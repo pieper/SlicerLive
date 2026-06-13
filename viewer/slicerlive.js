@@ -868,20 +868,38 @@ window.__dmDbg = () => {
 // left the closure. No fragile incremental diffing -- the scene is rebuilt from MRML state every change.
 // ===== SlicerLive 4-up: 3D + 3 orthogonal slice views (vtk.js multi-viewport; standalone, no compositor) =====
 let _fourUp = null;            // { Red:{ren,mapper,slice,volHash}, Yellow:.., Green:.. } once laid out
-const _VP = { Red: [0.5, 0.5, 1.0, 1.0], Yellow: [0.0, 0.0, 0.5, 0.5], Green: [0.5, 0.0, 1.0, 0.5] };  // [x0,y0,x1,y1] bottom-left origin
+const _VP = { Red: [0.0, 0.5, 0.5, 1.0], Yellow: [0.5, 0.0, 1.0, 0.5], Green: [0.0, 0.0, 0.5, 0.5] };  // Slicer FourUp: axial UL, sagittal LR, coronal LL ([x0,y0,x1,y1] bottom-left)
+const _SLIDER_CSS = {
+  Red:    'left:4px; width:calc(50% - 8px); top:calc(50% - 22px);',     // bottom edge of the top-left (axial) quadrant
+  Yellow: 'left:calc(50% + 4px); width:calc(50% - 8px); bottom:4px;',   // bottom-right (sagittal)
+  Green:  'left:4px; width:calc(50% - 8px); bottom:4px;',               // bottom-left (coronal)
+};
 const _col = (m, c) => [m[c], m[4 + c], m[8 + c]];                 // row-major 4x4 column c (xyz part)
 const _nrm3 = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
 const _dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 function ensureFourUp() {
   if (_fourUp) return;
-  renderer.setViewport(0.0, 0.5, 0.5, 1.0);                        // 3D -> top-left
+  renderer.setViewport(0.5, 0.5, 1.0, 1.0);                        // 3D -> top-right (Slicer FourUp)
   _fourUp = {};
   for (const name of ['Red', 'Yellow', 'Green']) {
     const ren = vtkRenderer.newInstance({ background: [0, 0, 0] });
     ren.setViewport(..._VP[name]);
     renderWindow.addRenderer(ren);
-    _fourUp[name] = { ren, mapper: null, slice: null, volHash: null };
+    const slider = document.createElement('input');                // slice-offset slider per slice view
+    slider.type = 'range'; slider.min = '0'; slider.max = '1'; slider.value = '0';
+    slider.style.cssText = 'position:fixed; z-index:15; height:16px; opacity:0.8; ' + _SLIDER_CSS[name];
+    slider.addEventListener('input', () => setSliceIndex(_fourUp[name], +slider.value));
+    slider.addEventListener('pointerdown', (e) => e.stopPropagation(), true);   // keep the slice-drag handler off the slider
+    document.body.appendChild(slider);
+    _fourUp[name] = { ren, mapper: null, slice: null, volHash: null, slider, index: 0, maxIndex: 1 };
   }
+}
+function setSliceIndex(slot, idx) {
+  if (!slot || !slot.mapper) return;
+  slot.index = Math.max(0, Math.min(slot.maxIndex, Math.round(idx)));
+  slot.mapper.setSlice(slot.index);
+  if (slot.slider && +slot.slider.value !== slot.index) slot.slider.value = String(slot.index);
+  scene3DDirty = true;
 }
 async function syncFourUp() {
   const sliceNodes = [...mirror.values()].filter((n) => n.class === 'vtkMRMLSliceNode');
@@ -909,19 +927,64 @@ async function syncFourUp() {
     let axis = 2, best = -1;                                       // image axis most aligned with the slice normal
     for (let a = 0; a < 3; a++) { const d = Math.abs(_dot3(normal, _nrm3(_col(i2r, a)))); if (d > best) { best = d; axis = a; } }
     const ijk = mulMatVec(inv4(i2r), [s2r[3], s2r[7], s2r[11], 1]);   // slice-center -> IJK
+    slot.axis = axis; slot.maxIndex = vol.attrs.dims[axis] - 1;
+    slot.right = _nrm3(_col(s2r, 0)); slot.up = _nrm3(_col(s2r, 1)); slot.normal = normal;
     slot.mapper.setSlicingMode([vtkImageMapper.SlicingMode.I, vtkImageMapper.SlicingMode.J, vtkImageMapper.SlicingMode.K][axis]);
-    slot.mapper.setSlice(Math.max(0, Math.min(vol.attrs.dims[axis] - 1, Math.round(ijk[axis]))));
+    slot.slider.max = String(slot.maxIndex);
+    setSliceIndex(slot, ijk[axis]);                                  // initial slice + slider sync
     let win = 255, lev = 128;
     for (const did of (vol.refs.display || [])) { const d = mirror.get(did); if (d && d.attrs.window != null) { win = d.attrs.window; lev = d.attrs.level; break; } }
     slot.slice.getProperty().setColorWindow(win); slot.slice.getProperty().setColorLevel(lev);
-    const cam = slot.ren.getActiveCamera(), focal = [s2r[3], s2r[7], s2r[11]], up = _nrm3(_col(s2r, 1));
+    const cam = slot.ren.getActiveCamera(), focal = [s2r[3], s2r[7], s2r[11]];
     cam.setParallelProjection(true); cam.setFocalPoint(...focal);
     cam.setPosition(focal[0] + normal[0] * 500, focal[1] + normal[1] * 500, focal[2] + normal[2] * 500);
-    cam.setViewUp(...up);
+    cam.setViewUp(...slot.up);
     if (sn.attrs.fieldOfView && sn.attrs.fieldOfView[1]) cam.setParallelScale(sn.attrs.fieldOfView[1] / 2);
     slot.ren.resetCameraClippingRange();
   }
 }
+// --- slice-view interaction (standalone 4-up): route by quadrant; pan/zoom/scroll match Slicer ---
+function fourUpSlotAt(clientX, clientY) {
+  if (!_fourUp) return null;
+  const r = host.getBoundingClientRect();
+  const x = (clientX - r.left) / r.width, y = 1 - (clientY - r.top) / r.height;   // 0..1, bottom-left origin
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+  for (const name of ['Red', 'Yellow', 'Green']) { const v = _VP[name]; if (x >= v[0] && x <= v[2] && y >= v[1] && y <= v[3]) return _fourUp[name]; }
+  return null;   // the 3D quadrant -> let the vtk.js interactor (trackball) handle it
+}
+let _sliceDrag = null;
+host.addEventListener('wheel', (e) => {
+  const slot = fourUpSlotAt(e.clientX, e.clientY); if (!slot) return;   // 3D quadrant -> vtk.js zoom
+  e.stopPropagation(); e.preventDefault();
+  setSliceIndex(slot, slot.index + (e.deltaY > 0 ? -1 : 1));            // scroll = slice offset
+}, true);
+host.addEventListener('pointerdown', (e) => {
+  if (!_fourUp) return;
+  const slot = fourUpSlotAt(e.clientX, e.clientY); if (!slot) return;   // 3D quadrant -> vtk.js trackball
+  const mode = e.button === 2 ? 'zoom' : (e.button === 1 || (e.button === 0 && e.shiftKey)) ? 'pan' : null;
+  e.stopPropagation(); e.preventDefault();                             // a slice view owns this -> never trackball
+  if (!mode) return;                                                   // plain left-click: swallow (no-op for now)
+  _sliceDrag = { slot, mode, x: e.clientX, y: e.clientY };
+  window.addEventListener('pointermove', onSliceDrag, true);
+  window.addEventListener('pointerup', onSliceUp, true);
+}, true);
+function onSliceDrag(e) {
+  if (!_sliceDrag) return; e.stopPropagation();
+  const { slot, mode } = _sliceDrag, dx = e.clientX - _sliceDrag.x, dy = e.clientY - _sliceDrag.y;
+  _sliceDrag.x = e.clientX; _sliceDrag.y = e.clientY;
+  const cam = slot.ren.getActiveCamera();
+  if (mode === 'zoom') {
+    cam.setParallelScale(Math.max(0.5, cam.getParallelScale() * Math.exp(-dy * 0.006)));  // right-drag down = zoom in (matches Slicer)
+  } else {                                                             // pan: image follows the cursor, in the slice plane
+    const r = host.getBoundingClientRect(), worldPerPx = (cam.getParallelScale() * 2) / (r.height / 2);
+    const mvx = -dx * worldPerPx, mvy = dy * worldPerPx;
+    const d = [slot.right[0] * mvx + slot.up[0] * mvy, slot.right[1] * mvx + slot.up[1] * mvy, slot.right[2] * mvx + slot.up[2] * mvy];
+    const f = cam.getFocalPoint(), p = cam.getPosition();
+    cam.setFocalPoint(f[0] + d[0], f[1] + d[1], f[2] + d[2]); cam.setPosition(p[0] + d[0], p[1] + d[1], p[2] + d[2]);
+  }
+  slot.ren.resetCameraClippingRange(); scene3DDirty = true;
+}
+function onSliceUp(e) { e.stopPropagation(); window.removeEventListener('pointermove', onSliceDrag, true); window.removeEventListener('pointerup', onSliceUp, true); _sliceDrag = null; }
 
 async function syncDMs() {
   for (const [id, node] of mirror) {
