@@ -3,3 +3,4 @@ node_modules/
 bundle.js
 _*.png
 .DS_Store
+mrhead/

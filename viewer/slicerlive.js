@@ -34,7 +34,7 @@ import vtkScalarBarActor from '@kitware/vtk.js/Rendering/Core/ScalarBarActor';
 import vtkXMLPolyDataReader from '@kitware/vtk.js/IO/XML/XMLPolyDataReader';   // SlicerLive: read .vtp models client-side
 import vtkPolyDataReader from '@kitware/vtk.js/IO/Legacy/PolyDataReader';      // SlicerLive: read legacy .vtk models
 
-const OFFLOAD_BUILD = 'slicerlive-v0 2026-06-13';
+const OFFLOAD_BUILD = 'slicerlive-v1 2026-06-13';
 window.__offloadBuild = OFFLOAD_BUILD;
 console.log('%c[offload] BUILD ' + OFFLOAD_BUILD, 'color:#7fe0a0;font-weight:bold');
 try { window.dispatchEvent(new CustomEvent('offload-build', { detail: OFFLOAD_BUILD })); } catch (e) {}
@@ -125,7 +125,8 @@ function fetchArray(meta) {
   if (localBlobs.has(meta.hash)) return Promise.resolve(localBlobs.get(meta.hash));   // SlicerLive: file-loaded data
   if (!blobCache.has(meta.hash)) {
     blobCache.set(meta.hash, (async () => {
-      const gz = await fetch(`${SCENE}/blob?hash=${meta.hash}`).then((r) => r.arrayBuffer());
+      const url = window.__SLICERLIVE_BLOB_BASE ? (window.__SLICERLIVE_BLOB_BASE + meta.hash) : `${SCENE}/blob?hash=${meta.hash}`;
+      const gz = await fetch(url).then((r) => r.arrayBuffer());
       const raw = await new Response(new Response(gz).body.pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
       return new (DT[meta.dtype] || Float32Array)(raw);
     })());
@@ -1155,7 +1156,10 @@ function composite(now) {
   const gl = glWindow.getCanvas && glWindow.getCanvas();
   if (!gl) return;
   if (STANDALONE) {                                            // no video: host (opacity 1) shows the render; just draw decorations
-    if (scene3DDirty || interacting) { renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false; }
+    if (scene3DDirty || interacting) {
+      if (scene3DDirty) renderer.resetCameraClippingRange();   // async-loaded volume/models changed bounds -> keep in clip range
+      renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false;
+    }
     outCtx.clearRect(0, 0, geom.cw, geom.ch); drawDecorations2D();
     return;
   }
@@ -1343,8 +1347,28 @@ async function readPolyData(url) {   // dispatch by extension: legacy .vtk (ASCI
   const buf = await fetch(url).then((r) => r.arrayBuffer()); const r = vtkXMLPolyDataReader.newInstance(); r.parseAsArrayBuffer(buf); return r.getOutputData(0);
 }
 
+// Full-scene load: a node-state JSON (mrml_sync.mrml_state output) + content-addressed gzip blob FILES.
+// This is the "publish" format -- it reuses ALL the DMs + blob/geometry handling (volumes, VR, segs, markups),
+// unlike the plain-MRML path which only does models. base/blobs/<hash> are the gz typed-array files.
+async function loadSceneJson(sceneUrl, base) {
+  let state;
+  try { state = await fetch(sceneUrl).then((r) => r.json()); }
+  catch (e) { console.error('[SlicerLive] cannot fetch scene json', e); window.__slicerliveError = String(e); return; }
+  window.__SLICERLIVE_BLOB_BASE = base + 'blobs/';
+  mirror.clear(); localBlobs.clear();
+  for (const [id, node] of Object.entries(state)) mirror.set(id, node);
+  console.log('[SlicerLive] loaded', mirror.size, 'nodes (json) from', sceneUrl);
+  window.__slicerliveLoaded = mirror.size;
+  threeDActive = true;
+  applyCameraOnce();
+  await syncDMs();
+  renderer.resetCameraClippingRange();   // content now loaded -> keep it in the (exported) camera's clip range
+  renderWindow.render(); markDirty();
+}
+
 async function loadSlicerLiveScene(sceneUrl) {
   const base = sceneUrl.slice(0, sceneUrl.lastIndexOf('/') + 1);
+  if (/\.json(\?|$)/.test(sceneUrl)) return loadSceneJson(sceneUrl, base);   // full-scene publish format
   let text;
   try { text = await fetch(sceneUrl).then((r) => r.text()); }
   catch (e) { console.error('[SlicerLive] cannot fetch scene', sceneUrl, e); window.__slicerliveError = String(e); return; }
