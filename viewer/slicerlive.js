@@ -21,6 +21,8 @@ import vtkActor from '@kitware/vtk.js/Rendering/Core/Actor';
 import vtkMapper from '@kitware/vtk.js/Rendering/Core/Mapper';
 import vtkVolume from '@kitware/vtk.js/Rendering/Core/Volume';
 import vtkVolumeMapper from '@kitware/vtk.js/Rendering/Core/VolumeMapper';
+import vtkImageMapper from '@kitware/vtk.js/Rendering/Core/ImageMapper';   // SlicerLive 4-up: ortho slice display
+import vtkImageSlice from '@kitware/vtk.js/Rendering/Core/ImageSlice';
 import vtkColorTransferFunction from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction';
 import vtkPiecewiseFunction from '@kitware/vtk.js/Common/DataModel/PiecewiseFunction';
 import vtkPolyData from '@kitware/vtk.js/Common/DataModel/PolyData';
@@ -864,6 +866,63 @@ window.__dmDbg = () => {
 
 // Deterministic full re-apply: run each DM over the current mirror, then drop any vtk objects whose node
 // left the closure. No fragile incremental diffing -- the scene is rebuilt from MRML state every change.
+// ===== SlicerLive 4-up: 3D + 3 orthogonal slice views (vtk.js multi-viewport; standalone, no compositor) =====
+let _fourUp = null;            // { Red:{ren,mapper,slice,volHash}, Yellow:.., Green:.. } once laid out
+const _VP = { Red: [0.5, 0.5, 1.0, 1.0], Yellow: [0.0, 0.0, 0.5, 0.5], Green: [0.5, 0.0, 1.0, 0.5] };  // [x0,y0,x1,y1] bottom-left origin
+const _col = (m, c) => [m[c], m[4 + c], m[8 + c]];                 // row-major 4x4 column c (xyz part)
+const _nrm3 = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+const _dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+function ensureFourUp() {
+  if (_fourUp) return;
+  renderer.setViewport(0.0, 0.5, 0.5, 1.0);                        // 3D -> top-left
+  _fourUp = {};
+  for (const name of ['Red', 'Yellow', 'Green']) {
+    const ren = vtkRenderer.newInstance({ background: [0, 0, 0] });
+    ren.setViewport(..._VP[name]);
+    renderWindow.addRenderer(ren);
+    _fourUp[name] = { ren, mapper: null, slice: null, volHash: null };
+  }
+}
+async function syncFourUp() {
+  const sliceNodes = [...mirror.values()].filter((n) => n.class === 'vtkMRMLSliceNode');
+  if (!sliceNodes.length) return;
+  ensureFourUp();
+  for (const sn of sliceNodes) {
+    const name = sn.attrs.layoutName, slot = _fourUp[name];
+    if (!slot || !sn.attrs.sliceToRAS) continue;
+    const comp = [...mirror.values()].find((n) => n.class === 'vtkMRMLSliceCompositeNode' && n.attrs.layoutName === name);
+    const vol = comp && comp.attrs.backgroundVolumeID ? mirror.get(comp.attrs.backgroundVolumeID) : null;
+    if (!vol || !(vol.blobs && vol.blobs.scalars) || !vol.attrs.ijkToRAS) continue;
+    const scalars = await fetchArray(vol.blobs.scalars); if (!scalars) continue;
+    if (slot.volHash !== vol.blobs.scalars.hash) {                 // build the image + slice actor once per volume
+      if (slot.slice) slot.ren.removeActor(slot.slice);
+      const img = vtkImageData.newInstance();
+      img.setDimensions(vol.attrs.dims);
+      img.getPointData().setScalars(vtkDataArray.newInstance({ numberOfComponents: vol.attrs.comps || 1, values: scalars }));
+      const userMat = volumeGeometry(img, vol.attrs.ijkToRAS);     // spacing -> img; returns the rigid col-major matrix
+      const mapper = vtkImageMapper.newInstance(); mapper.setInputData(img);
+      const islice = vtkImageSlice.newInstance(); islice.setMapper(mapper); islice.setUserMatrix(userMat);
+      slot.ren.addActor(islice);
+      slot.mapper = mapper; slot.slice = islice; slot.volHash = vol.blobs.scalars.hash;
+    }
+    const i2r = vol.attrs.ijkToRAS, s2r = sn.attrs.sliceToRAS, normal = _nrm3(_col(s2r, 2));
+    let axis = 2, best = -1;                                       // image axis most aligned with the slice normal
+    for (let a = 0; a < 3; a++) { const d = Math.abs(_dot3(normal, _nrm3(_col(i2r, a)))); if (d > best) { best = d; axis = a; } }
+    const ijk = mulMatVec(inv4(i2r), [s2r[3], s2r[7], s2r[11], 1]);   // slice-center -> IJK
+    slot.mapper.setSlicingMode([vtkImageMapper.SlicingMode.I, vtkImageMapper.SlicingMode.J, vtkImageMapper.SlicingMode.K][axis]);
+    slot.mapper.setSlice(Math.max(0, Math.min(vol.attrs.dims[axis] - 1, Math.round(ijk[axis]))));
+    let win = 255, lev = 128;
+    for (const did of (vol.refs.display || [])) { const d = mirror.get(did); if (d && d.attrs.window != null) { win = d.attrs.window; lev = d.attrs.level; break; } }
+    slot.slice.getProperty().setColorWindow(win); slot.slice.getProperty().setColorLevel(lev);
+    const cam = slot.ren.getActiveCamera(), focal = [s2r[3], s2r[7], s2r[11]], up = _nrm3(_col(s2r, 1));
+    cam.setParallelProjection(true); cam.setFocalPoint(...focal);
+    cam.setPosition(focal[0] + normal[0] * 500, focal[1] + normal[1] * 500, focal[2] + normal[2] * 500);
+    cam.setViewUp(...up);
+    if (sn.attrs.fieldOfView && sn.attrs.fieldOfView[1]) cam.setParallelScale(sn.attrs.fieldOfView[1] / 2);
+    slot.ren.resetCameraClippingRange();
+  }
+}
+
 async function syncDMs() {
   for (const [id, node] of mirror) {
     for (const dm of DMS) {
@@ -873,6 +932,7 @@ async function syncDMs() {
   for (const dm of DMS) if (dm.items) for (const id of [...dm.items.keys()]) if (!mirror.has(id)) dm.remove(id);
   updateViewBox();
   try { await syncSlices(); } catch (e) { console.warn('[offload] syncSlices', e); }
+  if (SLICERLIVE) { try { await syncFourUp(); } catch (e) { console.warn('[SlicerLive] syncFourUp', e); } }
   drawVectorOverlay();      // markups-in-slice redraw on scene/slice change (also fires on mousemove for the brush)
   markDirty();              // let composite() do the actual render next frame (was: render every syncDMs)
 }
@@ -1199,6 +1259,7 @@ function composite(now) {
 // --- 2D overlays drawn on the compositor canvas (no vtk.js 3D-text actor exists) -----------------------
 let viewBounds = null, axisLabelsOn = false;
 function drawDecorations2D() {
+  if (_fourUp) return;   // SlicerLive 4-up: the 3D is a quadrant -> full-window worldToScreen labels would misplace
   outCtx.save();
   outCtx.shadowColor = 'black'; outCtx.shadowBlur = 3; outCtx.fillStyle = 'white'; outCtx.strokeStyle = 'white';
   if (axisLabelsOn && viewBounds) {
