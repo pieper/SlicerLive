@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MRML version="Slicer4.4.0">
+<Model id="vtkMRMLModelNode1" name="Sphere_Red" displayNodeRef="vtkMRMLModelDisplayNode1" storageNodeRef="vtkMRMLModelStorageNode1"></Model>
+<ModelDisplay id="vtkMRMLModelDisplayNode1" name="MD_Sphere_Red" color="1.0 0.25 0.25" opacity="1" visibility="true"></ModelDisplay>
+<ModelStorage id="vtkMRMLModelStorageNode1" name="MS_Sphere_Red" fileName="Sphere_Red.vtp"></ModelStorage>
+<Model id="vtkMRMLModelNode2" name="Sphere_Green" displayNodeRef="vtkMRMLModelDisplayNode2" storageNodeRef="vtkMRMLModelStorageNode2"></Model>
+<ModelDisplay id="vtkMRMLModelDisplayNode2" name="MD_Sphere_Green" color="0.25 1.0 0.35" opacity="1" visibility="true"></ModelDisplay>
+<ModelStorage id="vtkMRMLModelStorageNode2" name="MS_Sphere_Green" fileName="Sphere_Green.vtp"></ModelStorage>
+<Model id="vtkMRMLModelNode3" name="Sphere_Blue" displayNodeRef="vtkMRMLModelDisplayNode3" storageNodeRef="vtkMRMLModelStorageNode3"></Model>
+<ModelDisplay id="vtkMRMLModelDisplayNode3" name="MD_Sphere_Blue" color="0.35 0.55 1.0" opacity="1" visibility="true"></ModelDisplay>
+<ModelStorage id="vtkMRMLModelStorageNode3" name="MS_Sphere_Blue" fileName="Sphere_Blue.vtp"></ModelStorage>
+</MRML>

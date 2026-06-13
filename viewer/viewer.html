@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>SlicerLive</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1a1a22; overflow: hidden;
+               font: 12px/1.4 -apple-system, system-ui, sans-serif; }
+  #status { position: fixed; left: 8px; bottom: 6px; z-index: 20; color: #9aa; pointer-events: none; }
+  #err    { position: fixed; left: 8px; top: 8px;   z-index: 20; color: #f88; font-family: monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<div id="status">SlicerLive — loading…</div>
+<div id="err"></div>
+<script>
+  // SlicerLive viewer: ?scene=<url-to-a-.mrml> renders that scene full-window on the client GPU, no server.
+  // The globals MUST be set before slicerlive-bundle.js evaluates (it reads them at module load).
+  const _params = new URLSearchParams(location.search);
+  const _scene = _params.get('scene') || '';
+  window.__OFFLOAD_STANDALONE = true;            // full-window vtk.js render, no video / desktop compositor
+  window.__SLICERLIVE_SCENE_URL = _scene;
+  if (!_scene) document.getElementById('err').textContent = 'No ?scene=<mrml-url> provided.';
+  window.addEventListener('offload-build', (e) => {
+    document.getElementById('status').textContent = 'SlicerLive ' + e.detail + (_scene ? '  •  ' + _scene : '');
+  });
+  // surface loader results for the debug harness + the status line
+  const _iv = setInterval(() => {
+    if (window.__slicerliveError) {
+      document.getElementById('err').textContent = 'load error: ' + window.__slicerliveError; clearInterval(_iv);
+    } else if (window.__slicerliveLoaded != null) {
+      document.getElementById('status').textContent =
+        'SlicerLive ' + (window.__offloadBuild || '') + '  •  ' + _scene + '  •  ' + window.__slicerliveLoaded + ' nodes';
+      clearInterval(_iv);
+    }
+  }, 400);
+</script>
+<script src="slicerlive-bundle.js"></script>
+</body>
+</html>
