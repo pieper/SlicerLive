@@ -95,9 +95,12 @@ interactor.onKeyPress((e) => {
 // changed (markDirty on any scene/camera edit; the interactor flags live drags), plus a throttled mask
 // refresh for popups (which appear at human speed). When the user works in the 2D views the local 3D is
 // idle -> composite costs ~nothing -> the video path gets the CPU back.
-let scene3DDirty = true, interacting = false, lastMaskAt = 0;
+let scene3DDirty = true, interacting = false, lastMaskAt = 0, pendingRenders = 0;
 const MASK_MS = 100;                                  // chroma-key mask cadence (popup tracking); ~10 Hz
-const markDirty = () => { scene3DDirty = true; };
+// Bump a few render frames on any change: vtk.js volume mappers often need 2+ passes to actually DRAW (the
+// first uploads the 3D texture, a later one renders it) + the camera clip range settles after the bounds
+// update -- so a single post-load render left the VR blank until a mouse move. Burst a handful of frames, then idle.
+const markDirty = () => { scene3DDirty = true; pendingRenders = Math.max(pendingRenders, 8); };
 // "interacting" = a live camera/handle drag on the local 3D -> composite at full rate. Driven by DOM
 // pointer events on the GL canvas (vtk.js's interaction events aren't exposed in this build).
 host.addEventListener('pointerdown', () => { interacting = true; }, true);
@@ -1279,9 +1282,10 @@ function composite(now) {
   const gl = glWindow.getCanvas && glWindow.getCanvas();
   if (!gl) return;
   if (STANDALONE) {                                            // no video: host (opacity 1) shows the render; just draw decorations
-    if (scene3DDirty || interacting) {
-      if (scene3DDirty) renderer.resetCameraClippingRange();   // async-loaded volume/models changed bounds -> keep in clip range
+    if (scene3DDirty || interacting || pendingRenders > 0) {
+      if (scene3DDirty || pendingRenders > 0) renderer.resetCameraClippingRange();   // async-loaded volume/models changed bounds -> keep in clip range
       renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false;
+      if (pendingRenders > 0) pendingRenders--;
     }
     outCtx.clearRect(0, 0, geom.cw, geom.ch); drawDecorations2D();
     return;
@@ -1292,9 +1296,10 @@ function composite(now) {
 
   // Render the local 3D only when it changed, then hand it to the GPU desktop compositor (index.html), which
   // composites video + 3D in a chroma-key shader. No JS pixel loop / canvas blit here anymore.
-  if (scene3DDirty || interacting) {
-    if (scene3DDirty) renderer.resetCameraClippingRange();   // bounds may have changed (async-loaded volume/models) ->
+  if (scene3DDirty || interacting || pendingRenders > 0) {
+    if (scene3DDirty || pendingRenders > 0) renderer.resetCameraClippingRange();   // bounds may have changed (async-loaded volume/models) ->
     renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false;   // keep content in the camera's clip range so it
+    if (pendingRenders > 0) pendingRenders--;
     if (window.desktopCompositor) window.desktopCompositor.invalidate();  // shows WITHOUT needing a first interaction (race fix)
   }
 
@@ -1475,10 +1480,12 @@ async function readPolyData(url) {   // dispatch by extension: legacy .vtk (ASCI
 // This is the "publish" format -- it reuses ALL the DMs + blob/geometry handling (volumes, VR, segs, markups),
 // unlike the plain-MRML path which only does models. base/blobs/<hash> are the gz typed-array files.
 async function loadSceneJson(sceneUrl, base) {
-  let state;
-  try { state = await fetch(sceneUrl).then((r) => r.json()); }
+  let raw;
+  try { raw = await fetch(sceneUrl).then((r) => r.json()); }
   catch (e) { console.error('[SlicerLive] cannot fetch scene json', e); window.__slicerliveError = String(e); return; }
-  window.__SLICERLIVE_BLOB_BASE = base + 'blobs/';
+  const state = (raw && raw.nodes) ? raw.nodes : raw;   // wrapper {blobBase,nodes} (bucket-hosted) or flat node-states
+  let bb = new URLSearchParams(location.search).get('blobs') || (raw && raw.blobBase) || (base + 'blobs/');
+  window.__SLICERLIVE_BLOB_BASE = bb.endsWith('/') ? bb : bb + '/';
   mirror.clear(); localBlobs.clear();
   for (const [id, node] of Object.entries(state)) mirror.set(id, node);
   console.log('[SlicerLive] loaded', mirror.size, 'nodes (json) from', sceneUrl);
