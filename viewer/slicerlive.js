@@ -36,7 +36,7 @@ import vtkScalarBarActor from '@kitware/vtk.js/Rendering/Core/ScalarBarActor';
 import vtkXMLPolyDataReader from '@kitware/vtk.js/IO/XML/XMLPolyDataReader';   // SlicerLive: read .vtp models client-side
 import vtkPolyDataReader from '@kitware/vtk.js/IO/Legacy/PolyDataReader';      // SlicerLive: read legacy .vtk models
 
-const OFFLOAD_BUILD = 'slicerlive-v1 2026-06-13';
+const OFFLOAD_BUILD = 'slicerlive-v1b vrfix 2026-06-14';
 window.__offloadBuild = OFFLOAD_BUILD;
 console.log('%c[offload] BUILD ' + OFFLOAD_BUILD, 'color:#7fe0a0;font-weight:bold');
 try { window.dispatchEvent(new CustomEvent('offload-build', { detail: OFFLOAD_BUILD })); } catch (e) {}
