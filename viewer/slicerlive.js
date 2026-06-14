@@ -23,6 +23,7 @@ import vtkVolume from '@kitware/vtk.js/Rendering/Core/Volume';
 import vtkVolumeMapper from '@kitware/vtk.js/Rendering/Core/VolumeMapper';
 import vtkImageMapper from '@kitware/vtk.js/Rendering/Core/ImageMapper';   // SlicerLive 4-up: ortho slice display
 import vtkImageSlice from '@kitware/vtk.js/Rendering/Core/ImageSlice';
+import vtkImageResliceMapper from '@kitware/vtk.js/Rendering/Core/ImageResliceMapper';   // MPR: reslice CT + labelmap on a world plane
 import vtkColorTransferFunction from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction';
 import vtkPiecewiseFunction from '@kitware/vtk.js/Common/DataModel/PiecewiseFunction';
 import vtkPolyData from '@kitware/vtk.js/Common/DataModel/PolyData';
@@ -36,7 +37,7 @@ import vtkScalarBarActor from '@kitware/vtk.js/Rendering/Core/ScalarBarActor';
 import vtkXMLPolyDataReader from '@kitware/vtk.js/IO/XML/XMLPolyDataReader';   // SlicerLive: read .vtp models client-side
 import vtkPolyDataReader from '@kitware/vtk.js/IO/Legacy/PolyDataReader';      // SlicerLive: read legacy .vtk models
 
-const OFFLOAD_BUILD = 'slicerlive-v1h lightfollow 2026-06-14';
+const OFFLOAD_BUILD = 'slicerlive-v1n ohif-blit 2026-06-14';
 window.__offloadBuild = OFFLOAD_BUILD;
 console.log('%c[offload] BUILD ' + OFFLOAD_BUILD, 'color:#7fe0a0;font-weight:bold');
 try { window.dispatchEvent(new CustomEvent('offload-build', { detail: OFFLOAD_BUILD })); } catch (e) {}
@@ -161,6 +162,58 @@ const DT = {                      // server dtype string -> typed-array construc
   float32: Float32Array, float64: Float64Array, int32: Int32Array, uint32: Uint32Array,
   int16: Int16Array, uint16: Uint16Array, int8: Int8Array, uint8: Uint8Array,
 };
+const ZDT = {                     // zarr dtype.str ("<i2") -> typed-array constructor (little-endian assumed)
+  '<f4': Float32Array, '<f8': Float64Array, '<i4': Int32Array, '<u4': Uint32Array,
+  '<i2': Int16Array, '<u2': Uint16Array, '|i1': Int8Array, '|u1': Uint8Array, '<i1': Int8Array, '<u1': Uint8Array,
+};
+
+const zarrCache = new Map();      // "<dir>/<dataset>/" -> Promise<TypedArray> (assembled full volume)
+// Fetch an OME-Zarr volume: pull all chunks IN PARALLEL (zlib via DecompressionStream('deflate')) and assemble
+// into one typed array. The rotated IJK->RAS geometry comes from the scene json (attrs.ijkToRAS), not zarr.
+// onBytes(n) reports each chunk's compressed size (for the download progress bar).
+function fetchZarrVolume(node, onBytes) {
+  const z = node.attrs && node.attrs.zarr;
+  if (!z) return Promise.resolve(null);
+  const dir = (window.__SLICERLIVE_BLOB_BASE || '') + z.dir + '/' + z.dataset + '/';
+  if (zarrCache.has(dir)) return zarrCache.get(dir);
+  const p = (async () => {
+    const Ctor = ZDT[z.dtype] || Int16Array;
+    const [nz, ny, nx] = z.shape, [cz, cy, cx] = z.chunks, [ncz, ncy, ncx] = z.chunkGrid;
+    const out = new Ctor(nz * ny * nx);
+    const jobs = [];
+    for (let kk = 0; kk < ncz; kk++) for (let jj = 0; jj < ncy; jj++) for (let ii = 0; ii < ncx; ii++) jobs.push([kk, jj, ii]);
+    let idx = 0; const CONC = 12;
+    const worker = async () => {
+      while (idx < jobs.length) {
+        const [kk, jj, ii] = jobs[idx++];
+        const gz = await fetch(dir + kk + '.' + jj + '.' + ii).then((r) => r.arrayBuffer());
+        if (onBytes) onBytes(gz.byteLength);
+        const raw = await new Response(new Response(gz).body.pipeThrough(new DecompressionStream('deflate'))).arrayBuffer();
+        const chunk = new Ctor(raw);                  // (cz,cy,cx) C-order, padded to full chunk shape
+        const z0 = kk * cz, y0 = jj * cy, x0 = ii * cx;
+        const zw = Math.min(cz, nz - z0), yw = Math.min(cy, ny - y0), xw = Math.min(cx, nx - x0);
+        for (let zz = 0; zz < zw; zz++) for (let yy = 0; yy < yw; yy++) {
+          const src = (zz * cy + yy) * cx;            // chunk row start
+          const dst = ((z0 + zz) * ny + (y0 + yy)) * nx + x0;
+          out.set(chunk.subarray(src, src + xw), dst);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONC, jobs.length) }, worker));
+    return out;
+  })();
+  zarrCache.set(dir, p);
+  return p;
+}
+// volume voxels: zarr (chunked, parallel) if present, else the single content-addressed blob
+function getVolumeScalars(node, onBytes) {
+  if (node.attrs && node.attrs.zarr) return fetchZarrVolume(node, onBytes);
+  return fetchArray(node.blobs && node.blobs.scalars);
+}
+function volScalarKey(node) {     // change-detection key for the volume voxels (zarr dir or blob hash)
+  if (node.attrs && node.attrs.zarr) return node.attrs.zarr.dir;
+  return node.blobs && node.blobs.scalars && node.blobs.scalars.hash;
+}
 
 // fetch a gzipped raw typed-array blob (content-addressed) -> TypedArray. The browser's DecompressionStream
 // gunzips natively. Cached by hash so unchanged geometry (incl. a hidden node toggled back on) never refetches.
@@ -626,11 +679,11 @@ class VolumeRenderingDM {
   handles(node) { return node.class.includes('ScalarVolumeNode') && !!displayNodeOf(node, isVR); }
   async update(id, node) {
     const vr = displayNodeOf(node, isVR);
-    const hash = node.blobs.scalars && node.blobs.scalars.hash;
+    const hash = volScalarKey(node);   // zarr dir or blob hash
     let it = this.items.get(id);
     if (!hash || !vr) { if (it) this.remove(id); return; }
     if (!it || it.hash !== hash) {
-      const scalars = await fetchArray(node.blobs.scalars);   // FETCH DATA FIRST
+      const scalars = await getVolumeScalars(node);   // FETCH DATA FIRST (zarr chunks in parallel, or blob)
       if (!scalars) return;
       const img = vtkImageData.newInstance();
       img.setDimensions(node.attrs.dims);
@@ -923,68 +976,169 @@ const _nrm3 = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0]
 const _dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 function ensureFourUp() {
   if (_fourUp) return;
-  renderer.setViewport(0.5, 0.5, 1.0, 1.0);                        // 3D -> top-right (Slicer FourUp)
-  _fourUp = {};
+  renderer.setViewport(0.5, 0.5, 1.0, 1.0);                        // 3D -> top-right (Slicer FourUp). The 3 slice
+  _fourUp = {};                                                    // quadrants are blitted into `out` (OHIF-style).
   for (const name of ['Red', 'Yellow', 'Green']) {
-    const ren = vtkRenderer.newInstance({ background: [0, 0, 0] });
-    ren.setViewport(..._VP[name]);
-    renderWindow.addRenderer(ren);
     const slider = document.createElement('input');                // slice-offset slider per slice view
     slider.type = 'range'; slider.min = '0'; slider.max = '1'; slider.value = '0';
     slider.style.cssText = 'position:fixed; z-index:15; height:16px; opacity:0.8; ' + _SLIDER_CSS[name];
     slider.addEventListener('input', () => setSliceIndex(_fourUp[name], +slider.value));
     slider.addEventListener('pointerdown', (e) => e.stopPropagation(), true);   // keep the slice-drag handler off the slider
     document.body.appendChild(slider);
-    _fourUp[name] = { ren, mapper: null, slice: null, volHash: null, slider, index: 0, maxIndex: 1 };
+    _fourUp[name] = { slider, index: null, maxIndex: 1, pscale: 0, pan: [0, 0, 0] };
   }
 }
-function setSliceIndex(slot, idx) {
-  if (!slot || !slot.mapper) return;
-  slot.index = Math.max(0, Math.min(slot.maxIndex, Math.round(idx)));
-  slot.mapper.setSlice(slot.index);
-  if (slot.slider && +slot.slider.value !== slot.index) slot.slider.value = String(slot.index);
-  scene3DDirty = true;
+// place an image in WORLD coordinates (origin/spacing/direction from ijkToRAS) so vtkImageResliceMapper reslices
+// it in world space -- the CT and the labelmap then auto-align at the same world plane (no manual index matching).
+function setImageWorldGeometry(img, ijkToRAS) {
+  const M = ijkToRAS, g = (r, c) => M[r * 4 + c];
+  const sp = [0, 1, 2].map((c) => Math.hypot(g(0, c), g(1, c), g(2, c)) || 1);
+  img.setSpacing(sp[0], sp[1], sp[2]);
+  img.setOrigin(g(0, 3), g(1, 3), g(2, 3));
+  img.setDirection([g(0, 0) / sp[0], g(0, 1) / sp[1], g(0, 2) / sp[2],
+                    g(1, 0) / sp[0], g(1, 1) / sp[1], g(1, 2) / sp[2],
+                    g(2, 0) / sp[0], g(2, 1) / sp[1], g(2, 2) / sp[2]]);
 }
+
+// OHIF-style MPR: ONE offscreen reslice context (multiple ImageResliceMappers across SEPARATE on-screen renderers
+// don't render in vtk.js -- only the first does). We reconfigure its plane+camera per orientation, render, and blit
+// the result into the visible 2D `out` canvas at that quadrant. CT + labelmap are two reslice mappers in the SAME
+// renderer (both render together -- proven), so each blit already carries the colored segment overlay.
+let slicesDirty = false;   // re-render the offscreen slice textures next composite frame
+let _sliceCtx = null;
+function ensureSliceCtx() {
+  if (_sliceCtx) return _sliceCtx;
+  const div = document.createElement('div');
+  div.style.cssText = 'position:absolute; left:-99999px; top:0; width:8px; height:8px; overflow:hidden;';
+  document.body.appendChild(div);
+  const rw = vtkRenderWindow.newInstance();
+  const ren = vtkRenderer.newInstance({ background: [0, 0, 0] });
+  rw.addRenderer(ren);
+  const gl = vtkOpenGLRenderWindow.newInstance();
+  gl.setContainer(div); gl.get3DContext({ preserveDrawingBuffer: true }); rw.addView(gl);
+  _sliceCtx = { rw, ren, gl, div, plane: vtkPlane.newInstance(), ctMapper: null, ctSlice: null, ovMapper: null, ovSlice: null, w: 0, h: 0, key: null, win: 255, lev: 128 };
+  return _sliceCtx;
+}
+
+function setSliceIndex(slot, idx) {
+  if (!slot) return;
+  slot.index = Math.max(0, Math.min(slot.maxIndex, Math.round(idx)));
+  if (slot.slider && +slot.slider.value !== slot.index) slot.slider.value = String(slot.index);
+  slicesDirty = true; scene3DDirty = true;
+}
+
+// Build (once, cached) the merged-labelmap image (world geometry) + color/opacity LUT for the 2D slice overlay.
+const _lmCache = new Map();   // segId:hash -> { img, ctf, ofun, maxLabel }
+async function ensureLabelmapImage(seg) {
+  const meta = seg.blobs && seg.blobs.labelmap;
+  if (!meta || !seg.attrs.labelmapDims) return null;
+  const key = seg.id + ':' + meta.hash;
+  if (_lmCache.has(key)) return _lmCache.get(key);
+  const arr = await fetchArray(meta); if (!arr) return null;
+  const img = vtkImageData.newInstance();
+  img.setDimensions(seg.attrs.labelmapDims);
+  img.getPointData().setScalars(vtkDataArray.newInstance({ numberOfComponents: 1, values: arr }));
+  setImageWorldGeometry(img, seg.attrs.labelmapIjkToRAS);
+  const ctf = vtkColorTransferFunction.newInstance();
+  ctf.addRGBPoint(0, 0, 0, 0);
+  for (const c of (seg.attrs.segmentColors || [])) ctf.addRGBPoint(c[0], c[1], c[2], c[3]);   // [label, r, g, b]
+  const op = seg.attrs.seg2DOpacity != null ? seg.attrs.seg2DOpacity : 0.5;
+  const maxLabel = (seg.attrs.segmentColors || []).reduce((m, c) => Math.max(m, c[0]), 1);
+  const ofun = vtkPiecewiseFunction.newInstance();
+  ofun.addPoint(0, 0); ofun.addPoint(0.5, 0); ofun.addPoint(1, op); ofun.addPoint(maxLabel, op);   // 0 transparent, >=1 = fill
+  const rec = { img, ctf, ofun, maxLabel };
+  _lmCache.set(key, rec); return rec;
+}
+
+// Set up the offscreen reslice context's inputs + each orientation's plane/camera params (rendered at blit time).
 async function syncFourUp() {
   const sliceNodes = [...mirror.values()].filter((n) => n.class === 'vtkMRMLSliceNode');
   if (!sliceNodes.length) return;
   ensureFourUp();
+  const ctx = ensureSliceCtx();
+  const segNode = [...mirror.values()].find((n) => n.class === 'vtkMRMLSegmentationNode' && n.blobs && n.blobs.labelmap);
+  const lm = segNode ? await ensureLabelmapImage(segNode) : null;
   for (const sn of sliceNodes) {
     const name = sn.attrs.layoutName, slot = _fourUp[name];
     if (!slot || !sn.attrs.sliceToRAS) continue;
     const comp = [...mirror.values()].find((n) => n.class === 'vtkMRMLSliceCompositeNode' && n.attrs.layoutName === name);
     const vol = comp && comp.attrs.backgroundVolumeID ? mirror.get(comp.attrs.backgroundVolumeID) : null;
-    if (!vol || !(vol.blobs && vol.blobs.scalars) || !vol.attrs.ijkToRAS) continue;
-    const scalars = await fetchArray(vol.blobs.scalars); if (!scalars) continue;
-    if (slot.volHash !== vol.blobs.scalars.hash) {                 // build the image + slice actor once per volume
-      if (slot.slice) slot.ren.removeActor(slot.slice);
+    if (!vol || !volScalarKey(vol) || !vol.attrs.ijkToRAS) continue;
+    const scalars = await getVolumeScalars(vol); if (!scalars) continue;
+    const ctxKey = volScalarKey(vol) + '|' + (lm ? segNode.id + ':' + segNode.blobs.labelmap.hash : '-');
+    if (ctx.key !== ctxKey) {                                      // set the shared reslice mappers' inputs once
+      if (ctx.ctSlice) ctx.ren.removeActor(ctx.ctSlice);
+      if (ctx.ovSlice) ctx.ren.removeActor(ctx.ovSlice);
       const img = vtkImageData.newInstance();
       img.setDimensions(vol.attrs.dims);
       img.getPointData().setScalars(vtkDataArray.newInstance({ numberOfComponents: vol.attrs.comps || 1, values: scalars }));
-      const userMat = volumeGeometry(img, vol.attrs.ijkToRAS);     // spacing -> img; returns the rigid col-major matrix
-      const mapper = vtkImageMapper.newInstance(); mapper.setInputData(img);
-      const islice = vtkImageSlice.newInstance(); islice.setMapper(mapper); islice.setUserMatrix(userMat);
-      slot.ren.addActor(islice);
-      slot.mapper = mapper; slot.slice = islice; slot.volHash = vol.blobs.scalars.hash;
+      setImageWorldGeometry(img, vol.attrs.ijkToRAS);
+      const ctm = vtkImageResliceMapper.newInstance(); ctm.setInputData(img); ctm.setSlicePlane(ctx.plane);
+      const cts = vtkImageSlice.newInstance(); cts.setMapper(ctm);
+      ctx.ren.addActor(cts); ctx.ctMapper = ctm; ctx.ctSlice = cts; ctx.ovSlice = null; ctx.ovMapper = null;
+      if (lm) {
+        const ovm = vtkImageResliceMapper.newInstance(); ovm.setInputData(lm.img); ovm.setSlicePlane(ctx.plane);
+        const ovs = vtkImageSlice.newInstance(); ovs.setMapper(ovm);
+        const p = ovs.getProperty();
+        p.setRGBTransferFunction(0, lm.ctf); p.setScalarOpacity(0, lm.ofun);
+        p.setColorWindow(lm.maxLabel); p.setColorLevel(lm.maxLabel / 2);   // map the label range onto the LUT
+        p.setInterpolationTypeToNearest();
+        ctx.ren.addActor(ovs); ctx.ovMapper = ovm; ctx.ovSlice = ovs;
+      }
+      ctx.key = ctxKey;
+      ctx.win = 255; ctx.lev = 128;
+      for (const did of (vol.refs.display || [])) { const d = mirror.get(did); if (d && d.attrs.window != null) { ctx.win = d.attrs.window; ctx.lev = d.attrs.level; break; } }
     }
     const i2r = vol.attrs.ijkToRAS, s2r = sn.attrs.sliceToRAS, normal = _nrm3(_col(s2r, 2));
     let axis = 2, best = -1;                                       // image axis most aligned with the slice normal
     for (let a = 0; a < 3; a++) { const d = Math.abs(_dot3(normal, _nrm3(_col(i2r, a)))); if (d > best) { best = d; axis = a; } }
     const ijk = mulMatVec(inv4(i2r), [s2r[3], s2r[7], s2r[11], 1]);   // slice-center -> IJK
-    slot.axis = axis; slot.maxIndex = vol.attrs.dims[axis] - 1;
-    slot.right = _nrm3(_col(s2r, 0)); slot.up = _nrm3(_col(s2r, 1)); slot.normal = normal;
-    slot.mapper.setSlicingMode([vtkImageMapper.SlicingMode.I, vtkImageMapper.SlicingMode.J, vtkImageMapper.SlicingMode.K][axis]);
+    const center = [s2r[3], s2r[7], s2r[11]], step = Math.hypot(..._col(i2r, axis));   // world spacing along axis = scroll step
+    slot.normal = normal; slot.up = _nrm3(_col(s2r, 1)); slot.right = _nrm3(_col(s2r, 0));
+    slot.axis = axis; slot.maxIndex = vol.attrs.dims[axis] - 1; slot.step = step;
+    slot.origin0 = [center[0] - ijk[axis] * step * normal[0], center[1] - ijk[axis] * step * normal[1], center[2] - ijk[axis] * step * normal[2]];
+    slot.fov = (sn.attrs.fieldOfView && sn.attrs.fieldOfView[1]) ? sn.attrs.fieldOfView[1] : 250;
     slot.slider.max = String(slot.maxIndex);
-    setSliceIndex(slot, ijk[axis]);                                  // initial slice + slider sync
-    let win = 255, lev = 128;
-    for (const did of (vol.refs.display || [])) { const d = mirror.get(did); if (d && d.attrs.window != null) { win = d.attrs.window; lev = d.attrs.level; break; } }
-    slot.slice.getProperty().setColorWindow(win); slot.slice.getProperty().setColorLevel(lev);
-    const cam = slot.ren.getActiveCamera(), focal = [s2r[3], s2r[7], s2r[11]];
-    cam.setParallelProjection(true); cam.setFocalPoint(...focal);
-    cam.setPosition(focal[0] + normal[0] * 500, focal[1] + normal[1] * 500, focal[2] + normal[2] * 500);
-    cam.setViewUp(...slot.up);
-    if (sn.attrs.fieldOfView && sn.attrs.fieldOfView[1]) cam.setParallelScale(sn.attrs.fieldOfView[1] / 2);
-    slot.ren.resetCameraClippingRange();
+    if (slot.index == null || slot._initKey !== ctxKey) {          // initial slice + view (once per scene)
+      slot.index = Math.round(ijk[axis]); slot._initKey = ctxKey; slot.pscale = slot.fov / 2; slot.pan = [0, 0, 0];
+      slot.slider.value = String(slot.index);
+    }
+  }
+  slicesDirty = true;
+}
+
+// OHIF blit: re-render each orientation through the single offscreen reslice context, cache the pixels (only on
+// change), then blitSlices() draws the cached images into `out` every frame.
+const _sliceImg = {};   // name -> 2D canvas holding the last rendered slice
+function renderSliceTextures() {
+  const ctx = _sliceCtx; if (!ctx || !ctx.ctSlice || !geom) return;
+  const qw = Math.max(1, Math.floor(geom.cw / 2)), qh = Math.max(1, Math.floor(geom.ch / 2));
+  if (ctx.w !== qw || ctx.h !== qh) { ctx.gl.setSize(qw, qh); ctx.w = qw; ctx.h = qh; }
+  ctx.ctSlice.getProperty().setColorWindow(ctx.win); ctx.ctSlice.getProperty().setColorLevel(ctx.lev);
+  const cam = ctx.ren.getActiveCamera();
+  for (const name of ['Red', 'Yellow', 'Green']) {
+    const slot = _fourUp[name]; if (!slot || !slot.normal || !slot.origin0) continue;
+    const n = slot.normal, i = slot.index, s = slot.step, o = slot.origin0, p = slot.pan || [0, 0, 0];
+    const orig = [o[0] + i * s * n[0] + p[0], o[1] + i * s * n[1] + p[1], o[2] + i * s * n[2] + p[2]];
+    ctx.plane.setOrigin(orig[0] - p[0], orig[1] - p[1], orig[2] - p[2]); ctx.plane.setNormal(n[0], n[1], n[2]);
+    if (ctx.ovSlice) ctx.ovSlice.setPosition(n[0] * 0.6, n[1] * 0.6, n[2] * 0.6);   // nudge overlay toward camera
+    cam.setParallelProjection(true); cam.setFocalPoint(orig[0], orig[1], orig[2]);
+    cam.setPosition(orig[0] + n[0] * 500, orig[1] + n[1] * 500, orig[2] + n[2] * 500);
+    cam.setViewUp(...slot.up); cam.setParallelScale(slot.pscale || slot.fov / 2);
+    ctx.ren.resetCameraClippingRange();
+    ctx.rw.render();
+    let c = _sliceImg[name]; if (!c) c = _sliceImg[name] = document.createElement('canvas');
+    if (c.width !== qw || c.height !== qh) { c.width = qw; c.height = qh; }
+    c.getContext('2d').drawImage(ctx.gl.getCanvas(), 0, 0);
+  }
+}
+const _QRECT = { Red: [0, 0], Green: [0, 0.5], Yellow: [0.5, 0.5] };   // [x0,y0] frac (top-left origin); 3D = top-right
+function blitSlices() {
+  if (!geom) return;
+  const qw = geom.cw / 2, qh = geom.ch / 2;
+  for (const name of ['Red', 'Yellow', 'Green']) {
+    const c = _sliceImg[name]; if (!c) continue;
+    const r = _QRECT[name]; outCtx.drawImage(c, r[0] * geom.cw, r[1] * geom.ch, qw, qh);
   }
 }
 // --- slice-view interaction (standalone 4-up): route by quadrant; pan/zoom/scroll match Slicer ---
@@ -1016,17 +1170,15 @@ function onSliceDrag(e) {
   if (!_sliceDrag) return; e.stopPropagation();
   const { slot, mode } = _sliceDrag, dx = e.clientX - _sliceDrag.x, dy = e.clientY - _sliceDrag.y;
   _sliceDrag.x = e.clientX; _sliceDrag.y = e.clientY;
-  const cam = slot.ren.getActiveCamera();
+  const ps = slot.pscale || slot.fov / 2;
   if (mode === 'zoom') {
-    cam.setParallelScale(Math.max(0.5, cam.getParallelScale() * Math.exp(-dy * 0.006)));  // right-drag down = zoom in (matches Slicer)
+    slot.pscale = Math.max(0.5, ps * Math.exp(-dy * 0.006));          // right-drag down = zoom in (matches Slicer)
   } else {                                                             // pan: image follows the cursor, in the slice plane
-    const r = host.getBoundingClientRect(), worldPerPx = (cam.getParallelScale() * 2) / (r.height / 2);
-    const mvx = -dx * worldPerPx, mvy = dy * worldPerPx;
-    const d = [slot.right[0] * mvx + slot.up[0] * mvy, slot.right[1] * mvx + slot.up[1] * mvy, slot.right[2] * mvx + slot.up[2] * mvy];
-    const f = cam.getFocalPoint(), p = cam.getPosition();
-    cam.setFocalPoint(f[0] + d[0], f[1] + d[1], f[2] + d[2]); cam.setPosition(p[0] + d[0], p[1] + d[1], p[2] + d[2]);
+    const qh = (geom ? geom.ch : 1000) / 2, worldPerPx = (ps * 2) / qh;
+    const mvx = -dx * worldPerPx, mvy = dy * worldPerPx, p = slot.pan || [0, 0, 0];
+    slot.pan = [p[0] + slot.right[0] * mvx + slot.up[0] * mvy, p[1] + slot.right[1] * mvx + slot.up[1] * mvy, p[2] + slot.right[2] * mvx + slot.up[2] * mvy];
   }
-  slot.ren.resetCameraClippingRange(); scene3DDirty = true;
+  slicesDirty = true; scene3DDirty = true;
 }
 function onSliceUp(e) { e.stopPropagation(); window.removeEventListener('pointermove', onSliceDrag, true); window.removeEventListener('pointerup', onSliceUp, true); _sliceDrag = null; }
 
@@ -1329,7 +1481,8 @@ function composite(now) {
       renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false;
       if (pendingRenders > 0) pendingRenders--;
     }
-    outCtx.clearRect(0, 0, geom.cw, geom.ch); drawDecorations2D();
+    if (slicesDirty) { renderSliceTextures(); slicesDirty = false; }   // OHIF: re-render the 3 MPR slices offscreen
+    outCtx.clearRect(0, 0, geom.cw, geom.ch); blitSlices(); drawDecorations2D();   // blit slice quadrants into `out`
     return;
   }
   const v = document.getElementById('v');
@@ -1520,6 +1673,68 @@ async function readPolyData(url) {   // dispatch by extension: legacy .vtk (ASCI
 }
 
 // Full-scene load: a node-state JSON (mrml_sync.mrml_state output) + content-addressed gzip blob FILES.
+// --- load progress: a centered liquid-glass panel with a byte-accurate bar (created lazily) ---
+let _progEl = null, _progBar = null, _progTxt = null;
+function setLoadProgress(frac, label) {   // frac<0 hides; frac 0..1 sets the bar; label = caption
+  if (frac < 0) { if (_progEl) _progEl.style.display = 'none'; return; }
+  if (!_progEl) {
+    _progEl = document.createElement('div');
+    _progEl.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:60;min-width:300px;'
+      + 'padding:18px 22px;border-radius:16px;background:rgba(18,20,32,0.55);border:1px solid rgba(255,255,255,0.12);'
+      + 'backdrop-filter:blur(20px) saturate(1.5);-webkit-backdrop-filter:blur(20px) saturate(1.5);'
+      + 'box-shadow:0 10px 50px rgba(0,0,0,0.45);font:13px/1.5 -apple-system,system-ui,sans-serif;color:#eef0f8;text-align:center;';
+    _progTxt = document.createElement('div');
+    const track = document.createElement('div');
+    track.style.cssText = 'height:6px;border-radius:3px;background:rgba(255,255,255,0.13);margin:11px 0 2px;overflow:hidden;';
+    _progBar = document.createElement('div');
+    _progBar.style.cssText = 'height:100%;width:0%;border-radius:3px;background:linear-gradient(90deg,#5b8cff,#7be0ff);transition:width .15s ease;';
+    track.appendChild(_progBar); _progEl.appendChild(_progTxt); _progEl.appendChild(track);
+    document.body.appendChild(_progEl);
+  }
+  _progEl.style.display = 'block';
+  _progBar.style.width = Math.round(Math.min(1, Math.max(0, frac)) * 100) + '%';
+  if (label) _progTxt.textContent = label;
+}
+
+// Prefetch + gunzip EVERY blob in the scene in parallel (the DMs would otherwise fetch them serially, one segment
+// at a time). Populates blobCache so syncDMs builds geometry with zero network waits. Progress is byte-accurate
+// when the serializer ships meta.size, else falls back to a file count.
+async function prefetchBlobs() {
+  const metas = [], seen = new Set(), zarrNodes = [];
+  const walk = (o) => {
+    if (!o || typeof o !== 'object') return;
+    if (typeof o.hash === 'string') { if (!seen.has(o.hash)) { seen.add(o.hash); metas.push(o); } return; }
+    if (Array.isArray(o)) { for (const v of o) walk(v); return; }
+    for (const k in o) walk(o[k]);
+  };
+  for (const n of mirror.values()) { walk(n.attrs); walk(n.blobs); if (n.attrs && n.attrs.zarr) zarrNodes.push(n); }
+  const total = metas.length;
+  if (!total && !zarrNodes.length) return;
+  const bytesTotal = metas.reduce((s, m) => s + (m.size || 0), 0)
+                   + zarrNodes.reduce((s, n) => s + (n.attrs.zarr.bytes || 0), 0);
+  const mb = (x) => (x / 1e6).toFixed(0);
+  let done = 0, bytesDone = 0;
+  const upd = () => setLoadProgress(bytesTotal ? bytesDone / bytesTotal : done / total,
+    bytesTotal ? `Loading anatomy…  ${mb(bytesDone)} / ${mb(bytesTotal)} MB` : `Loading…  ${done} / ${total} files`);
+  window.__slicerliveProgress = { total, bytesTotal };
+  upd();
+  let idx = 0;
+  const CONC = 12;   // browser caps concurrent connections per host; the rest queue. Still far better than serial.
+  const worker = async () => {
+    while (idx < metas.length) {
+      const m = metas[idx++];
+      try { await fetchArray(m); } catch (e) {}
+      done++; bytesDone += (m.size || 0); upd();
+    }
+  };
+  const onBytes = (n) => { bytesDone += n; upd(); };          // zarr chunks feed the same byte-progress bar
+  await Promise.all([
+    ...Array.from({ length: Math.min(CONC, Math.max(1, total)) }, worker),
+    ...zarrNodes.map((n) => fetchZarrVolume(n, onBytes).catch(() => {})),
+  ]);
+  window.__slicerlivePrefetched = total;
+}
+
 // This is the "publish" format -- it reuses ALL the DMs + blob/geometry handling (volumes, VR, segs, markups),
 // unlike the plain-MRML path which only does models. base/blobs/<hash> are the gz typed-array files.
 async function loadSceneJson(sceneUrl, base) {
@@ -1535,7 +1750,10 @@ async function loadSceneJson(sceneUrl, base) {
   window.__slicerliveLoaded = mirror.size;
   threeDActive = true;
   applyCameraOnce();
+  await prefetchBlobs();                 // fetch+gunzip ALL blobs in parallel (was: serial per-segment) + progress bar
+  setLoadProgress(1, 'Building scene…');  // download done; DMs now build geometry from the cached blobs (no network)
   await syncDMs();
+  setLoadProgress(-1);                    // hide the progress panel
   renderer.resetCameraClippingRange();   // content now loaded -> keep it in the (exported) camera's clip range
   renderer.updateLightsGeometryToFollowCamera();   // headlight -> exported camera (render path doesn't do it) so the VR is lit on the FIRST frame
   renderWindow.render(); markDirty();
