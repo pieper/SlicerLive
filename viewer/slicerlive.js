@@ -36,7 +36,7 @@ import vtkScalarBarActor from '@kitware/vtk.js/Rendering/Core/ScalarBarActor';
 import vtkXMLPolyDataReader from '@kitware/vtk.js/IO/XML/XMLPolyDataReader';   // SlicerLive: read .vtp models client-side
 import vtkPolyDataReader from '@kitware/vtk.js/IO/Legacy/PolyDataReader';      // SlicerLive: read legacy .vtk models
 
-const OFFLOAD_BUILD = 'slicerlive-v1b vrfix 2026-06-14';
+const OFFLOAD_BUILD = 'slicerlive-v1h lightfollow 2026-06-14';
 window.__offloadBuild = OFFLOAD_BUILD;
 console.log('%c[offload] BUILD ' + OFFLOAD_BUILD, 'color:#7fe0a0;font-weight:bold');
 try { window.dispatchEvent(new CustomEvent('offload-build', { detail: OFFLOAD_BUILD })); } catch (e) {}
@@ -66,13 +66,52 @@ let geom = null, maskHit = null, maskActive = false;
 const renderWindow = vtkRenderWindow.newInstance();
 const renderer = vtkRenderer.newInstance({ background: [0, 0, 0] });
 renderWindow.addRenderer(renderer);
+renderer.createLight();   // create the head-light NOW: else the volume's first render counts 0 lights and compiles a
+                          // dark (ambient-only) shader -> VR stays dark until an interaction forces a lit-shader rebuild
 const glWindow = vtkOpenGLRenderWindow.newInstance();
 glWindow.setContainer(host);
+glWindow.get3DContext({ preserveDrawingBuffer: true });   // create ctx now (canvas caches it) so readPixels can read the IDLE/live frame
 renderWindow.addView(glWindow);
 const interactor = vtkRenderWindowInteractor.newInstance();
 interactor.setView(glWindow);
 interactor.initialize();
 interactor.setCurrentRenderer(renderer);
+
+// Reliable VR test that does NOT use grab() (grab forces a full render, masking the "blank until interaction"
+// bug). Renders once, then reads the ACTUAL framebuffer: samples a grid in the 3D quadrant (top-right of the
+// 4-up) and counts pixels that differ from the quadrant's background corner -> how much of the volume drew.
+window.__vrCheck = (forceRender = true) => {
+  try {
+    if (forceRender) renderWindow.render();
+    const gl = glWindow.get3DContext();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);   // read the PRESENTED default framebuffer, not vtk.js's leftover offscreen FBO
+    const W = gl.drawingBufferWidth, H = gl.drawingBufferHeight, px = new Uint8Array(4), bg = new Uint8Array(4);
+    gl.readPixels(Math.round(W * 0.98), Math.round(H * 0.98), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, bg);  // 3D-quadrant bg corner
+    let vol = 0, tot = 0;
+    for (let fx = 0.55; fx <= 0.97; fx += 0.03) for (let fy = 0.55; fy <= 0.97; fy += 0.03) {
+      gl.readPixels(Math.round(W * fx), Math.round(H * fy), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      tot++;
+      const d = Math.abs(px[0] - bg[0]) + Math.abs(px[1] - bg[1]) + Math.abs(px[2] - bg[2]);
+      if (d > 40) vol++;   // differs from background -> volume drew here
+    }
+    return JSON.stringify({ volumePixels: vol, total: tot, bg: [bg[0], bg[1], bg[2]], W, H });
+  } catch (e) { return 'err:' + (e && e.message || e); }
+};
+window.__slRW = renderWindow; window.__slGW = glWindow; window.__slRen = renderer;
+// Programmatic "mouse nudge" — dispatch a real left-drag in the 3D quadrant so the interactor processes it,
+// to validate that __vrCheck distinguishes the buggy (idle) state from the fixed (post-interaction) state.
+window.__vrNudge = () => {
+  try {
+    const r = host.getBoundingClientRect();
+    const x = r.left + r.width * 0.75, y = r.top + r.height * 0.25;   // top-right = the 3D view
+    const ev = (t, dx, dy, btns) => host.dispatchEvent(new PointerEvent(t,
+      { clientX: x + dx, clientY: y + dy, button: 0, buttons: btns, pointerId: 1, pointerType: 'mouse', bubbles: true, cancelable: true }));
+    ev('pointerdown', 0, 0, 1);
+    for (let i = 1; i <= 6; i++) ev('pointermove', i * 3, i * 2, 1);
+    ev('pointerup', 18, 12, 0);
+    return 'nudged';
+  } catch (e) { return 'err:' + (e && e.message || e); }
+};
 
 const istyle = vtkInteractorStyleManipulator.newInstance();   // Slicer-matched bindings
 [
@@ -590,18 +629,20 @@ class VolumeRenderingDM {
     const hash = node.blobs.scalars && node.blobs.scalars.hash;
     let it = this.items.get(id);
     if (!hash || !vr) { if (it) this.remove(id); return; }
-    if (!it) {
-      const mapper = vtkVolumeMapper.newInstance(); const volume = vtkVolume.newInstance();
-      volume.setMapper(mapper); renderer.addVolume(volume);
-      it = { volume, mapper, hash: null }; this.items.set(id, it);
-    }
-    if (it.hash !== hash) {
-      const scalars = await fetchArray(node.blobs.scalars);
+    if (!it || it.hash !== hash) {
+      const scalars = await fetchArray(node.blobs.scalars);   // FETCH DATA FIRST
+      if (!scalars) return;
       const img = vtkImageData.newInstance();
       img.setDimensions(node.attrs.dims);
       img.getPointData().setScalars(vtkDataArray.newInstance({ numberOfComponents: node.attrs.comps || 1, values: scalars }));
+      if (!it) {
+        const mapper = vtkVolumeMapper.newInstance(); mapper.setAutoAdjustSampleDistances(false);
+        const volume = vtkVolume.newInstance(); volume.setMapper(mapper);
+        it = { volume, mapper, added: false, hash: null }; this.items.set(id, it);
+      }
       it.mapper.setInputData(img);
       if (node.attrs.ijkToRAS) it.volume.setUserMatrix(volumeGeometry(img, node.attrs.ijkToRAS));
+      if (!it.added) { renderer.addVolume(it.volume); it.added = true; }   // add the volume AFTER its input data is set
       it.hash = hash;
     }
     const vp = mirror.get((vr.refs.volumeProperty || [])[0]);
@@ -1284,6 +1325,7 @@ function composite(now) {
   if (STANDALONE) {                                            // no video: host (opacity 1) shows the render; just draw decorations
     if (scene3DDirty || interacting || pendingRenders > 0) {
       if (scene3DDirty || pendingRenders > 0) renderer.resetCameraClippingRange();   // async-loaded volume/models changed bounds -> keep in clip range
+      renderer.updateLightsGeometryToFollowCamera();   // the render path doesn't follow the camera; without this the headlight lags -> dark VR until interaction
       renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false;
       if (pendingRenders > 0) pendingRenders--;
     }
@@ -1298,6 +1340,7 @@ function composite(now) {
   // composites video + 3D in a chroma-key shader. No JS pixel loop / canvas blit here anymore.
   if (scene3DDirty || interacting || pendingRenders > 0) {
     if (scene3DDirty || pendingRenders > 0) renderer.resetCameraClippingRange();   // bounds may have changed (async-loaded volume/models) ->
+    renderer.updateLightsGeometryToFollowCamera();   // render path doesn't follow the camera; without this the headlight lags -> dark VR
     renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false;   // keep content in the camera's clip range so it
     if (pendingRenders > 0) pendingRenders--;
     if (window.desktopCompositor) window.desktopCompositor.invalidate();  // shows WITHOUT needing a first interaction (race fix)
@@ -1494,7 +1537,11 @@ async function loadSceneJson(sceneUrl, base) {
   applyCameraOnce();
   await syncDMs();
   renderer.resetCameraClippingRange();   // content now loaded -> keep it in the (exported) camera's clip range
+  renderer.updateLightsGeometryToFollowCamera();   // headlight -> exported camera (render path doesn't do it) so the VR is lit on the FIRST frame
   renderWindow.render(); markDirty();
+  // A few deferred renders to cover the GPU texture-upload window (the volume's texture lands a bit after load).
+  // dark-until-nudge is fixed by createLight at setup + following the camera here and in composite().
+  for (const d of [120, 400, 1000, 2200]) setTimeout(() => { try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
 }
 
 async function loadSlicerLiveScene(sceneUrl) {
