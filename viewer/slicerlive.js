@@ -1451,7 +1451,7 @@ function positionOverlay() {
     if (out.width !== cw || out.height !== ch) { out.width = cw; out.height = ch; }
     if (maskCv.width !== cw || maskCv.height !== ch) { maskCv.width = cw; maskCv.height = ch; }
     geom = { sx: 0, sy: 0, sw: cw, sh: ch, cw, ch };
-    glWindow.setSize(cw, ch); renderWindow.render(); markDirty();
+    glWindow.setSize(cw, ch); slicesDirty = true; renderWindow.render(); markDirty();   // re-render slices at the new quadrant size
     return;
   }
   if (!lastRect) return;
@@ -1468,7 +1468,7 @@ function positionOverlay() {
   if (maskCv.width !== cw || maskCv.height !== ch) { maskCv.width = cw; maskCv.height = ch; }
   geom = { sx, sy, sw, sh, cw, ch };
   glWindow.setSize(cw, ch);
-  renderWindow.render(); markDirty();
+  slicesDirty = true; renderWindow.render(); markDirty();   // re-render slices at the new quadrant size
 }
 
 function composite(now) {
@@ -2002,9 +2002,9 @@ async function loadSlicerLiveScene(sceneUrl) {
     if (!bound) { interactor.bindEvents(host); bound = true; }
     positionOverlay();
     window.addEventListener('resize', positionOverlay);
+    requestAnimationFrame(composite);   // start the render loop NOW so CT slices + VR show progressively as they load
     if (window.__IDC_CT) await loadIDCScene(window.__IDC_CT, window.__IDC_SEG);   // client-side IDC: DICOM straight from AWS
     else await loadSlicerLiveScene(window.__SLICERLIVE_SCENE_URL);
-    requestAnimationFrame(composite);
     return;
   }
   if (!(await pullMRML())) { console.warn('[offload] MRML server not reachable; overlay disabled'); return; }
