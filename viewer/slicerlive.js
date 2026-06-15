@@ -1679,7 +1679,7 @@ async function readPolyData(url) {   // dispatch by extension: legacy .vtk (ASCI
 // --- load progress: a centered liquid-glass panel with a byte-accurate bar (created lazily) ---
 let _progEl = null, _progBar = null, _progTxt = null;
 function setLoadProgress(frac, label) {   // frac<0 hides; frac 0..1 sets the bar; label = caption
-  if (frac < 0) { if (_progEl) _progEl.style.display = 'none'; return; }
+  if (frac < 0) { if (_progEl) _progEl.style.display = 'none'; mosaicHide(); if (_progSegs) _progSegs.innerHTML = ''; return; }
   if (!_progEl) {
     _progEl = document.createElement('div');
     _progEl.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:60;min-width:300px;'
@@ -1697,6 +1697,20 @@ function setLoadProgress(frac, label) {   // frac<0 hides; frac 0..1 sets the ba
   _progEl.style.display = 'block';
   _progBar.style.width = Math.round(Math.min(1, Math.max(0, frac)) * 100) + '%';
   if (label) _progTxt.textContent = label;
+}
+let _progSegs = null;
+function addSegName(name) {   // show segment names as the SEG is processed (a rolling window of recent ones)
+  if (!_progEl) return;
+  if (!_progSegs) {
+    _progSegs = document.createElement('div');
+    _progSegs.style.cssText = 'margin-top:11px; max-width:380px; max-height:84px; overflow:hidden; display:flex; flex-wrap:wrap; gap:4px; justify-content:center;';
+    _progEl.appendChild(_progSegs);
+  }
+  const chip = document.createElement('span');
+  chip.textContent = name;
+  chip.style.cssText = 'font-size:11px; background:rgba(123,224,255,0.13); border:1px solid rgba(123,224,255,0.22); border-radius:9px; padding:1px 8px; color:#cfe8ff; white-space:nowrap;';
+  _progSegs.appendChild(chip);
+  while (_progSegs.childElementCount > 18) _progSegs.removeChild(_progSegs.firstChild);
 }
 
 // Prefetch + gunzip EVERY blob in the scene in parallel (the DMs would otherwise fetch them serially, one segment
@@ -1781,11 +1795,40 @@ async function s3ListKeys(prefix) {
   }
   return keys;
 }
+// progress-bar background: a screen-filling mosaic of CT slice thumbnails as they stream in (by InstanceNumber)
+let _mosaic = null;
+function mosaicInit(count) {
+  if (!_mosaic) {
+    const c = document.createElement('canvas');
+    c.style.cssText = 'position:fixed; inset:0; z-index:55; width:100vw; height:100vh;';
+    document.body.appendChild(c);
+    _mosaic = { canvas: c, ctx: c.getContext('2d'), tmp: document.createElement('canvas') };
+  }
+  _mosaic.canvas.style.display = 'block';
+  const W = window.innerWidth, H = window.innerHeight;
+  _mosaic.canvas.width = W; _mosaic.canvas.height = H;
+  _mosaic.cols = Math.max(1, Math.round(Math.sqrt(count * W / H)));   // grid sized from the slice count -> fills the screen
+  _mosaic.rows = Math.ceil(count / _mosaic.cols);
+  _mosaic.cw = W / _mosaic.cols; _mosaic.ch = H / _mosaic.rows; _mosaic.count = count;
+  _mosaic.ctx.fillStyle = '#06060c'; _mosaic.ctx.fillRect(0, 0, W, H);
+}
+function mosaicDraw(n, w, h, buf) {
+  if (!_mosaic) return;
+  const cell = Math.max(0, Math.min(_mosaic.count - 1, (n | 0) - 1)), col = cell % _mosaic.cols, row = (cell / _mosaic.cols) | 0;
+  const t = _mosaic.tmp; if (t.width !== w || t.height !== h) { t.width = w; t.height = h; }
+  t.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(buf), w, h), 0, 0);
+  _mosaic.ctx.drawImage(t, col * _mosaic.cw, row * _mosaic.ch, _mosaic.cw, _mosaic.ch);
+}
+function mosaicHide() { if (_mosaic) _mosaic.canvas.style.display = 'none'; }
+
 function runIDCWorker(ctKeys, segKeys) {
   return new Promise((resolve, reject) => {
     const w = new Worker('idc-worker.js?t=' + Date.now());
     w.onmessage = (e) => {
       const m = e.data;
+      if (m.t === 'ctinfo') { mosaicInit(m.count); return; }
+      if (m.t === 'thumb') { mosaicDraw(m.n, m.w, m.h, m.rgba); return; }
+      if (m.t === 'seg') { addSegName(m.name); return; }
       if (m.t === 'progress') { setLoadProgress(m.frac, m.msg); return; }
       if (m.t === 'error') { w.terminate(); reject(new Error(m.error)); return; }
       if (m.t === 'done') {

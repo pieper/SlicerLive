@@ -17,17 +17,39 @@ const lps2ras = (v) => [-v[0], -v[1], v[2]];   // DICOM LPS -> Slicer RAS (negat
 
 async function fetchBuf(key) { const r = await fetch(S3 + key); if (!r.ok) throw new Error('fetch ' + r.status); return r.arrayBuffer(); }
 
+// a small windowed grayscale thumbnail of a CT slice, for the progress-bar mosaic
+function makeThumb(ds) {
+  let pd = ds.PixelData; if (Array.isArray(pd)) pd = pd[0];
+  if (!pd) return null;
+  const nx = ds.Columns, ny = ds.Rows, TW = 64, TH = Math.max(1, Math.round(64 * ny / nx));
+  const px = ds.PixelRepresentation === 1 ? new Int16Array(pd) : new Uint16Array(pd);
+  const slope = Number(ds.RescaleSlope ?? 1), inter = Number(ds.RescaleIntercept ?? 0);
+  const lev = Number((Array.isArray(ds.WindowCenter) ? ds.WindowCenter[0] : ds.WindowCenter) ?? 40);
+  const win = Number((Array.isArray(ds.WindowWidth) ? ds.WindowWidth[0] : ds.WindowWidth)) || 400;
+  const lo = lev - win / 2, sc = 255 / win, rgba = new Uint8ClampedArray(TW * TH * 4);
+  for (let ty = 0; ty < TH; ty++) {
+    const sy = (ty * ny / TH) | 0;
+    for (let tx = 0; tx < TW; tx++) {
+      let g = (px[sy * nx + ((tx * nx / TW) | 0)] * slope + inter - lo) * sc; g = g < 0 ? 0 : g > 255 ? 255 : g;
+      const o = (ty * TW + tx) * 4; rgba[o] = rgba[o + 1] = rgba[o + 2] = g; rgba[o + 3] = 255;
+    }
+  }
+  return { w: TW, h: TH, rgba };
+}
+
 // ---- CT series -> Int16 HU volume (k-fastest C order) + ijkToRAS (row-major, RAS) ----
 async function buildVolume(ctKeys) {
+  post({ t: 'ctinfo', count: ctKeys.length });   // let the UI lay out a slice-thumbnail mosaic
   const slices = [];
   let done = 0;
-  // parallel fetch+parse with a small concurrency cap (memory + connection limits)
   const CONC = 8; let idx = 0;
   async function worker() {
     while (idx < ctKeys.length) {
       const k = ctKeys[idx++];
       const ds = naturalize(await fetchBuf(k));
       slices.push(ds);
+      const th = makeThumb(ds);   // stream a thumbnail to the mosaic, placed by InstanceNumber
+      if (th) post({ t: 'thumb', n: Number(ds.InstanceNumber) || slices.length, w: th.w, h: th.h, rgba: th.rgba.buffer }, [th.rgba.buffer]);
       done++; if (done % 8 === 0) prog(`CT ${done}/${ctKeys.length}`, 0.05 + 0.45 * done / ctKeys.length);
     }
   }
@@ -79,6 +101,13 @@ function buildLabelmap(segBuf, ct) {
   const sPs = (shared.PixelMeasuresSequence?.[0]?.PixelSpacing || ct.ps).map(Number);
   const colW = sIop.slice(0, 3).map((v) => v * sPs[1]);   // LPS world delta per +1 column (the i / DICOM rowDir)
   const rowW = sIop.slice(3, 6).map((v) => v * sPs[0]);   // LPS world delta per +1 row    (the j / DICOM colDir)
+  const colors = [], names = {};   // parse segment colors/names up front so we can announce names while processing
+  for (const s of (ds.SegmentSequence || [])) {
+    const rgb = s.RecommendedDisplayCIELabValue ? dcmjs.data.Colors.dicomlab2RGB(s.RecommendedDisplayCIELabValue) : [1, 1, 1];
+    colors.push([Number(s.SegmentNumber), rgb[0], rgb[1], rgb[2]]);
+    names[Number(s.SegmentNumber)] = s.SegmentLabel || ('Segment ' + s.SegmentNumber);
+  }
+  const seenSeg = new Set();
   const perFrame = ds.PerFrameFunctionalGroupsSequence || [];
   const ref = (perFrame[0]?.PlanePositionSequence?.[0]?.ImagePositionPatient || [0, 0, 0]).map(Number), o0 = toIJK(ref);
   const diCol = sub(toIJK([ref[0] + colW[0], ref[1] + colW[1], ref[2] + colW[2]]), o0);   // IJK step per +1 column
@@ -88,6 +117,7 @@ function buildLabelmap(segBuf, ct) {
     const segNum = fg.SegmentIdentificationSequence?.[0]?.ReferencedSegmentNumber;
     const ippLps = fg.PlanePositionSequence?.[0]?.ImagePositionPatient?.map(Number);
     if (!segNum || !ippLps) continue;
+    if (!seenSeg.has(segNum)) { seenSeg.add(segNum); post({ t: 'seg', name: names[segNum] || ('Segment ' + segNum) }); }
     const o = toIJK(ippLps), fb = f * frameBytes;
     for (let row = 0; row < ny; row++) {
       const bi = o[0] + row * diRow[0], bj = o[1] + row * diRow[1], bk = o[2] + row * diRow[2], rb = row * nx;
@@ -99,13 +129,6 @@ function buildLabelmap(segBuf, ct) {
       }
     }
     if (f % 200 === 0) prog(`SEG ${f}/${perFrame.length}`, 0.55 + 0.4 * f / perFrame.length);
-  }
-  const colors = [], names = {};
-  for (const s of (ds.SegmentSequence || [])) {
-    const rgb = s.RecommendedDisplayCIELabValue
-      ? dcmjs.data.Colors.dicomlab2RGB(s.RecommendedDisplayCIELabValue) : [1, 1, 1];
-    colors.push([Number(s.SegmentNumber), rgb[0], rgb[1], rgb[2]]);
-    names[Number(s.SegmentNumber)] = s.SegmentLabel || ('Segment ' + s.SegmentNumber);
   }
   return { lab, colors, names };
 }
