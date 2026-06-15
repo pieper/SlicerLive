@@ -1,10 +1,34 @@
 // IDC client-side loader worker: fetch DICOM straight from the open-CORS AWS bucket and reconstruct, off the
 // main thread (the 86 MB SEG + 2595-frame parse would otherwise freeze the UI). The main thread does the S3
 // listing (needs DOMParser) and passes the instance keys here. Returns transferable typed arrays.
-importScripts('https://cdn.jsdelivr.net/npm/dcmjs@0.41.0/build/dcmjs.min.js');
+// load dcmjs, retrying across CDN mirrors (jsdelivr/unpkg are occasionally flaky from some networks)
+(function loadDcmjs() {
+  const mirrors = [
+    'https://cdn.jsdelivr.net/npm/dcmjs@0.41.0/build/dcmjs.min.js',
+    'https://unpkg.com/dcmjs@0.41.0/build/dcmjs.min.js',
+    'https://cdn.jsdelivr.net/npm/dcmjs@0.41.0/build/dcmjs.js',
+    'https://unpkg.com/dcmjs@0.41.0/build/dcmjs.js',
+  ];
+  for (let i = 0; i < 12; i++) { try { importScripts(mirrors[i % mirrors.length]); return; } catch (e) {} }
+  throw new Error('dcmjs: all CDN mirrors failed');
+})();
 const S3 = 'https://idc-open-data.s3.us-east-1.amazonaws.com/';
 const post = (m, x) => self.postMessage(m, x || []);
 const prog = (msg, frac) => post({ t: 'progress', msg, frac });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// fetch with retries + jittered exponential backoff (IDC S3 returns transient network errors under concurrency)
+async function fetchRetry(url, opts, tries = 6) {
+  let err;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const r = await fetch(url, opts);
+      if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
+      return r;
+    } catch (e) { err = e; if (i < tries - 1) await sleep(Math.min(4000, 250 * 2 ** i) * (0.6 + 0.8 * Math.random())); }
+  }
+  throw err;
+}
 
 function naturalize(buf) {
   const dd = dcmjs.data.DicomMessage.readFile(buf);
@@ -15,7 +39,7 @@ const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const lps2ras = (v) => [-v[0], -v[1], v[2]];   // DICOM LPS -> Slicer RAS (negate X,Y)
 
-async function fetchBuf(key) { const r = await fetch(S3 + key); if (!r.ok) throw new Error('fetch ' + r.status); return r.arrayBuffer(); }
+async function fetchBuf(key) { return (await fetchRetry(S3 + key)).arrayBuffer(); }
 
 // a small windowed grayscale thumbnail of a CT slice, for the progress-bar mosaic
 function makeThumb(ds) {
@@ -150,7 +174,7 @@ function invAffine(m) {
 // byte ranges -> this parallelizes the 85 MB download AND skips dcmjs copying it. Falls back to a plain fetch.
 async function fetchSeg(key) {
   const HEAD = 4 << 20;
-  const head = new Uint8Array(await fetch(S3 + key, { headers: { Range: `bytes=0-${HEAD - 1}` } }).then((r) => r.arrayBuffer()));
+  const head = new Uint8Array(await fetchRetry(S3 + key, { headers: { Range: `bytes=0-${HEAD - 1}` } }).then((r) => r.arrayBuffer()));
   const dv = new DataView(head.buffer, head.byteOffset);
   let pt = -1;                                                       // PixelData tag 7FE0,0010 (LE) followed by a pixel VR
   for (let i = 132; i + 12 <= head.length; i += 2) {
@@ -172,7 +196,7 @@ async function fetchSeg(key) {
     await Promise.all(Array.from({ length: CH }, (_, c) => {
       const s = rs + c * cs, e = Math.min(re, s + cs - 1);
       if (s > e) return null;
-      return fetch(S3 + key, { headers: { Range: `bytes=${s}-${e}` } }).then((r) => r.arrayBuffer()).then((ab) => {
+      return fetchRetry(S3 + key, { headers: { Range: `bytes=${s}-${e}` } }).then((r) => r.arrayBuffer()).then((ab) => {
         bits.set(new Uint8Array(ab), s - valOff); got += ab.byteLength;
         prog(`SEG ${(got / 1e6) | 0}/${(pdLen / 1e6) | 0} MB`, 0.5 + 0.08 * got / pdLen);
       });
@@ -186,17 +210,16 @@ self.onmessage = async (e) => {
   try {
     prog('fetching CT…', 0.05);
     const ct = await buildVolume(ctKeys);
-    let seg = null;
+    // progressive: hand the CT to the main thread right away so it can render the slices while the SEG loads
+    post({ t: 'ct', vol: ct.vol, dims: ct.dims, ijkToRAS: ct.ijkToRAS, win: ct.win, lev: ct.lev }, [ct.vol.buffer]);
     if (segKeys && segKeys.length) {
       prog('fetching SEG…', 0.5);
       let parsed;
       try { parsed = await fetchSeg(segKeys[0]); }
       catch (err) { const buf = await fetchBuf(segKeys[0]); const ds = naturalize(buf); let pd = ds.PixelData; if (Array.isArray(pd)) pd = pd[0]; parsed = { ds, bits: new Uint8Array(pd) }; }
-      seg = buildLabelmap(parsed.ds, parsed.bits, ct);
+      const seg = buildLabelmap(parsed.ds, parsed.bits, ct);
+      post({ t: 'labelmap', lab: seg.lab, colors: seg.colors, names: seg.names }, [seg.lab.buffer]);
     }
-    const transfer = [ct.vol.buffer];
-    if (seg) transfer.push(seg.lab.buffer);
-    post({ t: 'done', ct: { vol: ct.vol, dims: ct.dims, ijkToRAS: ct.ijkToRAS, win: ct.win, lev: ct.lev },
-           seg: seg ? { lab: seg.lab, colors: seg.colors, names: seg.names } : null }, transfer);
+    post({ t: 'alldone' });
   } catch (err) { post({ t: 'error', error: String(err && err.stack || err) }); }
 };

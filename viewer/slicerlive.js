@@ -609,7 +609,10 @@ function applyVolumeProperty(prop, a) {
   prop.setScalarOpacity(0, sof);
   prop.setInterpolationTypeToLinear();
   prop.setShade(a.shade ? 1 : 0);
-  prop.setAmbient(0.2); prop.setDiffuse(0.7); prop.setSpecular(0.3);
+  prop.setAmbient(a.ambient != null ? a.ambient : 0.2);
+  prop.setDiffuse(a.diffuse != null ? a.diffuse : 0.7);
+  prop.setSpecular(a.specular != null ? a.specular : 0.3);
+  if (a.specularPower != null) prop.setSpecularPower(a.specularPower);
   // vtk.js gradient opacity is a min/max RAMP, not a piecewise function (no setGradientOpacity(pf)).
   // Approximate Slicer's gradient-opacity TF by its endpoints; off if absent.
   const g = a.gradientOpacity;
@@ -1782,13 +1785,22 @@ async function loadSceneJson(sceneUrl, base) {
 // ===================== SlicerLive: client-side IDC loader (DICOM straight from AWS, no server) =====================
 // idc-open-data S3 has open CORS; list a series' instances + parse with dcmjs in a worker, generate a scene, render.
 const IDC_S3 = 'https://idc-open-data.s3.us-east-1.amazonaws.com/';
+// fetch with retries + jittered backoff (the IDC S3 endpoint occasionally returns transient network errors)
+async function fetchRetry(url, opts, tries = 6) {
+  let err;
+  for (let i = 0; i < tries; i++) {
+    try { const r = await fetch(url, opts); if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status); return r; }
+    catch (e) { err = e; if (i < tries - 1) await new Promise((res) => setTimeout(res, Math.min(4000, 250 * 2 ** i) * (0.6 + 0.8 * Math.random()))); }
+  }
+  throw err;
+}
 async function s3ListKeys(prefix) {
   if (!prefix.endsWith('/')) prefix += '/';
   let keys = [], token = null, more = true;
   while (more) {
     let url = `${IDC_S3}?list-type=2&prefix=${encodeURIComponent(prefix)}`;
     if (token) url += `&continuation-token=${encodeURIComponent(token)}`;
-    const x = new DOMParser().parseFromString(await fetch(url).then((r) => r.text()), 'application/xml');
+    const x = new DOMParser().parseFromString(await fetchRetry(url).then((r) => r.text()), 'application/xml');
     keys.push(...[...x.getElementsByTagName('Key')].map((e) => e.textContent).filter(Boolean));
     more = x.getElementsByTagName('IsTruncated')[0]?.textContent === 'true';
     token = more ? x.getElementsByTagName('NextContinuationToken')[0]?.textContent : null;
@@ -1821,28 +1833,31 @@ function mosaicDraw(n, w, h, buf) {
 }
 function mosaicHide() { if (_mosaic) _mosaic.canvas.style.display = 'none'; }
 
-function runIDCWorker(ctKeys, segKeys) {
+// Drive progressive rendering: onCT fires as soon as the CT volume is ready; onLabelmap when the SEG is parsed.
+function runIDCWorker(ctKeys, segKeys, handlers) {
   return new Promise((resolve, reject) => {
     const w = new Worker('idc-worker.js?t=' + Date.now());
+    let chain = Promise.resolve();   // serialize handler work so renders don't interleave
     w.onmessage = (e) => {
       const m = e.data;
       if (m.t === 'ctinfo') { mosaicInit(m.count); return; }
       if (m.t === 'thumb') { mosaicDraw(m.n, m.w, m.h, m.rgba); return; }
       if (m.t === 'seg') { addSegName(m.name); return; }
       if (m.t === 'progress') { setLoadProgress(m.frac, m.msg); return; }
+      if (m.t === 'ct') { const ct = { vol: new Int16Array(m.vol), dims: m.dims, ijkToRAS: m.ijkToRAS, win: m.win, lev: m.lev };
+        chain = chain.then(() => handlers.onCT(ct)).catch((err) => console.error('[IDC] onCT', err)); return; }
+      if (m.t === 'labelmap') { const seg = { lab: new Uint8Array(m.lab), colors: m.colors, names: m.names };
+        chain = chain.then(() => handlers.onLabelmap(seg)).catch((err) => console.error('[IDC] onLabelmap', err)); return; }
       if (m.t === 'error') { w.terminate(); reject(new Error(m.error)); return; }
-      if (m.t === 'done') {
-        w.terminate();
-        resolve({ ct: { vol: new Int16Array(m.ct.vol), dims: m.ct.dims, ijkToRAS: m.ct.ijkToRAS, win: m.ct.win, lev: m.ct.lev },
-          seg: m.seg ? { lab: new Uint8Array(m.seg.lab), colors: m.seg.colors, names: m.seg.names } : null });
-      }
+      if (m.t === 'alldone') { w.terminate(); chain.then(resolve); return; }
     };
     w.onerror = (e) => { w.terminate(); reject(new Error('worker: ' + (e.message || e))); };
     w.postMessage({ ctKeys, segKeys });
   });
 }
-// generate a self-consistent SlicerLive scene (mirror nodes) from the parsed CT volume + SEG labelmap
-function buildIDCNodes(ct, seg) {
+// CT-only SlicerLive scene (mirror nodes): orthogonal slice views, no volume rendering (segments render as
+// surfaces instead). An empty segmentation node is created up front; surfaces are added progressively.
+function buildIDCNodes(ct, hasSeg) {
   const M = ct.ijkToRAS, [nx, ny, nz] = ct.dims;
   const apply = (p) => [M[0] * p[0] + M[1] * p[1] + M[2] * p[2] + M[3], M[4] * p[0] + M[5] * p[1] + M[6] * p[2] + M[7], M[8] * p[0] + M[9] * p[1] + M[10] * p[2] + M[11]];
   const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
@@ -1853,9 +1868,10 @@ function buildIDCNodes(ct, seg) {
   const add = (id, cls, attrs, refs, extra) => { nodes[id] = Object.assign({ id, class: cls, name: id, attrs, refs: refs || {}, blobs: {} }, extra || {}); return id; };
   add('vtkMRMLViewNode1', 'vtkMRMLViewNode', { backgroundColor: [0.756, 0.764, 0.909], backgroundColor2: [0.454, 0.470, 0.745], boxVisible: 1, axisLabelsVisible: 1, orientationMarkerType: 0 });
   const volDisp = add('idcVolDisp', 'vtkMRMLScalarVolumeDisplayNode', { visibility: 1, window: ct.win, level: ct.lev, color: [1, 1, 1], opacity: 1 });
-  const prop = add('idcVolProp', 'vtkMRMLVolumePropertyNode', { shade: 1, interpolationType: 1,
-    color: [[-1000, 0, 0, 0], [-400, 0.30, 0.10, 0.05], [40, 0.85, 0.55, 0.40], [300, 0.95, 0.85, 0.70], [1200, 1, 1, 1]],
-    scalarOpacity: [[-1000, 0], [-300, 0], [40, 0.03], [200, 0.12], [600, 0.5], [1500, 0.85]], gradientOpacity: [[0, 1], [255, 1]] });
+  const prop = add('idcVolProp', 'vtkMRMLVolumePropertyNode', { shade: 1, interpolationType: 1,   // Slicer "CT-Chest-Contrast-Enhanced"
+    ambient: 0.1, diffuse: 0.9, specular: 0.2, specularPower: 10,
+    color: [[-3024, 0, 0, 0], [67.0106, 0.54902, 0.25098, 0.14902], [251.105, 0.882353, 0.603922, 0.290196], [439.291, 1, 0.937033, 0.954531], [3071, 0.827451, 0.658824, 1]],
+    scalarOpacity: [[-3024, 0], [67.0106, 0], [251.105, 0.446429], [439.291, 0.625], [3071, 0.616071]], gradientOpacity: [[0, 1], [255, 1]] });
   const vrDisp = add('idcVRDisp', 'vtkMRMLGPURayCastVolumeRenderingDisplayNode', { visibility: 1, visibility3D: 1, kind: 'volumeRendering', croppingEnabled: 0 }, { volumeProperty: [prop] });
   const vol = add('idcVol', 'vtkMRMLScalarVolumeNode', { dims: [nx, ny, nz], comps: 1, ijkToRAS: M }, { display: [volDisp, vrDisp] });
   nodes[vol].__scalars = ct.vol; nodes[vol].__volKey = 'idc-ct';
@@ -1868,29 +1884,70 @@ function buildIDCNodes(ct, seg) {
       sliceToRAS: [r[0], u[0], n[0], c[0], r[1], u[1], n[1], c[1], r[2], u[2], n[2], c[2], 0, 0, 0, 1], fieldOfView: [axExt(r), axExt(u), 2.5] });
     add('idcComp' + name, 'vtkMRMLSliceCompositeNode', { layoutName: name, backgroundVolumeID: vol, foregroundOpacity: 0, labelOpacity: 1 }, { backgroundVolume: [vol] });
   }
-  if (seg) {
+  if (hasSeg) {
     const segDisp = add('idcSegDisp', 'vtkMRMLSegmentationDisplayNode', { visibility: 1, visibility3D: 1 });
-    const segNode = add('idcSeg', 'vtkMRMLSegmentationNode', { labelmapDims: [nx, ny, nz], labelmapIjkToRAS: M, segmentColors: seg.colors, seg2DOpacity: 0.5, segments: [] }, { display: [segDisp] });
-    nodes[segNode].__labelmap = seg.lab;
+    add('idcSeg', 'vtkMRMLSegmentationNode', { labelmapDims: [nx, ny, nz], labelmapIjkToRAS: M, segmentColors: [], seg2DOpacity: 0.5, segments: [] }, { display: [segDisp] });
   }
   return nodes;
 }
+
+// Default 3D view: look from the anterior (+Y) with superior (+Z) up, centered + fit on the CT, and make the
+// trackball center of rotation the centroid of the CT bounding box (the camera focal point).
+function setIDCCamera(ct) {
+  const M = ct.ijkToRAS, [nx, ny, nz] = ct.dims;
+  const apply = (p) => [M[0] * p[0] + M[1] * p[1] + M[2] * p[2] + M[3], M[4] * p[0] + M[5] * p[1] + M[6] * p[2] + M[7], M[8] * p[0] + M[9] * p[1] + M[10] * p[2] + M[11]];
+  const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+  for (const i of [0, nx]) for (const j of [0, ny]) for (const k of [0, nz]) { const w = apply([i, j, k]); for (let d = 0; d < 3; d++) { lo[d] = Math.min(lo[d], w[d]); hi[d] = Math.max(hi[d], w[d]); } }
+  const center = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+  const maxExt = Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+  // Frame the CT bbox directly: at this point the 3D renderer has no actors yet (slices reslice offscreen, no VR,
+  // surfaces not built), so resetCamera has nothing to fit. Place the camera manually so the centroid projects to
+  // the viewport center (centered + rotation center = CT centroid) and the bbox fits.
+  const D = maxExt * 2.5;
+  const cam = renderer.getActiveCamera();
+  cam.setViewUp(0, 0, 1);                                            // superior up
+  cam.setFocalPoint(center[0], center[1], center[2]);               // rotation center = CT bbox centroid
+  cam.setPosition(center[0], center[1] + D, center[2]);             // anterior (+Y), looking posterior
+  cam.setClippingRange(Math.max(1, D - maxExt), D + maxExt * 1.5);
+  renderer.updateLightsGeometryToFollowCamera();
+}
+
+// Apply the SEG as a colored 2D overlay on the slice views once the labelmap is decoded. The 3D view shows the CT
+// volume rendering (no segment surfaces). NOTE: the SegmentationDM surface path (segments[].mesh) is intentionally
+// left in place so we can render segment surfaces later -- we just don't generate them for this IDC view.
+async function addIDCSegments(ct, seg) {
+  const segNode = mirror.get('idcSeg'); if (!segNode) return;
+  segNode.attrs.segmentColors = seg.colors;
+  segNode.__labelmap = seg.lab; segNode.attrs.labelmapDims = ct.dims; segNode.attrs.labelmapIjkToRAS = ct.ijkToRAS;
+  await syncDMs();
+  renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty();
+}
+
 async function loadIDCScene(ctPrefix, segPrefix) {
   try {
     setLoadProgress(0.02, 'Listing IDC instances…');
     const ctKeys = await s3ListKeys(ctPrefix);
     const segKeys = segPrefix ? await s3ListKeys(segPrefix) : [];
     console.log('[IDC] CT', ctKeys.length, 'SEG', segKeys.length);
-    const data = await runIDCWorker(ctKeys, segKeys);
-    window.__idcData = data;   // debug: expose CT vol + dims + ijkToRAS for ground-truth voxel comparison
-    setLoadProgress(0.97, 'Building scene…');
     mirror.clear(); localBlobs.clear();
-    const nodes = buildIDCNodes(data.ct, data.seg);
-    for (const id in nodes) mirror.set(id, nodes[id]);
-    window.__slicerliveLoaded = mirror.size; threeDActive = true;
-    await syncDMs();
+    let ctData = null;
+    await runIDCWorker(ctKeys, segKeys, {
+      onCT: async (ct) => {                          // CT fully available -> render the 3 slice views + the VR
+        ctData = ct; window.__idcData = { ct };
+        const nodes = buildIDCNodes(ct, segKeys.length > 0);
+        for (const id in nodes) mirror.set(id, nodes[id]);
+        window.__slicerliveLoaded = mirror.size; threeDActive = true;
+        await syncDMs();
+        mosaicHide();                                // real slices render now -> drop the thumbnail mosaic
+        setIDCCamera(ct);
+        renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty();
+        // deferred renders cover the GPU volume-texture upload window (the VR is dark-until-nudge without this)
+        for (const d of [120, 400, 1000]) setTimeout(() => { try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
+      },
+      onLabelmap: async (seg) => { await addIDCSegments(ctData, seg); },   // 2D colored overlay on the slices
+    });
     setLoadProgress(-1);
-    renderer.resetCamera(); renderer.updateLightsGeometryToFollowCamera();
+    renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera();
     renderWindow.render(); markDirty();
     for (const d of [120, 400, 1000, 2200]) setTimeout(() => { try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
   } catch (e) { console.error('[IDC]', e); window.__slicerliveError = String(e); setLoadProgress(-1); }
