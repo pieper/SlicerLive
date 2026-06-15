@@ -4,3 +4,5 @@ bundle.js
 _*.png
 .DS_Store
 mrhead/
+idctest.html
+viewer/idcdemo/

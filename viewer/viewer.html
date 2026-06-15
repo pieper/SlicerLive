@@ -18,9 +18,12 @@
   // The globals MUST be set before slicerlive-bundle.js evaluates (it reads them at module load).
   const _params = new URLSearchParams(location.search);
   const _scene = _params.get('scene') || '';
+  const _ct = _params.get('ct') || '';           // client-side IDC: ?ct=<crdc_series_uuid>&seg=<crdc_series_uuid>
+  const _seg = _params.get('seg') || '';
   window.__OFFLOAD_STANDALONE = true;            // full-window vtk.js render, no video / desktop compositor
   window.__SLICERLIVE_SCENE_URL = _scene;
-  if (!_scene) document.getElementById('err').textContent = 'No ?scene=<mrml-url> provided.';
+  if (_ct) { window.__IDC_CT = _ct; window.__IDC_SEG = _seg; }
+  if (!_scene && !_ct) document.getElementById('err').textContent = 'No ?scene=<mrml-url> or ?ct=&seg= provided.';
   window.addEventListener('offload-build', (e) => {
     document.getElementById('status').textContent = 'SlicerLive ' + e.detail + (_scene ? '  •  ' + _scene : '');
   });
