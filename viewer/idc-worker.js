@@ -85,11 +85,8 @@ async function buildVolume(ctKeys) {
 // ---- SEG (1 multiframe) -> Uint8 labelmap on the CT grid + segment colors/names ----
 // Map each SEG frame pixel (col,row) -> CT IJK using the SEG's OWN ImageOrientation/Position (per frame, oblique-
 // safe) -- the SEG may be stored flipped vs the CT (here colDir is negated), so a naive (col,row)->(i,j) is wrong.
-function buildLabelmap(segBuf, ct) {
-  const ds = naturalize(segBuf);
+function buildLabelmap(ds, bits, ct) {
   const [nx, ny, nz] = ct.dims, frameBytes = (nx * ny) >> 3;
-  let pd = ds.PixelData; if (Array.isArray(pd)) pd = pd[0];
-  const bits = new Uint8Array(pd);
   const lab = new Uint8Array(nx * ny * nz);
   const M = ct.ijkToRAS, inv = invAffine(M);
   const toIJK = (lps) => { const r = lps2ras(lps); return [
@@ -148,6 +145,42 @@ function invAffine(m) {
   return [r[0], r[1], r[2], tx, r[3], r[4], r[5], ty, r[6], r[7], r[8], tz, 0, 0, 0, 1];
 }
 
+// header-first parallel SEG fetch: range the header (functional groups precede PixelData), then range-fetch the
+// bit-packed PixelData in parallel chunks. idc-open-data serves it UNCOMPRESSED (no on-the-fly gzip) but supports
+// byte ranges -> this parallelizes the 85 MB download AND skips dcmjs copying it. Falls back to a plain fetch.
+async function fetchSeg(key) {
+  const HEAD = 4 << 20;
+  const head = new Uint8Array(await fetch(S3 + key, { headers: { Range: `bytes=0-${HEAD - 1}` } }).then((r) => r.arrayBuffer()));
+  const dv = new DataView(head.buffer, head.byteOffset);
+  let pt = -1;                                                       // PixelData tag 7FE0,0010 (LE) followed by a pixel VR
+  for (let i = 132; i + 12 <= head.length; i += 2) {
+    if (head[i] === 0xE0 && head[i + 1] === 0x7F && head[i + 2] === 0x10 && head[i + 3] === 0x00) {
+      const vr = String.fromCharCode(head[i + 4], head[i + 5]);
+      if (vr === 'OB' || vr === 'OW' || vr === 'UN') { pt = i; break; }
+    }
+  }
+  if (pt < 0) throw new Error('PixelData tag not in header range');
+  const valOff = pt + 12, pdLen = dv.getUint32(pt + 8, true);       // explicit-VR OB/OW/UN: 12-byte element header
+  if (!pdLen || pdLen === 0xFFFFFFFF) throw new Error('encapsulated/undefined PixelData length');
+  const ds = naturalize(head.slice(0, pt).buffer);                  // header only -> functional groups + segments
+  const bits = new Uint8Array(pdLen);
+  const have = Math.max(0, Math.min(HEAD, valOff + pdLen) - valOff);
+  if (have > 0) bits.set(head.subarray(valOff, valOff + have), 0);  // PixelData bytes already in the header range
+  const rs = valOff + have, re = valOff + pdLen - 1;
+  if (rs <= re) {
+    const CH = 8, cs = Math.ceil((re - rs + 1) / CH); let got = have;
+    await Promise.all(Array.from({ length: CH }, (_, c) => {
+      const s = rs + c * cs, e = Math.min(re, s + cs - 1);
+      if (s > e) return null;
+      return fetch(S3 + key, { headers: { Range: `bytes=${s}-${e}` } }).then((r) => r.arrayBuffer()).then((ab) => {
+        bits.set(new Uint8Array(ab), s - valOff); got += ab.byteLength;
+        prog(`SEG ${(got / 1e6) | 0}/${(pdLen / 1e6) | 0} MB`, 0.5 + 0.08 * got / pdLen);
+      });
+    }));
+  }
+  return { ds, bits };
+}
+
 self.onmessage = async (e) => {
   const { ctKeys, segKeys } = e.data;
   try {
@@ -155,9 +188,11 @@ self.onmessage = async (e) => {
     const ct = await buildVolume(ctKeys);
     let seg = null;
     if (segKeys && segKeys.length) {
-      prog('fetching SEG…', 0.55);
-      const segBuf = await fetchBuf(segKeys[0]);
-      seg = buildLabelmap(segBuf, ct);
+      prog('fetching SEG…', 0.5);
+      let parsed;
+      try { parsed = await fetchSeg(segKeys[0]); }
+      catch (err) { const buf = await fetchBuf(segKeys[0]); const ds = naturalize(buf); let pd = ds.PixelData; if (Array.isArray(pd)) pd = pd[0]; parsed = { ds, bits: new Uint8Array(pd) }; }
+      seg = buildLabelmap(parsed.ds, parsed.bits, ct);
     }
     const transfer = [ct.vol.buffer];
     if (seg) transfer.push(seg.lab.buffer);
