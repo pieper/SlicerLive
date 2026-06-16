@@ -3,6 +3,11 @@
 <head>
 <meta charset="utf-8">
 <title>SlicerLive</title>
+<script>
+  window.__jsErrors = [];
+  addEventListener('error', (e) => window.__jsErrors.push((e.message || e.type) + ' @ ' + (e.filename || '').split('/').pop() + ':' + (e.lineno || '')));
+  addEventListener('unhandledrejection', (e) => window.__jsErrors.push('reject: ' + ((e.reason && (e.reason.stack || e.reason.message)) || e.reason)));
+</script>
 <style>
   html, body { margin: 0; height: 100%; background: #1a1a22; overflow: hidden;
                font: 12px/1.4 -apple-system, system-ui, sans-serif; }
@@ -20,10 +25,12 @@
   const _scene = _params.get('scene') || '';
   const _ct = _params.get('ct') || '';           // client-side IDC: ?ct=<crdc_series_uuid>&seg=<crdc_series_uuid>
   const _seg = _params.get('seg') || '';
+  const _roulette = _params.has('segroulette');   // SEGRoulette: spin a random IDC SEG (CT/MR/PET source) into the viewer
   window.__OFFLOAD_STANDALONE = true;            // full-window vtk.js render, no video / desktop compositor
   window.__SLICERLIVE_SCENE_URL = _scene;
-  if (_ct) { window.__IDC_CT = _ct; window.__IDC_SEG = _seg; }
-  if (!_scene && !_ct) document.getElementById('err').textContent = 'No ?scene=<mrml-url> or ?ct=&seg= provided.';
+  if (_ct) { window.__IDC_CT = _ct; window.__IDC_SEG = _seg; window.__IDC_MOD = _params.get('mod') || 'CT'; }
+  if (_roulette) window.__SEGROULETTE = true;
+  if (!_scene && !_ct && !_roulette) document.getElementById('err').textContent = 'No ?scene=<mrml-url>, ?ct=&seg=, or ?segroulette provided.';
   window.addEventListener('offload-build', (e) => {
     document.getElementById('status').textContent = 'SlicerLive ' + e.detail + (_scene ? '  •  ' + _scene : '');
   });

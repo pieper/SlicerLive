@@ -43,7 +43,7 @@ console.log('%c[offload] BUILD ' + OFFLOAD_BUILD, 'color:#7fe0a0;font-weight:bol
 try { window.dispatchEvent(new CustomEvent('offload-build', { detail: OFFLOAD_BUILD })); } catch (e) {}
 const SCENE = (window.__OFFLOAD_BASE != null) ? window.__OFFLOAD_BASE : `${location.origin}/offload`;   // proxy routes /offload/ -> :2027; the DM-debug harness overrides via window.__OFFLOAD_BASE (same-origin '')
 const STANDALONE = !!window.__OFFLOAD_STANDALONE;   // DM-debug harness: render the vtk.js view full-window, no video / no desktop compositor
-const SLICERLIVE = !!window.__SLICERLIVE_SCENE_URL || !!window.__IDC_CT;  // SlicerLive: load a scene URL or client-side IDC -- no server
+const SLICERLIVE = !!window.__SLICERLIVE_SCENE_URL || !!window.__IDC_CT || !!window.__SEGROULETTE;  // scene URL, client-side IDC, or SEGRoulette -- no server
 const VIEW = 0;
 const KEY = [255, 0, 255];   // server keyhole chroma key (keep in sync with _KEYHOLE_RGB)
 const KEY_TOL = 70;
@@ -694,7 +694,7 @@ class VolumeRenderingDM {
       img.setDimensions(node.attrs.dims);
       img.getPointData().setScalars(vtkDataArray.newInstance({ numberOfComponents: node.attrs.comps || 1, values: scalars }));
       if (!it) {
-        const mapper = vtkVolumeMapper.newInstance(); mapper.setAutoAdjustSampleDistances(false);
+        const mapper = vtkVolumeMapper.newInstance(); mapper.setAutoAdjustSampleDistances(false); mapper.setMaximumSamplesPerRay(4000);
         const volume = vtkVolume.newInstance(); volume.setMapper(mapper);
         it = { volume, mapper, added: false, hash: null }; this.items.set(id, it);
       }
@@ -1104,7 +1104,7 @@ async function syncFourUp() {
       // via the actor user matrix, so rotations/permutations just work. A parallel camera + thin clip-range slab +
       // opaque scalar opacity (early ray termination) reads as a slice -- rendered as a viewport of the main WebGL2 window.
       const ctm = vtkVolumeMapper.newInstance(); ctm.setInputData(img); ctm.setBlendModeToComposite();
-      ctm.setSampleDistance(0.5); ctm.setAutoAdjustSampleDistances(false);
+      ctm.setSampleDistance(0.5); ctm.setAutoAdjustSampleDistances(false); ctm.setMaximumSamplesPerRay(4000);   // else a per-frame "steps>max" warning floods the console
       const ctv = vtkVolume.newInstance(); ctv.setMapper(ctm); ctv.setUserMatrix(volumeGeometry(img, vol.attrs.ijkToRAS));
       const lo = sr.lev - sr.win / 2, hi = sr.lev + sr.win / 2;
       const cctf = vtkColorTransferFunction.newInstance(); cctf.addRGBPoint(lo, 0, 0, 0); cctf.addRGBPoint(hi, 1, 1, 1);   // windowed grayscale
@@ -1114,7 +1114,7 @@ async function syncFourUp() {
       sr.ren.addVolume(ctv); sr.ctVol = ctv; sr.ctMapper = ctm;
       if (lm) {   // colored segmentation overlay: a 2nd volume, labels semi-transparent over the opaque CT
         const ovm = vtkVolumeMapper.newInstance(); ovm.setInputData(lm.img); ovm.setBlendModeToComposite();
-        ovm.setSampleDistance(0.5); ovm.setAutoAdjustSampleDistances(false);
+        ovm.setSampleDistance(0.5); ovm.setAutoAdjustSampleDistances(false); ovm.setMaximumSamplesPerRay(4000);
         const ovv = vtkVolume.newInstance(); ovv.setMapper(ovm); ovv.setUserMatrix(volumeGeometry(lm.img, segNode.attrs.labelmapIjkToRAS));
         const op = ovv.getProperty();
         op.setRGBTransferFunction(0, lm.ctf); op.setScalarOpacity(0, lm.ofun); op.setInterpolationTypeToNearest(); op.setShade(false); op.setUseGradientOpacity(0, false);
@@ -1869,7 +1869,24 @@ function runIDCWorker(ctKeys, segKeys, handlers) {
 }
 // CT-only SlicerLive scene (mirror nodes): orthogonal slice views, no volume rendering (segments render as
 // surfaces instead). An empty segmentation node is created up front; surfaces are added progressively.
-function buildIDCNodes(ct, hasSeg) {
+// Volume-rendering preset by source modality. CT = Slicer's CT-Chest-Contrast-Enhanced (HU); MR = grayscale ramp on
+// the DICOM window/level; PT/PET = hot-metal on the window/level. (SEGRoulette spins CT/MR/PET sources.)
+function vrPresetFor(modality, win, lev) {
+  if (modality === 'CT' || !win) return {
+    ambient: 0.1, diffuse: 0.9, specular: 0.2, specularPower: 10,
+    color: [[-3024, 0, 0, 0], [67.0106, 0.54902, 0.25098, 0.14902], [251.105, 0.882353, 0.603922, 0.290196], [439.291, 1, 0.937033, 0.954531], [3071, 0.827451, 0.658824, 1]],
+    scalarOpacity: [[-3024, 0], [67.0106, 0], [251.105, 0.446429], [439.291, 0.625], [3071, 0.616071]], gradientOpacity: [[0, 1], [255, 1]] };
+  const lo = lev - win / 2, hi = lev + win / 2, q = (f) => lo + (hi - lo) * f;
+  if (modality === 'PT') return {   // hot-metal: black -> red -> yellow -> white over the intensity range
+    ambient: 0.2, diffuse: 0.8, specular: 0.1, specularPower: 10,
+    color: [[lo, 0, 0, 0], [q(0.4), 0.7, 0, 0], [q(0.75), 1, 0.6, 0], [hi, 1, 1, 1]],
+    scalarOpacity: [[lo, 0], [q(0.3), 0.04], [hi, 0.85]], gradientOpacity: [[0, 1], [255, 1]] };
+  return {   // MR (default): grayscale ramp on window/level
+    ambient: 0.2, diffuse: 0.8, specular: 0.2, specularPower: 10,
+    color: [[lo, 0, 0, 0], [hi, 1, 1, 1]],
+    scalarOpacity: [[lo, 0], [q(0.35), 0.05], [hi, 0.55]], gradientOpacity: [[0, 1], [255, 1]] };
+}
+function buildIDCNodes(ct, hasSeg, modality) {
   const M = ct.ijkToRAS, [nx, ny, nz] = ct.dims;
   const apply = (p) => [M[0] * p[0] + M[1] * p[1] + M[2] * p[2] + M[3], M[4] * p[0] + M[5] * p[1] + M[6] * p[2] + M[7], M[8] * p[0] + M[9] * p[1] + M[10] * p[2] + M[11]];
   const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
@@ -1880,10 +1897,7 @@ function buildIDCNodes(ct, hasSeg) {
   const add = (id, cls, attrs, refs, extra) => { nodes[id] = Object.assign({ id, class: cls, name: id, attrs, refs: refs || {}, blobs: {} }, extra || {}); return id; };
   add('vtkMRMLViewNode1', 'vtkMRMLViewNode', { backgroundColor: [0.756, 0.764, 0.909], backgroundColor2: [0.454, 0.470, 0.745], boxVisible: 1, axisLabelsVisible: 1, orientationMarkerType: 0 });
   const volDisp = add('idcVolDisp', 'vtkMRMLScalarVolumeDisplayNode', { visibility: 1, window: ct.win, level: ct.lev, color: [1, 1, 1], opacity: 1 });
-  const prop = add('idcVolProp', 'vtkMRMLVolumePropertyNode', { shade: 1, interpolationType: 1,   // Slicer "CT-Chest-Contrast-Enhanced"
-    ambient: 0.1, diffuse: 0.9, specular: 0.2, specularPower: 10,
-    color: [[-3024, 0, 0, 0], [67.0106, 0.54902, 0.25098, 0.14902], [251.105, 0.882353, 0.603922, 0.290196], [439.291, 1, 0.937033, 0.954531], [3071, 0.827451, 0.658824, 1]],
-    scalarOpacity: [[-3024, 0], [67.0106, 0], [251.105, 0.446429], [439.291, 0.625], [3071, 0.616071]], gradientOpacity: [[0, 1], [255, 1]] });
+  const prop = add('idcVolProp', 'vtkMRMLVolumePropertyNode', Object.assign({ shade: 1, interpolationType: 1 }, vrPresetFor(modality, ct.win, ct.lev)));
   const vrDisp = add('idcVRDisp', 'vtkMRMLGPURayCastVolumeRenderingDisplayNode', { visibility: 1, visibility3D: 1, kind: 'volumeRendering', croppingEnabled: 0 }, { volumeProperty: [prop] });
   const vol = add('idcVol', 'vtkMRMLScalarVolumeNode', { dims: [nx, ny, nz], comps: 1, ijkToRAS: M }, { display: [volDisp, vrDisp] });
   nodes[vol].__scalars = ct.vol; nodes[vol].__volKey = 'idc-ct';
@@ -1930,12 +1944,14 @@ function setIDCCamera(ct) {
 async function addIDCSegments(ct, seg) {
   const segNode = mirror.get('idcSeg'); if (!segNode) return;
   segNode.attrs.segmentColors = seg.colors;
+  window.__caseSegments = (seg.colors || []).map((c) => ({ n: c[0], rgb: [c[1], c[2], c[3]], name: (seg.names || {})[c[0]] || ('Segment ' + c[0]) }));
   segNode.__labelmap = seg.lab; segNode.attrs.labelmapDims = ct.dims; segNode.attrs.labelmapIjkToRAS = ct.ijkToRAS;
   await syncDMs();
   renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty();
 }
 
-async function loadIDCScene(ctPrefix, segPrefix) {
+async function loadIDCScene(ctPrefix, segPrefix, modality) {
+  window.__slicerliveError = null; window.__caseSegments = null;
   try {
     setLoadProgress(0.02, 'Listing IDC instances…');
     const ctKeys = await s3ListKeys(ctPrefix);
@@ -1946,7 +1962,9 @@ async function loadIDCScene(ctPrefix, segPrefix) {
     await runIDCWorker(ctKeys, segKeys, {
       onCT: async (ct) => {                          // CT fully available -> render the 3 slice views + the VR
         ctData = ct; window.__idcData = { ct };
-        const nodes = buildIDCNodes(ct, segKeys.length > 0);
+        const vox = ct.dims[0] * ct.dims[1] * ct.dims[2];   // guard: a too-large volume blows the GPU 3D textures (white crash)
+        if (vox > 64e6) { window.__slicerliveError = 'Source too large for in-browser 3D: ' + ct.dims.join('×') + ' (' + Math.round(vox / 1e6) + 'M voxels)'; mosaicHide(); setLoadProgress(-1); return; }
+        const nodes = buildIDCNodes(ct, segKeys.length > 0, modality);
         for (const id in nodes) mirror.set(id, nodes[id]);
         window.__slicerliveLoaded = mirror.size; threeDActive = true;
         await syncDMs();
@@ -1963,6 +1981,50 @@ async function loadIDCScene(ctPrefix, segPrefix) {
     renderWindow.render(); markDirty();
     for (const d of [120, 400, 1000, 2200]) setTimeout(() => { try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
   } catch (e) { console.error('[IDC]', e); window.__slicerliveError = String(e); setLoadProgress(-1); }
+}
+
+// ===================== SEGRoulette: spin a random IDC SEG (CT/MR/PET source) into the viewer =====================
+// Minimal + robust: auto-spin a random case + a simple top bar to re-spin. (No landing/popup/backdrop-filter for now;
+// a backdrop-filter panel over the WebGL canvas, and the no-scene idle state, both caused trouble in QtWebEngine.)
+let _segByCol = null, _segStats = null, _srSpinning = false, _srBar = null, _srCap = null, _srBtn = null;
+async function loadSEGRoulette() {
+  try {
+    const data = await fetchRetry('segroulette.json').then((r) => r.json());
+    const rows = data.rows || data; _segStats = data.stats || null;
+    _segByCol = {};
+    for (const e of rows) (_segByCol[e.col] = _segByCol[e.col] || []).push(e);   // group by collection -> balanced spin
+    ensureSRBar();
+    await srSpin();                                                              // load a case right away
+  } catch (e) { console.error('[SEGRoulette]', e); window.__slicerliveError = String(e); }
+}
+function srPick() {
+  const cols = Object.keys(_segByCol);
+  const list = _segByCol[cols[Math.floor(Math.random() * cols.length)]];        // collection-uniform so nlst doesn't dominate
+  return list[Math.floor(Math.random() * list.length)];
+}
+async function srSpin() {
+  if (_srSpinning || !_segByCol) return;
+  _srSpinning = true; if (_srBtn) _srBtn.disabled = true;
+  const e = srPick(), mod = { CT: 'CT', MR: 'MR', PT: 'PET' }[e.m] || e.m;
+  if (_srCap) _srCap.textContent = mod + '  \u00b7  ' + e.col + '  \u00b7  ' + (e.sd || 'segmentation');
+  try { await loadIDCScene(e.c, e.s, e.m); } catch (err) { window.__slicerliveError = String(err); }
+  if (window.__slicerliveError && _srCap) _srCap.textContent += '  \u2014 failed (spin again)';
+  _srSpinning = false; if (_srBtn) _srBtn.disabled = false;
+}
+function ensureSRBar() {
+  if (_srBar) return;
+  _srBar = document.createElement('div');
+  _srBar.style.cssText = 'position:fixed; left:50%; top:10px; transform:translateX(-50%); z-index:75; display:flex;' +
+    ' align-items:center; gap:12px; padding:7px 10px 7px 16px; max-width:94vw; border-radius:13px;' +
+    ' background:rgba(20,23,36,0.92); border:1px solid rgba(255,255,255,0.13); box-shadow:0 8px 30px rgba(0,0,0,0.5);' +
+    ' color:#eaf0ff; font:13px/1.4 -apple-system,system-ui,sans-serif;';
+  _srCap = document.createElement('div'); _srCap.style.cssText = 'white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;';
+  _srCap.textContent = '\ud83c\udfb2 SEGRoulette';
+  _srBtn = document.createElement('button'); _srBtn.textContent = '\ud83c\udfb2 Spin';
+  _srBtn.style.cssText = 'flex:none; cursor:pointer; border:0; border-radius:9px; padding:8px 16px; font:600 13px system-ui;' +
+    ' color:#04121c; background:linear-gradient(180deg,#9fe9ff,#54c6f0);';
+  _srBtn.onclick = srSpin;
+  _srBar.appendChild(_srCap); _srBar.appendChild(_srBtn); document.body.appendChild(_srBar);
 }
 
 async function loadSlicerLiveScene(sceneUrl) {
@@ -2015,7 +2077,8 @@ async function loadSlicerLiveScene(sceneUrl) {
     positionOverlay();
     window.addEventListener('resize', positionOverlay);
     requestAnimationFrame(composite);   // start the render loop NOW so CT slices + VR show progressively as they load
-    if (window.__IDC_CT) await loadIDCScene(window.__IDC_CT, window.__IDC_SEG);   // client-side IDC: DICOM straight from AWS
+    if (window.__SEGROULETTE) await loadSEGRoulette();                              // spin a random IDC SEG + its CT/MR/PET source
+    else if (window.__IDC_CT) await loadIDCScene(window.__IDC_CT, window.__IDC_SEG, window.__IDC_MOD || 'CT');   // client-side IDC: DICOM straight from AWS
     else await loadSlicerLiveScene(window.__SLICERLIVE_SCENE_URL);
     return;
   }
