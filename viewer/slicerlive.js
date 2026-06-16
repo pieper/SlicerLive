@@ -1005,24 +1005,45 @@ function setImageWorldGeometry(img, ijkToRAS) {
                     g(2, 0) / sp[0], g(2, 1) / sp[1], g(2, 2) / sp[2]]);
 }
 
+// mat3 (row-major) * vec3
+function mv3(m, v) { return [m[0] * v[0] + m[1] * v[1] + m[2] * v[2], m[3] * v[0] + m[4] * v[1] + m[5] * v[2], m[6] * v[0] + m[7] * v[1] + m[8] * v[2]]; }
+// Place an image AXIS-ALIGNED (origin 0, spacing, identity direction) and return the world->local frame {Rt, t}:
+// local = Rt * (world - t), where R is the volume's normalized IJK->RAS rotation (so Rt = R^-1). vtk.js
+// ImageResliceMapper treats the image as axis-aligned (it honors neither the image direction matrix nor the actor
+// user matrix), so a rotated/permuted volume is resliced in its OWN physical frame: transform the slice plane +
+// camera by this frame -- the same idea as Slicer's reslice axes (XYToIJK) / the dcmjs display2 MPR example.
+function imageLocalFrame(img, ijkToRAS) {
+  const M = ijkToRAS, g = (r, c) => M[r * 4 + c];
+  const sp = [0, 1, 2].map((c) => Math.hypot(g(0, c), g(1, c), g(2, c)) || 1);
+  img.setSpacing(sp[0], sp[1], sp[2]); img.setOrigin(0, 0, 0); img.setDirection(1, 0, 0, 0, 1, 0, 0, 0, 1);
+  const Rt = [g(0, 0) / sp[0], g(1, 0) / sp[0], g(2, 0) / sp[0],    // R^T (row-major): world vector -> local vector
+              g(0, 1) / sp[1], g(1, 1) / sp[1], g(2, 1) / sp[1],
+              g(0, 2) / sp[2], g(1, 2) / sp[2], g(2, 2) / sp[2]];
+  return { Rt, t: [g(0, 3), g(1, 3), g(2, 3)] };
+}
+
 // OHIF-style MPR: ONE offscreen reslice context (multiple ImageResliceMappers across SEPARATE on-screen renderers
 // don't render in vtk.js -- only the first does). We reconfigure its plane+camera per orientation, render, and blit
 // the result into the visible 2D `out` canvas at that quadrant. CT + labelmap are two reslice mappers in the SAME
 // renderer (both render together -- proven), so each blit already carries the colored segment overlay.
-let slicesDirty = false;   // re-render the offscreen slice textures next composite frame
-let _sliceCtx = null;
-function ensureSliceCtx() {
-  if (_sliceCtx) return _sliceCtx;
-  const div = document.createElement('div');
-  div.style.cssText = 'position:absolute; left:-99999px; top:0; width:8px; height:8px; overflow:hidden;';
-  document.body.appendChild(div);
-  const rw = vtkRenderWindow.newInstance();
-  const ren = vtkRenderer.newInstance({ background: [0, 0, 0] });
-  rw.addRenderer(ren);
-  const gl = vtkOpenGLRenderWindow.newInstance();
-  gl.setContainer(div); gl.get3DContext({ preserveDrawingBuffer: true }); rw.addView(gl);
-  _sliceCtx = { rw, ren, gl, div, plane: vtkPlane.newInstance(), ctMapper: null, ctSlice: null, ovMapper: null, ovSlice: null, w: 0, h: 0, key: null, win: 255, lev: 128 };
-  return _sliceCtx;
+let slicesDirty = false;   // slice cameras changed -> reposition + re-render next composite frame
+// SLICERLIVE 4-up: render the 3D + 3 thin-slab MPR slices as 4 VIEWPORTS of the ONE (WebGL2) render window. The
+// volume mapper applies each volume's IJK->RAS (rotations/permutations just work); a parallel camera + a thin
+// clip-range slab per viewport reads as a slice. (vtk.js volume rendering needs the main WebGL2 context.)
+let _sliceRens = null;
+const _VPRECT = { threeD: [0.5, 0.5, 1, 1], Red: [0, 0.5, 0.5, 1], Green: [0, 0, 0.5, 0.5], Yellow: [0.5, 0, 1, 0.5] };   // origin BOTTOM-left
+function ensureSliceRenderers() {
+  if (_sliceRens) return _sliceRens;
+  renderer.setViewport(..._VPRECT.threeD);   // the existing 3D renderer -> top-right quadrant
+  _sliceRens = {};
+  for (const name of ['Red', 'Green', 'Yellow']) {
+    const ren = vtkRenderer.newInstance({ background: [0, 0, 0] });   // slice views are black (Slicer convention)
+    ren.setViewport(..._VPRECT[name]); ren.getActiveCamera().setParallelProjection(true);
+    ren.createLight();   // a volume render with 0 lights compiles a broken/dark shader -> the slice would be black
+    renderWindow.addRenderer(ren);
+    _sliceRens[name] = { ren, ctVol: null, ctMapper: null, ovVol: null, ovMapper: null, key: null, win: 255, lev: 128 };
+  }
+  return _sliceRens;
 }
 
 function setSliceIndex(slot, idx) {
@@ -1043,7 +1064,7 @@ async function ensureLabelmapImage(seg) {
   const img = vtkImageData.newInstance();
   img.setDimensions(seg.attrs.labelmapDims);
   img.getPointData().setScalars(vtkDataArray.newInstance({ numberOfComponents: 1, values: arr }));
-  setImageWorldGeometry(img, seg.attrs.labelmapIjkToRAS);
+  imageLocalFrame(img, seg.attrs.labelmapIjkToRAS);   // axis-aligned (reslice in the volume's physical frame, like the CT)
   const ctf = vtkColorTransferFunction.newInstance();
   ctf.addRGBPoint(0, 0, 0, 0);
   for (const c of (seg.attrs.segmentColors || [])) ctf.addRGBPoint(c[0], c[1], c[2], c[3]);   // [label, r, g, b]
@@ -1060,39 +1081,46 @@ async function syncFourUp() {
   const sliceNodes = [...mirror.values()].filter((n) => n.class === 'vtkMRMLSliceNode');
   if (!sliceNodes.length) return;
   ensureFourUp();
-  const ctx = ensureSliceCtx();
+  const srs = ensureSliceRenderers();
   const segNode = [...mirror.values()].find((n) => n.class === 'vtkMRMLSegmentationNode' && ((n.blobs && n.blobs.labelmap) || n.__labelmap));
   const lm = segNode ? await ensureLabelmapImage(segNode) : null;
   for (const sn of sliceNodes) {
-    const name = sn.attrs.layoutName, slot = _fourUp[name];
-    if (!slot || !sn.attrs.sliceToRAS) continue;
+    const name = sn.attrs.layoutName, slot = _fourUp[name], sr = srs[name];
+    if (!slot || !sr || !sn.attrs.sliceToRAS) continue;
     const comp = [...mirror.values()].find((n) => n.class === 'vtkMRMLSliceCompositeNode' && n.attrs.layoutName === name);
     const vol = comp && comp.attrs.backgroundVolumeID ? mirror.get(comp.attrs.backgroundVolumeID) : null;
     if (!vol || !volScalarKey(vol) || !vol.attrs.ijkToRAS) continue;
     const scalars = await getVolumeScalars(vol); if (!scalars) continue;
     const ctxKey = volScalarKey(vol) + '|' + (lm ? segNode.id + ':' + (segNode.__labelmap ? 'direct' : segNode.blobs.labelmap.hash) : '-');
-    if (ctx.key !== ctxKey) {                                      // set the shared reslice mappers' inputs once
-      if (ctx.ctSlice) ctx.ren.removeActor(ctx.ctSlice);
-      if (ctx.ovSlice) ctx.ren.removeActor(ctx.ovSlice);
+    if (sr.key !== ctxKey) {                                       // (re)build this viewport's slice volumes
+      if (sr.ctVol) sr.ren.removeVolume(sr.ctVol);
+      if (sr.ovVol) { sr.ren.removeVolume(sr.ovVol); sr.ovVol = null; sr.ovMapper = null; }
+      sr.win = 255; sr.lev = 128;
+      for (const did of (vol.refs.display || [])) { const d = mirror.get(did); if (d && d.attrs.window != null) { sr.win = d.attrs.window; sr.lev = d.attrs.level; break; } }
       const img = vtkImageData.newInstance();
       img.setDimensions(vol.attrs.dims);
       img.getPointData().setScalars(vtkDataArray.newInstance({ numberOfComponents: vol.attrs.comps || 1, values: scalars }));
-      setImageWorldGeometry(img, vol.attrs.ijkToRAS);
-      const ctm = vtkImageResliceMapper.newInstance(); ctm.setInputData(img); ctm.setSlicePlane(ctx.plane);
-      const cts = vtkImageSlice.newInstance(); cts.setMapper(ctm);
-      ctx.ren.addActor(cts); ctx.ctMapper = ctm; ctx.ctSlice = cts; ctx.ovSlice = null; ctx.ovMapper = null;
-      if (lm) {
-        const ovm = vtkImageResliceMapper.newInstance(); ovm.setInputData(lm.img); ovm.setSlicePlane(ctx.plane);
-        const ovs = vtkImageSlice.newInstance(); ovs.setMapper(ovm);
-        const p = ovs.getProperty();
-        p.setRGBTransferFunction(0, lm.ctf); p.setScalarOpacity(0, lm.ofun);
-        p.setColorWindow(lm.maxLabel); p.setColorLevel(lm.maxLabel / 2);   // map the label range onto the LUT
-        p.setInterpolationTypeToNearest();
-        ctx.ren.addActor(ovs); ctx.ovMapper = ovm; ctx.ovSlice = ovs;
+      // Thin-slab VOLUME-RENDERED MPR (dcmjs vtkDisplay / OHIF technique): the volume mapper applies the full IJK->RAS
+      // via the actor user matrix, so rotations/permutations just work. A parallel camera + thin clip-range slab +
+      // opaque scalar opacity (early ray termination) reads as a slice -- rendered as a viewport of the main WebGL2 window.
+      const ctm = vtkVolumeMapper.newInstance(); ctm.setInputData(img); ctm.setBlendModeToComposite();
+      ctm.setSampleDistance(0.5); ctm.setAutoAdjustSampleDistances(false);
+      const ctv = vtkVolume.newInstance(); ctv.setMapper(ctm); ctv.setUserMatrix(volumeGeometry(img, vol.attrs.ijkToRAS));
+      const lo = sr.lev - sr.win / 2, hi = sr.lev + sr.win / 2;
+      const cctf = vtkColorTransferFunction.newInstance(); cctf.addRGBPoint(lo, 0, 0, 0); cctf.addRGBPoint(hi, 1, 1, 1);   // windowed grayscale
+      const cofn = vtkPiecewiseFunction.newInstance(); cofn.addPoint(lo - 1, 1); cofn.addPoint(hi + 1, 1);                 // opaque -> early termination
+      const cp = ctv.getProperty();
+      cp.setRGBTransferFunction(0, cctf); cp.setScalarOpacity(0, cofn); cp.setInterpolationTypeToLinear(); cp.setShade(false); cp.setUseGradientOpacity(0, false);
+      sr.ren.addVolume(ctv); sr.ctVol = ctv; sr.ctMapper = ctm;
+      if (lm) {   // colored segmentation overlay: a 2nd volume, labels semi-transparent over the opaque CT
+        const ovm = vtkVolumeMapper.newInstance(); ovm.setInputData(lm.img); ovm.setBlendModeToComposite();
+        ovm.setSampleDistance(0.5); ovm.setAutoAdjustSampleDistances(false);
+        const ovv = vtkVolume.newInstance(); ovv.setMapper(ovm); ovv.setUserMatrix(volumeGeometry(lm.img, segNode.attrs.labelmapIjkToRAS));
+        const op = ovv.getProperty();
+        op.setRGBTransferFunction(0, lm.ctf); op.setScalarOpacity(0, lm.ofun); op.setInterpolationTypeToNearest(); op.setShade(false); op.setUseGradientOpacity(0, false);
+        sr.ren.addVolume(ovv); sr.ovVol = ovv; sr.ovMapper = ovm;
       }
-      ctx.key = ctxKey;
-      ctx.win = 255; ctx.lev = 128;
-      for (const did of (vol.refs.display || [])) { const d = mirror.get(did); if (d && d.attrs.window != null) { ctx.win = d.attrs.window; ctx.lev = d.attrs.level; break; } }
+      sr.key = ctxKey;
     }
     const i2r = vol.attrs.ijkToRAS, s2r = sn.attrs.sliceToRAS, normal = _nrm3(_col(s2r, 2));
     let axis = 2, best = -1;                                       // image axis most aligned with the slice normal
@@ -1112,39 +1140,23 @@ async function syncFourUp() {
   slicesDirty = true;
 }
 
-// OHIF blit: re-render each orientation through the single offscreen reslice context, cache the pixels (only on
-// change), then blitSlices() draws the cached images into `out` every frame.
-const _sliceImg = {};   // name -> 2D canvas holding the last rendered slice
-function renderSliceTextures() {
-  const ctx = _sliceCtx; if (!ctx || !ctx.ctSlice || !geom) return;
-  const qw = Math.max(1, Math.floor(geom.cw / 2)), qh = Math.max(1, Math.floor(geom.ch / 2));
-  if (ctx.w !== qw || ctx.h !== qh) { ctx.gl.setSize(qw, qh); ctx.w = qw; ctx.h = qh; }
-  ctx.ctSlice.getProperty().setColorWindow(ctx.win); ctx.ctSlice.getProperty().setColorLevel(ctx.lev);
-  const cam = ctx.ren.getActiveCamera();
-  for (const name of ['Red', 'Yellow', 'Green']) {
-    const slot = _fourUp[name]; if (!slot || !slot.normal || !slot.origin0) continue;
+// Position each slice viewport's parallel camera + thin clip-range slab at its slice (the main render window draws
+// all four viewports). Thin-slab volume render + opaque opacity (early ray termination) == a slice; the volume
+// mapper applies the IJK->RAS (user matrix), so rotations/permutations just work -- everything stays in WORLD.
+function renderSlices() {
+  if (!_sliceRens) return;
+  for (const name of ['Red', 'Green', 'Yellow']) {
+    const slot = _fourUp[name], sr = _sliceRens[name];
+    if (!slot || !sr || !slot.normal || !slot.origin0) continue;
     const n = slot.normal, i = slot.index, s = slot.step, o = slot.origin0, p = slot.pan || [0, 0, 0];
-    const orig = [o[0] + i * s * n[0] + p[0], o[1] + i * s * n[1] + p[1], o[2] + i * s * n[2] + p[2]];
-    const co = cross3(slot.right, slot.up);   // out-of-screen = right x up -> camera on the RADIOLOGICAL side
-    ctx.plane.setOrigin(orig[0] - p[0], orig[1] - p[1], orig[2] - p[2]); ctx.plane.setNormal(n[0], n[1], n[2]);
-    if (ctx.ovSlice) ctx.ovSlice.setPosition(co[0] * 0.6, co[1] * 0.6, co[2] * 0.6);   // nudge overlay toward the camera
+    const orig = [o[0] + i * s * n[0] + p[0], o[1] + i * s * n[1] + p[1], o[2] + i * s * n[2] + p[2]];   // world slice center (with pan)
+    const co = cross3(slot.right, slot.up);   // world out-of-screen = right x up -> RADIOLOGICAL camera side
+    const D = 500, t = Math.max(slot.step || 1, 1);
+    const cam = sr.ren.getActiveCamera();
     cam.setParallelProjection(true); cam.setFocalPoint(orig[0], orig[1], orig[2]);
-    cam.setPosition(orig[0] + co[0] * 500, orig[1] + co[1] * 500, orig[2] + co[2] * 500);   // axial: right x up = -normal (Slicer's left-handed axial)
-    cam.setViewUp(...slot.up); cam.setParallelScale(slot.pscale || slot.fov / 2);
-    ctx.ren.resetCameraClippingRange();
-    ctx.rw.render();
-    let c = _sliceImg[name]; if (!c) c = _sliceImg[name] = document.createElement('canvas');
-    if (c.width !== qw || c.height !== qh) { c.width = qw; c.height = qh; }
-    c.getContext('2d').drawImage(ctx.gl.getCanvas(), 0, 0);
-  }
-}
-const _QRECT = { Red: [0, 0], Green: [0, 0.5], Yellow: [0.5, 0.5] };   // [x0,y0] frac (top-left origin); 3D = top-right
-function blitSlices() {
-  if (!geom) return;
-  const qw = geom.cw / 2, qh = geom.ch / 2;
-  for (const name of ['Red', 'Yellow', 'Green']) {
-    const c = _sliceImg[name]; if (!c) continue;
-    const r = _QRECT[name]; outCtx.drawImage(c, r[0] * geom.cw, r[1] * geom.ch, qw, qh);
+    cam.setPosition(orig[0] + co[0] * D, orig[1] + co[1] * D, orig[2] + co[2] * D);
+    cam.setViewUp(slot.up[0], slot.up[1], slot.up[2]); cam.setParallelScale(slot.pscale || slot.fov / 2);
+    cam.setClippingRange(D - 0.5, D + t);   // near clip == the slice plane; thin slab -> a slice
   }
 }
 // --- slice-view interaction (standalone 4-up): route by quadrant; pan/zoom/scroll match Slicer ---
@@ -1481,14 +1493,14 @@ function composite(now) {
   const gl = glWindow.getCanvas && glWindow.getCanvas();
   if (!gl) return;
   if (STANDALONE) {                                            // no video: host (opacity 1) shows the render; just draw decorations
+    if (slicesDirty) { renderSlices(); slicesDirty = false; scene3DDirty = true; }   // slice cameras moved -> redraw all viewports
     if (scene3DDirty || interacting || pendingRenders > 0) {
       if (scene3DDirty || pendingRenders > 0) renderer.resetCameraClippingRange();   // async-loaded volume/models changed bounds -> keep in clip range
       renderer.updateLightsGeometryToFollowCamera();   // the render path doesn't follow the camera; without this the headlight lags -> dark VR until interaction
-      renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false;
+      renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false;   // renders ALL viewports: 3D (top-right) + 3 MPR slices
       if (pendingRenders > 0) pendingRenders--;
     }
-    if (slicesDirty) { renderSliceTextures(); slicesDirty = false; }   // OHIF: re-render the 3 MPR slices offscreen
-    outCtx.clearRect(0, 0, geom.cw, geom.ch); blitSlices(); drawDecorations2D();   // blit slice quadrants into `out`
+    outCtx.clearRect(0, 0, geom.cw, geom.ch); drawDecorations2D();   // 2D decorations over the viewports (no slice blit)
     return;
   }
   const v = document.getElementById('v');
