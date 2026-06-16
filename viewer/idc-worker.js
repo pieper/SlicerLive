@@ -12,7 +12,10 @@
   for (let i = 0; i < 12; i++) { try { importScripts(mirrors[i % mirrors.length]); return; } catch (e) {} }
   throw new Error('dcmjs: all CDN mirrors failed');
 })();
-const S3 = 'https://idc-open-data.s3.us-east-1.amazonaws.com/';
+// IDC spreads series across several open buckets (idc-open-data, idc-open-data-cr, idc-open-data-two, ...).
+// CT source and SEG can live in DIFFERENT buckets, so resolve each per job from the buckets passed in onmessage.
+const s3url = (b) => 'https://' + (b || 'idc-open-data') + '.s3.us-east-1.amazonaws.com/';
+let CT_S3 = s3url(), SEG_S3 = s3url();
 const post = (m, x) => self.postMessage(m, x || []);
 const prog = (msg, frac) => post({ t: 'progress', msg, frac });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -21,11 +24,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function fetchRetry(url, opts, tries = 6) {
   let err;
   for (let i = 0; i < tries; i++) {
+    const ac = new AbortController(), to = setTimeout(() => ac.abort(), 20000);   // abort a stalled S3 connection so it frees the per-host pool instead of hanging forever
     try {
-      const r = await fetch(url, opts);
+      const r = await fetch(url, { ...(opts || {}), signal: ac.signal });
       if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
       return r;
     } catch (e) { err = e; if (i < tries - 1) await sleep(Math.min(4000, 250 * 2 ** i) * (0.6 + 0.8 * Math.random())); }
+    finally { clearTimeout(to); }
   }
   throw err;
 }
@@ -39,7 +44,7 @@ const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const lps2ras = (v) => [-v[0], -v[1], v[2]];   // DICOM LPS -> Slicer RAS (negate X,Y)
 
-async function fetchBuf(key) { return (await fetchRetry(S3 + key)).arrayBuffer(); }
+async function fetchBuf(key, base) { return (await fetchRetry((base || CT_S3) + key)).arrayBuffer(); }
 
 // a small windowed grayscale thumbnail of a CT slice, for the progress-bar mosaic
 function makeThumb(ds) {
@@ -174,7 +179,7 @@ function invAffine(m) {
 // byte ranges -> this parallelizes the 85 MB download AND skips dcmjs copying it. Falls back to a plain fetch.
 async function fetchSeg(key) {
   const HEAD = 4 << 20;
-  const head = new Uint8Array(await fetchRetry(S3 + key, { headers: { Range: `bytes=0-${HEAD - 1}` } }).then((r) => r.arrayBuffer()));
+  const head = new Uint8Array(await fetchRetry(SEG_S3 + key, { headers: { Range: `bytes=0-${HEAD - 1}` } }).then((r) => r.arrayBuffer()));
   const dv = new DataView(head.buffer, head.byteOffset);
   let pt = -1;                                                       // PixelData tag 7FE0,0010 (LE) followed by a pixel VR
   for (let i = 132; i + 12 <= head.length; i += 2) {
@@ -196,7 +201,7 @@ async function fetchSeg(key) {
     await Promise.all(Array.from({ length: CH }, (_, c) => {
       const s = rs + c * cs, e = Math.min(re, s + cs - 1);
       if (s > e) return null;
-      return fetchRetry(S3 + key, { headers: { Range: `bytes=${s}-${e}` } }).then((r) => r.arrayBuffer()).then((ab) => {
+      return fetchRetry(SEG_S3 + key, { headers: { Range: `bytes=${s}-${e}` } }).then((r) => r.arrayBuffer()).then((ab) => {
         bits.set(new Uint8Array(ab), s - valOff); got += ab.byteLength;
         prog(`SEG ${(got / 1e6) | 0}/${(pdLen / 1e6) | 0} MB`, 0.5 + 0.08 * got / pdLen);
       });
@@ -206,7 +211,8 @@ async function fetchSeg(key) {
 }
 
 self.onmessage = async (e) => {
-  const { ctKeys, segKeys } = e.data;
+  const { ctKeys, segKeys, ctBucket, segBucket } = e.data;
+  CT_S3 = s3url(ctBucket); SEG_S3 = s3url(segBucket);   // CT source + SEG may be in different IDC buckets
   try {
     prog('fetching CT…', 0.05);
     const ct = await buildVolume(ctKeys);
@@ -216,7 +222,7 @@ self.onmessage = async (e) => {
       prog('fetching SEG…', 0.5);
       let parsed;
       try { parsed = await fetchSeg(segKeys[0]); }
-      catch (err) { const buf = await fetchBuf(segKeys[0]); const ds = naturalize(buf); let pd = ds.PixelData; if (Array.isArray(pd)) pd = pd[0]; parsed = { ds, bits: new Uint8Array(pd) }; }
+      catch (err) { const buf = await fetchBuf(segKeys[0], SEG_S3); const ds = naturalize(buf); let pd = ds.PixelData; if (Array.isArray(pd)) pd = pd[0]; parsed = { ds, bits: new Uint8Array(pd) }; }
       const seg = buildLabelmap(parsed.ds, parsed.bits, ct);
       post({ t: 'labelmap', lab: seg.lab, colors: seg.colors, names: seg.names }, [seg.lab.buffer]);
     }

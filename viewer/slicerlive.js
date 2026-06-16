@@ -1618,6 +1618,7 @@ function routePointer(e) {
 window.addEventListener('pointermove', routePointer, true);
 
 function postCamera() {
+  if (SLICERLIVE) return;   // no server in SlicerLive/IDC/SEGRoulette mode -- don't spray failed /offload/camera POSTs (waste connections)
   const c = renderer.getActiveCamera();
   const cam = {
     position: c.getPosition(), focalPoint: c.getFocalPoint(), viewUp: c.getViewUp(),
@@ -1796,21 +1797,26 @@ async function loadSceneJson(sceneUrl, base) {
 
 // ===================== SlicerLive: client-side IDC loader (DICOM straight from AWS, no server) =====================
 // idc-open-data S3 has open CORS; list a series' instances + parse with dcmjs in a worker, generate a scene, render.
-const IDC_S3 = 'https://idc-open-data.s3.us-east-1.amazonaws.com/';
+// IDC spreads series across several open buckets (idc-open-data, idc-open-data-cr, idc-open-data-two, ...) -- a
+// series listed under the wrong bucket returns 0 keys, so each case carries its real bucket (segroulette.json cb/sb).
+const idcS3 = (bucket) => 'https://' + (bucket || 'idc-open-data') + '.s3.us-east-1.amazonaws.com/';
 // fetch with retries + jittered backoff (the IDC S3 endpoint occasionally returns transient network errors)
 async function fetchRetry(url, opts, tries = 6) {
   let err;
   for (let i = 0; i < tries; i++) {
-    try { const r = await fetch(url, opts); if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status); return r; }
+    const ac = new AbortController(), to = setTimeout(() => ac.abort(), 20000);   // abort a stalled connection so it frees the per-host pool (QtWebEngine caps ~6/host) instead of hanging forever
+    try { const r = await fetch(url, { ...(opts || {}), signal: ac.signal }); if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status); return r; }
     catch (e) { err = e; if (i < tries - 1) await new Promise((res) => setTimeout(res, Math.min(4000, 250 * 2 ** i) * (0.6 + 0.8 * Math.random()))); }
+    finally { clearTimeout(to); }
   }
   throw err;
 }
-async function s3ListKeys(prefix) {
+async function s3ListKeys(prefix, bucket) {
   if (!prefix.endsWith('/')) prefix += '/';
+  const base = idcS3(bucket);
   let keys = [], token = null, more = true;
   while (more) {
-    let url = `${IDC_S3}?list-type=2&prefix=${encodeURIComponent(prefix)}`;
+    let url = `${base}?list-type=2&prefix=${encodeURIComponent(prefix)}`;
     if (token) url += `&continuation-token=${encodeURIComponent(token)}`;
     const x = new DOMParser().parseFromString(await fetchRetry(url).then((r) => r.text()), 'application/xml');
     keys.push(...[...x.getElementsByTagName('Key')].map((e) => e.textContent).filter(Boolean));
@@ -1846,9 +1852,12 @@ function mosaicDraw(n, w, h, buf) {
 function mosaicHide() { if (_mosaic) _mosaic.canvas.style.display = 'none'; }
 
 // Drive progressive rendering: onCT fires as soon as the CT volume is ready; onLabelmap when the SEG is parsed.
-function runIDCWorker(ctKeys, segKeys, handlers) {
+let _idcWorker = null;   // current worker; killed before a new spin so a still-downloading worker can't leak idc-open-data connections
+function runIDCWorker(ctKeys, segKeys, handlers, ctBucket, segBucket) {
+  if (_idcWorker) { try { _idcWorker.terminate(); } catch (e) {} _idcWorker = null; }   // kill any prior (re-spin) worker first
   return new Promise((resolve, reject) => {
     const w = new Worker('idc-worker.js?t=' + Date.now());
+    _idcWorker = w;
     let chain = Promise.resolve();   // serialize handler work so renders don't interleave
     w.onmessage = (e) => {
       const m = e.data;
@@ -1864,7 +1873,7 @@ function runIDCWorker(ctKeys, segKeys, handlers) {
       if (m.t === 'alldone') { w.terminate(); chain.then(resolve); return; }
     };
     w.onerror = (e) => { w.terminate(); reject(new Error('worker: ' + (e.message || e))); };
-    w.postMessage({ ctKeys, segKeys });
+    w.postMessage({ ctKeys, segKeys, ctBucket, segBucket });
   });
 }
 // CT-only SlicerLive scene (mirror nodes): orthogonal slice views, no volume rendering (segments render as
@@ -1950,13 +1959,17 @@ async function addIDCSegments(ct, seg) {
   renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty();
 }
 
-async function loadIDCScene(ctPrefix, segPrefix, modality) {
+async function loadIDCScene(ctPrefix, segPrefix, modality, ctBucket, segBucket) {
   window.__slicerliveError = null; window.__caseSegments = null;
   try {
     setLoadProgress(0.02, 'Listing IDC instances…');
-    const ctKeys = await s3ListKeys(ctPrefix);
-    const segKeys = segPrefix ? await s3ListKeys(segPrefix) : [];
+    const ctKeys = await s3ListKeys(ctPrefix, ctBucket);
+    const segKeys = segPrefix ? await s3ListKeys(segPrefix, segBucket) : [];
     console.log('[IDC] CT', ctKeys.length, 'SEG', segKeys.length);
+    if (!ctKeys.length) {   // no instances under this bucket/prefix -> surface it instead of crashing the worker into a blank screen
+      window.__slicerliveError = 'No CT instances at ' + (ctBucket || 'idc-open-data') + '/' + ctPrefix;
+      setLoadProgress(-1); return;
+    }
     mirror.clear(); localBlobs.clear();
     let ctData = null;
     await runIDCWorker(ctKeys, segKeys, {
@@ -1975,7 +1988,7 @@ async function loadIDCScene(ctPrefix, segPrefix, modality) {
         for (const d of [120, 400, 1000]) setTimeout(() => { try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
       },
       onLabelmap: async (seg) => { await addIDCSegments(ctData, seg); },   // 2D colored overlay on the slices
-    });
+    }, ctBucket, segBucket);
     setLoadProgress(-1);
     renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera();
     renderWindow.render(); markDirty();
@@ -2007,20 +2020,23 @@ async function srSpin() {
   _srSpinning = true; if (_srBtn) _srBtn.disabled = true;
   const e = srPick(), mod = { CT: 'CT', MR: 'MR', PT: 'PET' }[e.m] || e.m;
   if (_srCap) _srCap.textContent = mod + '  \u00b7  ' + e.col + '  \u00b7  ' + (e.sd || 'segmentation');
-  try { await loadIDCScene(e.c, e.s, e.m); } catch (err) { window.__slicerliveError = String(err); }
+  try { await loadIDCScene(e.c, e.s, e.m, e.cb, e.sb); } catch (err) { window.__slicerliveError = String(err); }
   if (window.__slicerliveError && _srCap) _srCap.textContent += '  \u2014 failed (spin again)';
   _srSpinning = false; if (_srBtn) _srBtn.disabled = false;
 }
 function ensureSRBar() {
   if (_srBar) return;
   _srBar = document.createElement('div');
-  _srBar.style.cssText = 'position:fixed; left:50%; top:10px; transform:translateX(-50%); z-index:75; display:flex;' +
+  // NO color emoji in the caption/button text: rendering a color-emoji glyph composited over the WebGL canvas
+  // CRASHES QtWebEngine's render process on macOS -> instant white screen (Chrome is fine). This was the
+  // qSlicerWebWidget "blank on spin" bug. Also keep it plain (no transform/box-shadow/translucent bg).
+  _srBar.style.cssText = 'position:fixed; left:10px; top:10px; z-index:75; display:flex;' +
     ' align-items:center; gap:12px; padding:7px 10px 7px 16px; max-width:94vw; border-radius:13px;' +
-    ' background:rgba(20,23,36,0.92); border:1px solid rgba(255,255,255,0.13); box-shadow:0 8px 30px rgba(0,0,0,0.5);' +
+    ' background:#141726; border:1px solid #34384a;' +
     ' color:#eaf0ff; font:13px/1.4 -apple-system,system-ui,sans-serif;';
   _srCap = document.createElement('div'); _srCap.style.cssText = 'white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;';
-  _srCap.textContent = '\ud83c\udfb2 SEGRoulette';
-  _srBtn = document.createElement('button'); _srBtn.textContent = '\ud83c\udfb2 Spin';
+  _srCap.textContent = 'SEGRoulette';
+  _srBtn = document.createElement('button'); _srBtn.textContent = 'Spin';
   _srBtn.style.cssText = 'flex:none; cursor:pointer; border:0; border-radius:9px; padding:8px 16px; font:600 13px system-ui;' +
     ' color:#04121c; background:linear-gradient(180deg,#9fe9ff,#54c6f0);';
   _srBtn.onclick = srSpin;
@@ -2078,7 +2094,7 @@ async function loadSlicerLiveScene(sceneUrl) {
     window.addEventListener('resize', positionOverlay);
     requestAnimationFrame(composite);   // start the render loop NOW so CT slices + VR show progressively as they load
     if (window.__SEGROULETTE) await loadSEGRoulette();                              // spin a random IDC SEG + its CT/MR/PET source
-    else if (window.__IDC_CT) await loadIDCScene(window.__IDC_CT, window.__IDC_SEG, window.__IDC_MOD || 'CT');   // client-side IDC: DICOM straight from AWS
+    else if (window.__IDC_CT) await loadIDCScene(window.__IDC_CT, window.__IDC_SEG, window.__IDC_MOD || 'CT', window.__IDC_CTB, window.__IDC_SEGB);   // client-side IDC (optional ctb/segb buckets)
     else await loadSlicerLiveScene(window.__SLICERLIVE_SCENE_URL);
     return;
   }
