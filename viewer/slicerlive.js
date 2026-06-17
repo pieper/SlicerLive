@@ -33,6 +33,7 @@ import vtkAnnotatedCubeActor from '@kitware/vtk.js/Rendering/Core/AnnotatedCubeA
 import vtkOrientationMarkerWidget from '@kitware/vtk.js/Interaction/Widgets/OrientationMarkerWidget';
 import vtkPlane from '@kitware/vtk.js/Common/DataModel/Plane';
 import vtkSphereSource from '@kitware/vtk.js/Filters/Sources/SphereSource';
+import vtkImageMarchingCubes from '@kitware/vtk.js/Filters/General/ImageMarchingCubes';   // segment surfaces from the labelmap
 import vtkScalarBarActor from '@kitware/vtk.js/Rendering/Core/ScalarBarActor';
 import vtkXMLPolyDataReader from '@kitware/vtk.js/IO/XML/XMLPolyDataReader';   // SlicerLive: read .vtp models client-side
 import vtkPolyDataReader from '@kitware/vtk.js/IO/Legacy/PolyDataReader';      // SlicerLive: read legacy .vtk models
@@ -736,7 +737,7 @@ class SegmentationDM {
       if (s.hash !== gkey) { s.mapper.setInputData(await buildPolyData(sg.mesh)); s.hash = gkey; }
       s.actor.getProperty().setColor(...(sg.color || [1, 1, 1]));
       s.actor.setVisibility(vis);
-      s.actor.setUserMatrix(worldMatrixCol(node) || IDENTITY4);
+      s.actor.setUserMatrix(node.__surfMat || worldMatrixCol(node) || IDENTITY4);   // __surfMat = client-side IDC IJK->RAS
     }
     for (const [sid, s] of it.segs) if (!present.has(sid)) { renderer.removeActor(s.actor); it.segs.delete(sid); }
   }
@@ -1907,7 +1908,7 @@ function buildIDCNodes(ct, hasSeg, modality) {
   add('vtkMRMLViewNode1', 'vtkMRMLViewNode', { backgroundColor: [0.756, 0.764, 0.909], backgroundColor2: [0.454, 0.470, 0.745], boxVisible: 1, axisLabelsVisible: 1, orientationMarkerType: 0 });
   const volDisp = add('idcVolDisp', 'vtkMRMLScalarVolumeDisplayNode', { visibility: 1, window: ct.win, level: ct.lev, color: [1, 1, 1], opacity: 1 });
   const prop = add('idcVolProp', 'vtkMRMLVolumePropertyNode', Object.assign({ shade: 1, interpolationType: 1 }, vrPresetFor(modality, ct.win, ct.lev)));
-  const vrDisp = add('idcVRDisp', 'vtkMRMLGPURayCastVolumeRenderingDisplayNode', { visibility: 1, visibility3D: 1, kind: 'volumeRendering', croppingEnabled: 0 }, { volumeProperty: [prop] });
+  const vrDisp = add('idcVRDisp', 'vtkMRMLGPURayCastVolumeRenderingDisplayNode', { visibility: 1, visibility3D: _vrOn ? 1 : 0, kind: 'volumeRendering', croppingEnabled: 0 }, { volumeProperty: [prop] });
   const vol = add('idcVol', 'vtkMRMLScalarVolumeNode', { dims: [nx, ny, nz], comps: 1, ijkToRAS: M }, { display: [volDisp, vrDisp] });
   nodes[vol].__scalars = ct.vol; nodes[vol].__volKey = 'idc-ct';
   const ORI = { Red: { right: [-1, 0, 0], up: [0, 1, 0], normal: [0, 0, 1], ori: 'Axial' },
@@ -1947,20 +1948,103 @@ function setIDCCamera(ct) {
   renderer.updateLightsGeometryToFollowCamera();
 }
 
-// Apply the SEG as a colored 2D overlay on the slice views once the labelmap is decoded. The 3D view shows the CT
-// volume rendering (no segment surfaces). NOTE: the SegmentationDM surface path (segments[].mesh) is intentionally
-// left in place so we can render segment surfaces later -- we just don't generate them for this IDC view.
+// --- Volume-rendering on/off toggle (a glass button over the 3D quadrant; NO emoji -> see the QtWebEngine crash) ---
+let _vrOn = true, _vrBtn = null;
+function applyVR() {
+  const disp = mirror.get('idcVRDisp'); if (disp) disp.attrs.visibility3D = _vrOn ? 1 : 0;
+  let it = null; for (const dm of DMS) if (dm.items && dm.items.has('idcVol')) { it = dm.items.get('idcVol'); break; }
+  if (it && it.volume) it.volume.setVisibility(_vrOn);
+  if (_vrBtn) _vrBtn.textContent = _vrOn ? 'Volume rendering: on' : 'Volume rendering: off';
+  scene3DDirty = true; try { renderWindow.render(); } catch (e) {} markDirty();
+}
+function ensureVRToggle() {
+  if (_vrBtn) { _vrBtn.textContent = _vrOn ? 'Volume rendering: on' : 'Volume rendering: off'; return; }
+  _vrBtn = document.createElement('button');
+  _vrBtn.style.cssText = 'position:fixed; top:14px; right:14px; z-index:75; cursor:pointer; border:1px solid rgba(255,255,255,0.16);' +
+    ' border-radius:9px; padding:7px 13px; font:600 12px -apple-system,system-ui,sans-serif; color:#eaf0ff;' +
+    ' background:rgba(20,23,36,0.55); backdrop-filter:blur(20px) saturate(1.5); -webkit-backdrop-filter:blur(20px) saturate(1.5);';
+  _vrBtn.textContent = _vrOn ? 'Volume rendering: on' : 'Volume rendering: off';
+  _vrBtn.onclick = () => { _vrOn = !_vrOn; applyVR(); };
+  document.body.appendChild(_vrBtn);
+}
+
+// Apply the SEG once the labelmap is decoded: colored 2D overlay on the slice views AND closed-surface models in 3D
+// (the SegmentationDM surface path), generated client-side from the labelmap with vtk.js marching cubes.
 async function addIDCSegments(ct, seg) {
   const segNode = mirror.get('idcSeg'); if (!segNode) return;
   segNode.attrs.segmentColors = seg.colors;
   window.__caseSegments = (seg.colors || []).map((c) => ({ n: c[0], rgb: [c[1], c[2], c[3]], name: (seg.names || {})[c[0]] || ('Segment ' + c[0]) }));
   segNode.__labelmap = seg.lab; segNode.attrs.labelmapDims = ct.dims; segNode.attrs.labelmapIjkToRAS = ct.ijkToRAS;
-  await syncDMs();
+  await syncDMs();                                          // 2D colored overlay on the slices (labelmap path) first
   renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty();
+  try { await buildSegSurfaces(ct, seg, segNode); } catch (e) { console.warn('[IDC] surfaces', e); }   // then 3D surfaces
+}
+
+// Closed-surface models per segment, generated client-side from the labelmap with vtk.js marching cubes. Each
+// segment is meshed in its own cropped sub-volume for speed; surfaces stay in the volume's SCALED-INDEX frame and a
+// single shared actor matrix (idcSeg.__surfMat, from volumeGeometry) maps them to RAS -- so rotated/permuted volumes
+// just work and normals stay correct (vtk.js applies the matrix to normals). Feeds segNode.attrs.segments[].mesh,
+// which the SegmentationDM renders. Yields between segments so a many-segment case doesn't freeze the page.
+async function buildSegSurfaces(ct, seg, segNode) {
+  const [nx, ny, nz] = ct.dims, lab = seg.lab, M = ct.ijkToRAS;
+  const colors = seg.colors || []; if (!colors.length) return;
+  const probe = vtkImageData.newInstance(); probe.setDimensions(nx, ny, nz);
+  segNode.__surfMat = volumeGeometry(probe, M);            // shared IJK(scaled)->RAS matrix; also gives us spacing
+  const sp = probe.getSpacing();
+  const bb = new Map();                                    // label -> [i0,j0,k0,i1,j1,k1]
+  for (const c of colors) bb.set(c[0], [nx, ny, nz, -1, -1, -1]);
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) {                 // one pass: per-label bounding box
+    let base = (k * ny + j) * nx;
+    for (let i = 0; i < nx; i++) { const v = lab[base + i]; if (!v) continue; const b = bb.get(v); if (!b) continue;
+      if (i < b[0]) b[0] = i; if (j < b[1]) b[1] = j; if (k < b[2]) b[2] = k; if (i > b[3]) b[3] = i; if (j > b[4]) b[4] = j; if (k > b[5]) b[5] = k; }
+  }
+  const segs = [];
+  for (const c of colors) {
+    const L = c[0], color = [c[1], c[2], c[3]], b = bb.get(L);
+    if (!b || b[3] < b[0]) continue;                       // empty label
+    const x0 = Math.max(0, b[0] - 1), y0 = Math.max(0, b[1] - 1), z0 = Math.max(0, b[2] - 1);
+    const x1 = Math.min(nx - 1, b[3] + 1), y1 = Math.min(ny - 1, b[4] + 1), z1 = Math.min(nz - 1, b[5] + 1);
+    const sx = x1 - x0 + 1, sy = y1 - y0 + 1, sz = z1 - z0 + 1;
+    const mask = new Uint8Array(sx * sy * sz);
+    for (let k = 0; k < sz; k++) for (let j = 0; j < sy; j++) { const src = ((k + z0) * ny + (j + y0)) * nx + x0, dst = (k * sy + j) * sx;
+      for (let i = 0; i < sx; i++) mask[dst + i] = lab[src + i] === L ? 1 : 0; }
+    const img = vtkImageData.newInstance();
+    img.setDimensions(sx, sy, sz); img.setSpacing(sp[0], sp[1], sp[2]); img.setDirection(1, 0, 0, 0, 1, 0, 0, 0, 1);
+    img.setOrigin(x0 * sp[0], y0 * sp[1], z0 * sp[2]);     // sub-volume offset -> points land in full scaled-index frame
+    img.getPointData().setScalars(vtkDataArray.newInstance({ numberOfComponents: 1, values: mask }));
+    const mc = vtkImageMarchingCubes.newInstance({ contourValue: 0.5, computeNormals: true, mergePoints: true });
+    mc.setInputData(img);
+    const pd = mc.getOutputData();
+    if (pd && pd.getPoints().getNumberOfPoints() > 0)
+      segs.push({ id: 'seg' + L, color, mesh: { points: { hash: 'surf' + L + ':' + pd.getPoints().getNumberOfPoints() }, __pd: pd } });
+    await new Promise((r) => setTimeout(r, 0));            // yield -> surfaces appear progressively, no freeze
+  }
+  segNode.attrs.segments = segs;
+  await syncDMs();
+  renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty();
+}
+
+// Drop the previous dataset COMPLETELY so nothing from the prior spin lingers: DM actors/volumes (VR + seg
+// surfaces), the slice-view volumes (syncFourUp only removes these when a NEW volume replaces them, so an empty
+// mirror would leave them), the view box, and the cached per-slice state. Called at the start of every load.
+function clearIDCScene() {
+  mirror.clear(); localBlobs.clear();
+  for (const dm of DMS) if (dm.items) for (const id of [...dm.items.keys()]) { try { dm.remove(id); } catch (e) {} }
+  if (_sliceRens) for (const name in _sliceRens) {
+    const sr = _sliceRens[name];
+    if (sr.ctVol) { sr.ren.removeVolume(sr.ctVol); sr.ctVol = null; sr.ctMapper = null; }
+    if (sr.ovVol) { sr.ren.removeVolume(sr.ovVol); sr.ovVol = null; sr.ovMapper = null; }
+    sr.key = null;
+  }
+  if (_fourUp) for (const name in _fourUp) { const slot = _fourUp[name]; if (slot) { slot.index = null; slot._initKey = null; } }
+  if (viewBoxActor) viewBoxActor.setVisibility(false);
+  window.__caseSegments = null; window.__idcData = null;
+  scene3DDirty = true; slicesDirty = true; try { renderWindow.render(); } catch (e) {}
 }
 
 async function loadIDCScene(ctPrefix, segPrefix, modality, ctBucket, segBucket) {
   window.__slicerliveError = null; window.__caseSegments = null;
+  clearIDCScene();   // drop the previous dataset immediately -> no lingering actors/slices during the new load
   try {
     setLoadProgress(0.02, 'Listing IDC instances…');
     const ctKeys = await s3ListKeys(ctPrefix, ctBucket);
@@ -1970,7 +2054,6 @@ async function loadIDCScene(ctPrefix, segPrefix, modality, ctBucket, segBucket) 
       window.__slicerliveError = 'No CT instances at ' + (ctBucket || 'idc-open-data') + '/' + ctPrefix;
       setLoadProgress(-1); return;
     }
-    mirror.clear(); localBlobs.clear();
     let ctData = null;
     await runIDCWorker(ctKeys, segKeys, {
       onCT: async (ct) => {                          // CT fully available -> render the 3 slice views + the VR
@@ -1981,6 +2064,7 @@ async function loadIDCScene(ctPrefix, segPrefix, modality, ctBucket, segBucket) 
         for (const id in nodes) mirror.set(id, nodes[id]);
         window.__slicerliveLoaded = mirror.size; threeDActive = true;
         await syncDMs();
+        ensureVRToggle();                            // VR on/off button over the 3D quadrant
         mosaicHide();                                // real slices render now -> drop the thumbnail mosaic
         setIDCCamera(ct);
         renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty();
@@ -1997,12 +2081,14 @@ async function loadIDCScene(ctPrefix, segPrefix, modality, ctBucket, segBucket) 
 }
 
 // ===================== SEGRoulette: spin a random IDC SEG (CT/MR/PET source) into the viewer =====================
-// Minimal + robust: auto-spin a random case + a simple top bar to re-spin. (No landing/popup/backdrop-filter for now;
-// a backdrop-filter panel over the WebGL canvas, and the no-scene idle state, both caused trouble in QtWebEngine.)
+// Auto-spin a random case + a top bar (Details / Spin) + a case-detail popup. Hard QtWebEngine rule learned the hard
+// way: NO color emoji anywhere -- a color-emoji glyph composited over the WebGL canvas crashes the render process
+// (white screen) on macOS. Translucency / backdrop-filter / box-shadow are all fine (the glass UI relies on them).
 let _segByCol = null, _segStats = null, _srSpinning = false, _srBar = null, _srCap = null, _srBtn = null;
+let _srInfoBtn = null, _srCurrent = null;   // current picked case (for the details popup)
 async function loadSEGRoulette() {
   try {
-    const data = await fetchRetry('segroulette.json').then((r) => r.json());
+    const data = await fetchRetry('segroulette.json?t=' + Date.now()).then((r) => r.json());   // cache-bust: stay in sync with bundle updates
     const rows = data.rows || data; _segStats = data.stats || null;
     _segByCol = {};
     for (const e of rows) (_segByCol[e.col] = _segByCol[e.col] || []).push(e);   // group by collection -> balanced spin
@@ -2019,6 +2105,7 @@ async function srSpin() {
   if (_srSpinning || !_segByCol) return;
   _srSpinning = true; if (_srBtn) _srBtn.disabled = true;
   const e = srPick(), mod = { CT: 'CT', MR: 'MR', PT: 'PET' }[e.m] || e.m;
+  _srCurrent = e; closeCaseInfo();
   if (_srCap) _srCap.textContent = mod + '  \u00b7  ' + e.col + '  \u00b7  ' + (e.sd || 'segmentation');
   try { await loadIDCScene(e.c, e.s, e.m, e.cb, e.sb); } catch (err) { window.__slicerliveError = String(err); }
   if (window.__slicerliveError && _srCap) _srCap.textContent += '  \u2014 failed (spin again)';
@@ -2027,20 +2114,81 @@ async function srSpin() {
 function ensureSRBar() {
   if (_srBar) return;
   _srBar = document.createElement('div');
-  // NO color emoji in the caption/button text: rendering a color-emoji glyph composited over the WebGL canvas
+  // ONE hard rule: NO color emoji in the caption/button text -- a color-emoji glyph composited over the WebGL canvas
   // CRASHES QtWebEngine's render process on macOS -> instant white screen (Chrome is fine). This was the
-  // qSlicerWebWidget "blank on spin" bug. Also keep it plain (no transform/box-shadow/translucent bg).
+  // qSlicerWebWidget "blank on spin" bug. Translucency / backdrop-filter are fine, so the bar is glass too.
   _srBar.style.cssText = 'position:fixed; left:10px; top:10px; z-index:75; display:flex;' +
     ' align-items:center; gap:12px; padding:7px 10px 7px 16px; max-width:94vw; border-radius:13px;' +
-    ' background:#141726; border:1px solid #34384a;' +
+    ' background:rgba(20,23,36,0.55); backdrop-filter:blur(20px) saturate(1.5); -webkit-backdrop-filter:blur(20px) saturate(1.5);' +
+    ' border:1px solid rgba(255,255,255,0.16); box-shadow:0 8px 30px rgba(0,0,0,0.4);' +
     ' color:#eaf0ff; font:13px/1.4 -apple-system,system-ui,sans-serif;';
   _srCap = document.createElement('div'); _srCap.style.cssText = 'white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;';
   _srCap.textContent = 'SEGRoulette';
+  _srInfoBtn = document.createElement('button'); _srInfoBtn.textContent = 'Details';
+  _srInfoBtn.style.cssText = 'flex:none; cursor:pointer; border:1px solid #34384a; border-radius:9px; padding:8px 13px;' +
+    ' font:600 13px -apple-system,system-ui,sans-serif; color:#cfe6ff; background:#1b2030;';
+  _srInfoBtn.onclick = openCaseInfo;
   _srBtn = document.createElement('button'); _srBtn.textContent = 'Spin';
   _srBtn.style.cssText = 'flex:none; cursor:pointer; border:0; border-radius:9px; padding:8px 16px; font:600 13px system-ui;' +
     ' color:#04121c; background:linear-gradient(180deg,#9fe9ff,#54c6f0);';
   _srBtn.onclick = srSpin;
-  _srBar.appendChild(_srCap); _srBar.appendChild(_srBtn); document.body.appendChild(_srBar);
+  _srBar.appendChild(_srCap); _srBar.appendChild(_srInfoBtn); _srBar.appendChild(_srBtn); document.body.appendChild(_srBar);
+}
+
+// Case-detail popup: collection summary + TCIA/IDC links + colored segment list. Liquid-glass look = backdrop-filter
+// blur over the live 3D + a translucent gradient skin + inner highlight rim. (Only hard rule: NO color emoji -- that
+// crashes the QtWebEngine render process; compositing/blur is fine.)
+let _srModal = null;
+function closeCaseInfo() { if (_srModal) { _srModal.remove(); _srModal = null; } }
+function collDisplayName(id) { return (id || '').replace(/_/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase()); }
+function openCaseInfo() {
+  closeCaseInfo();
+  const e = _srCurrent; if (!e) return;
+  const meta = (_segStats && _segStats.collMeta && _segStats.collMeta[e.col]) || {};
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const viewerURL = e.st ? 'https://viewer.imaging.datacommons.cancer.gov/v3/viewer/?StudyInstanceUIDs=' + encodeURIComponent(e.st) : null;
+  const portalURL = 'https://portal.imaging.datacommons.cancer.gov/explore/filters/?collection_id=' + encodeURIComponent(e.col);
+  const tciaURL = meta.doi ? 'https://doi.org/' + encodeURIComponent(meta.doi) : null;
+  const modName = { CT: 'CT', MR: 'MR', PT: 'PET' }[e.m] || e.m;
+  const rows = [];
+  if (meta.cancer) rows.push(['Primary cancer', meta.cancer]);
+  if (meta.loc) rows.push(['Body part', meta.loc]);
+  if (meta.cases != null) rows.push(['Cases in collection', String(meta.cases)]);
+  if (meta.sites) rows.push(['Contributing scanners/sites', meta.sites]);
+  if (meta.segSrc) rows.push(['Segmentation source', meta.segSrc]);
+  if (e.sd) rows.push(['This segmentation', e.sd]);
+  const segs = window.__caseSegments || [];
+  const swatch = (rgb) => 'display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:8px;vertical-align:-1px;' +
+    'border:1px solid rgba(255,255,255,0.35);background:rgb(' + Math.round(rgb[0] * 255) + ',' + Math.round(rgb[1] * 255) + ',' + Math.round(rgb[2] * 255) + ')';
+  const link = (href, text) => href ? '<a href="' + esc(href) + '" target="_blank" rel="noopener" style="color:#9fe9ff;text-decoration:none;border-bottom:1px solid rgba(159,233,255,0.4)">' + esc(text) + '</a>' : '';
+  const linksHTML = [link(tciaURL, 'Collection on TCIA'), viewerURL && link(viewerURL, 'Open case in IDC viewer'), link(portalURL, 'Collection in IDC portal')].filter(Boolean).join('<span style="opacity:0.4;margin:0 10px">|</span>');
+
+  _srModal = document.createElement('div');
+  _srModal.style.cssText = 'position:fixed; inset:0; z-index:90; display:flex; align-items:center; justify-content:center;' +
+    ' background:rgba(6,8,14,0.38); font:13px/1.5 -apple-system,system-ui,sans-serif; color:#e8eeff;';
+  _srModal.onclick = (ev) => { if (ev.target === _srModal) closeCaseInfo(); };
+  const panel = document.createElement('div');
+  // liquid glass: frosted blur over the live 3D behind it + a translucent gradient skin + an inner highlight rim
+  panel.style.cssText = 'max-width:min(680px,92vw); max-height:86vh; overflow:auto; border-radius:18px; padding:22px 24px;' +
+    ' background:linear-gradient(135deg, rgba(58,64,88,0.55), rgba(20,24,38,0.62));' +
+    ' backdrop-filter:blur(26px) saturate(1.7); -webkit-backdrop-filter:blur(26px) saturate(1.7);' +
+    ' border:1px solid rgba(255,255,255,0.22); box-shadow:0 18px 60px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.22);';
+  panel.innerHTML =
+    '<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px">' +
+    '<div style="font-size:19px;font-weight:700">' + esc(collDisplayName(e.col)) + '</div>' +
+    '<div style="opacity:0.7;font-size:12px">' + esc(modName) + ' · IDC ' + esc((_segStats && _segStats.idcVersion) || '') + '</div></div>' +
+    (meta.desc ? '<div style="opacity:0.85;margin-bottom:12px">' + esc(meta.desc) + '</div>' : '') +
+    '<div style="margin:6px 0 14px">' + linksHTML + '</div>' +
+    rows.map(([k, v]) => '<div style="display:flex;gap:12px;margin:7px 0"><div style="flex:0 0 168px;opacity:0.6">' + esc(k) + '</div><div style="flex:1">' + esc(v) + '</div></div>').join('') +
+    (segs.length ? '<div style="margin:16px 0 6px;opacity:0.6">Segments (' + segs.length + ')</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:4px 14px">' +
+      segs.map((s) => '<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="' + swatch(s.rgb) + '"></span>' + esc(s.name) + '</div>').join('') + '</div>' : '');
+  const close = document.createElement('button'); close.textContent = 'Close';
+  close.style.cssText = 'margin-top:18px;cursor:pointer;border:1px solid rgba(255,255,255,0.22);border-radius:9px;' +
+    'padding:8px 18px;font:600 13px system-ui;color:#e8eeff;background:rgba(255,255,255,0.08)';
+  close.onclick = closeCaseInfo;
+  panel.appendChild(close);
+  _srModal.appendChild(panel); document.body.appendChild(_srModal);
 }
 
 async function loadSlicerLiveScene(sceneUrl) {
