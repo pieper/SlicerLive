@@ -1878,7 +1878,7 @@ async function s3ListKeys(prefix, bucket) {
     let url = `${base}?list-type=2&prefix=${encodeURIComponent(prefix)}`;
     if (token) url += `&continuation-token=${encodeURIComponent(token)}`;
     const x = new DOMParser().parseFromString(await fetchRetry(url).then((r) => r.text()), 'application/xml');
-    keys.push(...[...x.getElementsByTagName('Key')].map((e) => e.textContent).filter(Boolean));
+    keys.push(...[...x.getElementsByTagName('Key')].map((e) => e.textContent).filter((k) => k && /\.dcm$/i.test(k)));   // skip S3 folder-marker keys ("<prefix>/") -> they aren't DICOM and crash the parse
     more = x.getElementsByTagName('IsTruncated')[0]?.textContent === 'true';
     token = more ? x.getElementsByTagName('NextContinuationToken')[0]?.textContent : null;
   }
@@ -2167,8 +2167,7 @@ async function loadSEGRoulette() {
     const rows = data.rows || data; _segStats = data.stats || null;
     _segByCol = {};
     for (const e of rows) (_segByCol[e.col] = _segByCol[e.col] || []).push(e);   // group by collection -> balanced spin
-    ensureSRBar();
-    await srSpin();                                                              // load a case right away
+    showLanding();                                                              // intro: IDC seg stats + a Spin button
   } catch (e) { console.error('[SEGRoulette]', e); window.__slicerliveError = String(e); }
 }
 function srPick() {
@@ -2208,6 +2207,39 @@ function ensureSRBar() {
     ' color:#04121c; background:linear-gradient(180deg,#9fe9ff,#54c6f0);';
   _srBtn.onclick = srSpin;
   _srBar.appendChild(_srCap); _srBar.appendChild(_srInfoBtn); _srBar.appendChild(_srBtn); document.body.appendChild(_srBar);
+}
+
+// Intro landing: IDC segmentation stats + a big Spin button. Clicking Spin dismisses it, shows the bar, and loads
+// the first case (then the progress UI takes over, like the IDC TS demo). Liquid glass; NO color emoji (crash rule).
+let _srLanding = null;
+function closeLanding() { if (_srLanding) { _srLanding.remove(); _srLanding = null; } }
+function showLanding() {
+  closeLanding();
+  const s = _segStats || {}, bm = s.byMod || {}, n = (x) => (x == null ? '–' : x.toLocaleString());
+  _srLanding = document.createElement('div');
+  _srLanding.style.cssText = 'position:fixed; inset:0; z-index:95; display:flex; align-items:center; justify-content:center;' +
+    ' background:rgba(6,8,14,0.45); font:14px/1.5 -apple-system,system-ui,sans-serif; color:#e8eeff;';
+  const panel = document.createElement('div');
+  panel.style.cssText = 'max-width:min(560px,92vw); text-align:center; border-radius:22px; padding:34px 38px;' +
+    ' background:linear-gradient(135deg, rgba(58,64,88,0.55), rgba(20,24,38,0.62));' +
+    ' backdrop-filter:blur(26px) saturate(1.7); -webkit-backdrop-filter:blur(26px) saturate(1.7);' +
+    ' border:1px solid rgba(255,255,255,0.22); box-shadow:0 18px 60px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.22);';
+  panel.innerHTML =
+    '<div style="font-size:30px;font-weight:800;letter-spacing:0.5px">SEGRoulette</div>' +
+    '<div style="opacity:0.85;margin:8px 0 24px">Spin a random AI / expert segmentation from the NCI Imaging Data Commons — with its source CT, MR, or PET — straight into a live 3D viewer in your browser. No install, data streamed from the IDC public buckets.</div>' +
+    '<div style="font-size:42px;font-weight:800;color:#9fe9ff;line-height:1">' + n(s.totalSeg) + '</div>' +
+    '<div style="opacity:0.7;margin:4px 0 20px">segmentation series in IDC ' + (s.idcVersion ? '(' + s.idcVersion + ')' : '') + ', across ' + n(s.collections) + ' collections</div>' +
+    '<div style="opacity:0.75;margin-bottom:6px;font-size:12px;text-transform:uppercase;letter-spacing:1px">Spin pool — ' + n(s.sampled) + ' viewable cases</div>' +
+    '<div style="display:flex;gap:22px;justify-content:center;margin-bottom:26px">' +
+      '<div><span style="font-size:22px;font-weight:700">' + n(bm.CT) + '</span> CT</div>' +
+      '<div><span style="font-size:22px;font-weight:700">' + n(bm.MR) + '</span> MR</div>' +
+      '<div><span style="font-size:22px;font-weight:700">' + n(bm.PT) + '</span> PET</div></div>';
+  const spin = document.createElement('button'); spin.textContent = 'Spin';
+  spin.style.cssText = 'cursor:pointer; border:0; border-radius:13px; padding:13px 44px; font:800 17px system-ui;' +
+    ' color:#04121c; background:linear-gradient(180deg,#9fe9ff,#54c6f0); box-shadow:0 6px 22px rgba(84,198,240,0.45);';
+  spin.onclick = () => { closeLanding(); ensureSRBar(); srSpin(); };
+  panel.appendChild(spin);
+  _srLanding.appendChild(panel); document.body.appendChild(_srLanding);
 }
 
 // Case-detail popup: collection summary + TCIA/IDC links + colored segment list. Liquid-glass look = backdrop-filter
