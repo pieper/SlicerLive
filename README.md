@@ -7,6 +7,17 @@ the browser, the plan is one click to the native app or a cloud GPU (see `docs/S
 Built on the [desktopia](https://github.com/pieper/desktopia) offload displayable-manager stack (the JS DMs +
 vtk.js render core). Gateway eventually at **live.slicer.org**.
 
+## Try it
+
+- **SEGRoulette** — spin a random AI / expert segmentation from the NCI [Imaging Data Commons](https://imaging.datacommons.cancer.gov/)
+  (with its source CT, MR, or PET) into a live 3D + MPR viewer, no install, DICOM streamed from IDC's public buckets:
+  **<https://pieper.github.io/live/viewer.html?segroulette>**
+- **Colab notebook** — find an IDC segmentation with `idc-index` and view it in an embedded SlicerLive output cell:
+  [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/pieper/SlicerLive/blob/main/notebooks/SlicerLive_IDC_demo.ipynb)
+- **Gallery** of published scenes: <https://pieper.github.io/live/>
+- **A specific IDC case** directly: `viewer.html?ct=<crdc_series_uuid>&seg=<crdc_series_uuid>&mod=CT` — the SEGRoulette
+  **Details** popup has a *Copy link* button that builds one of these for the case you're viewing.
+
 ## Status — v0
 `viewer/viewer.html?scene=<mrml-url>` loads a MRML scene from a URL and renders its **models** client-side via
 vtk.js displayable managers — no server, no WebSocket. (Volumes, segmentations, markups, transforms, MRB, and

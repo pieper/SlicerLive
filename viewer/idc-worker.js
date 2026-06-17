@@ -16,6 +16,7 @@
 // CT source and SEG can live in DIFFERENT buckets, so resolve each per job from the buckets passed in onmessage.
 const s3url = (b) => 'https://' + (b || 'idc-open-data') + '.s3.us-east-1.amazonaws.com/';
 let CT_S3 = s3url(), SEG_S3 = s3url();
+let MODNAME = 'image';   // source modality label for progress messages (CT / MR / PET), set per job
 const post = (m, x) => self.postMessage(m, x || []);
 const prog = (msg, frac) => post({ t: 'progress', msg, frac });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -79,7 +80,7 @@ async function buildVolume(ctKeys) {
       slices.push(ds);
       const th = makeThumb(ds);   // stream a thumbnail to the mosaic, placed by InstanceNumber
       if (th) post({ t: 'thumb', n: Number(ds.InstanceNumber) || slices.length, w: th.w, h: th.h, rgba: th.rgba.buffer }, [th.rgba.buffer]);
-      done++; if (done % 8 === 0) prog(`CT ${done}/${ctKeys.length}`, 0.05 + 0.45 * done / ctKeys.length);
+      done++; if (done % 8 === 0) prog(`${MODNAME} ${done}/${ctKeys.length}`, 0.05 + 0.45 * done / ctKeys.length);
     }
   }
   await Promise.all(Array.from({ length: CONC }, worker));
@@ -211,10 +212,11 @@ async function fetchSeg(key) {
 }
 
 self.onmessage = async (e) => {
-  const { ctKeys, segKeys, ctBucket, segBucket } = e.data;
+  const { ctKeys, segKeys, ctBucket, segBucket, modality } = e.data;
   CT_S3 = s3url(ctBucket); SEG_S3 = s3url(segBucket);   // CT source + SEG may be in different IDC buckets
+  MODNAME = { CT: 'CT', MR: 'MR', PT: 'PET' }[modality] || 'image';
   try {
-    prog('fetching CT…', 0.05);
+    prog('fetching ' + MODNAME + '…', 0.05);
     const ct = await buildVolume(ctKeys);
     // progressive: hand the CT to the main thread right away so it can render the slices while the SEG loads
     post({ t: 'ct', vol: ct.vol, dims: ct.dims, ijkToRAS: ct.ijkToRAS, win: ct.win, lev: ct.lev }, [ct.vol.buffer]);

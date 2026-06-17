@@ -706,6 +706,8 @@ class VolumeRenderingDM {
     }
     const vp = mirror.get((vr.refs.volumeProperty || [])[0]);
     if (vp) applyVolumeProperty(it.volume.getProperty(), vp.attrs);
+    if (vr.attrs.blendMode === 'mip') it.mapper.setBlendModeToMaximumIntensity();   // PET: maximum-intensity projection
+    else it.mapper.setBlendModeToComposite();
     it.volume.setVisibility(visibleOf(vr));
     // ROI cropping: rebuild clip planes from the ROI node each apply (deterministic; cheap)
     it.mapper.removeAllClippingPlanes();
@@ -1522,7 +1524,11 @@ function positionOverlay() {
     if (out.width !== cw || out.height !== ch) { out.width = cw; out.height = ch; }
     if (maskCv.width !== cw || maskCv.height !== ch) { maskCv.width = cw; maskCv.height = ch; }
     geom = { sx: 0, sy: 0, sw: cw, sh: ch, cw, ch };
-    glWindow.setSize(cw, ch); slicesDirty = true; renderWindow.render(); markDirty();   // re-render slices at the new quadrant size
+    const dpr = window.devicePixelRatio || 1;                 // render the WebGL backing store at DEVICE resolution
+    glWindow.setSize(Math.round(cw * dpr), Math.round(ch * dpr));   // (vtk.js 36 setSize = backing px, no DPR) -> crisp on retina
+    const cv = glWindow.getCanvas && glWindow.getCanvas();
+    if (cv) { cv.style.width = cw + 'px'; cv.style.height = ch + 'px'; }   // but display at logical CSS size
+    slicesDirty = true; renderWindow.render(); markDirty();
     return;
   }
   if (!lastRect) return;
@@ -1912,7 +1918,7 @@ function mosaicHide() { if (_mosaic) _mosaic.canvas.style.display = 'none'; }
 
 // Drive progressive rendering: onCT fires as soon as the CT volume is ready; onLabelmap when the SEG is parsed.
 let _idcWorker = null;   // current worker; killed before a new spin so a still-downloading worker can't leak idc-open-data connections
-function runIDCWorker(ctKeys, segKeys, handlers, ctBucket, segBucket) {
+function runIDCWorker(ctKeys, segKeys, handlers, ctBucket, segBucket, modality) {
   if (_idcWorker) { try { _idcWorker.terminate(); } catch (e) {} _idcWorker = null; }   // kill any prior (re-spin) worker first
   return new Promise((resolve, reject) => {
     const w = new Worker('idc-worker.js?t=' + Date.now());
@@ -1932,7 +1938,7 @@ function runIDCWorker(ctKeys, segKeys, handlers, ctBucket, segBucket) {
       if (m.t === 'alldone') { w.terminate(); chain.then(resolve); return; }
     };
     w.onerror = (e) => { w.terminate(); reject(new Error('worker: ' + (e.message || e))); };
-    w.postMessage({ ctKeys, segKeys, ctBucket, segBucket });
+    w.postMessage({ ctKeys, segKeys, ctBucket, segBucket, modality });
   });
 }
 // CT-only SlicerLive scene (mirror nodes): orthogonal slice views, no volume rendering (segments render as
@@ -1945,10 +1951,10 @@ function vrPresetFor(modality, win, lev) {
     color: [[-3024, 0, 0, 0], [67.0106, 0.54902, 0.25098, 0.14902], [251.105, 0.882353, 0.603922, 0.290196], [439.291, 1, 0.937033, 0.954531], [3071, 0.827451, 0.658824, 1]],
     scalarOpacity: [[-3024, 0], [67.0106, 0], [251.105, 0.446429], [439.291, 0.625], [3071, 0.616071]], gradientOpacity: [[0, 1], [255, 1]] };
   const lo = lev - win / 2, hi = lev + win / 2, q = (f) => lo + (hi - lo) * f;
-  if (modality === 'PT') return {   // hot-metal: black -> red -> yellow -> white over the intensity range
+  if (modality === 'PT') return {   // PET = MIP (set on the VR node): hot-metal over the intensity range, opaque so the projected max shows
     ambient: 0.2, diffuse: 0.8, specular: 0.1, specularPower: 10,
     color: [[lo, 0, 0, 0], [q(0.4), 0.7, 0, 0], [q(0.75), 1, 0.6, 0], [hi, 1, 1, 1]],
-    scalarOpacity: [[lo, 0], [q(0.3), 0.04], [hi, 0.85]], gradientOpacity: [[0, 1], [255, 1]] };
+    scalarOpacity: [[lo, 0], [q(0.2), 0.5], [hi, 1]], gradientOpacity: [[0, 1], [255, 1]] };
   return {   // MR (default): grayscale ramp on window/level
     ambient: 0.2, diffuse: 0.8, specular: 0.2, specularPower: 10,
     color: [[lo, 0, 0, 0], [hi, 1, 1, 1]],
@@ -1966,7 +1972,7 @@ function buildIDCNodes(ct, hasSeg, modality) {
   add('vtkMRMLViewNode1', 'vtkMRMLViewNode', { backgroundColor: [0.756, 0.764, 0.909], backgroundColor2: [0.454, 0.470, 0.745], boxVisible: 1, axisLabelsVisible: 1, orientationMarkerType: 0 });
   const volDisp = add('idcVolDisp', 'vtkMRMLScalarVolumeDisplayNode', { visibility: 1, window: ct.win, level: ct.lev, color: [1, 1, 1], opacity: 1 });
   const prop = add('idcVolProp', 'vtkMRMLVolumePropertyNode', Object.assign({ shade: 1, interpolationType: 1 }, vrPresetFor(modality, ct.win, ct.lev)));
-  const vrDisp = add('idcVRDisp', 'vtkMRMLGPURayCastVolumeRenderingDisplayNode', { visibility: 1, visibility3D: _vrOn ? 1 : 0, kind: 'volumeRendering', croppingEnabled: 0 }, { volumeProperty: [prop] });
+  const vrDisp = add('idcVRDisp', 'vtkMRMLGPURayCastVolumeRenderingDisplayNode', { visibility: 1, visibility3D: _vrOn ? 1 : 0, kind: 'volumeRendering', croppingEnabled: 0, blendMode: modality === 'PT' ? 'mip' : 'composite' }, { volumeProperty: [prop] });
   const vol = add('idcVol', 'vtkMRMLScalarVolumeNode', { dims: [nx, ny, nz], comps: 1, ijkToRAS: M }, { display: [volDisp, vrDisp] });
   nodes[vol].__scalars = ct.vol; nodes[vol].__volKey = 'idc-ct';
   const ORI = { Red: { right: [-1, 0, 0], up: [0, 1, 0], normal: [0, 0, 1], ori: 'Axial' },
@@ -2019,6 +2025,7 @@ function recenterRotation(c) {
 
 // --- Volume-rendering on/off toggle (a glass button over the 3D quadrant; NO emoji -> see the QtWebEngine crash) ---
 let _vrOn = true, _vrBtn = null;
+let _idcRotCenter = null;   // RAS trackball pivot for the current case (segmentation centroid once known, else null)
 function applyVR() {
   const disp = mirror.get('idcVRDisp'); if (disp) disp.attrs.visibility3D = _vrOn ? 1 : 0;
   let it = null; for (const dm of DMS) if (dm.items && dm.items.has('idcVol')) { it = dm.items.get('idcVol'); break; }
@@ -2069,9 +2076,10 @@ async function buildSegSurfaces(ct, seg, segNode) {
       if (i < b[0]) b[0] = i; if (j < b[1]) b[1] = j; if (k < b[2]) b[2] = k; if (i > b[3]) b[3] = i; if (j > b[4]) b[4] = j; if (k > b[5]) b[5] = k;
       ci += i; cj += j; ck += k; cn++; }
   }
-  if (cn) {                                                // recenter the trackball on the segmentation centroid (RAS)
-    const a = ci / cn, b = cj / cn, c = ck / cn;
-    recenterRotation([M[0] * a + M[1] * b + M[2] * c + M[3], M[4] * a + M[5] * b + M[6] * c + M[7], M[8] * a + M[9] * b + M[10] * c + M[11]]);
+  if (cn) {                                                // trackball pivot = segmentation centroid (RAS); re-applied
+    const a = ci / cn, b = cj / cn, c = ck / cn;           // after the load finalizes (loadIDCScene deferred renders)
+    _idcRotCenter = [M[0] * a + M[1] * b + M[2] * c + M[3], M[4] * a + M[5] * b + M[6] * c + M[7], M[8] * a + M[9] * b + M[10] * c + M[11]];
+    recenterRotation(_idcRotCenter);
   }
   const segs = [];
   for (const c of colors) {
@@ -2113,7 +2121,7 @@ function clearIDCScene() {
   }
   if (_fourUp) for (const name in _fourUp) { const slot = _fourUp[name]; if (slot) { slot.index = null; slot._initKey = null; } }
   if (viewBoxActor) viewBoxActor.setVisibility(false);
-  window.__caseSegments = null; window.__idcData = null;
+  window.__caseSegments = null; window.__idcData = null; _idcRotCenter = null;
   scene3DDirty = true; slicesDirty = true; try { renderWindow.render(); } catch (e) {}
 }
 
@@ -2147,11 +2155,12 @@ async function loadIDCScene(ctPrefix, segPrefix, modality, ctBucket, segBucket) 
         for (const d of [120, 400, 1000]) setTimeout(() => { try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
       },
       onLabelmap: async (seg) => { await addIDCSegments(ctData, seg); },   // 2D colored overlay on the slices
-    }, ctBucket, segBucket);
+    }, ctBucket, segBucket, modality);
     setLoadProgress(-1);
+    if (_idcRotCenter) { recenterRotation(_idcRotCenter); jumpOthersTo(_idcRotCenter, ''); }   // pivot + park the 3 slices ON the seg so the 2D overlay is visible (was at volume center)
     renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera();
     renderWindow.render(); markDirty();
-    for (const d of [120, 400, 1000, 2200]) setTimeout(() => { try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
+    for (const d of [120, 400, 1000, 2200]) setTimeout(() => { try { if (_idcRotCenter) recenterRotation(_idcRotCenter); renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
   } catch (e) { console.error('[IDC]', e); window.__slicerliveError = String(e); setLoadProgress(-1); }
 }
 
@@ -2289,12 +2298,34 @@ function openCaseInfo() {
     rows.map(([k, v]) => '<div style="display:flex;gap:12px;margin:7px 0"><div style="flex:0 0 168px;opacity:0.6">' + esc(k) + '</div><div style="flex:1">' + esc(v) + '</div></div>').join('') +
     (segs.length ? '<div style="margin:16px 0 6px;opacity:0.6">Segments (' + segs.length + ')</div>' +
       '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:4px 14px">' +
-      segs.map((s) => '<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="' + swatch(s.rgb) + '"></span>' + esc(s.name) + '</div>').join('') + '</div>' : '');
+      segs.map((s) => '<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="' + swatch(s.rgb) + '"></span>' + esc(s.name) + '</div>').join('') + '</div>' : '') +
+    '<div style="margin:16px 0 4px;opacity:0.6">Case identifiers</div>' +
+    '<div style="font:12px/1.6 ui-monospace,Menlo,monospace;opacity:0.85;word-break:break-all">' +
+    'Study Instance UID: ' + esc(e.st || '—') + '<br>Source series (IDC crdc): ' + esc(e.c) + '<br>Segmentation (IDC crdc): ' + esc(e.s) + '</div>';
+
+  // Shareable deep-link to exactly this case on the live site (copy + send to a colleague)
+  const shareURL = 'https://pieper.github.io/live/viewer.html?' + new URLSearchParams(
+    { ct: e.c, seg: e.s, mod: e.m, ctb: e.cb || 'idc-open-data', segb: e.sb || 'idc-open-data' }).toString();
+  const shareLabel = document.createElement('div'); shareLabel.style.cssText = 'margin:16px 0 6px;opacity:0.6'; shareLabel.textContent = 'Link to this case';
+  const shareRow = document.createElement('div'); shareRow.style.cssText = 'display:flex;gap:8px;align-items:center';
+  const inp = document.createElement('input'); inp.readOnly = true; inp.value = shareURL;
+  inp.style.cssText = 'flex:1;min-width:0;background:rgba(0,0,0,0.28);border:1px solid rgba(255,255,255,0.18);border-radius:8px;padding:8px 10px;color:#cfe6ff;font:12px ui-monospace,Menlo,monospace';
+  inp.onclick = () => inp.select();
+  const copyBtn = document.createElement('button'); copyBtn.textContent = 'Copy link';
+  copyBtn.style.cssText = 'flex:none;cursor:pointer;border:0;border-radius:8px;padding:8px 16px;font:600 13px system-ui;color:#04121c;background:linear-gradient(180deg,#9fe9ff,#54c6f0)';
+  copyBtn.onclick = () => {
+    inp.select();
+    const done = () => { copyBtn.textContent = 'Copied'; setTimeout(() => { copyBtn.textContent = 'Copy link'; }, 1500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(shareURL).then(done, () => { try { document.execCommand('copy'); done(); } catch (e2) {} });
+    else { try { document.execCommand('copy'); done(); } catch (e2) {} }
+  };
+  shareRow.appendChild(inp); shareRow.appendChild(copyBtn);
+
   const close = document.createElement('button'); close.textContent = 'Close';
   close.style.cssText = 'margin-top:18px;cursor:pointer;border:1px solid rgba(255,255,255,0.22);border-radius:9px;' +
     'padding:8px 18px;font:600 13px system-ui;color:#e8eeff;background:rgba(255,255,255,0.08)';
   close.onclick = closeCaseInfo;
-  panel.appendChild(close);
+  panel.appendChild(shareLabel); panel.appendChild(shareRow); panel.appendChild(close);
   _srModal.appendChild(panel); document.body.appendChild(_srModal);
 }
 
