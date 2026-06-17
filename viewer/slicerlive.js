@@ -972,11 +972,6 @@ window.__dmDbg = () => {
 // ===== SlicerLive 4-up: 3D + 3 orthogonal slice views (vtk.js multi-viewport; standalone, no compositor) =====
 let _fourUp = null;            // { Red:{ren,mapper,slice,volHash}, Yellow:.., Green:.. } once laid out
 const _VP = { Red: [0.0, 0.5, 0.5, 1.0], Yellow: [0.5, 0.0, 1.0, 0.5], Green: [0.0, 0.0, 0.5, 0.5] };  // Slicer FourUp: axial UL, sagittal LR, coronal LL ([x0,y0,x1,y1] bottom-left)
-const _SLIDER_CSS = {
-  Red:    'left:4px; width:calc(50% - 8px); top:calc(50% - 22px);',     // bottom edge of the top-left (axial) quadrant
-  Yellow: 'left:calc(50% + 4px); width:calc(50% - 8px); bottom:4px;',   // bottom-right (sagittal)
-  Green:  'left:4px; width:calc(50% - 8px); bottom:4px;',               // bottom-left (coronal)
-};
 const _col = (m, c) => [m[c], m[4 + c], m[8 + c]];                 // row-major 4x4 column c (xyz part)
 const _nrm3 = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
 const _dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -984,15 +979,8 @@ function ensureFourUp() {
   if (_fourUp) return;
   renderer.setViewport(0.5, 0.5, 1.0, 1.0);                        // 3D -> top-right (Slicer FourUp). The 3 slice
   _fourUp = {};                                                    // quadrants are blitted into `out` (OHIF-style).
-  for (const name of ['Red', 'Yellow', 'Green']) {
-    const slider = document.createElement('input');                // slice-offset slider per slice view
-    slider.type = 'range'; slider.min = '0'; slider.max = '1'; slider.value = '0';
-    slider.style.cssText = 'position:fixed; z-index:15; height:16px; opacity:0.8; ' + _SLIDER_CSS[name];
-    slider.addEventListener('input', () => setSliceIndex(_fourUp[name], +slider.value));
-    slider.addEventListener('pointerdown', (e) => e.stopPropagation(), true);   // keep the slice-drag handler off the slider
-    document.body.appendChild(slider);
-    _fourUp[name] = { slider, index: null, maxIndex: 1, pscale: 0, pan: [0, 0, 0] };
-  }
+  // No sliders: scrolling is left-drag / wheel in the slice view (Slicer-style); shift+move jumps the other views.
+  for (const name of ['Red', 'Yellow', 'Green']) _fourUp[name] = { index: null, maxIndex: 1, pscale: 0, pan: [0, 0, 0] };
 }
 // place an image in WORLD coordinates (origin/spacing/direction from ijkToRAS) so vtkImageResliceMapper reslices
 // it in world space -- the CT and the labelmap then auto-align at the same world plane (no manual index matching).
@@ -1132,10 +1120,8 @@ async function syncFourUp() {
     slot.axis = axis; slot.maxIndex = vol.attrs.dims[axis] - 1; slot.step = step;
     slot.origin0 = [center[0] - ijk[axis] * step * normal[0], center[1] - ijk[axis] * step * normal[1], center[2] - ijk[axis] * step * normal[2]];
     slot.fov = (sn.attrs.fieldOfView && sn.attrs.fieldOfView[1]) ? sn.attrs.fieldOfView[1] : 250;
-    slot.slider.max = String(slot.maxIndex);
     if (slot.index == null || slot._initKey !== ctxKey) {          // initial slice + view (once per scene)
       slot.index = Math.round(ijk[axis]); slot._initKey = ctxKey; slot.pscale = slot.fov / 2; slot.pan = [0, 0, 0];
-      slot.slider.value = String(slot.index);
     }
   }
   slicesDirty = true;
@@ -1160,28 +1146,95 @@ function renderSlices() {
     cam.setClippingRange(D - 0.5, D + t);   // near clip == the slice plane; thin slab -> a slice
   }
 }
+// --- maximize: double-click a viewport -> fullscreen; double-click again -> restore 4-up. The 3D + 3 slice
+// renderers are viewports of the ONE render window, so maximize = give that renderer the whole window and stop
+// drawing the others (setDraw(false)). _sliceVP() reports the effective hit-test rect for the active layout.
+let _maxView = null;   // null = 4-up; else 'threeD' | 'Red' | 'Green' | 'Yellow'
+function setMaxView(name) {
+  _maxView = name || null;
+  const full = [0, 0, 1, 1];
+  const set = (ren, rect, draw) => { ren.setViewport(rect[0], rect[1], rect[2], rect[3]); if (ren.setDraw) ren.setDraw(draw); };
+  set(renderer, name === 'threeD' ? full : _VPRECT.threeD, !name || name === 'threeD');
+  for (const n of ['Red', 'Green', 'Yellow']) set(_sliceRens[n].ren, name === n ? full : _VPRECT[n], !name || name === n);
+  if (_vrBtn) _vrBtn.style.display = (name && name !== 'threeD') ? 'none' : 'block';   // VR toggle belongs to the 3D view
+  slicesDirty = true; scene3DDirty = true; try { renderWindow.render(); } catch (e) {} markDirty();
+}
+function toggleMaxAt(cx, cy) {
+  if (_maxView) { setMaxView(null); return; }                         // already maximized -> restore
+  const r = host.getBoundingClientRect();
+  const x = (cx - r.left) / r.width, y = 1 - (cy - r.top) / r.height;
+  let target = 'threeD';                                              // not in a slice quadrant -> the 3D view
+  for (const n of ['Red', 'Yellow', 'Green']) { const v = _VP[n]; if (x >= v[0] && x <= v[2] && y >= v[1] && y <= v[3]) { target = n; break; } }
+  setMaxView(target);
+}
+function _sliceVP(name) {                                             // effective hit-test rect, honoring maximize
+  if (_maxView === 'threeD') return null;
+  if (_maxView && _maxView !== name) return null;
+  return _maxView === name ? [0, 0, 1, 1] : _VP[name];
+}
 // --- slice-view interaction (standalone 4-up): route by quadrant; pan/zoom/scroll match Slicer ---
 function fourUpSlotAt(clientX, clientY) {
-  if (!_fourUp) return null;
+  if (!_fourUp || _maxView === 'threeD') return null;
   const r = host.getBoundingClientRect();
   const x = (clientX - r.left) / r.width, y = 1 - (clientY - r.top) / r.height;   // 0..1, bottom-left origin
   if (x < 0 || x > 1 || y < 0 || y > 1) return null;
-  for (const name of ['Red', 'Yellow', 'Green']) { const v = _VP[name]; if (x >= v[0] && x <= v[2] && y >= v[1] && y <= v[3]) return _fourUp[name]; }
+  for (const name of ['Red', 'Yellow', 'Green']) { const v = _sliceVP(name); if (v && x >= v[0] && x <= v[2] && y >= v[1] && y <= v[3]) return _fourUp[name]; }
   return null;   // the 3D quadrant -> let the vtk.js interactor (trackball) handle it
 }
-let _sliceDrag = null;
+// World (RAS) point under the cursor, on the hovered slice plane. Inverts the slice's parallel camera (slot.right =
+// screen-right, slot.up = screen-up, slot.pscale = half world-height; horizontal half-extent = pscale*aspect).
+function sliceWorldAt(cx, cy) {
+  if (!_fourUp || _maxView === 'threeD') return null;
+  const r = host.getBoundingClientRect();
+  const x = (cx - r.left) / r.width, y = 1 - (cy - r.top) / r.height;
+  for (const name of ['Red', 'Yellow', 'Green']) {
+    const v = _sliceVP(name); if (!v) continue;
+    if (x < v[0] || x > v[2] || y < v[1] || y > v[3]) continue;
+    const slot = _fourUp[name]; if (!slot || !slot.normal || !slot.origin0) return null;
+    const u = (x - v[0]) / (v[2] - v[0]), vv = (y - v[1]) / (v[3] - v[1]);
+    const qwPx = (v[2] - v[0]) * r.width, qhPx = (v[3] - v[1]) * r.height, aspect = qhPx ? qwPx / qhPx : 1;
+    const ps = slot.pscale || slot.fov / 2;
+    const sx = (u - 0.5) * 2 * ps * aspect, sy = (vv - 0.5) * 2 * ps;
+    const i = slot.index, s = slot.step, n = slot.normal, o = slot.origin0, p = slot.pan || [0, 0, 0], R = slot.right, U = slot.up;
+    const orig = [o[0] + i * s * n[0] + p[0], o[1] + i * s * n[1] + p[1], o[2] + i * s * n[2] + p[2]];
+    return { name, slot, ras: [orig[0] + R[0] * sx + U[0] * sy, orig[1] + R[1] * sx + U[1] * sy, orig[2] + R[2] * sx + U[2] * sy] };
+  }
+  return null;
+}
+// Slicer-style crosshair jump: set every OTHER slice's offset so its plane passes through the RAS point.
+function jumpOthersTo(ras, exceptName) {
+  for (const name of ['Red', 'Yellow', 'Green']) {
+    if (name === exceptName) continue;
+    const slot = _fourUp[name]; if (!slot || !slot.normal || !slot.origin0 || !slot.step) continue;
+    const n = slot.normal, o = slot.origin0;
+    setSliceIndex(slot, ((ras[0] - o[0]) * n[0] + (ras[1] - o[1]) * n[1] + (ras[2] - o[2]) * n[2]) / slot.step);
+  }
+}
+let _sliceDrag = null, _lastDown = null;
 host.addEventListener('wheel', (e) => {
   const slot = fourUpSlotAt(e.clientX, e.clientY); if (!slot) return;   // 3D quadrant -> vtk.js zoom
   e.stopPropagation(); e.preventDefault();
-  setSliceIndex(slot, slot.index + (e.deltaY > 0 ? -1 : 1));            // scroll = slice offset
+  setSliceIndex(slot, slot.index + (e.deltaY > 0 ? -1 : 1));            // wheel = slice offset
+}, true);
+// shift + move over a slice -> jump the other two views to that physical location (works hovering OR dragging)
+host.addEventListener('pointermove', (e) => {
+  if (!_fourUp || !e.shiftKey) return;
+  const w = sliceWorldAt(e.clientX, e.clientY); if (!w) return;         // not over a slice quadrant -> let it pass
+  e.stopPropagation(); jumpOthersTo(w.ras, w.name);
 }, true);
 host.addEventListener('pointerdown', (e) => {
   if (!_fourUp) return;
+  // double-click ANY viewport (incl. the 3D quadrant) -> toggle fullscreen / restore. Detected here (not via the
+  // dblclick event) because slice pointerdowns preventDefault, which would suppress the synthesized dblclick.
+  const dbl = _lastDown && (e.timeStamp - _lastDown.t) < 350 && Math.hypot(e.clientX - _lastDown.x, e.clientY - _lastDown.y) < 6;
+  _lastDown = dbl ? null : { t: e.timeStamp, x: e.clientX, y: e.clientY };
+  if (dbl) { toggleMaxAt(e.clientX, e.clientY); e.stopPropagation(); e.preventDefault(); return; }
   const slot = fourUpSlotAt(e.clientX, e.clientY); if (!slot) return;   // 3D quadrant -> vtk.js trackball
-  const mode = e.button === 2 ? 'zoom' : (e.button === 1 || (e.button === 0 && e.shiftKey)) ? 'pan' : null;
   e.stopPropagation(); e.preventDefault();                             // a slice view owns this -> never trackball
-  if (!mode) return;                                                   // plain left-click: swallow (no-op for now)
-  _sliceDrag = { slot, mode, x: e.clientX, y: e.clientY };
+  if (e.shiftKey) { const w = sliceWorldAt(e.clientX, e.clientY); if (w) jumpOthersTo(w.ras, w.name); return; }   // shift = jump (the move handler continues it)
+  const mode = e.button === 2 ? 'zoom' : e.button === 1 ? 'pan' : e.button === 0 ? 'scroll' : null;   // left = scroll slices
+  if (!mode) return;
+  _sliceDrag = { slot, mode, x: e.clientX, y: e.clientY, acc: 0 };
   window.addEventListener('pointermove', onSliceDrag, true);
   window.addEventListener('pointerup', onSliceUp, true);
 }, true);
@@ -1189,10 +1242,15 @@ function onSliceDrag(e) {
   if (!_sliceDrag) return; e.stopPropagation();
   const { slot, mode } = _sliceDrag, dx = e.clientX - _sliceDrag.x, dy = e.clientY - _sliceDrag.y;
   _sliceDrag.x = e.clientX; _sliceDrag.y = e.clientY;
+  if (mode === 'scroll') {                                              // drag up/right -> forward, down/left -> back
+    _sliceDrag.acc += (dx - dy); const STEP = 7;
+    while (Math.abs(_sliceDrag.acc) >= STEP) { const d = _sliceDrag.acc > 0 ? 1 : -1; setSliceIndex(slot, slot.index + d); _sliceDrag.acc -= d * STEP; }
+    return;
+  }
   const ps = slot.pscale || slot.fov / 2;
   if (mode === 'zoom') {
     slot.pscale = Math.max(0.5, ps * Math.exp(-dy * 0.006));          // right-drag down = zoom in (matches Slicer)
-  } else {                                                             // pan: image follows the cursor, in the slice plane
+  } else {                                                             // middle-drag pan: image follows the cursor
     const qh = (geom ? geom.ch : 1000) / 2, worldPerPx = (ps * 2) / qh;
     const mvx = -dx * worldPerPx, mvy = dy * worldPerPx, p = slot.pan || [0, 0, 0];
     slot.pan = [p[0] + slot.right[0] * mvx + slot.up[0] * mvy, p[1] + slot.right[1] * mvx + slot.up[1] * mvy, p[2] + slot.right[2] * mvx + slot.up[2] * mvy];
@@ -1948,6 +2006,17 @@ function setIDCCamera(ct) {
   renderer.updateLightsGeometryToFollowCamera();
 }
 
+// Move the trackball pivot to `c` (RAS) WITHOUT disturbing the user's current view: shift focal point + camera
+// position by the same delta, so view direction / distance / any rotation are preserved -- only the rotation
+// center moves. Used to recenter on the segmentation centroid once it's known (it loads after the CT).
+function recenterRotation(c) {
+  const cam = renderer.getActiveCamera(), f = cam.getFocalPoint(), p = cam.getPosition();
+  const d = [c[0] - f[0], c[1] - f[1], c[2] - f[2]];
+  cam.setFocalPoint(c[0], c[1], c[2]);
+  cam.setPosition(p[0] + d[0], p[1] + d[1], p[2] + d[2]);
+  renderer.resetCameraClippingRange(); scene3DDirty = true; markDirty();
+}
+
 // --- Volume-rendering on/off toggle (a glass button over the 3D quadrant; NO emoji -> see the QtWebEngine crash) ---
 let _vrOn = true, _vrBtn = null;
 function applyVR() {
@@ -1993,10 +2062,16 @@ async function buildSegSurfaces(ct, seg, segNode) {
   const sp = probe.getSpacing();
   const bb = new Map();                                    // label -> [i0,j0,k0,i1,j1,k1]
   for (const c of colors) bb.set(c[0], [nx, ny, nz, -1, -1, -1]);
-  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) {                 // one pass: per-label bounding box
+  let ci = 0, cj = 0, ck = 0, cn = 0;                      // centroid of ALL labeled voxels (rotation center)
+  for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) {                 // one pass: per-label bounding box + centroid
     let base = (k * ny + j) * nx;
     for (let i = 0; i < nx; i++) { const v = lab[base + i]; if (!v) continue; const b = bb.get(v); if (!b) continue;
-      if (i < b[0]) b[0] = i; if (j < b[1]) b[1] = j; if (k < b[2]) b[2] = k; if (i > b[3]) b[3] = i; if (j > b[4]) b[4] = j; if (k > b[5]) b[5] = k; }
+      if (i < b[0]) b[0] = i; if (j < b[1]) b[1] = j; if (k < b[2]) b[2] = k; if (i > b[3]) b[3] = i; if (j > b[4]) b[4] = j; if (k > b[5]) b[5] = k;
+      ci += i; cj += j; ck += k; cn++; }
+  }
+  if (cn) {                                                // recenter the trackball on the segmentation centroid (RAS)
+    const a = ci / cn, b = cj / cn, c = ck / cn;
+    recenterRotation([M[0] * a + M[1] * b + M[2] * c + M[3], M[4] * a + M[5] * b + M[6] * c + M[7], M[8] * a + M[9] * b + M[10] * c + M[11]]);
   }
   const segs = [];
   for (const c of colors) {
