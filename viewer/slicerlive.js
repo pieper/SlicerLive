@@ -2322,11 +2322,12 @@ function openCaseInfo() {
     '<div style="margin:6px 0 14px">' + linksHTML + '</div>' +
     rows.map(([k, v]) => '<div style="display:flex;gap:12px;margin:7px 0"><div style="flex:0 0 168px;opacity:0.6">' + esc(k) + '</div><div style="flex:1">' + esc(v) + '</div></div>').join('') +
     (segs.length ? '<div style="margin:16px 0 6px;opacity:0.6">Segments (' + segs.length + ')</div>' +
-      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:4px 14px">' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:4px 14px;' +
+      (segs.length > 5 ? 'max-height:148px;overflow:auto;padding-right:6px' : '') + '">' +
       segs.map((s) => '<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="' + swatch(s.rgb) + '"></span>' + esc(s.name) + '</div>').join('') + '</div>' : '') +
-    '<div style="margin:16px 0 6px;opacity:0.6">Cite &amp; download</div>' +
-    '<div style="opacity:0.85;margin-bottom:8px">' + esc(citeTxt) + '</div>' +
-    '<pre style="margin:0;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.14);border-radius:8px;padding:10px 12px;overflow:auto;font:12px/1.5 ui-monospace,Menlo,monospace;color:#cfe6ff;white-space:pre">' + esc(dlCode) + '</pre>';
+    '<details style="margin-top:16px"><summary style="cursor:pointer;opacity:0.6;outline:none;user-select:none">Cite &amp; download</summary>' +
+    '<div style="opacity:0.85;margin:8px 0">' + esc(citeTxt) + '</div>' +
+    '<pre style="margin:0;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.14);border-radius:8px;padding:10px 12px;overflow:auto;font:12px/1.5 ui-monospace,Menlo,monospace;color:#cfe6ff;white-space:pre">' + esc(dlCode) + '</pre></details>';
 
   // Shareable deep-link to exactly this case on the live site (copy + send to a colleague)
   const shareURL = 'https://pieper.github.io/live/viewer.html?' + new URLSearchParams(   // carry case context so the opened link can show Details
