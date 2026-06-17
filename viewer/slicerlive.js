@@ -2297,9 +2297,6 @@ function openCaseInfo() {
   if (meta.sites) rows.push(['Contributing scanners/sites', meta.sites]);
   if (meta.segSrc) rows.push(['Segmentation source', meta.segSrc]);
   if (e.sd) rows.push(['This segmentation', e.sd]);
-  const segs = window.__caseSegments || [];
-  const swatch = (rgb) => 'display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:8px;vertical-align:-1px;' +
-    'border:1px solid rgba(255,255,255,0.35);background:rgb(' + Math.round(rgb[0] * 255) + ',' + Math.round(rgb[1] * 255) + ',' + Math.round(rgb[2] * 255) + ')';
   const link = (href, text) => href ? '<a href="' + esc(href) + '" target="_blank" rel="noopener" style="color:#9fe9ff;text-decoration:none;border-bottom:1px solid rgba(159,233,255,0.4)">' + esc(text) + '</a>' : '';
   const linksHTML = [link(tciaURL, 'Collection on TCIA'), viewerURL && link(viewerURL, 'Open case in IDC viewer'), link(portalURL, 'Collection in IDC portal')].filter(Boolean).join('<span style="opacity:0.4;margin:0 10px">|</span>');
 
@@ -2321,10 +2318,6 @@ function openCaseInfo() {
     (meta.desc ? '<div style="opacity:0.85;margin-bottom:12px">' + esc(meta.desc) + '</div>' : '') +
     '<div style="margin:6px 0 14px">' + linksHTML + '</div>' +
     rows.map(([k, v]) => '<div style="display:flex;gap:12px;margin:7px 0"><div style="flex:0 0 168px;opacity:0.6">' + esc(k) + '</div><div style="flex:1">' + esc(v) + '</div></div>').join('') +
-    (segs.length ? '<div style="margin:16px 0 6px;opacity:0.6">Segments (' + segs.length + ')</div>' +
-      '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:4px 14px;' +
-      (segs.length > 5 ? 'max-height:148px;overflow:auto;padding-right:6px' : '') + '">' +
-      segs.map((s) => '<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="' + swatch(s.rgb) + '"></span>' + esc(s.name) + '</div>').join('') + '</div>' : '') +
     '<details style="margin-top:16px"><summary style="cursor:pointer;opacity:0.6;outline:none;user-select:none">Cite &amp; download</summary>' +
     '<div style="opacity:0.85;margin:8px 0">' + esc(citeTxt) + '</div>' +
     '<pre style="margin:0;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.14);border-radius:8px;padding:10px 12px;overflow:auto;font:12px/1.5 ui-monospace,Menlo,monospace;color:#cfe6ff;white-space:pre">' + esc(dlCode) + '</pre></details>';
