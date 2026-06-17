@@ -29,7 +29,11 @@
   window.__OFFLOAD_STANDALONE = true;            // full-window vtk.js render, no video / desktop compositor
   window.__SLICERLIVE_SCENE_URL = _scene;
   if (_ct) { window.__IDC_CT = _ct; window.__IDC_SEG = _seg; window.__IDC_MOD = _params.get('mod') || 'CT';
-             window.__IDC_CTB = _params.get('ctb') || ''; window.__IDC_SEGB = _params.get('segb') || ''; }   // optional IDC buckets (default idc-open-data)
+             window.__IDC_CTB = _params.get('ctb') || ''; window.__IDC_SEGB = _params.get('segb') || '';   // optional IDC buckets (default idc-open-data)
+             // a shared "Copy link" carries case context -> reconstruct the Details popup on a fresh open
+             if (_params.get('col')) window.__IDC_CASE = { c: _ct, s: _seg, m: window.__IDC_MOD, cb: window.__IDC_CTB, sb: window.__IDC_SEGB,
+               col: _params.get('col'), st: _params.get('st') || '', sd: _params.get('sd') || '',
+               lic: _params.get('lic') || '', su: _params.get('su') || '', pid: _params.get('pid') || '' }; }
   if (_roulette) window.__SEGROULETTE = true;
   if (!_scene && !_ct && !_roulette) document.getElementById('err').textContent = 'No ?scene=<mrml-url>, ?ct=&seg=, or ?segroulette provided.';
   window.addEventListener('offload-build', (e) => {
