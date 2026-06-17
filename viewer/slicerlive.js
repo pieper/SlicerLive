@@ -37,6 +37,7 @@ import vtkImageMarchingCubes from '@kitware/vtk.js/Filters/General/ImageMarching
 import vtkScalarBarActor from '@kitware/vtk.js/Rendering/Core/ScalarBarActor';
 import vtkXMLPolyDataReader from '@kitware/vtk.js/IO/XML/XMLPolyDataReader';   // SlicerLive: read .vtp models client-side
 import vtkPolyDataReader from '@kitware/vtk.js/IO/Legacy/PolyDataReader';      // SlicerLive: read legacy .vtk models
+import { slicerLiveLogo } from './sllogo.js';                                 // SlicerLive brand mark (3D Slicer logo + gold fractal lightning)
 
 const OFFLOAD_BUILD = 'slicerlive-v1o idc-clientside 2026-06-15';
 window.__offloadBuild = OFFLOAD_BUILD;
@@ -2255,7 +2256,8 @@ function showLanding() {
     ' backdrop-filter:blur(26px) saturate(1.7); -webkit-backdrop-filter:blur(26px) saturate(1.7);' +
     ' border:1px solid rgba(255,255,255,0.22); box-shadow:0 18px 60px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.22);';
   panel.innerHTML =
-    '<div style="font-size:30px;font-weight:800;letter-spacing:0.5px">SEGRoulette</div>' +
+    slicerLiveLogo(180) +
+    '<div style="font-size:22px;font-weight:700;letter-spacing:1px;opacity:0.92;margin-top:14px">SEGRoulette</div>' +
     '<div style="opacity:0.85;margin:8px 0 24px">Spin a random AI / expert segmentation from the NCI Imaging Data Commons — with its source CT, MR, or PET — straight into a live 3D viewer in your browser. No install, data streamed from the IDC public buckets.</div>' +
     '<div style="font-size:42px;font-weight:800;color:#9fe9ff;line-height:1">' + n(s.totalSeg) + '</div>' +
     '<div style="opacity:0.7;margin:4px 0 20px">segmentation series in IDC ' + (s.idcVersion ? '(' + s.idcVersion + ')' : '') + ', across ' + n(s.collections) + ' collections</div>' +

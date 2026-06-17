@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/slicerlive-logo.png" alt="SlicerLive" width="320">
+</p>
+
 # SlicerLive
 
 **Live 3D Slicer scenes on the web** — open a URL and a Slicer MRML/MRB scene renders interactively in your
