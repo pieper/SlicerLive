@@ -33,7 +33,8 @@
              // a shared "Copy link" carries case context -> reconstruct the Details popup on a fresh open
              if (_params.get('col')) window.__IDC_CASE = { c: _ct, s: _seg, m: window.__IDC_MOD, cb: window.__IDC_CTB, sb: window.__IDC_SEGB,
                col: _params.get('col'), st: _params.get('st') || '', sd: _params.get('sd') || '',
-               lic: _params.get('lic') || '', su: _params.get('su') || '', pid: _params.get('pid') || '' }; }
+               lic: _params.get('lic') || '', su: _params.get('su') || '', pid: _params.get('pid') || '',
+               u: _params.get('u') || '', idoi: _params.get('idoi') || '', sdoi: _params.get('sdoi') || '' }; }
   if (_roulette) window.__SEGROULETTE = true;
   if (!_scene && !_ct && !_roulette) document.getElementById('err').textContent = 'No ?scene=<mrml-url>, ?ct=&seg=, or ?segroulette provided.';
   window.addEventListener('offload-build', (e) => {

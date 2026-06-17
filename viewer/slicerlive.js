@@ -2287,20 +2287,35 @@ function openCaseInfo() {
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const viewerURL = e.st ? 'https://viewer.imaging.datacommons.cancer.gov/v3/viewer/?StudyInstanceUIDs=' + encodeURIComponent(e.st) : null;
   const portalURL = 'https://portal.imaging.datacommons.cancer.gov/explore/filters/?collection_id=' + encodeURIComponent(e.col);
-  const tciaURL = meta.doi ? 'https://doi.org/' + encodeURIComponent(meta.doi) : null;
   const licURL = ccDeedURL(e.lic);
   const modName = { CT: 'CT', MR: 'MR', PT: 'PET' }[e.m] || e.m;
-  const dlCode = 'pip install idc-index\nfrom idc_index import IDCClient\nIDCClient().download_from_selection(\n    seriesInstanceUID=["' + (e.u || '') + '", "' + (e.su || '') + '"], downloadDir="case")';
-  const citeTxt = 'Data: the ' + collDisplayName(e.col) + ' collection via the NCI Imaging Data Commons' + (meta.doi ? ' (DOI ' + meta.doi + ')' : '') + '. Please cite the collection and IDC (Fedorov et al., Cancer Res 2021;81:4188–4193).';
+
+  // Citations: the DISTINCT source DOIs of exactly what is on screen -- the image series AND the segmentation,
+  // which in the general case is an analysis result with its OWN DOI (e.g. a Zenodo AIMI dataset, NOT the TCIA
+  // collection) -- plus the IDC platform. Built by idc-index's citations_from_selection at data-prep time and
+  // baked into stats.doiCite (source_DOI -> APA citation). This auto-handles the link text: the citation itself
+  // names "The Cancer Imaging Archive" or "Zenodo", so nothing hard-codes "TCIA".
+  const dc = (_segStats && _segStats.doiCite) || {}, idcCite = (_segStats && _segStats.idcCite) || '';
+  const linkifyDoi = (s) => String(s).replace(/https?:\/\/doi\.org\/(\S+)/gi, (mm, p) => '<a href="https://doi.org/' + esc(p) + '" target="_blank" rel="noopener" style="color:#9fe9ff">' + esc('https://doi.org/' + p) + '</a>');
+  const citeList = [], seenDoi = {};
+  [['Image', e.idoi], ['Segmentation', e.sdoi]].forEach((pair) => {
+    const role = pair[0], d = pair[1];
+    if (!d || seenDoi[d] || !dc[d]) return; seenDoi[d] = 1;
+    citeList.push('<div style="margin:8px 0"><span style="opacity:0.55">' + role + ':</span> ' + linkifyDoi(dc[d]) + '</div>');
+  });
+  if (idcCite) citeList.push('<div style="margin:8px 0"><span style="opacity:0.55">Platform:</span> ' + linkifyDoi(idcCite) + '</div>');
+  if (!citeList.length) citeList.push('<div style="opacity:0.85">' + esc('Data via the NCI Imaging Data Commons' + (meta.doi ? ' (DOI ' + meta.doi + ')' : '') + '.') + '</div>');
+  const dlUIDs = [e.u, e.su].filter(Boolean).join(' ');
+  const dlCode = 'pip install --upgrade idc-index\nidc download ' + dlUIDs;
+
   const rows = [];
   if (meta.cancer) rows.push(['Primary cancer', meta.cancer]);
   if (meta.loc) rows.push(['Body part', meta.loc]);
   if (meta.cases != null) rows.push(['Cases in collection', String(meta.cases)]);
   if (meta.sites) rows.push(['Contributing scanners/sites', meta.sites]);
-  if (meta.segSrc) rows.push(['Segmentation source', meta.segSrc]);
   if (e.sd) rows.push(['This segmentation', e.sd]);
   const link = (href, text) => href ? '<a href="' + esc(href) + '" target="_blank" rel="noopener" style="color:#9fe9ff;text-decoration:none;border-bottom:1px solid rgba(159,233,255,0.4)">' + esc(text) + '</a>' : '';
-  const linksHTML = [link(tciaURL, 'Collection on TCIA'), viewerURL && link(viewerURL, 'Open case in IDC viewer'), link(portalURL, 'Collection in IDC portal')].filter(Boolean).join('<span style="opacity:0.4;margin:0 10px">|</span>');
+  const linksHTML = [viewerURL && link(viewerURL, 'Open case in IDC viewer'), link(portalURL, 'Collection in IDC portal')].filter(Boolean).join('<span style="opacity:0.4;margin:0 10px">|</span>');
 
   _srModal = document.createElement('div');
   _srModal.style.cssText = 'position:fixed; inset:0; z-index:90; display:flex; align-items:center; justify-content:center;' +
@@ -2321,13 +2336,16 @@ function openCaseInfo() {
     '<div style="margin:6px 0 14px">' + linksHTML + '</div>' +
     rows.map(([k, v]) => '<div style="display:flex;gap:12px;margin:7px 0"><div style="flex:0 0 168px;opacity:0.6">' + esc(k) + '</div><div style="flex:1">' + esc(v) + '</div></div>').join('') +
     '<details style="margin-top:16px"><summary style="cursor:pointer;opacity:0.6;outline:none;user-select:none">Cite &amp; download</summary>' +
-    '<div style="opacity:0.85;margin:8px 0">' + esc(citeTxt) + '</div>' +
+    '<div style="opacity:0.8;margin:10px 0 2px">Cite the data shown and the IDC platform:</div>' +
+    citeList.join('') +
+    '<div style="opacity:0.8;margin:14px 0 4px">Download the exact image + segmentation series shown:</div>' +
     '<pre style="margin:0;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.14);border-radius:8px;padding:10px 12px;overflow:auto;font:12px/1.5 ui-monospace,Menlo,monospace;color:#cfe6ff;white-space:pre">' + esc(dlCode) + '</pre></details>';
 
   // Shareable deep-link to exactly this case on the live site (copy + send to a colleague)
   const shareURL = 'https://pieper.github.io/live/viewer.html?' + new URLSearchParams(   // carry case context so the opened link can show Details
     { ct: e.c, seg: e.s, mod: e.m, ctb: e.cb || 'idc-open-data', segb: e.sb || 'idc-open-data',
-      col: e.col || '', st: e.st || '', sd: e.sd || '', lic: e.lic || '', su: e.su || '', pid: e.pid || '' }).toString();
+      col: e.col || '', st: e.st || '', sd: e.sd || '', lic: e.lic || '', su: e.su || '', pid: e.pid || '',
+      u: e.u || '', idoi: e.idoi || '', sdoi: e.sdoi || '' }).toString();
   const shareLabel = document.createElement('div'); shareLabel.style.cssText = 'margin:16px 0 6px;opacity:0.6'; shareLabel.textContent = 'Link to this case';
   const shareRow = document.createElement('div'); shareRow.style.cssText = 'display:flex;gap:8px;align-items:center';
   const inp = document.createElement('input'); inp.readOnly = true; inp.value = shareURL;
