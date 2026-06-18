@@ -98,18 +98,33 @@ async function buildVolume(ctKeys) {
   const c0 = lps2ras(rowDir.map((v) => v * ps[1])), c1 = lps2ras(colDir.map((v) => v * ps[0])),
         c2 = lps2ras(normal.map((v) => v * sliceSpacing)), o = lps2ras(p0);
   const ijkToRAS = [c0[0], c1[0], c2[0], o[0], c0[1], c1[1], c2[1], o[1], c0[2], c1[2], c2[2], o[2], 0, 0, 0, 1];
-  const vol = new Int16Array(nx * ny * nz);
+  const isPET = MODNAME === 'PET';                  // PET activity (Bq/mL) overflows Int16 -> store Float32
+  const vol = isPET ? new Float32Array(nx * ny * nz) : new Int16Array(nx * ny * nz);
   const slope = Number(s0.RescaleSlope ?? 1), inter = Number(s0.RescaleIntercept ?? 0);
   for (let k = 0; k < nz; k++) {
     const ds = slices[k];
     let pd = ds.PixelData; if (Array.isArray(pd)) pd = pd[0];
     const px = ds.PixelRepresentation === 1 ? new Int16Array(pd) : new Uint16Array(pd);
     const off = k * nx * ny;
-    for (let p = 0; p < nx * ny; p++) vol[off + p] = px[p] * slope + inter;   // -> HU
+    for (let p = 0; p < nx * ny; p++) vol[off + p] = px[p] * slope + inter;   // CT -> HU; PET -> activity; MR -> raw
   }
-  const win = Number((Array.isArray(s0.WindowWidth) ? s0.WindowWidth[0] : s0.WindowWidth) ?? 400);
-  const lev = Number((Array.isArray(s0.WindowCenter) ? s0.WindowCenter[0] : s0.WindowCenter) ?? 40);
-  return { vol, dims: [nx, ny, nz], ijkToRAS, win, lev, iop, ps };
+  // Modality-aware window/level. CT keeps its HU window (the VR preset is HU-calibrated). PET/MR DICOM
+  // WindowWidth/Center are unreliable (PET looks washed out), so estimate from the data via robust percentiles
+  // of a subsample: PET = 0 .. p98 of the NON-zero activity (clips the bright bladder/brain to white, uptake stays
+  // visible); MR = p1 .. p99 of all voxels.
+  let win, lev;
+  if (MODNAME === 'CT') {
+    win = Number((Array.isArray(s0.WindowWidth) ? s0.WindowWidth[0] : s0.WindowWidth) ?? 400);
+    lev = Number((Array.isArray(s0.WindowCenter) ? s0.WindowCenter[0] : s0.WindowCenter) ?? 40);
+  } else {
+    const N = vol.length, step = Math.max(1, (N / 200000) | 0), samp = [];
+    for (let i = 0; i < N; i += step) { const v = vol[i]; if (!isPET || v > 0) samp.push(v); }
+    samp.sort((a, b) => a - b);
+    const pct = (f) => (samp.length ? samp[Math.min(samp.length - 1, (f * samp.length) | 0)] : 0);
+    const lo = isPET ? 0 : pct(0.01), hi = isPET ? (pct(0.98) || 1) : pct(0.99);
+    lev = (lo + hi) / 2; win = Math.max(1, hi - lo);
+  }
+  return { vol, dims: [nx, ny, nz], ijkToRAS, win, lev, iop, ps, dtype: isPET ? 'float32' : 'int16' };
 }
 
 // ---- SEG (1 multiframe) -> Uint8 labelmap on the CT grid + segment colors/names ----
@@ -219,7 +234,7 @@ self.onmessage = async (e) => {
     prog('fetching ' + MODNAME + '…', 0.05);
     const ct = await buildVolume(ctKeys);
     // progressive: hand the CT to the main thread right away so it can render the slices while the SEG loads
-    post({ t: 'ct', vol: ct.vol, dims: ct.dims, ijkToRAS: ct.ijkToRAS, win: ct.win, lev: ct.lev }, [ct.vol.buffer]);
+    post({ t: 'ct', vol: ct.vol, dims: ct.dims, ijkToRAS: ct.ijkToRAS, win: ct.win, lev: ct.lev, dtype: ct.dtype }, [ct.vol.buffer]);
     if (segKeys && segKeys.length) {
       prog('fetching SEG…', 0.5);
       let parsed;

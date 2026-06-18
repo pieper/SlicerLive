@@ -1222,6 +1222,9 @@ function renderSlices() {
     cam.setClippingRange(D - t * 0.4, D + t * 0.4);   // thin slab CENTERED on the slice voxel (was D-0.5..D+t, which
     // reached a full voxel BEHIND the plane -> the ray composited this slice's label AND the next slice's, so a
     // segment behind showed THROUGH (the "cyst through kidney" overlap). +/-0.4*spacing stays inside one voxel.
+    const sd = Math.max(0.05, t / 8);   // sample the slab ~8x: non-axial slabs cut the FINE axis (thin), so 0.5mm left
+    if (sr.ctMapper) sr.ctMapper.setSampleDistance(sd);   // gaps -> dotted/speckled seg-only render -> spurious outlines
+    if (sr.ovMapper) sr.ovMapper.setSampleDistance(sd);
   }
 }
 
@@ -2081,7 +2084,8 @@ function runIDCWorker(ctKeys, segKeys, handlers, ctBucket, segBucket, modality) 
       if (m.t === 'thumb') { mosaicDraw(m.n, m.w, m.h, m.rgba); return; }
       if (m.t === 'seg') { addSegName(m.name); return; }
       if (m.t === 'progress') { setLoadProgress(m.frac, m.msg); return; }
-      if (m.t === 'ct') { const ct = { vol: new Int16Array(m.vol), dims: m.dims, ijkToRAS: m.ijkToRAS, win: m.win, lev: m.lev };
+      if (m.t === 'ct') { const Ctor = m.dtype === 'float32' ? Float32Array : Int16Array;   // PET volume is Float32 (Int16 overflows)
+        const ct = { vol: new Ctor(m.vol), dims: m.dims, ijkToRAS: m.ijkToRAS, win: m.win, lev: m.lev };
         chain = chain.then(() => handlers.onCT(ct)).catch((err) => console.error('[IDC] onCT', err)); return; }
       if (m.t === 'labelmap') { const seg = { lab: new Uint8Array(m.lab), colors: m.colors, names: m.names };
         chain = chain.then(() => handlers.onLabelmap(seg)).catch((err) => console.error('[IDC] onLabelmap', err)); return; }
@@ -2302,6 +2306,14 @@ function openCtrlMenu() {
       _ctrlMenu.appendChild(wrap);
     }
   }
+  const about = document.createElement('div');   // About -> the SlicerLive GitHub readme (opens in a new tab)
+  about.style.cssText = 'cursor:pointer;border-radius:9px;padding:9px 8px;margin-top:4px;border-top:1px solid rgba(255,255,255,0.12);' +
+    'font:600 13px -apple-system,system-ui,sans-serif;color:#9fe9ff;';
+  about.textContent = 'About SlicerLive';
+  about.onmouseenter = () => { about.style.background = 'rgba(255,255,255,0.07)'; };
+  about.onmouseleave = () => { about.style.background = 'transparent'; };
+  about.onclick = () => { window.open('https://github.com/pieper/SlicerLive', '_blank', 'noopener'); };
+  _ctrlMenu.appendChild(about);
   document.body.appendChild(_ctrlMenu);
   if (_ctrlBtn) { const r = _ctrlBtn.getBoundingClientRect();   // anchor just under the button, right edges aligned
     _ctrlMenu.style.top = Math.round(r.bottom + 8) + 'px'; _ctrlMenu.style.right = Math.round(Math.max(8, window.innerWidth - r.right)) + 'px'; }
@@ -2486,6 +2498,7 @@ async function srSpin() {
   if (_srSpinning || !_segByCol) return;
   _srSpinning = true; if (_srBtn) _srBtn.disabled = true;
   const e = srPick(), mod = { CT: 'CT', MR: 'MR', PT: 'PET' }[e.m] || e.m;
+  _vrOn = true; _seg3DOn = true; _seg2DOn = true;   // every spin starts with VR + segmentation visible (fill/outline style persists)
   _srCurrent = e; closeCaseInfo();
   if (_srCap) _srCap.textContent = mod + '  \u00b7  ' + e.col + '  \u00b7  ' + (e.sd || 'segmentation');
   if (_srLic) _srLic.textContent = e.lic || '';
@@ -2530,6 +2543,7 @@ let _srLanding = null;
 function closeLanding() { if (_srLanding) { _srLanding.remove(); _srLanding = null; } }
 function showLanding() {
   closeLanding();
+  _vrOn = true; _seg3DOn = true; _seg2DOn = true; _segFill = true; _segOutline = true;   // back to the spin page -> all display modes to defaults
   const s = _segStats || {}, bm = s.byMod || {}, n = (x) => (x == null ? '–' : x.toLocaleString());
   _srLanding = document.createElement('div');
   _srLanding.style.cssText = 'position:fixed; inset:0; z-index:95; display:flex; align-items:center; justify-content:center;' +
