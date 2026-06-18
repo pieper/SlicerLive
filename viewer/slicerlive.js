@@ -152,13 +152,52 @@ function extendSlicerRotate(publicAPI, model, initialValues = {}) {
 }
 const newSlicerRotateManipulator = macro.newInstance(extendSlicerRotate, 'vtkSlicerRotateManipulator');
 
+// Zoom EXACTLY like Slicer's desktop 3D view (vtkMRMLCameraWidget::Dolly): camera.dolly(factor) moves the camera
+// along the view axis and KEEPS THE FOCAL POINT FIXED, so the center of rotation stays put in world space while
+// zooming. The stock vtkMouseCameraTrackballZoomManipulator's drag path instead translates the focal point along
+// with the camera -- that slid the rotation center into the scene on a right-drag zoom (the reported bug). Wheel
+// uses Slicer's Dolly(pow(1.1, +/-0.2*MotionFactor*MouseWheelMotionFactor)); drag uses ProcessScale, verbatim.
+const SLICER_MOTION_FACTOR = 10.0, SLICER_WHEEL_FACTOR = 1.0;
+function slicerDolly(renderer, factor) {
+  const camera = renderer.getActiveCamera();
+  if (camera.getParallelProjection()) camera.setParallelScale(camera.getParallelScale() / factor);
+  else { camera.dolly(factor); renderer.resetCameraClippingRange(); }
+  scene3DDirty = true; markDirty();
+}
+function vtkSlicerZoomManipulator(publicAPI, model) {
+  model.classHierarchy.push('vtkSlicerZoomManipulator');
+  publicAPI.onButtonDown = (interactor, renderer, position) => { model.prev = position; };
+  publicAPI.onMouseMove = (interactor, renderer, position) => {              // right-drag = ProcessScale
+    if (!position || !model.prev) return;
+    const size = interactor.getView().getViewportSize(renderer);
+    const dy = position.y - model.prev.y;
+    if (dy === 0) { model.prev = position; return; }
+    const centerY = size[1] / 2;                                            // Renderer->GetCenter()[1]
+    const dyf = SLICER_MOTION_FACTOR * dy / centerY;
+    slicerDolly(renderer, Math.pow(1.1, -1.0 * dyf));                       // pull toward you -> closer
+    model.prev = position;
+  };
+  publicAPI.onScroll = (interactor, renderer, delta) => {                   // wheel = Dolly(pow(1.1, +/-2))
+    if (!delta) return;
+    const dir = delta < 0 ? 1 : -1;                                         // match vtk.js: negative delta = zoom in
+    slicerDolly(renderer, Math.pow(1.1, dir * 0.2 * SLICER_MOTION_FACTOR * SLICER_WHEEL_FACTOR));
+  };
+}
+function extendSlicerZoom(publicAPI, model, initialValues = {}) {
+  Object.assign(model, initialValues);
+  macro.obj(publicAPI, model);
+  vtkCompositeMouseManipulator.extend(publicAPI, model, initialValues);
+  vtkSlicerZoomManipulator(publicAPI, model);
+}
+const newSlicerZoomManipulator = macro.newInstance(extendSlicerZoom, 'vtkSlicerZoomManipulator');
+
 const istyle = vtkInteractorStyleManipulator.newInstance();   // Slicer-matched bindings
 [
   newSlicerRotateManipulator({ button: 1 }),                   // left-drag = rotate, exactly like Slicer desktop
   vtkMouseCameraTrackballPanManipulator.newInstance({ button: 2 }),
   vtkMouseCameraTrackballPanManipulator.newInstance({ button: 1, shift: true }),
-  vtkMouseCameraTrackballZoomManipulator.newInstance({ button: 3 }),
-  vtkMouseCameraTrackballZoomManipulator.newInstance({ scrollEnabled: true, dragEnabled: false }),
+  newSlicerZoomManipulator({ button: 3 }),                     // right-drag = zoom, focal point fixed (Slicer Dolly)
+  newSlicerZoomManipulator({ scrollEnabled: true, dragEnabled: false }),   // wheel = zoom, focal point fixed (Slicer Dolly)
 ].forEach((m) => istyle.addMouseManipulator(m));
 istyle.addGestureManipulator(vtkGestureCameraManipulator.newInstance());
 interactor.setInteractorStyle(istyle);
