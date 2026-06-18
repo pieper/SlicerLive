@@ -1120,11 +1120,12 @@ function setSliceIndex(slot, idx) {
   slicesDirty = true; scene3DDirty = true;
 }
 
-// Build (once, cached) the merged-labelmap image (world geometry) + color/opacity LUT for the 2D slice overlay.
-const _lmCache = new Map();   // segId:hash -> { img, ctf, ofun, maxLabel }
+// Build (once, cached) the labelmap image (world geometry) + per-label color LUT for the 2D slice FILL overlay.
+// The colored OUTLINE is a separate screen-space edge-detect pass (drawSegOutlines), not baked into the data.
+const _lmCache = new Map();   // segId:token -> { img, ctf, ofun }
 async function ensureLabelmapImage(seg) {
   const meta = seg.blobs && seg.blobs.labelmap;
-  if (!seg.attrs.labelmapDims || (!meta && !seg.__labelmap)) return null;
+  if (!seg.attrs.labelmapDims || (!seg.__labelmap && !meta)) return null;
   const key = seg.id + ':' + (seg.__labelmap ? 'direct' : meta.hash);
   if (_lmCache.has(key)) return _lmCache.get(key);
   const arr = seg.__labelmap || await fetchArray(meta); if (!arr) return null;
@@ -1135,11 +1136,8 @@ async function ensureLabelmapImage(seg) {
   const ctf = vtkColorTransferFunction.newInstance();
   ctf.addRGBPoint(0, 0, 0, 0);
   for (const c of (seg.attrs.segmentColors || [])) ctf.addRGBPoint(c[0], c[1], c[2], c[3]);   // [label, r, g, b]
-  const op = seg.attrs.seg2DOpacity != null ? seg.attrs.seg2DOpacity : 0.5;
-  const maxLabel = (seg.attrs.segmentColors || []).reduce((m, c) => Math.max(m, c[0]), 1);
-  const ofun = vtkPiecewiseFunction.newInstance();
-  ofun.addPoint(0, 0); ofun.addPoint(0.5, 0); ofun.addPoint(1, op); ofun.addPoint(maxLabel, op);   // 0 transparent, >=1 = fill
-  const rec = { img, ctf, ofun, maxLabel };
+  const ofun = vtkPiecewiseFunction.newInstance(); ofun.addPoint(0, 0);   // applySeg2DOpacity sets the real LUT
+  const rec = { img, ctf, ofun };
   _lmCache.set(key, rec); return rec;
 }
 
@@ -1223,6 +1221,58 @@ function renderSlices() {
     cam.setViewUp(slot.up[0], slot.up[1], slot.up[2]); cam.setParallelScale(slot.pscale || slot.fov / 2);
     cam.setClippingRange(D - 0.5, D + t);   // near clip == the slice plane; thin slab -> a slice
   }
+}
+
+// --- Segmentation OUTLINE: a screen-space edge-detect pass over the extracted slabs (NOT baked into the labelmap).
+// Once per slice/scene change we do a quick seg-only render (CT hidden, fill forced opaque), read those pixels, and
+// mark any segment pixel that touches a DIFFERENT segment (or background) as an outline pixel in its own color --
+// so where two segments touch you get two abutting 1px outlines, and the contour is crisp at any zoom (it follows
+// screen pixels, not voxel borders). Drawn onto the 2D `out` canvas each frame.
+const _segScratch = document.createElement('canvas');
+const _segScratchCtx = _segScratch.getContext('2d', { willReadFrequently: true });
+const _outlineCanvas = document.createElement('canvas');
+const _outlineCtx = _outlineCanvas.getContext('2d');
+let _segOutlineDirty = true, _outlineReady = false;
+function computeSegOutlines() {
+  const glc = glWindow.getCanvas && glWindow.getCanvas(); if (!glc) return;
+  if (!mirror.get('idcSeg')) return;
+  const draw3D = renderer.getDraw ? renderer.getDraw() : true;
+  const ctVis = [];                                          // seg-only: hide 3D + every slice's CT, fill -> opaque
+  renderer.setDraw(false);
+  for (const nm in _sliceRens) { const sr = _sliceRens[nm]; if (sr && sr.ctVol) { ctVis.push([sr.ctVol, sr.ctVol.getVisibility()]); sr.ctVol.setVisibility(false); } }
+  _segOutOpaque = true; applySeg2DOpacity();
+  try { renderWindow.render(); } catch (e) {}
+  const W = out.width, H = out.height;                       // work at the DISPLAY resolution so the final draw is 1:1 (no downscale -> no alpha loss)
+  if (!W || !H) { renderer.setDraw(draw3D); for (const [v, vis] of ctVis) v.setVisibility(vis); _segOutOpaque = false; applySeg2DOpacity(); return; }
+  if (_segScratch.width !== W || _segScratch.height !== H) { _segScratch.width = W; _segScratch.height = H; _outlineCanvas.width = W; _outlineCanvas.height = H; }
+  let src = null;
+  try { _segScratchCtx.clearRect(0, 0, W, H); _segScratchCtx.drawImage(glc, 0, 0, W, H); src = _segScratchCtx.getImageData(0, 0, W, H); } catch (e) {}
+  renderer.setDraw(draw3D);                                  // restore (the caller renders normally right after)
+  for (const [v, vis] of ctVis) v.setVisibility(vis);
+  _segOutOpaque = false; applySeg2DOpacity();
+  if (src) { edgeDetectOutline(src, W, H); _outlineReady = true; }
+}
+function edgeDetectOutline(src, W, H) {
+  const s = src.data, dst = _outlineCtx.createImageData(W, H), d = dst.data;
+  const skip3D = !(_maxView && _maxView !== 'threeD');       // 4-up -> skip the 3D quadrant (top-right of the readback)
+  const noSlices = _maxView === 'threeD';
+  const halfW = W >> 1, halfH = H >> 1, row = W * 4;
+  const isSeg = (p) => s[p] > 18 || s[p + 1] > 18 || s[p + 2] > 18;                                  // non-black = a segment pixel
+  const diff = (a, b) => (Math.abs(s[a] - s[b]) + Math.abs(s[a + 1] - s[b + 1]) + Math.abs(s[a + 2] - s[b + 2])) > 60;
+  const stamp = (q, p) => { d[q] = s[p]; d[q + 1] = s[p + 1]; d[q + 2] = s[p + 2]; d[q + 3] = 255; };
+  if (!noSlices) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (skip3D && x >= halfW && y < halfH) continue;         // the 3D viewport
+    const p = (y * W + x) * 4; if (!isSeg(p)) continue;
+    const border = (x > 0 && (!isSeg(p - 4) || diff(p, p - 4))) || (x < W - 1 && (!isSeg(p + 4) || diff(p, p + 4))) ||
+                   (y > 0 && (!isSeg(p - row) || diff(p, p - row))) || (y < H - 1 && (!isSeg(p + row) || diff(p, p + row)));
+    if (!border) continue;
+    stamp(p, p);                                    // ~2px line, dilated ONLY into same-segment pixels (stays inside the segment)
+    if (x > 0 && isSeg(p - 4) && !diff(p, p - 4)) stamp(p - 4, p);
+    if (x < W - 1 && isSeg(p + 4) && !diff(p, p + 4)) stamp(p + 4, p);
+    if (y > 0 && isSeg(p - row) && !diff(p, p - row)) stamp(p - row, p);
+    if (y < H - 1 && isSeg(p + row) && !diff(p, p + row)) stamp(p + row, p);
+  }
+  _outlineCtx.putImageData(dst, 0, 0);
 }
 // --- maximize: double-click a viewport -> fullscreen; double-click again -> restore 4-up. The 3D + 3 slice
 // renderers are viewports of the ONE render window, so maximize = give that renderer the whole window and stop
@@ -1645,14 +1695,18 @@ function composite(now) {
   const gl = glWindow.getCanvas && glWindow.getCanvas();
   if (!gl) return;
   if (STANDALONE) {                                            // no video: host (opacity 1) shows the render; just draw decorations
-    if (slicesDirty) { renderSlices(); slicesDirty = false; scene3DDirty = true; }   // slice cameras moved -> redraw all viewports
+    if (slicesDirty) { renderSlices(); slicesDirty = false; scene3DDirty = true; _segOutlineDirty = true; }   // slice cameras moved -> redraw all viewports
     if (scene3DDirty || interacting || pendingRenders > 0) {
       if (scene3DDirty || pendingRenders > 0) renderer.resetCameraClippingRange();   // async-loaded volume/models changed bounds -> keep in clip range
       renderer.updateLightsGeometryToFollowCamera();   // the render path doesn't follow the camera; without this the headlight lags -> dark VR until interaction
+      if (_segOutlineDirty && _seg2DOn && _segOutline && mirror.get('idcSeg')) computeSegOutlines();   // seg-only readback -> screen-space outline (before the normal render restores the view)
+      _segOutlineDirty = false;
       renderWindow.render(); pushCameraIfChanged(); scene3DDirty = false;   // renders ALL viewports: 3D (top-right) + 3 MPR slices
       if (pendingRenders > 0) pendingRenders--;
     }
-    outCtx.clearRect(0, 0, geom.cw, geom.ch); drawDecorations2D();   // 2D decorations over the viewports (no slice blit)
+    outCtx.clearRect(0, 0, geom.cw, geom.ch);
+    if (_seg2DOn && _segOutline && _outlineReady && mirror.get('idcSeg')) outCtx.drawImage(_outlineCanvas, 0, 0);   // colored segment outlines (1:1, display res)
+    drawDecorations2D();   // 2D decorations over the viewports (no slice blit)
     return;
   }
   const v = document.getElementById('v');
@@ -2072,7 +2126,7 @@ function buildIDCNodes(ct, hasSeg, modality) {
     add('idcComp' + name, 'vtkMRMLSliceCompositeNode', { layoutName: name, backgroundVolumeID: vol, foregroundOpacity: 0, labelOpacity: 1 }, { backgroundVolume: [vol] });
   }
   if (hasSeg) {
-    const segDisp = add('idcSegDisp', 'vtkMRMLSegmentationDisplayNode', { visibility: _segOn ? 1 : 0, visibility3D: _segOn ? 1 : 0 });
+    const segDisp = add('idcSegDisp', 'vtkMRMLSegmentationDisplayNode', { visibility: (_seg3DOn || _seg2DOn) ? 1 : 0, visibility3D: _seg3DOn ? 1 : 0 });
     add('idcSeg', 'vtkMRMLSegmentationNode', { labelmapDims: [nx, ny, nz], labelmapIjkToRAS: M, segmentColors: [], seg2DOpacity: 0.5, segments: [] }, { display: [segDisp] });
   }
   return nodes;
@@ -2135,8 +2189,8 @@ function finalizeRotationCenter() {
 }
 
 // --- Volume-rendering on/off toggle (a glass button over the 3D quadrant; NO emoji -> see the QtWebEngine crash) ---
-let _vrOn = true, _segOn = true, _ctrlBtn = null, _ctrlMenu = null;
-let _segVis = {};           // per-segment visibility: label -> bool (default visible); gated by the master _segOn
+let _vrOn = true, _seg3DOn = true, _seg2DOn = true, _segFill = true, _segOutline = true, _ctrlBtn = null, _ctrlMenu = null;
+let _segVis = {};           // per-segment visibility: label -> bool (default visible); gated by the per-view masters
 let _rotCenterSet = false;  // the trackball pivot has been finalized for the current case (set once after full load)
 let _idcRotCenter = null;   // RAS trackball pivot for the current case (segmentation centroid once known, else null)
 function segVisible(L) { return _segVis[L] !== false; }   // default true
@@ -2147,26 +2201,28 @@ function applyVR() {
   updateCtrlSwitches();
   scene3DDirty = true; try { renderWindow.render(); } catch (e) {} markDirty();
 }
-// Segmentation visibility: master toggle (_segOn) AND per-segment (_segVis[label]), applied to both the 3D surface
-// actors (SegmentationDM, keyed 'seg'<label>) and the colored 2D slice overlay (per-label opacity in ovVol).
+// Segmentation visibility: independent 3D (surfaces) + 2D-in-slices toggles, AND per-segment (_segVis[label]).
+// 3D = SegmentationDM surface actors (keyed 'seg'<label>); 2D = per-label opacity in the slice overlay (ovVol).
 function applySegVis() {
-  const disp = mirror.get('idcSegDisp'); if (disp) { disp.attrs.visibility = _segOn ? 1 : 0; disp.attrs.visibility3D = _segOn ? 1 : 0; }
+  const disp = mirror.get('idcSegDisp'); if (disp) { disp.attrs.visibility = (_seg3DOn || _seg2DOn) ? 1 : 0; disp.attrs.visibility3D = _seg3DOn ? 1 : 0; }
   for (const dm of DMS) if (dm.items && dm.items.has('idcSeg')) {
     const it = dm.items.get('idcSeg');
-    for (const [sid, s] of it.segs) { const L = parseInt(String(sid).replace(/^seg/, ''), 10); s.actor.setVisibility(_segOn && segVisible(L)); }
+    for (const [sid, s] of it.segs) { const L = parseInt(String(sid).replace(/^seg/, ''), 10); s.actor.setVisibility(_seg3DOn && segVisible(L)); }
   }
   applySeg2DOpacity();
   updateCtrlSwitches();
-  slicesDirty = true; scene3DDirty = true; try { renderWindow.render(); } catch (e) {} markDirty();
+  _segOutlineDirty = true; slicesDirty = true; scene3DDirty = true; try { renderWindow.render(); } catch (e) {} markDirty();
 }
-// Rebuild the 2D overlay's per-label opacity function (nearest-interpolated labelmap -> opacity per integer label),
-// honoring the master toggle + per-segment visibility, and re-apply to every slice's overlay volume.
+// Rebuild the 2D slice FILL LUT: per-label opacity, gated by the in-slices master + Fill toggle + per-segment
+// visibility. The OUTLINE is drawn separately in screen space (drawSegOutlines). _segOutOpaque temporarily forces
+// full opacity for the seg-only readback that the outline pass uses.
+let _segOutOpaque = false;
 function applySeg2DOpacity() {
   const seg = mirror.get('idcSeg'); if (!seg) return;
-  const op = seg.attrs.seg2DOpacity != null ? seg.attrs.seg2DOpacity : 0.5;
+  const fillOp = _segOutOpaque ? 1.0 : (seg.attrs.seg2DOpacity != null ? seg.attrs.seg2DOpacity : 0.45);
   const ofun = vtkPiecewiseFunction.newInstance();
   ofun.addPoint(0, 0); ofun.addPoint(0.5, 0);
-  for (const c of (seg.attrs.segmentColors || [])) ofun.addPoint(c[0], (_segOn && segVisible(c[0])) ? op : 0);
+  for (const c of (seg.attrs.segmentColors || [])) ofun.addPoint(c[0], ((_segOutOpaque || (_seg2DOn && _segFill)) && segVisible(c[0])) ? fillOp : 0);
   for (const nm in _sliceRens) { const sr = _sliceRens[nm]; if (sr && sr.ovVol) sr.ovVol.getProperty().setScalarOpacity(0, ofun); }
 }
 
@@ -2220,14 +2276,19 @@ function openCtrlMenu() {
   _ctrlMenu.appendChild(add(makeToggleRow('Volume rendering', () => _vrOn, (v) => { _vrOn = v; applyVR(); })));
   const segs = window.__caseSegments || [];
   if (mirror.get('idcSeg')) {
-    _ctrlMenu.appendChild(add(makeToggleRow('Segmentation', () => _segOn, (v) => { _segOn = v; applySegVis(); })));
+    _ctrlMenu.appendChild(add(makeToggleRow('Segmentation (3D)', () => _seg3DOn, (v) => { _seg3DOn = v; applySegVis(); })));
+    _ctrlMenu.appendChild(add(makeToggleRow('Segmentation in slices', () => _seg2DOn, (v) => { _seg2DOn = v; applySegVis(); })));
+    _ctrlMenu.appendChild(add(makeToggleRow('Fill', () => _segFill, (v) => { _segFill = v; applySegVis(); },
+      { indent: true, small: true, dim: () => !_seg2DOn })));
+    _ctrlMenu.appendChild(add(makeToggleRow('Outline', () => _segOutline, (v) => { _segOutline = v; applySegVis(); },
+      { indent: true, small: true, dim: () => !_seg2DOn })));
     if (segs.length) {                              // per-segment visibility, nested + scrollable past 5 segments
       const wrap = document.createElement('div');
       wrap.style.cssText = 'margin-top:2px;border-top:1px solid rgba(255,255,255,0.12);padding-top:4px;' +
         (segs.length > 5 ? 'max-height:184px;overflow-y:auto;' : '');
       for (const s of segs) { const L = s.n;
         wrap.appendChild(add(makeToggleRow(s.name, () => segVisible(L), (v) => { _segVis[L] = v; applySegVis(); },
-          { swatch: s.rgb, indent: true, small: true, dim: () => !_segOn }))); }
+          { swatch: s.rgb, indent: true, small: true, dim: () => !_seg3DOn && !_seg2DOn }))); }
       _ctrlMenu.appendChild(wrap);
     }
   }
@@ -2322,7 +2383,7 @@ async function buildSegSurfaces(ct, seg, segNode) {
 // surfaces), the slice-view volumes (syncFourUp only removes these when a NEW volume replaces them, so an empty
 // mirror would leave them), the view box, and the cached per-slice state. Called at the start of every load.
 function clearIDCScene() {
-  mirror.clear(); localBlobs.clear();
+  mirror.clear(); localBlobs.clear(); _lmCache.clear();   // drop the previous case's cached labelmap overlay image
   for (const dm of DMS) if (dm.items) for (const id of [...dm.items.keys()]) { try { dm.remove(id); } catch (e) {} }
   if (_sliceRens) for (const name in _sliceRens) {
     const sr = _sliceRens[name];
