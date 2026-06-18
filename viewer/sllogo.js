@@ -6,24 +6,22 @@ function _strokes(color, wm, wb, wt) {
          '<use href="#sllb" stroke="' + color + '" stroke-width="' + wb + '"/>' +
          '<use href="#sllt" stroke="' + color + '" stroke-width="' + wt + '"/>';
 }
-// Returns an HTML string: the static brand mark (px square) + the SlicerLive wordmark.
-export function slicerLiveLogo(px, markURL) {
-  px = px || 190; markURL = markURL || '3D-Slicer-Mark.svg';
-  const ds1 = (px * 0.085).toFixed(0), ds2 = (px * 0.17).toFixed(0), wf = (px * 0.185).toFixed(0);
+// The square brand mark (sphere + gold lightning), sized to px. px-dependent values are inlined on the
+// elements (not in the shared classes) so multiple instances at different sizes never collide.
+function _markStage(px, markURL) {
+  const ds1 = (px * 0.085).toFixed(1), ds2 = (px * 0.17).toFixed(1);
   return (
     '<style>' +
-    '.sll-stage{position:relative;width:' + px + 'px;height:' + px + 'px;margin:0 auto}' +
+    '.sll-stage{position:relative;margin:0 auto}' +
     '.sll-layer{position:absolute;inset:0;overflow:visible}' +
     '.sll-layer svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}' +
     '.sll-layer use{fill:none;stroke-linejoin:round;stroke-linecap:round}' +
-    '.sll-logo{background:url(' + markURL + ') center/contain no-repeat;filter:brightness(1.1) saturate(1.1) drop-shadow(0 0 ' + ds1 + 'px rgba(255,200,80,.6)) drop-shadow(0 0 ' + ds2 + 'px rgba(255,175,55,.35))}' +
+    '.sll-logo{background:url(' + markURL + ') center/contain no-repeat}' +
     '.sll-clip{-webkit-mask:url(' + markURL + ') center/contain no-repeat;mask:url(' + markURL + ') center/contain no-repeat}' +
     '.sll-wash{background:radial-gradient(60% 60% at 48% 52%, rgba(255,205,95,.5), rgba(255,165,45,.2) 70%, rgba(255,150,35,.04));mix-blend-mode:screen;opacity:.85}' +
     '.sll-xray{mix-blend-mode:screen}' +
-    '.sll-word{font:800 ' + wf + 'px/1 -apple-system,system-ui,sans-serif;letter-spacing:1px;color:#eef7ff;text-align:center;margin-top:6px;text-shadow:0 0 20px rgba(255,210,90,.45)}' +
-    '.sll-word b{color:#ffd34d}' +
     '</style>' +
-    '<div class="sll-stage">' +
+    '<div class="sll-stage" style="width:' + px + 'px;height:' + px + 'px">' +
       '<svg width="0" height="0"><defs>' +
         '<path id="sllm" d="' + SLL.m + '"/><path id="sllb" d="' + SLL.b + '"/><path id="sllt" d="' + SLL.t + '"/>' +
         '<filter id="sllaura" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="5"/></filter>' +
@@ -35,14 +33,22 @@ export function slicerLiveLogo(px, markURL) {
         '<g filter="url(#sllaura)" opacity="0.95">' + _strokes('#ffc63a',6.5,4,2.4) + '</g>' +
         _strokes('#ffd84e',4,2.4,1.4) + _strokes('#fff7d6',2,1.2,0.7) +
       '</svg></div>' +
-      '<div class="sll-layer sll-logo"></div>' +
+      '<div class="sll-layer sll-logo" style="filter:brightness(1.1) saturate(1.1) drop-shadow(0 0 ' + ds1 + 'px rgba(255,200,80,.6)) drop-shadow(0 0 ' + ds2 + 'px rgba(255,175,55,.35))"></div>' +
       '<div class="sll-layer sll-clip sll-wash"></div>' +
       '<div class="sll-layer sll-clip sll-xray"><svg viewBox="0 0 230 230">' +
         '<g filter="url(#sllxr)" opacity="0.85">' + _strokes('#ff9e1e',7,4.4,2.4) + '</g>' +
         '<g filter="url(#sllxg)" opacity="1">' + _strokes('#ffd44d',4.2,2.6,1.4) + '</g>' +
         '<g filter="url(#sllxc)" opacity="0.95">' + _strokes('#fffae6',2.2,1.4,0.8) + '</g>' +
       '</svg></div>' +
-    '</div>' +
-    '<div class="sll-word">Slicer<b>Live</b></div>'
+    '</div>'
   );
 }
+// Full brand lockup: the mark + the SlicerLive wordmark (used on the landing + README).
+export function slicerLiveLogo(px, markURL) {
+  px = px || 190; markURL = markURL || '3D-Slicer-Mark.svg';
+  const wf = (px * 0.185).toFixed(0);
+  return _markStage(px, markURL) +
+    '<div style="font:800 ' + wf + 'px/1 -apple-system,system-ui,sans-serif;letter-spacing:1px;color:#eef7ff;text-align:center;margin-top:6px;text-shadow:0 0 20px rgba(255,210,90,.45)">Slicer<b style="color:#ffd34d">Live</b></div>';
+}
+// Just the square mark (no wordmark), for use as a compact button icon.
+export function slicerLiveMark(px, markURL) { return _markStage(px || 40, markURL || '3D-Slicer-Mark.svg'); }

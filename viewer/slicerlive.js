@@ -17,6 +17,8 @@ import vtkMouseCameraTrackballRotateManipulator from '@kitware/vtk.js/Interactio
 import vtkMouseCameraTrackballPanManipulator from '@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballPanManipulator';
 import vtkMouseCameraTrackballZoomManipulator from '@kitware/vtk.js/Interaction/Manipulators/MouseCameraTrackballZoomManipulator';
 import vtkGestureCameraManipulator from '@kitware/vtk.js/Interaction/Manipulators/GestureCameraManipulator';
+import vtkCompositeMouseManipulator from '@kitware/vtk.js/Interaction/Manipulators/CompositeMouseManipulator';
+import macro from '@kitware/vtk.js/macros';
 import vtkActor from '@kitware/vtk.js/Rendering/Core/Actor';
 import vtkMapper from '@kitware/vtk.js/Rendering/Core/Mapper';
 import vtkVolume from '@kitware/vtk.js/Rendering/Core/Volume';
@@ -37,7 +39,7 @@ import vtkImageMarchingCubes from '@kitware/vtk.js/Filters/General/ImageMarching
 import vtkScalarBarActor from '@kitware/vtk.js/Rendering/Core/ScalarBarActor';
 import vtkXMLPolyDataReader from '@kitware/vtk.js/IO/XML/XMLPolyDataReader';   // SlicerLive: read .vtp models client-side
 import vtkPolyDataReader from '@kitware/vtk.js/IO/Legacy/PolyDataReader';      // SlicerLive: read legacy .vtk models
-import { slicerLiveLogo } from './sllogo.js';                                 // SlicerLive brand mark (3D Slicer logo + gold fractal lightning)
+import { slicerLiveLogo, slicerLiveMark } from './sllogo.js';                 // SlicerLive brand mark (3D Slicer logo + gold fractal lightning)
 
 const OFFLOAD_BUILD = 'slicerlive-v1o idc-clientside 2026-06-15';
 window.__offloadBuild = OFFLOAD_BUILD;
@@ -116,9 +118,43 @@ window.__vrNudge = () => {
   } catch (e) { return 'err:' + (e && e.message || e); }
 };
 
+// Rotate EXACTLY like Slicer's desktop 3D view (vtkMRMLCameraWidget::ProcessRotate) so muscle memory carries over:
+// azimuth/elevation about the camera FOCAL POINT, same delta = pixels * -20/size * MotionFactor(10), then
+// OrthogonalizeViewUp. vtk.js's camera.azimuth/elevation/orthogonalizeViewUp are direct VTK ports and vtk.js mouse
+// positions are y-from-bottom like VTK, so this is bit-for-bit the same camera motion as Slicer. (The stock
+// vtkMouseCameraTrackballRotateManipulator instead pivots on model.center, which defaults to the world origin --
+// that was the "center of rotation is wrong" bug; setting the focal point did nothing because it ignored it.)
+function vtkSlicerRotateManipulator(publicAPI, model) {
+  model.classHierarchy.push('vtkSlicerRotateManipulator');
+  publicAPI.onButtonDown = (interactor, renderer, position) => { model.prev = position; };
+  publicAPI.onMouseMove = (interactor, renderer, position) => {
+    if (!position || !model.prev) return;
+    const camera = renderer.getActiveCamera();
+    const size = interactor.getView().getViewportSize(renderer);     // viewport pixels (the 3D quadrant)
+    const dx = position.x - model.prev.x, dy = position.y - model.prev.y;
+    if (dx === 0 && dy === 0) { model.prev = position; return; }
+    const MotionFactor = 10.0;
+    const rxf = dx * (-20.0 / size[0]) * MotionFactor;                // vtkMRMLCameraWidget::ProcessRotate, verbatim
+    const ryf = dy * (-20.0 / size[1]) * MotionFactor;
+    camera.azimuth(rxf);
+    camera.elevation(ryf);
+    camera.orthogonalizeViewUp();
+    renderer.resetCameraClippingRange();
+    if (interactor.getLightFollowCamera()) renderer.updateLightsGeometryToFollowCamera();
+    model.prev = position; scene3DDirty = true; markDirty();
+  };
+}
+function extendSlicerRotate(publicAPI, model, initialValues = {}) {
+  Object.assign(model, initialValues);
+  macro.obj(publicAPI, model);
+  vtkCompositeMouseManipulator.extend(publicAPI, model, initialValues);
+  vtkSlicerRotateManipulator(publicAPI, model);
+}
+const newSlicerRotateManipulator = macro.newInstance(extendSlicerRotate, 'vtkSlicerRotateManipulator');
+
 const istyle = vtkInteractorStyleManipulator.newInstance();   // Slicer-matched bindings
 [
-  vtkMouseCameraTrackballRotateManipulator.newInstance({ button: 1 }),
+  newSlicerRotateManipulator({ button: 1 }),                   // left-drag = rotate, exactly like Slicer desktop
   vtkMouseCameraTrackballPanManipulator.newInstance({ button: 2 }),
   vtkMouseCameraTrackballPanManipulator.newInstance({ button: 1, shift: true }),
   vtkMouseCameraTrackballZoomManipulator.newInstance({ button: 3 }),
@@ -1159,7 +1195,8 @@ function setMaxView(name) {
   const set = (ren, rect, draw) => { ren.setViewport(rect[0], rect[1], rect[2], rect[3]); if (ren.setDraw) ren.setDraw(draw); };
   set(renderer, name === 'threeD' ? full : _VPRECT.threeD, !name || name === 'threeD');
   for (const n of ['Red', 'Green', 'Yellow']) set(_sliceRens[n].ren, name === n ? full : _VPRECT[n], !name || name === n);
-  if (_vrBtn) _vrBtn.style.display = (name && name !== 'threeD') ? 'none' : 'block';   // VR toggle belongs to the 3D view
+  if (_ctrlBtn) _ctrlBtn.style.display = (name && name !== 'threeD') ? 'none' : 'flex';   // display menu belongs to the 3D view
+  if (name && name !== 'threeD') closeCtrlMenu();
   slicesDirty = true; scene3DDirty = true; try { renderWindow.render(); } catch (e) {} markDirty();
 }
 function toggleMaxAt(cx, cy) {
@@ -1986,7 +2023,7 @@ function buildIDCNodes(ct, hasSeg, modality) {
     add('idcComp' + name, 'vtkMRMLSliceCompositeNode', { layoutName: name, backgroundVolumeID: vol, foregroundOpacity: 0, labelOpacity: 1 }, { backgroundVolume: [vol] });
   }
   if (hasSeg) {
-    const segDisp = add('idcSegDisp', 'vtkMRMLSegmentationDisplayNode', { visibility: 1, visibility3D: 1 });
+    const segDisp = add('idcSegDisp', 'vtkMRMLSegmentationDisplayNode', { visibility: _segOn ? 1 : 0, visibility3D: _segOn ? 1 : 0 });
     add('idcSeg', 'vtkMRMLSegmentationNode', { labelmapDims: [nx, ny, nz], labelmapIjkToRAS: M, segmentColors: [], seg2DOpacity: 0.5, segments: [] }, { display: [segDisp] });
   }
   return nodes;
@@ -2024,25 +2061,148 @@ function recenterRotation(c) {
   renderer.resetCameraClippingRange(); scene3DDirty = true; markDirty();
 }
 
+// Geometric centroid of the CT bounding box (RAS) -- the rotation-center fallback when the segmentation is empty.
+function ctBBoxCenter(ct) {
+  const M = ct.ijkToRAS, [nx, ny, nz] = ct.dims;
+  const apply = (p) => [M[0] * p[0] + M[1] * p[1] + M[2] * p[2] + M[3], M[4] * p[0] + M[5] * p[1] + M[6] * p[2] + M[7], M[8] * p[0] + M[9] * p[1] + M[10] * p[2] + M[11]];
+  const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+  for (const i of [0, nx]) for (const j of [0, ny]) for (const k of [0, nz]) { const w = apply([i, j, k]); for (let d = 0; d < 3; d++) { lo[d] = Math.min(lo[d], w[d]); hi[d] = Math.max(hi[d], w[d]); } }
+  return [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+}
+
+// Set the trackball pivot ONCE, after the full study (source image + seg) has loaded: the segmentation centroid if
+// it has any labeled voxels (_idcRotCenter, computed in buildSegSurfaces), else the volume centroid. After this it
+// stays put -- only a middle-mouse pan in the 3D view moves it (vtk.js pan shifts the focal point). Idempotent per
+// case via _rotCenterSet so the deferred render passes can't keep yanking the view (the old "rotates oddly" bug).
+function finalizeRotationCenter() {
+  if (_rotCenterSet) return;
+  let c = _idcRotCenter;                                  // segmentation centroid (set iff the SEG had labeled voxels)
+  const ct = window.__idcData && window.__idcData.ct;
+  if (!c && ct) c = ctBBoxCenter(ct);                     // empty / no segmentation -> volume centroid
+  if (!c) return;
+  _idcRotCenter = c; _rotCenterSet = true;
+  recenterRotation(c); jumpOthersTo(c, '');               // pivot on it + park the 3 slices there (2D overlay visible)
+  renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty();
+}
+
 // --- Volume-rendering on/off toggle (a glass button over the 3D quadrant; NO emoji -> see the QtWebEngine crash) ---
-let _vrOn = true, _vrBtn = null;
+let _vrOn = true, _segOn = true, _ctrlBtn = null, _ctrlMenu = null;
+let _segVis = {};           // per-segment visibility: label -> bool (default visible); gated by the master _segOn
+let _rotCenterSet = false;  // the trackball pivot has been finalized for the current case (set once after full load)
 let _idcRotCenter = null;   // RAS trackball pivot for the current case (segmentation centroid once known, else null)
+function segVisible(L) { return _segVis[L] !== false; }   // default true
 function applyVR() {
   const disp = mirror.get('idcVRDisp'); if (disp) disp.attrs.visibility3D = _vrOn ? 1 : 0;
   let it = null; for (const dm of DMS) if (dm.items && dm.items.has('idcVol')) { it = dm.items.get('idcVol'); break; }
   if (it && it.volume) it.volume.setVisibility(_vrOn);
-  if (_vrBtn) _vrBtn.textContent = _vrOn ? 'Volume rendering: on' : 'Volume rendering: off';
+  updateCtrlSwitches();
   scene3DDirty = true; try { renderWindow.render(); } catch (e) {} markDirty();
 }
-function ensureVRToggle() {
-  if (_vrBtn) { _vrBtn.textContent = _vrOn ? 'Volume rendering: on' : 'Volume rendering: off'; return; }
-  _vrBtn = document.createElement('button');
-  _vrBtn.style.cssText = 'position:fixed; top:14px; right:14px; z-index:75; cursor:pointer; border:1px solid rgba(255,255,255,0.16);' +
-    ' border-radius:9px; padding:7px 13px; font:600 12px -apple-system,system-ui,sans-serif; color:#eaf0ff;' +
-    ' background:rgba(20,23,36,0.55); backdrop-filter:blur(20px) saturate(1.5); -webkit-backdrop-filter:blur(20px) saturate(1.5);';
-  _vrBtn.textContent = _vrOn ? 'Volume rendering: on' : 'Volume rendering: off';
-  _vrBtn.onclick = () => { _vrOn = !_vrOn; applyVR(); };
-  document.body.appendChild(_vrBtn);
+// Segmentation visibility: master toggle (_segOn) AND per-segment (_segVis[label]), applied to both the 3D surface
+// actors (SegmentationDM, keyed 'seg'<label>) and the colored 2D slice overlay (per-label opacity in ovVol).
+function applySegVis() {
+  const disp = mirror.get('idcSegDisp'); if (disp) { disp.attrs.visibility = _segOn ? 1 : 0; disp.attrs.visibility3D = _segOn ? 1 : 0; }
+  for (const dm of DMS) if (dm.items && dm.items.has('idcSeg')) {
+    const it = dm.items.get('idcSeg');
+    for (const [sid, s] of it.segs) { const L = parseInt(String(sid).replace(/^seg/, ''), 10); s.actor.setVisibility(_segOn && segVisible(L)); }
+  }
+  applySeg2DOpacity();
+  updateCtrlSwitches();
+  slicesDirty = true; scene3DDirty = true; try { renderWindow.render(); } catch (e) {} markDirty();
+}
+// Rebuild the 2D overlay's per-label opacity function (nearest-interpolated labelmap -> opacity per integer label),
+// honoring the master toggle + per-segment visibility, and re-apply to every slice's overlay volume.
+function applySeg2DOpacity() {
+  const seg = mirror.get('idcSeg'); if (!seg) return;
+  const op = seg.attrs.seg2DOpacity != null ? seg.attrs.seg2DOpacity : 0.5;
+  const ofun = vtkPiecewiseFunction.newInstance();
+  ofun.addPoint(0, 0); ofun.addPoint(0.5, 0);
+  for (const c of (seg.attrs.segmentColors || [])) ofun.addPoint(c[0], (_segOn && segVisible(c[0])) ? op : 0);
+  for (const nm in _sliceRens) { const sr = _sliceRens[nm]; if (sr && sr.ovVol) sr.ovVol.getProperty().setScalarOpacity(0, ofun); }
+}
+
+// Display-options menu: a glass popup of toggle switches, opened on hover of the SlicerLive button (top-right of 3D).
+function makeSwitch() {
+  const track = document.createElement('span');
+  track.style.cssText = 'position:relative;flex:none;width:38px;height:22px;border-radius:11px;transition:background .15s;';
+  const knob = document.createElement('span');
+  knob.style.cssText = 'position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.4);transition:transform .15s;';
+  track.appendChild(knob);
+  track._paint = (on) => { track.style.background = on ? 'linear-gradient(180deg,#9fe9ff,#54c6f0)' : 'rgba(255,255,255,0.20)'; knob.style.transform = 'translateX(' + (on ? '16px' : '0px') + ')'; };
+  return track;
+}
+// opts: { swatch:[r,g,b] color chip, indent, small, dim:()=>bool (disabled+faded, e.g. per-segment while master is off) }
+function makeToggleRow(label, getOn, setOn, opts) {
+  opts = opts || {};
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:16px;cursor:pointer;border-radius:9px;' +
+    'padding:' + (opts.small ? '6px 8px' : '9px 8px') + ';' + (opts.indent ? 'margin-left:10px;' : '');
+  row.onmouseenter = () => { row.style.background = 'rgba(255,255,255,0.07)'; };
+  row.onmouseleave = () => { row.style.background = 'transparent'; };
+  const left = document.createElement('span'); left.style.cssText = 'display:flex;align-items:center;gap:9px;min-width:0;';
+  if (opts.swatch) { const sw = document.createElement('span'); const c = opts.swatch;
+    sw.style.cssText = 'flex:none;width:11px;height:11px;border-radius:3px;box-shadow:0 0 0 1px rgba(255,255,255,.25);background:rgb(' + Math.round(c[0] * 255) + ',' + Math.round(c[1] * 255) + ',' + Math.round(c[2] * 255) + ')';
+    left.appendChild(sw); }
+  const lab = document.createElement('span'); lab.textContent = label;
+  lab.style.cssText = 'font:' + (opts.small ? '500 12.5px' : '600 13px') + ' -apple-system,system-ui,sans-serif;color:#eaf0ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+  left.appendChild(lab);
+  const track = makeSwitch();
+  const paint = () => { const dim = opts.dim && opts.dim(); row.style.opacity = dim ? '0.4' : '1'; track._paint(!!getOn()); };
+  row.onclick = () => { if (opts.dim && opts.dim()) return; setOn(!getOn()); paint(); };
+  row.appendChild(left); row.appendChild(track); paint(); row._paint = paint;
+  return row;
+}
+function updateCtrlSwitches() { if (_ctrlMenu && _ctrlMenu._rows) for (const r of _ctrlMenu._rows) if (r._paint) r._paint(); }
+function _ctrlOutside(ev) { if (_ctrlMenu && !_ctrlMenu.contains(ev.target) && _ctrlBtn && !_ctrlBtn.contains(ev.target)) closeCtrlMenu(); }
+function closeCtrlMenu() { if (_ctrlMenu) { _ctrlMenu.remove(); _ctrlMenu = null; document.removeEventListener('mousedown', _ctrlOutside, true); } }
+function openCtrlMenu() {
+  _ctrlMenu = document.createElement('div');
+  // same liquid-glass skin as the case-detail popup
+  _ctrlMenu.style.cssText = 'position:fixed; top:108px; right:14px; z-index:76; min-width:248px; max-width:340px; border-radius:14px; padding:8px;' +
+    ' font:13px/1.4 -apple-system,system-ui,sans-serif; color:#e8eeff;' +
+    ' background:linear-gradient(135deg, rgba(58,64,88,0.55), rgba(20,24,38,0.62));' +
+    ' backdrop-filter:blur(26px) saturate(1.7); -webkit-backdrop-filter:blur(26px) saturate(1.7);' +
+    ' border:1px solid rgba(255,255,255,0.22); box-shadow:0 18px 60px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.22);';
+  const rows = []; _ctrlMenu._rows = rows;
+  const add = (r) => { rows.push(r); return r; };
+  const title = document.createElement('div'); title.textContent = 'Display';
+  title.style.cssText = 'font:700 11px -apple-system,system-ui,sans-serif;letter-spacing:1px;text-transform:uppercase;opacity:0.5;padding:6px 8px 8px;';
+  _ctrlMenu.appendChild(title);
+  _ctrlMenu.appendChild(add(makeToggleRow('Volume rendering', () => _vrOn, (v) => { _vrOn = v; applyVR(); })));
+  const segs = window.__caseSegments || [];
+  if (mirror.get('idcSeg')) {
+    _ctrlMenu.appendChild(add(makeToggleRow('Segmentation', () => _segOn, (v) => { _segOn = v; applySegVis(); })));
+    if (segs.length) {                              // per-segment visibility, nested + scrollable past 5 segments
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'margin-top:2px;border-top:1px solid rgba(255,255,255,0.12);padding-top:4px;' +
+        (segs.length > 5 ? 'max-height:184px;overflow-y:auto;' : '');
+      for (const s of segs) { const L = s.n;
+        wrap.appendChild(add(makeToggleRow(s.name, () => segVisible(L), (v) => { _segVis[L] = v; applySegVis(); },
+          { swatch: s.rgb, indent: true, small: true, dim: () => !_segOn }))); }
+      _ctrlMenu.appendChild(wrap);
+    }
+  }
+  document.body.appendChild(_ctrlMenu);
+  if (_ctrlBtn) { const r = _ctrlBtn.getBoundingClientRect();   // anchor just under the button, right edges aligned
+    _ctrlMenu.style.top = Math.round(r.bottom + 8) + 'px'; _ctrlMenu.style.right = Math.round(Math.max(8, window.innerWidth - r.right)) + 'px'; }
+  document.addEventListener('mousedown', _ctrlOutside, true);
+}
+function ensureControlsButton() {
+  if (_ctrlBtn) return;
+  _ctrlBtn = document.createElement('button');
+  _ctrlBtn.title = 'Display options';
+  // The full vertical lockup: mark with the lightning, "SlicerLive" wordmark directly UNDER the bolts (the
+  // Frankenstein-reanimation reference -> semantically the text must sit below the lightning). Solid near-black
+  // panel like the brand markup (NOT glass -- the gold reads washed-out on a translucent skin).
+  _ctrlBtn.style.cssText = 'position:fixed; top:12px; right:14px; z-index:77; cursor:pointer; padding:10px 14px 9px;' +
+    ' display:inline-flex; flex-direction:column; align-items:center; overflow:visible;' +
+    ' border:1px solid rgba(255,255,255,0.12); border-radius:15px; background:#121826;' +
+    ' box-shadow:0 10px 30px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);';
+  _ctrlBtn.innerHTML = slicerLiveLogo(60);
+  const openIfClosed = () => { if (!_ctrlMenu) openCtrlMenu(); };
+  _ctrlBtn.onmouseenter = openIfClosed;                 // open on hover...
+  _ctrlBtn.onclick = (ev) => { ev.stopPropagation(); openIfClosed(); };   // ...and on click/tap; stays up until a click outside
+  document.body.appendChild(_ctrlBtn);
 }
 
 // Apply the SEG once the labelmap is decoded: colored 2D overlay on the slice views AND closed-surface models in 3D
@@ -2055,6 +2215,8 @@ async function addIDCSegments(ct, seg) {
   await syncDMs();                                          // 2D colored overlay on the slices (labelmap path) first
   renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty();
   try { await buildSegSurfaces(ct, seg, segNode); } catch (e) { console.warn('[IDC] surfaces', e); }   // then 3D surfaces
+  applySegVis();                                            // honor the Segmentation toggle on both 3D + 2D after (re)load
+  finalizeRotationCenter();                                 // study fully loaded -> set the trackball pivot (seg centroid) once
 }
 
 // Closed-surface models per segment, generated client-side from the labelmap with vtk.js marching cubes. Each
@@ -2077,10 +2239,9 @@ async function buildSegSurfaces(ct, seg, segNode) {
       if (i < b[0]) b[0] = i; if (j < b[1]) b[1] = j; if (k < b[2]) b[2] = k; if (i > b[3]) b[3] = i; if (j > b[4]) b[4] = j; if (k > b[5]) b[5] = k;
       ci += i; cj += j; ck += k; cn++; }
   }
-  if (cn) {                                                // trackball pivot = segmentation centroid (RAS); re-applied
-    const a = ci / cn, b = cj / cn, c = ck / cn;           // after the load finalizes (loadIDCScene deferred renders)
+  if (cn) {                                                // trackball pivot = segmentation centroid (RAS); applied once
+    const a = ci / cn, b = cj / cn, c = ck / cn;           // by finalizeRotationCenter() after the full study loads
     _idcRotCenter = [M[0] * a + M[1] * b + M[2] * c + M[3], M[4] * a + M[5] * b + M[6] * c + M[7], M[8] * a + M[9] * b + M[10] * c + M[11]];
-    recenterRotation(_idcRotCenter);
   }
   const segs = [];
   for (const c of colors) {
@@ -2122,7 +2283,9 @@ function clearIDCScene() {
   }
   if (_fourUp) for (const name in _fourUp) { const slot = _fourUp[name]; if (slot) { slot.index = null; slot._initKey = null; } }
   if (viewBoxActor) viewBoxActor.setVisibility(false);
-  window.__caseSegments = null; window.__idcData = null; _idcRotCenter = null;
+  window.__caseSegments = null; window.__idcData = null;
+  _idcRotCenter = null; _rotCenterSet = false; _segVis = {};   // reset trackball pivot + per-segment visibility for the next case
+  closeCtrlMenu();
   scene3DDirty = true; slicesDirty = true; try { renderWindow.render(); } catch (e) {}
 }
 
@@ -2148,7 +2311,7 @@ async function loadIDCScene(ctPrefix, segPrefix, modality, ctBucket, segBucket) 
         for (const id in nodes) mirror.set(id, nodes[id]);
         window.__slicerliveLoaded = mirror.size; threeDActive = true;
         await syncDMs();
-        ensureVRToggle();                            // VR on/off button over the 3D quadrant
+        ensureControlsButton();                      // SlicerLive-mark button -> display-options menu over the 3D quadrant
         mosaicHide();                                // real slices render now -> drop the thumbnail mosaic
         setIDCCamera(ct);
         renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty();
@@ -2158,10 +2321,11 @@ async function loadIDCScene(ctPrefix, segPrefix, modality, ctBucket, segBucket) 
       onLabelmap: async (seg) => { await addIDCSegments(ctData, seg); },   // 2D colored overlay on the slices
     }, ctBucket, segBucket, modality);
     setLoadProgress(-1);
-    if (_idcRotCenter) { recenterRotation(_idcRotCenter); jumpOthersTo(_idcRotCenter, ''); }   // pivot + park the 3 slices ON the seg so the 2D overlay is visible (was at volume center)
+    if (segKeys.length === 0) finalizeRotationCenter();   // no segmentation -> pivot on the volume centroid (seg cases finalize in addIDCSegments)
     renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera();
     renderWindow.render(); markDirty();
-    for (const d of [120, 400, 1000, 2200]) setTimeout(() => { try { if (_idcRotCenter) recenterRotation(_idcRotCenter); renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
+    // deferred renders cover the GPU volume-texture upload window; they no longer touch the pivot (it's fixed once finalized)
+    for (const d of [120, 400, 1000, 2200]) setTimeout(() => { try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
   } catch (e) { console.error('[IDC]', e); window.__slicerliveError = String(e); setLoadProgress(-1); }
 }
 
