@@ -46,3 +46,7 @@ Models load from **`.vtp`** (recommended — vtk.js reads it reliably; binary, c
 cell format, so prefer `.vtp` when exporting from a recent Slicer.
 
 > Build artifacts (`*-bundle.js`, `node_modules/`) are gitignored — run `viewer/build.sh` to regenerate.
+
+## Acknowledgments
+Thanks to **Andrey Fedorov** for his valuable testing and feedback, which shaped the SEGRoulette viewer
+and its IDC integration.
