@@ -1266,6 +1266,7 @@ function computeSegOutlines() {
   for (const nm in _sliceRens) { const sr = _sliceRens[nm]; if (sr && sr.ctVol) { ctVis.push([sr.ctVol, sr.ctVol.getVisibility()]); sr.ctVol.setVisibility(false); } }
   _segOutOpaque = true; applySeg2DOpacity();
   try { renderWindow.render(); } catch (e) {}                // vtk canvas = the seg-only slabs
+  try { const vgl = glWindow.get3DContext && glWindow.get3DContext(); if (vgl) vgl.finish(); } catch (e) {}   // FLUSH vtk's GL before the cross-context texImage2D below, else fast scrubbing reads a STALE canvas (a previous slice) -> outline desynced from the fill until the next render
   drawOutlineGL(glc);                                        // GPU: upload that frame + edge-detect -> the _outGL layer
   renderer.setDraw(draw3D);                                  // restore (the caller renders the normal CT+fill view right after)
   for (const [v, vis] of ctVis) v.setVisibility(vis);
