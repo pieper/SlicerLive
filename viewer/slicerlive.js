@@ -2257,6 +2257,14 @@ function finalizeRotationCenter() {
 
 // --- Volume-rendering on/off toggle (a glass button over the 3D quadrant; NO emoji -> see the QtWebEngine crash) ---
 let _vrOn = true, _seg3DOn = true, _seg2DOn = true, _segFill = true, _segOutline = true, _ctrlBtn = null, _ctrlMenu = null;
+// Track Shift from pointer events (which reliably carry it -- the shift gestures depend on it) so the controls-logo
+// hover-open can be suppressed during shift-move/zoom even when a mouseenter/mousemove doesn't report the modifier.
+let _shiftDown = false;
+const _trackShift = (e) => { _shiftDown = !!e.shiftKey; if (_shiftDown && _ctrlMenu && _ctrlBtn && _ctrlBtn.matches(':hover')) closeCtrlMenu(); };
+window.addEventListener('pointermove', _trackShift, true);
+window.addEventListener('pointerdown', _trackShift, true);
+window.addEventListener('keydown', (e) => { if (e.key === 'Shift') _shiftDown = true; }, true);
+window.addEventListener('keyup', (e) => { if (e.key === 'Shift') _shiftDown = false; }, true);
 let _segVis = {};           // per-segment visibility: label -> bool (default visible); gated by the per-view masters
 let _rotCenterSet = false;  // the trackball pivot has been finalized for the current case (set once after full load)
 let _idcRotCenter = null;   // RAS trackball pivot for the current case (segmentation centroid once known, else null)
@@ -2385,8 +2393,8 @@ function ensureControlsButton() {
     ' box-shadow:0 10px 30px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);';
   _ctrlBtn.innerHTML = slicerLiveLogo(60);
   const openIfClosed = () => { if (!_ctrlMenu) openCtrlMenu(); };
-  _ctrlBtn.onmouseenter = (ev) => { if (ev && ev.shiftKey) return; openIfClosed(); };   // open on hover -- but not while shift-jumping/zooming over the 3D
-  _ctrlBtn.onmousemove = (ev) => { if (ev && ev.shiftKey && _ctrlMenu) closeCtrlMenu(); };   // if it's already open and shift goes down, get out of the way
+  _ctrlBtn.onmouseenter = (ev) => { if ((ev && ev.shiftKey) || _shiftDown) return; openIfClosed(); };   // open on hover -- but not while shift-jumping/zooming over the 3D
+  _ctrlBtn.onmousemove = (ev) => { if (((ev && ev.shiftKey) || _shiftDown) && _ctrlMenu) closeCtrlMenu(); };   // already open + shift -> get out of the way
   _ctrlBtn.onclick = (ev) => { ev.stopPropagation(); openIfClosed(); };   // ...and on click/tap; stays up until a click outside
   document.body.appendChild(_ctrlBtn);
 }
