@@ -2385,7 +2385,8 @@ function ensureControlsButton() {
     ' box-shadow:0 10px 30px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.06);';
   _ctrlBtn.innerHTML = slicerLiveLogo(60);
   const openIfClosed = () => { if (!_ctrlMenu) openCtrlMenu(); };
-  _ctrlBtn.onmouseenter = openIfClosed;                 // open on hover...
+  _ctrlBtn.onmouseenter = (ev) => { if (ev && ev.shiftKey) return; openIfClosed(); };   // open on hover -- but not while shift-jumping/zooming over the 3D
+  _ctrlBtn.onmousemove = (ev) => { if (ev && ev.shiftKey && _ctrlMenu) closeCtrlMenu(); };   // if it's already open and shift goes down, get out of the way
   _ctrlBtn.onclick = (ev) => { ev.stopPropagation(); openIfClosed(); };   // ...and on click/tap; stays up until a click outside
   document.body.appendChild(_ctrlBtn);
 }
