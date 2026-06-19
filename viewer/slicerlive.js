@@ -1049,6 +1049,7 @@ window.__dmDbg = () => {
 // left the closure. No fragile incremental diffing -- the scene is rebuilt from MRML state every change.
 // ===== SlicerLive 4-up: 3D + 3 orthogonal slice views (vtk.js multi-viewport; standalone, no compositor) =====
 let _fourUp = null;            // { Red:{ren,mapper,slice,volHash}, Yellow:.., Green:.. } once laid out
+window.__fourUpDbg = () => _fourUp ? Object.fromEntries(['Red', 'Green', 'Yellow'].map((n) => [n, _fourUp[n] ? { index: _fourUp[n].index, pscale: Math.round(_fourUp[n].pscale || 0) } : null])) : null;
 const _VP = { Red: [0.0, 0.5, 0.5, 1.0], Yellow: [0.5, 0.0, 1.0, 0.5], Green: [0.0, 0.0, 0.5, 0.5] };  // Slicer FourUp: axial UL, sagittal LR, coronal LL ([x0,y0,x1,y1] bottom-left)
 const _col = (m, c) => [m[c], m[4 + c], m[8 + c]];                 // row-major 4x4 column c (xyz part)
 const _nrm3 = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
@@ -1373,6 +1374,7 @@ host.addEventListener('wheel', (e) => {
 // shift + move over a slice -> jump the other two views to that physical location (works hovering OR dragging)
 host.addEventListener('pointermove', (e) => {
   if (!_fourUp || !e.shiftKey) return;
+  if (_sliceDrag) return;                                               // a shift+right-drag (synced zoom) owns the gesture -> don't jump
   const w = sliceWorldAt(e.clientX, e.clientY); if (!w) return;         // not over a slice quadrant -> let it pass
   e.stopPropagation(); jumpOthersTo(w.ras, w.name);
 }, true);
@@ -1385,7 +1387,15 @@ host.addEventListener('pointerdown', (e) => {
   if (dbl) { toggleMaxAt(e.clientX, e.clientY); e.stopPropagation(); e.preventDefault(); return; }
   const slot = fourUpSlotAt(e.clientX, e.clientY); if (!slot) return;   // 3D quadrant -> vtk.js trackball
   e.stopPropagation(); e.preventDefault();                             // a slice view owns this -> never trackball
-  if (e.shiftKey) { const w = sliceWorldAt(e.clientX, e.clientY); if (w) jumpOthersTo(w.ras, w.name); return; }   // shift = jump (the move handler continues it)
+  if (e.shiftKey) {
+    if (e.button === 2) {   // shift + right-drag = zoom all THREE slices together (no jump) -> home in, then study in detail
+      _sliceDrag = { slot, mode: 'zoomAll', x: e.clientX, y: e.clientY, acc: 0 };
+      window.addEventListener('pointermove', onSliceDrag, true);
+      window.addEventListener('pointerup', onSliceUp, true);
+      return;
+    }
+    const w = sliceWorldAt(e.clientX, e.clientY); if (w) jumpOthersTo(w.ras, w.name); return;   // shift = jump (the move handler continues it)
+  }
   const mode = e.button === 2 ? 'zoom' : e.button === 1 ? 'pan' : e.button === 0 ? 'scroll' : null;   // left = scroll slices
   if (!mode) return;
   _sliceDrag = { slot, mode, x: e.clientX, y: e.clientY, acc: 0 };
@@ -1402,8 +1412,11 @@ function onSliceDrag(e) {
     return;
   }
   const ps = slot.pscale || slot.fov / 2;
-  if (mode === 'zoom') {
-    slot.pscale = Math.max(0.5, ps * Math.exp(-dy * 0.006));          // right-drag down = zoom in (matches Slicer)
+  if (mode === 'zoom' || mode === 'zoomAll') {
+    const f = Math.exp(-dy * 0.006);                                  // right-drag down = zoom in (matches Slicer)
+    if (mode === 'zoomAll') for (const nm of ['Red', 'Green', 'Yellow']) {   // shift+right: same factor on all 3 slices, each stays centered on its jumped location
+      const so = _fourUp[nm]; if (so) so.pscale = Math.max(0.5, (so.pscale || so.fov / 2) * f);
+    } else slot.pscale = Math.max(0.5, ps * f);
   } else {                                                             // middle-drag pan: image follows the cursor
     const qh = (geom ? geom.ch : 1000) / 2, worldPerPx = (ps * 2) / qh;
     const mvx = -dx * worldPerPx, mvy = dy * worldPerPx, p = slot.pan || [0, 0, 0];
