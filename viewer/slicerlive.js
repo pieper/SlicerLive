@@ -1178,7 +1178,10 @@ async function syncFourUp() {
       cp.setRGBTransferFunction(0, cctf); cp.setScalarOpacity(0, cofn); cp.setInterpolationTypeToLinear(); cp.setShade(false); cp.setUseGradientOpacity(0, false);
       sr.ren.addVolume(ctv); sr.ctVol = ctv; sr.ctMapper = ctm;
       if (lm) {   // colored segmentation overlay: a 2nd volume, labels semi-transparent over the opaque CT
-        const ovm = vtkVolumeMapper.newInstance(); ovm.setInputData(lm.img); ovm.setBlendModeToComposite();
+        // MAXIMUM-INTENSITY (not composite): a thin slab accumulates multiple labels through-plane where a label
+        // boundary grazes the slice -> composite muddies green+red and the jitter speckles it. MIP picks ONE label
+        // per pixel (the max along the ray), jitter-insensitive, so the fill (and the outline derived from it) is crisp.
+        const ovm = vtkVolumeMapper.newInstance(); ovm.setInputData(lm.img); ovm.setBlendModeToMaximumIntensity();
         ovm.setSampleDistance(0.5); ovm.setAutoAdjustSampleDistances(false); ovm.setMaximumSamplesPerRay(4000);
         const ovv = vtkVolume.newInstance(); ovv.setMapper(ovm); ovv.setUserMatrix(volumeGeometry(lm.img, segNode.attrs.labelmapIjkToRAS));
         const op = ovv.getProperty();
