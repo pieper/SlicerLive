@@ -1,0 +1,32 @@
+{
+  "name": "@slicerlive/liveinterface",
+  "version": "0.0.1",
+  "description": "WebGPU-native UI primitives for SlicerLive's LiveInterface layer, usable from the browser and from Slicer's qSlicerWebWidget.",
+  "type": "module",
+  "main": "dist/liveinterface.esm.js",
+  "types": "dist/liveinterface.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/liveinterface.esm.js",
+      "types": "./dist/liveinterface.d.ts"
+    },
+    "./iife": "./dist/liveinterface.iife.js",
+    "./css": "./dist/liveinterface.css"
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "watch": "node build.mjs --watch",
+    "test": "node --import tsx/esm --test src/widgets/ColorPicker/ColorMath.test.ts src/widgets/Histogram/HistogramBinning.test.ts src/mrml/VolumeProperty.test.ts src/mrml/Modality.test.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "esbuild": "^0.23.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  }
+}

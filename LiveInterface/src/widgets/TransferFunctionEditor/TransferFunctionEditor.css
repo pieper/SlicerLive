@@ -1,0 +1,87 @@
+.lw-tf-editor {
+  position: relative;
+  background: var(--lw-bg-elevated);
+  border: 1px solid var(--lw-border);
+  border-radius: var(--lw-radius);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.lw-tf-editor .lw-tf-hg {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+  border: 0;
+  background: transparent;
+  width: 100%;
+  height: 100%;
+}
+.lw-tf-editor .lw-tf-hg .lw-hg-axis {
+  inset: auto 8px 4px 8px;
+}
+.lw-tf-editor .lw-tf-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+.lw-tf-editor .lw-tf-area  { fill: var(--lw-tf-color, var(--lw-accent)); opacity: 0.22; }
+.lw-tf-editor .lw-tf-line  {
+  fill: none;
+  stroke: var(--lw-tf-color, var(--lw-accent));
+  stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+}
+.lw-tf-editor .lw-tf-handles {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.lw-tf-editor .lw-tf-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+  background: var(--lw-bg-elevated);
+  border: 1.5px solid var(--lw-tf-color, var(--lw-accent));
+  cursor: grab;
+  pointer-events: auto;
+  padding: 0;
+  outline: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  transition: width 80ms, height 80ms, margin 80ms, background 80ms;
+}
+.lw-tf-editor .lw-tf-handle:hover,
+.lw-tf-editor .lw-tf-handle:focus-visible {
+  background: var(--lw-tf-color, var(--lw-accent));
+  width: 14px; height: 14px; margin: -7px 0 0 -7px;
+}
+.lw-tf-editor .lw-tf-handle:focus-visible {
+  box-shadow: 0 0 0 2px var(--lw-bg), 0 0 0 4px var(--lw-tf-color, var(--lw-accent));
+}
+.lw-tf-editor .lw-tf-handle.dragging {
+  cursor: grabbing;
+  background: var(--lw-tf-color, var(--lw-accent));
+}
+
+.lw-tf-editor .lw-tf-readout {
+  position: absolute;
+  pointer-events: none;
+  bottom: 22px; left: 50%; transform: translateX(-50%);
+  font: 11px var(--lw-font-mono);
+  color: var(--lw-fg);
+  background: rgba(0, 0, 0, 0.55);
+  padding: 2px 7px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 100ms;
+}
+.lw-tf-editor.show-readout .lw-tf-readout { opacity: 1; }
+
+.lw-tf-editor .lw-tf-no-gpu {
+  padding: 8px;
+  font-size: 12px;
+  color: var(--lw-error);
+}

@@ -1,0 +1,85 @@
+.lw-lighting {
+  display: flex;
+  gap: 14px;
+  align-items: stretch;
+  background: var(--lw-bg-elevated);
+  border: 1px solid var(--lw-border);
+  border-radius: var(--lw-radius);
+  padding: 10px;
+}
+.lw-lighting .lw-lighting-sphere {
+  flex: 0 0 90px;
+  width: 90px;
+  height: 90px;
+  position: relative;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #4d535d 0%, #1a1d22 75%, #0c0d10 100%);
+  border: 1px solid var(--lw-border);
+  touch-action: none;
+  cursor: grab;
+}
+.lw-lighting .lw-lighting-handle {
+  position: absolute;
+  width: 14px; height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  border: 0;
+  padding: 0;
+  cursor: grab;
+  outline: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7);
+}
+.lw-lighting .lw-lighting-handle.key  {
+  background: #ffe79f;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7), 0 0 8px rgba(255, 220, 130, 0.7);
+}
+.lw-lighting .lw-lighting-handle.fill {
+  background: #b3d1ff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7), 0 0 6px rgba(140, 180, 230, 0.5);
+}
+.lw-lighting .lw-lighting-handle.behind { opacity: 0.45; }
+.lw-lighting .lw-lighting-handle:focus-visible {
+  outline: 2px solid var(--lw-accent);
+  outline-offset: 2px;
+}
+.lw-lighting .lw-lighting-handle.dragging { cursor: grabbing; }
+
+.lw-lighting .lw-lighting-sliders {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+}
+.lw-lighting .lw-lighting-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lw-lighting .lw-lighting-row label {
+  flex: 0 0 76px;
+  color: var(--lw-fg-muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.lw-lighting .lw-lighting-row label::before {
+  content: '';
+  width: 8px; height: 8px;
+  border-radius: 50%;
+}
+.lw-lighting .lw-lighting-row.key   label::before { background: #ffe79f; }
+.lw-lighting .lw-lighting-row.fill  label::before { background: #b3d1ff; }
+.lw-lighting .lw-lighting-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--lw-accent);
+}
+.lw-lighting .lw-lighting-row .value {
+  flex: 0 0 36px;
+  text-align: right;
+  font-family: var(--lw-font-mono);
+  color: var(--lw-fg);
+  font-variant-numeric: tabular-nums;
+}
+.lw-lighting .lw-lighting-row.toggle { margin-top: 2px; }
+.lw-lighting .lw-lighting-row.toggle label::before { display: none; }

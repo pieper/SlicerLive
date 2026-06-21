@@ -40,6 +40,9 @@ import vtkScalarBarActor from '@kitware/vtk.js/Rendering/Core/ScalarBarActor';
 import vtkXMLPolyDataReader from '@kitware/vtk.js/IO/XML/XMLPolyDataReader';   // SlicerLive: read .vtp models client-side
 import vtkPolyDataReader from '@kitware/vtk.js/IO/Legacy/PolyDataReader';      // SlicerLive: read legacy .vtk models
 import { slicerLiveLogo, slicerLiveMark } from './sllogo.js';                 // SlicerLive brand mark (3D Slicer logo + gold fractal lightning)
+import { installLightningMenu } from './lightning-menu.js';                   // SlicerLive Lightning state-explorer (snowflake/tree of candidate state-transitions)
+import { installLocalDrop } from './local-drop.js';                           // SlicerLive drag-and-drop loader (v0: MRB only)
+import { unzipMrb } from './mrb-loader.js';                                   // fflate-based MRB unzip
 
 const OFFLOAD_BUILD = 'slicerlive-v1o idc-clientside 2026-06-15';
 window.__offloadBuild = OFFLOAD_BUILD;
@@ -47,7 +50,7 @@ console.log('%c[offload] BUILD ' + OFFLOAD_BUILD, 'color:#7fe0a0;font-weight:bol
 try { window.dispatchEvent(new CustomEvent('offload-build', { detail: OFFLOAD_BUILD })); } catch (e) {}
 const SCENE = (window.__OFFLOAD_BASE != null) ? window.__OFFLOAD_BASE : `${location.origin}/offload`;   // proxy routes /offload/ -> :2027; the DM-debug harness overrides via window.__OFFLOAD_BASE (same-origin '')
 const STANDALONE = !!window.__OFFLOAD_STANDALONE;   // DM-debug harness: render the vtk.js view full-window, no video / no desktop compositor
-const SLICERLIVE = !!window.__SLICERLIVE_SCENE_URL || !!window.__IDC_CT || !!window.__SEGROULETTE;  // scene URL, client-side IDC, or SEGRoulette -- no server
+const SLICERLIVE = !!window.__SLICERLIVE_SCENE_URL || !!window.__IDC_CT || !!window.__SEGROULETTE || !!window.__DROPMODE || !!window.__REMIND_STUDY;  // scene URL, IDC, SEGRoulette, empty drop, or ReMIND multi-series -- no server
 const VIEW = 0;
 const KEY = [255, 0, 255];   // server keyhole chroma key (keep in sync with _KEYHOLE_RGB)
 const KEY_TOL = 70;
@@ -1312,6 +1315,313 @@ function toggleMaxAt(cx, cy) {
   for (const n of ['Red', 'Yellow', 'Green']) { const v = _VP[n]; if (x >= v[0] && x <= v[2] && y >= v[1] && y <= v[3]) { target = n; break; } }
   setMaxView(target);
 }
+
+// ===== Lightning menu apply paths — actually do the state transition ==========
+// Layouts dispatch to setMaxView (which the viewer already implements for
+// double-click maximize). VR presets rebuild the active volume's
+// VolumeProperty attrs and trigger a re-render via syncDMs.
+//
+// Maps from the catalog's Slicer SlicerLayout enum values
+// (Libs/MRML/Core/vtkMRMLLayoutNode.h) to our viewport handler:
+//   3 = FourUp       -> setMaxView(null)
+//   4 = OneUp3D      -> setMaxView('threeD')
+//   6 = OneUpRed     -> setMaxView('Red')      (axial)
+//   7 = OneUpYellow  -> setMaxView('Yellow')   (sagittal)
+//   8 = OneUpGreen   -> setMaxView('Green')    (coronal)
+// Other catalog layouts (compare grids, plot views, etc.) toast as unsupported
+// for now — they need a multi-volume layout engine that lands with the
+// CompareView/ReMIND-study work.
+const _LAYOUT_TO_MAX = { 3: null, 4: 'threeD', 6: 'Red', 7: 'Yellow', 8: 'Green' };
+function applyLayoutDelta(delta) {
+  if (!_sliceRens || !_fourUp) { _lmToast('Layout switching needs a loaded scene'); return; }
+  if (delta.layoutId in _LAYOUT_TO_MAX) {
+    setMaxView(_LAYOUT_TO_MAX[delta.layoutId]);
+    return;
+  }
+  _lmToast('Layout "' + (delta.layoutSymbol || delta.layoutId) + '" needs multi-volume support (coming)');
+}
+function applyVrPresetDelta(delta) {
+  const def = VR_PRESET_DEFS[delta.presetName];
+  if (!def) { _lmToast('Preset "' + delta.presetName + '" not yet bundled (lands with the full presets.xml shipment)'); return; }
+  // Find the active volume's VR display node + its VolumeProperty node, and
+  // swap the color / scalarOpacity / gradientOpacity. The DMs run on mirror
+  // state every frame, so updating attrs + calling syncDMs is enough.
+  let propNode = null;
+  for (const n of mirror.values()) if (n.class === 'vtkMRMLVolumePropertyNode') { propNode = n; break; }
+  if (!propNode) { _lmToast('No volume rendering on this scene'); return; }
+  Object.assign(propNode.attrs, def);
+  // Make sure VR is on; otherwise the swap is invisible.
+  _vrOn = true;
+  // applyVR + syncDMs both rebuild the actual vtk objects from mirror state.
+  try { applyVR(); } catch (_) {}
+  syncDMs().then(() => { renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty(); });
+  _lmToast('Applied ' + delta.presetName);
+}
+// W/L (Window/Level) preset: rewrite the active ScalarVolumeDisplayNode's
+// window/level attrs and trigger a slice re-render. Catalog data mined from
+// Modules/Loadable/Volumes/Resources/VolumeDisplayPresets.json.
+function applyWlPresetDelta(delta) {
+  let displayNode = null;
+  for (const n of mirror.values()) if (n.class === 'vtkMRMLScalarVolumeDisplayNode') { displayNode = n; break; }
+  if (!displayNode) { _lmToast('No volume to apply W/L to'); return; }
+  displayNode.attrs.window = delta.window;
+  displayNode.attrs.level = delta.level;
+  syncDMs().then(() => { try { renderer.updateLightsGeometryToFollowCamera(); } catch (_) {} renderWindow.render(); markDirty(); });
+  _lmToast('W/L: ' + delta.presetName + ' (W=' + delta.window + ', L=' + delta.level + ')');
+}
+
+// Camera preset: orient the 3D camera in a standard radiological direction
+// (A/P/S/I/L/R + isometrics). Preserves the current camera distance so zoom
+// is unchanged; only the viewpoint orientation flips.
+function applyCameraDelta(delta) {
+  if (typeof renderer === 'undefined' || !renderer) { _lmToast('No 3D view'); return; }
+  const cam = renderer.getActiveCamera();
+  if (!cam) { _lmToast('No 3D camera'); return; }
+  const fp = cam.getFocalPoint();
+  const dist = cam.getDistance() || 200;
+  const [px, py, pz] = delta.position;        // unit direction from focal toward camera
+  cam.setPosition(fp[0] + px * dist, fp[1] + py * dist, fp[2] + pz * dist);
+  cam.setViewUp(delta.viewUp[0], delta.viewUp[1], delta.viewUp[2]);
+  try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); } catch (_) {}
+  renderWindow.render(); markDirty();
+  _lmToast('Camera: ' + delta.symbol);
+}
+
+// Series-switch: activate a different cached series in the current study.
+// Uses the existing ReMIND chip-bar's _remindStudies cache so the swap is
+// instant (no re-fetch). Refreshes the chip-bar's highlighted active state.
+function applySeriesSwitchDelta(delta) {
+  const studies = window.__remindStudies;
+  if (!studies || !studies[delta.seriesIdx]) { _lmToast('Series not loaded'); return; }
+  const data = studies[delta.seriesIdx];
+  activateSeries(data).then(() => {
+    try { ensureReMINDChipBar(studies, delta.seriesIdx); } catch (_) {}
+  }).catch((e) => console.warn('[series-switch]', e));
+  _lmToast('Series → ' + (delta.seriesLabel || data.label));
+}
+
+// Segment-visibility bundle: bulk-toggle visibility across all segments.
+// Uses the existing _segVis map + applySegVis() pipeline. "fade-others" is a
+// no-op for v0 (per-segment opacity needs a display-node refactor) and toasts
+// that fact so it's discoverable but doesn't lie.
+function applySegVisDelta(delta) {
+  const segs = window.__caseSegments || [];
+  if (!segs.length) { _lmToast('No segments to control'); return; }
+  switch (delta.mode) {
+    case 'all-on':
+      for (const s of segs) _segVis[s.n] = true;
+      break;
+    case 'all-off':
+      for (const s of segs) _segVis[s.n] = false;
+      break;
+    case 'solo-first':
+      segs.forEach((s, i) => { _segVis[s.n] = (i === 0); });
+      break;
+    case 'fade-others':
+      // For v0: behaves like all-on. Real per-segment opacity needs a
+      // display-node refactor; flag it in the toast.
+      for (const s of segs) _segVis[s.n] = true;
+      _lmToast('fade-others: per-segment opacity coming next; all segments shown');
+      applySegVis();
+      return;
+    default:
+      _lmToast('Unknown segment bundle: ' + delta.mode); return;
+  }
+  applySegVis();
+  _lmToast('Segments: ' + delta.mode);
+}
+
+// ===== SCENE STATE CAPTURE / RESTORE =================================
+// The minimal SEMANTIC state of the LiveScene: enough to fork the scene,
+// apply a delta, capture a render, and put everything back exactly. Used by:
+//   - lightning menu's per-tile real re-render path (preview the option
+//     against the user's actual data instead of CSS approximations)
+//   - undo / redo (Cmd+Z) via a state stack
+// Excludes blob data + scalar arrays + vtk objects -- those are immutable
+// references; only the attrs/refs change.
+function _cloneAttrs(o) {
+  // Shallow JSON round-trip handles plain data; vtk objects in attrs would
+  // throw / be replaced with null. We deliberately keep only what survives.
+  try { return JSON.parse(JSON.stringify(o)); } catch (_) { return {}; }
+}
+function captureSceneState() {
+  const mirrorState = {};
+  for (const [id, n] of mirror) {
+    mirrorState[id] = { class: n.class, name: n.name, attrs: _cloneAttrs(n.attrs || {}), refs: _cloneAttrs(n.refs || {}) };
+  }
+  const cam = renderer && renderer.getActiveCamera ? renderer.getActiveCamera() : null;
+  const camState = cam ? {
+    position: cam.getPosition().slice(),
+    focalPoint: cam.getFocalPoint().slice(),
+    viewUp: cam.getViewUp().slice(),
+    parallelScale: cam.getParallelScale(),
+  } : null;
+  return {
+    t: Date.now(),
+    mirror: mirrorState,
+    camera: camState,
+    maxView: _maxView,
+    vrOn: _vrOn, seg3DOn: _seg3DOn, seg2DOn: _seg2DOn, segFill: _segFill, segOutline: _segOutline,
+    segVis: { ..._segVis },
+    remindIdx: _remindActiveIdx,
+  };
+}
+async function restoreSceneState(snap) {
+  if (!snap) return;
+  // Restore mirror node attrs in-place (preserve existing __scalars / __pd /
+  // blobs references that are NOT serialized). For nodes that disappeared in
+  // the snapshot but exist now, drop them.
+  const seen = new Set(Object.keys(snap.mirror));
+  for (const id of [...mirror.keys()]) if (!seen.has(id)) mirror.delete(id);
+  for (const id in snap.mirror) {
+    const src = snap.mirror[id];
+    const existing = mirror.get(id);
+    if (existing) {
+      existing.attrs = _cloneAttrs(src.attrs);
+      existing.refs = _cloneAttrs(src.refs);
+    } else {
+      // Re-creating a dropped node without its blobs is rarely useful, but
+      // restoring this skeleton lets the DMs at least track the topology.
+      mirror.set(id, { id, class: src.class, name: src.name, attrs: _cloneAttrs(src.attrs), refs: _cloneAttrs(src.refs), blobs: {} });
+    }
+  }
+  // View toggles + segment-visibility
+  _vrOn = !!snap.vrOn; _seg3DOn = !!snap.seg3DOn; _seg2DOn = !!snap.seg2DOn;
+  _segFill = !!snap.segFill; _segOutline = !!snap.segOutline;
+  _segVis = { ...snap.segVis };
+  // Layout (maximize state)
+  try { setMaxView(snap.maxView || null); } catch (_) {}
+  // Camera
+  if (snap.camera && renderer) {
+    const cam = renderer.getActiveCamera();
+    cam.setPosition(...snap.camera.position);
+    cam.setFocalPoint(...snap.camera.focalPoint);
+    cam.setViewUp(...snap.camera.viewUp);
+    cam.setParallelScale(snap.camera.parallelScale);
+    try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); } catch (_) {}
+  }
+  await syncDMs();
+  try { renderWindow.render(); } catch (_) {}
+  markDirty();
+}
+
+// Pump the render pipeline; resolves after `frames` rAF ticks so async
+// syncDMs settles before the next capture.
+function _renderTick(frames) {
+  return new Promise((resolve) => {
+    let n = frames || 1;
+    const step = () => { try { renderWindow.render(); } catch (_) {} if (--n <= 0) resolve(); else requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  });
+}
+
+// ===== UNDO / REDO ===================================================
+// Lightweight history stack. capture() pushes the CURRENT state; undo/redo
+// move the index and restore. Each entry is ~5-50 KB so a 200-deep history
+// is bounded at a few MB. Throttle hook deferred (per memory note).
+const _historyMax = 200;
+const _historyStack = [];
+let _historyIdx = -1;     // index of the state we ARE currently at; -1 = empty
+function historyCapture() {
+  // Truncate any "redo" tail before pushing a fresh entry
+  if (_historyIdx < _historyStack.length - 1) _historyStack.length = _historyIdx + 1;
+  _historyStack.push(captureSceneState());
+  // Bound the stack from the bottom
+  while (_historyStack.length > _historyMax) _historyStack.shift();
+  _historyIdx = _historyStack.length - 1;
+}
+async function historyUndo() {
+  if (_historyIdx <= 0) { _lmToast('Nothing to undo'); return; }
+  _historyIdx -= 1;
+  await restoreSceneState(_historyStack[_historyIdx]);
+  _lmToast('Undo  ·  step ' + (_historyIdx + 1) + ' / ' + _historyStack.length);
+}
+async function historyRedo() {
+  if (_historyIdx >= _historyStack.length - 1) { _lmToast('Nothing to redo'); return; }
+  _historyIdx += 1;
+  await restoreSceneState(_historyStack[_historyIdx]);
+  _lmToast('Redo  ·  step ' + (_historyIdx + 1) + ' / ' + _historyStack.length);
+}
+// Global Cmd/Ctrl+Z keymap. Lives at the document level so it works regardless
+// of which input is focused (we still ignore when typing into a text input).
+document.addEventListener('keydown', (ev) => {
+  const t = ev.target;
+  if (t && /^(input|textarea|select)$/i.test(t.tagName)) return;
+  const meta = ev.metaKey || ev.ctrlKey;
+  if (!meta || ev.key.toLowerCase() !== 'z') return;
+  ev.preventDefault();
+  if (ev.shiftKey) historyRedo(); else historyUndo();
+}, true);
+
+// Snapshot of the current vtk.js canvas as a data URL. Used by the lightning
+// menu as the tile preview background -- way more honest than abstract icons.
+// preserveDrawingBuffer=true is already set on the GL context (line 81) so
+// toDataURL works without forcing a re-render. Downscale to ~640 px wide so
+// the data URL stays small (a few tens of KB).
+function captureSceneSnapshot(maxW) {
+  try {
+    const canvas = glWindow.getCanvas && glWindow.getCanvas();
+    if (!canvas) return null;
+    const srcW = canvas.width, srcH = canvas.height;
+    if (!srcW || !srcH) return null;
+    const W = Math.min(maxW || 640, srcW);
+    const H = Math.round(srcH * (W / srcW));
+    const tmp = document.createElement('canvas');
+    tmp.width = W; tmp.height = H;
+    const ctx = tmp.getContext('2d');
+    ctx.drawImage(canvas, 0, 0, srcW, srcH, 0, 0, W, H);
+    return tmp.toDataURL('image/jpeg', 0.78);
+  } catch (e) { console.warn('[snapshot]', e); return null; }
+}
+
+// Wraps applyCatalogEntry with a history checkpoint so every lightning-menu
+// apply becomes an undoable step. The bare _applyCatalogEntryImpl (below) is
+// kept for internal use by the per-tile re-render loop, where we don't want
+// to flood history with preview-mutations.
+function applyCatalogEntry(entry) {
+  historyCapture();
+  return _applyCatalogEntryImpl(entry);
+}
+function _applyCatalogEntryImpl(entry) {
+  if (!entry || !entry.delta) return;
+  switch (entry.delta.kind) {
+    case 'layout':         return applyLayoutDelta(entry.delta);
+    case 'vr-preset':      return applyVrPresetDelta(entry.delta);
+    case 'wl-preset':      return applyWlPresetDelta(entry.delta);
+    case 'camera':         return applyCameraDelta(entry.delta);
+    case 'segment-vis':    return applySegVisDelta(entry.delta);
+    case 'series-switch':  return applySeriesSwitchDelta(entry.delta);
+    default:
+      console.log('[lightning] unknown delta kind', entry.delta);
+  }
+}
+
+// Auto-pick: after a scene loads, pick the best layout for what's on screen
+// and apply it without user input. v0 heuristic, no model -- just rules:
+//   - models only (no volume)       -> 3D only
+//   - volume + segmentation         -> 4-up (Slicer's default)
+//   - volume only                   -> 4-up
+// Stays trivial on purpose so the user can override in the lightning menu.
+function autoPickAfterLoad() {
+  let hasVolume = false, hasSeg = false, hasModel = false;
+  for (const n of mirror.values()) {
+    if (n.class === 'vtkMRMLScalarVolumeNode') hasVolume = true;
+    if (n.class === 'vtkMRMLSegmentationNode') hasSeg = true;
+    if (n.class === 'vtkMRMLModelNode') hasModel = true;
+  }
+  let layoutId = null, label = null;
+  if (hasModel && !hasVolume) { layoutId = 4; label = '3D only'; }
+  else if (hasVolume) { layoutId = 3; label = '4-up'; }    // 4-up is what the viewer already lays out -- the call is essentially a no-op confirmation
+  else return;
+  applyLayoutDelta({ kind: 'layout', layoutId, layoutSymbol: 'auto' });
+  // Give visible feedback that the lightning *picked* something. (Subtle --
+  // toast only on non-default picks so the common 4-up case isn't noisy.)
+  if (layoutId !== 3) _lmToast('Lightning auto-pick: ' + label);
+  // Seed history: after the initial autopick, the "scene as loaded" is
+  // history[0]. Subsequent lightning-menu applies + chip clicks add steps,
+  // and Cmd+Z walks all the way back to this initial state.
+  try { historyCapture(); } catch (_) {}
+}
 function _sliceVP(name) {                                             // effective hit-test rect, honoring maximize
   if (_maxView === 'threeD') return null;
   if (_maxView && _maxView !== name) return null;
@@ -2019,6 +2329,16 @@ async function readPolyData(url) {   // dispatch by extension: legacy .vtk (ASCI
   if (ext === 'vtk') { const txt = await fetch(url).then((r) => r.text()); const r = vtkPolyDataReader.newInstance(); r.parseAsText(txt); return r.getOutputData(0); }
   const buf = await fetch(url).then((r) => r.arrayBuffer()); const r = vtkXMLPolyDataReader.newInstance(); r.parseAsArrayBuffer(buf); return r.getOutputData(0);
 }
+// Same dispatch, but the bytes are already in memory (MRB-unzipped, drag-drop, etc.) -- no fetch.
+function readPolyDataFromBytes(bytes, name) {
+  const ext = (name.toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1];
+  if (ext === 'vtk') {
+    const txt = new TextDecoder().decode(bytes);
+    const r = vtkPolyDataReader.newInstance(); r.parseAsText(txt); return r.getOutputData(0);
+  }
+  const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  const r = vtkXMLPolyDataReader.newInstance(); r.parseAsArrayBuffer(ab); return r.getOutputData(0);
+}
 
 // Full-scene load: a node-state JSON (mrml_sync.mrml_state output) + content-addressed gzip blob FILES.
 // --- load progress: a centered liquid-glass panel with a byte-accurate bar (created lazily) ---
@@ -2210,6 +2530,65 @@ function runIDCWorker(ctKeys, segKeys, handlers, ctBucket, segBucket, modality) 
 // surfaces instead). An empty segmentation node is created up front; surfaces are added progressively.
 // Volume-rendering preset by source modality. CT = Slicer's CT-Chest-Contrast-Enhanced (HU); MR = grayscale ramp on
 // the DICOM window/level; PT/PET = hot-metal on the window/level. (SEGRoulette spins CT/MR/PET sources.)
+// Named VR presets extracted from Slicer's Modules/Loadable/VolumeRendering/Resources/presets.xml.
+// The catalog (LiveInterface) references presets by name; the lightning menu's applyEntry hook
+// resolves the name here and rebuilds the VolumeProperty attrs in place on the active volume.
+// Only the most useful starting points for v0 -- the full ~31 presets land when we ship the XML
+// parser. Format matches vrPresetFor's return shape so the rest of the pipeline is unchanged.
+function _parseScalarOpacity(s) {
+  const a = s.trim().split(/\s+/).map(Number); const out = [];
+  for (let i = 1; i < a.length; i += 2) out.push([a[i], a[i + 1]]);
+  return out;
+}
+function _parseColorTransfer(s) {
+  const a = s.trim().split(/\s+/).map(Number); const out = [];
+  for (let i = 1; i < a.length; i += 4) out.push([a[i], a[i + 1], a[i + 2], a[i + 3]]);
+  return out;
+}
+function _parseGradientOpacity(s) {
+  const a = s.trim().split(/\s+/).map(Number); const out = [];
+  for (let i = 1; i < a.length; i += 2) out.push([a[i], a[i + 1]]);
+  return out;
+}
+const VR_PRESET_DEFS = {
+  'CT-Bone': {
+    ambient: 0.1, diffuse: 0.9, specular: 0.2, specularPower: 10,
+    color: _parseColorTransfer('16 -3024 0 0 0 -16.4458 0.729412 0.254902 0.301961 641.385 0.905882 0.815686 0.552941 3071 1 1 1'),
+    scalarOpacity: _parseScalarOpacity('8 -3024 0 -16.4458 0 641.385 0.715686 3071 0.705882'),
+    gradientOpacity: _parseGradientOpacity('4 0 1 255 1'),
+  },
+  'CT-Lung': {
+    ambient: 0.2, diffuse: 1.0, specular: 0.0, specularPower: 1,
+    color: _parseColorTransfer('24 -1000 0.3 0.3 1 -600 0 0 1 -530 0.134704 0.781726 0.0724558 -460 0.929244 1 0.109473 -400 0.888889 0.254949 0.0240258 2952 1 0.3 0.3'),
+    scalarOpacity: _parseScalarOpacity('12 -1000 0 -600 0 -599 0.15 -400 0.15 -399 0 2952 0'),
+    gradientOpacity: _parseGradientOpacity('6 0 1 985.12 1 988 1'),
+  },
+  'CT-Soft-Tissue': {
+    ambient: 0.2, diffuse: 1.0, specular: 0.0, specularPower: 1, shade: 0,
+    color: _parseColorTransfer('20 -2048 0 0 0 -167.01 0 0 0 -160 0.0556356 0.0556356 0.0556356 240 1 1 1 3661 1 1 1'),
+    scalarOpacity: _parseScalarOpacity('10 -2048 0 -167.01 0 -160 1 240 1 3661 1'),
+    gradientOpacity: _parseGradientOpacity('4 0 1 255 1'),
+  },
+  'MR-Default': {
+    ambient: 0.2, diffuse: 1.0, specular: 0.0, specularPower: 1,
+    color: _parseColorTransfer('24 0 0 0 0 20 0.168627 0 0 40 0.403922 0.145098 0.0784314 120 0.780392 0.607843 0.380392 220 0.847059 0.835294 0.788235 1024 1 1 1'),
+    scalarOpacity: _parseScalarOpacity('12 0 0 20 0 40 0.15 120 0.3 220 0.375 1024 0.5'),
+    gradientOpacity: _parseGradientOpacity('4 0 1 255 1'),
+  },
+  'MR-T2-Brain': {
+    ambient: 0.3, diffuse: 0.6, specular: 0.5, specularPower: 40,
+    color: _parseColorTransfer('16 0 0 0 0 98.7223 0.956863 0.839216 0.192157 412.406 0 0.592157 0.807843 641 1 1 1'),
+    scalarOpacity: _parseScalarOpacity('10 0 0 36.05 0 218.302 0.171429 412.406 1 641 1'),
+    gradientOpacity: _parseGradientOpacity('4 0 1 160.25 1'),
+  },
+  'MR-Angio': {
+    ambient: 0.2, diffuse: 1.0, specular: 0.0, specularPower: 1,
+    color: _parseColorTransfer('24 -2048 0 0 0 151.354 0 0 0 158.279 0.74902 0.376471 0 190.112 1 0.866667 0.733333 200.873 0.937255 0.937255 0.937255 3661 1 1 1'),
+    scalarOpacity: _parseScalarOpacity('12 -2048 0 151.354 0 158.279 0.4375 190.112 0.580357 200.873 0.732143 3661 0.741071'),
+    gradientOpacity: _parseGradientOpacity('4 0 1 255 1'),
+  },
+};
+
 function vrPresetFor(modality, win, lev) {
   if (modality === 'CT' || !win) return {
     ambient: 0.1, diffuse: 0.9, specular: 0.2, specularPower: 10,
@@ -2437,6 +2816,35 @@ function openCtrlMenu() {
     _ctrlMenu.style.top = Math.round(r.bottom + 8) + 'px'; _ctrlMenu.style.right = Math.round(Math.max(8, window.innerWidth - r.right)) + 'px'; }
   document.addEventListener('mousedown', _ctrlOutside, true);
 }
+// Brief glass toast near the bottom-center — used by the lightning menu's
+// v0 applyEntry hook to show that an entry was selected (the real apply
+// paths land next).
+let _lmToastEl = null, _lmToastTimer = null;
+// When true, _lmToast is a no-op. Set by the per-tile preview loop so that
+// unsupported-layout warnings + "applied X" confirmations don't fire as toast
+// noise for each of the N preview-renders the menu runs at open time.
+let _lmToastSuppress = false;
+function _lmToast(msg) {
+  if (_lmToastSuppress) return;
+  if (_lmToastEl) { _lmToastEl.remove(); _lmToastEl = null; }
+  if (_lmToastTimer) { clearTimeout(_lmToastTimer); _lmToastTimer = null; }
+  _lmToastEl = document.createElement('div');
+  _lmToastEl.textContent = msg;
+  _lmToastEl.style.cssText = 'position:fixed;left:50%;bottom:40px;transform:translateX(-50%);z-index:80;' +
+    'padding:9px 16px;border-radius:11px;color:#fff5d6;font:600 12.5px -apple-system,system-ui,sans-serif;' +
+    'background:linear-gradient(135deg, rgba(58,64,88,0.7), rgba(20,24,38,0.78));' +
+    'backdrop-filter:blur(18px) saturate(1.6);-webkit-backdrop-filter:blur(18px) saturate(1.6);' +
+    'border:1px solid rgba(255,206,90,0.42);box-shadow:0 12px 32px rgba(0,0,0,0.5),0 0 22px rgba(255,180,60,0.22);' +
+    'opacity:0;transition:opacity 130ms ease-out;';
+  document.body.appendChild(_lmToastEl);
+  requestAnimationFrame(() => { if (_lmToastEl) _lmToastEl.style.opacity = '1'; });
+  _lmToastTimer = setTimeout(() => {
+    if (!_lmToastEl) return;
+    _lmToastEl.style.opacity = '0';
+    setTimeout(() => { if (_lmToastEl) { _lmToastEl.remove(); _lmToastEl = null; } }, 200);
+  }, 1600);
+}
+
 function ensureControlsButton() {
   if (_ctrlBtn) return;
   _ctrlBtn = document.createElement('button');
@@ -2577,7 +2985,121 @@ async function loadIDCScene(ctPrefix, segPrefix, modality, ctBucket, segBucket) 
     renderWindow.render(); markDirty();
     // deferred renders cover the GPU volume-texture upload window; they no longer touch the pivot (it's fixed once finalized)
     for (const d of [120, 400, 1000, 2200]) setTimeout(() => { try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
+    // Auto-pick a sensible layout once the scene is loaded.
+    setTimeout(() => { try { autoPickAfterLoad(); } catch (e) { console.warn('[autoPick]', e); } }, 800);
   } catch (e) { console.error('[IDC]', e); window.__slicerliveError = String(e); setLoadProgress(-1); }
+}
+
+// ===================== ReMIND multi-series study: load N series for one patient + chip-bar switch =====================
+// v0 of the "explore a full study" path. We fetch N series (CT/MR each with optional SEG) in PARALLEL,
+// cache the decoded data per series, activate the first one in the existing 4-up, and surface a chip bar
+// at the top of the viewport for switching the active volume. Each chip swap rebuilds the mirror from the
+// cached series data and triggers a re-render -- no extra network. Future: actual N-row CompareView
+// rendering (per-row slice renderers); for now the chip-toggle is the demo.
+const REMIND_049_PRE_OP = [
+  // [crdc_ct_uuid, crdc_seg_uuid_or_null, modality, label]
+  ['e0289278-314c-42d5-8b93-16e554906ef9', '112fa1d0-6b22-49a8-8056-19ae5ea6da88', 'MR', 'T1+contrast · cerebrum'],
+  ['88dc0ede-c8d2-48dc-b072-53d2c5b9b90f', 'df1d52d6-e11e-4315-b019-edf7ff9bb67b', 'MR', 'T2-SPACE · tumor'],
+  ['ce55b3e9-3c1e-4fdc-9e14-665a87c375b9', null,                                   'MR', 'T2-FLAIR'],
+];
+
+// Pure data fetch: list keys + spawn one worker, collect ct + labelmap, return -- no mirror mutation.
+async function fetchIDCSeries(seriesPrefix, segPrefix, modality, ctBucket, segBucket) {
+  const ctKeys = await s3ListKeys(seriesPrefix, ctBucket);
+  const segKeys = segPrefix ? await s3ListKeys(segPrefix, segBucket) : [];
+  if (!ctKeys.length) throw new Error('No instances at ' + (ctBucket || 'idc-open-data') + '/' + seriesPrefix);
+  const result = { ct: null, seg: null, modality, hasSeg: segKeys.length > 0 };
+  await runIDCWorker(ctKeys, segKeys, {
+    onCT: (ct) => { result.ct = ct; },
+    onLabelmap: (seg) => { result.seg = seg; },
+  }, ctBucket, segBucket, modality);
+  if (!result.ct) throw new Error('worker returned no CT for ' + seriesPrefix);
+  return result;
+}
+
+// Install one cached series into mirror + render. Reused by initial activate + chip-click swap.
+async function activateSeries(data) {
+  clearIDCScene();
+  const nodes = buildIDCNodes(data.ct, data.hasSeg, data.modality);
+  for (const id in nodes) mirror.set(id, nodes[id]);
+  window.__idcData = { ct: data.ct };
+  window.__slicerliveLoaded = mirror.size; threeDActive = true;
+  await syncDMs();
+  ensureControlsButton();
+  setIDCCamera(data.ct);
+  renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); markDirty();
+  if (data.seg) { try { await addIDCSegments(data.ct, data.seg); } catch (e) { console.warn('[ReMIND] seg apply', e); } }
+  else finalizeRotationCenter();
+  for (const d of [120, 400, 1000]) setTimeout(() => { try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
+}
+
+async function loadReMINDStudy() {
+  setLoadProgress(0.02, 'Loading ReMIND-049 (3 series)…');
+  const study = REMIND_049_PRE_OP;
+  // Sequential fetch (one series at a time). Parallel here causes a dcmjs CDN race --
+  // the 3 workers each importScripts dcmjs from the same CDN at the same instant and
+  // the CDN throttles all-but-one. Sequential is slower (~40-60 s for 3 series totalling
+  // ~55 MB) but reliable. Future: pre-load dcmjs once + cache via service worker, then
+  // workers don't hit the CDN at all and parallel is safe again.
+  const data = [];
+  for (let i = 0; i < study.length; i++) {
+    const [ct, seg, mod, label] = study[i];
+    setLoadProgress(0.05 + 0.85 * i / study.length, 'Fetching ' + label + ' (' + (i + 1) + '/' + study.length + ')…');
+    try {
+      const r = await fetchIDCSeries(ct + '/', seg ? seg + '/' : null, mod, 'idc-open-data', 'idc-open-data');
+      r.label = label;
+      data.push(r);
+    } catch (e) {
+      console.warn('[ReMIND] failed', label, e);
+    }
+  }
+  setLoadProgress(-1);
+  if (!data.length) { window.__slicerliveError = 'ReMIND load failed (no series decoded)'; return; }
+  window.__remindStudies = data;
+  // Activate first series, then surface the chip bar so user can switch.
+  await activateSeries(data[0]);
+  ensureReMINDChipBar(data, 0);
+  setTimeout(() => { try { autoPickAfterLoad(); } catch (e) { console.warn('[autoPick]', e); } }, 800);
+}
+
+let _remindBar = null;
+let _remindActiveIdx = 0;
+function ensureReMINDChipBar(study, activeIdx) {
+  if (_remindBar) _remindBar.remove();
+  _remindActiveIdx = activeIdx;
+  _remindBar = document.createElement('div');
+  // Sit to the RIGHT of the lightning button (top:12 left:14, ~46px wide -> start chip bar at ~72px).
+  _remindBar.style.cssText = 'position:fixed; left:78px; top:12px; z-index:75; display:flex; gap:6px;' +
+    ' padding:6px 10px; border-radius:13px; background:rgba(20,23,36,0.55);' +
+    ' backdrop-filter:blur(20px) saturate(1.5); -webkit-backdrop-filter:blur(20px) saturate(1.5);' +
+    ' border:1px solid rgba(255,255,255,0.16); box-shadow:0 8px 30px rgba(0,0,0,0.4);' +
+    ' font:12px/1.4 -apple-system,system-ui,sans-serif; color:#eaf0ff;';
+  const label = document.createElement('div');
+  label.textContent = window.__REMIND_CASE || 'ReMIND';
+  label.style.cssText = 'align-self:center; padding:0 6px 0 0; opacity:0.7; font:700 11px -apple-system,system-ui,sans-serif; letter-spacing:0.6px; text-transform:uppercase;';
+  _remindBar.appendChild(label);
+  for (let i = 0; i < study.length; i++) {
+    const d = study[i];
+    const chip = document.createElement('button');
+    chip.textContent = d.label;
+    chip.style.cssText = 'cursor:pointer; border-radius:9px; padding:7px 12px;' +
+      ' font:600 12px -apple-system,system-ui,sans-serif; transition:transform 100ms ease-out;' +
+      (i === activeIdx
+        ? ' background:linear-gradient(180deg,#9fe9ff,#54c6f0); color:#04121c; border:0; box-shadow:0 4px 14px rgba(84,198,240,0.35);'
+        : ' background:rgba(255,255,255,0.05); color:#cfe6ff; border:1px solid rgba(255,255,255,0.14);');
+    chip.onmouseenter = () => { if (i !== _remindActiveIdx) chip.style.background = 'rgba(255,255,255,0.10)'; };
+    chip.onmouseleave = () => { if (i !== _remindActiveIdx) chip.style.background = 'rgba(255,255,255,0.05)'; };
+    chip.onclick = async () => {
+      if (i === _remindActiveIdx) return;
+      try { historyCapture(); } catch (_) {}      // chip swap is undoable
+      setLoadProgress(0.5, 'Switching to ' + d.label + '…');
+      try { await activateSeries(d); } catch (e) { console.error('[ReMIND] switch', e); }
+      setLoadProgress(-1);
+      ensureReMINDChipBar(study, i);
+    };
+    _remindBar.appendChild(chip);
+  }
+  document.body.appendChild(_remindBar);
 }
 
 // ===================== SEGRoulette: spin a random IDC SEG (CT/MR/PET source) into the viewer =====================
@@ -2786,6 +3308,86 @@ function openCaseInfo() {
   _srModal.appendChild(panel); document.body.appendChild(_srModal);
 }
 
+// Drag-and-drop MRB v0 — load a Slicer MRB (zip with .mrml + Data/*) directly
+// from bytes. Parses the inner MRML XML and resolves storage-node fileNames
+// against the unzipped file map (rather than fetching). v0 handles Model
+// nodes (VTP/legacy .vtk) — volumes/segs (NRRD) are surfaced as a deferred
+// notice so the user knows what didn't render.
+async function loadMrbBytes(bytes, opts) {
+  opts = opts || {};
+  const mode = opts.mode || 'replace';
+  let result;
+  try { result = unzipMrb(bytes); }
+  catch (e) { _lmToast('MRB read failed: ' + (e && e.message || e)); return; }
+  const { mrmlXml, files } = result;
+  const xml = new DOMParser().parseFromString(mrmlXml, 'application/xml');
+  const root = xml.documentElement;
+  if (!root || root.querySelector('parsererror')) { _lmToast('MRB: malformed MRML XML'); return; }
+  const byId = {};
+  for (const el of root.children) { const id = el.getAttribute('id'); if (id) byId[id] = el; }
+
+  if (mode === 'replace') { mirror.clear(); localBlobs.clear(); threeDActive = true; }
+
+  // ModelDisplay nodes first (Models reference them).
+  for (const el of root.children) {
+    const id = el.getAttribute('id'); if (!id || el.tagName !== 'ModelDisplay') continue;
+    mirror.set(id, { id, class: 'vtkMRMLModelDisplayNode', name: el.getAttribute('name') || id, refs: {}, blobs: {},
+      attrs: { color: _floats(el.getAttribute('color') || '1 1 1'),
+               opacity: el.getAttribute('opacity') != null ? +el.getAttribute('opacity') : 1,
+               visibility: el.getAttribute('visibility') === 'false' ? 0 : 1,
+               representation: el.getAttribute('representation') != null ? +el.getAttribute('representation') : 2,
+               edgeVisibility: el.getAttribute('edgeVisibility') === 'true' } });
+  }
+  // Model nodes -- resolve fileName against the in-memory file map.
+  let modelCount = 0, modelMissing = 0;
+  for (const el of root.children) {
+    const id = el.getAttribute('id'); if (!id || el.tagName !== 'Model') continue;
+    const dispRef = (el.getAttribute('displayNodeRef') || '').split(/\s+/).filter(Boolean);
+    const storeRef = (el.getAttribute('storageNodeRef') || '').split(/\s+/).filter(Boolean)[0];
+    const fileName = storeRef && byId[storeRef] && byId[storeRef].getAttribute('fileName');
+    const blobs = {};
+    if (fileName) {
+      const baseName = fileName.split('/').pop();
+      const data = files.get(fileName) || files.get(baseName);
+      if (data) {
+        try {
+          const pd = readPolyDataFromBytes(data, baseName);
+          if (pd && pd.getPoints && pd.getPoints().getNumberOfPoints() > 0) {
+            blobs.points = { hash: 'mrb' + (__slHash++) };
+            blobs.__pd = pd;
+            modelCount++;
+          } else { modelMissing++; }
+        } catch (e) { console.warn('[MRB] model read failed', fileName, e); modelMissing++; }
+      } else { console.warn('[MRB] file not found in bundle', fileName); modelMissing++; }
+    }
+    mirror.set(id, { id, class: 'vtkMRMLModelNode', name: el.getAttribute('name') || id, refs: { display: dispRef }, attrs: {}, blobs });
+  }
+  // Volumes / Segmentations / Markups in the MRB are flagged for the user --
+  // the readers for those formats land in the next pass. The nodes are NOT
+  // added to the mirror (the DMs would try to render them and warn).
+  const deferred = [];
+  for (const el of root.children) {
+    if (['Volume', 'Segmentation', 'Markups'].includes(el.tagName)) {
+      deferred.push(el.tagName + ' "' + (el.getAttribute('name') || el.getAttribute('id') || '?') + '"');
+    }
+  }
+
+  console.log('[MRB]', opts.name || '', 'loaded', mirror.size, 'nodes,', modelCount, 'model(s)' +
+              (modelMissing ? ' (' + modelMissing + ' missing)' : '') +
+              (deferred.length ? '; deferred: ' + deferred.length : ''));
+  window.__slicerliveLoaded = mirror.size;
+  await syncDMs();
+  try { renderer.resetCamera(); renderer.updateLightsGeometryToFollowCamera(); } catch (_) {}
+  renderWindow.render(); markDirty();
+  for (const d of [120, 400, 1000]) setTimeout(() => { try { renderer.resetCameraClippingRange(); renderer.updateLightsGeometryToFollowCamera(); renderWindow.render(); } catch (e) {} }, d);
+
+  if (deferred.length) _lmToast(deferred.length + ' volume/seg/markup nodes deferred — NRRD support lands next');
+  else if (modelCount === 0) _lmToast('MRB loaded but no models rendered (' + modelMissing + ' missing files)');
+  else _lmToast('Loaded ' + (opts.name || 'MRB') + ' — ' + modelCount + ' model(s)');
+  // Auto-pick the layout for what we just loaded (3D-only for models, 4-up for volumes).
+  setTimeout(() => { try { autoPickAfterLoad(); } catch (e) { console.warn('[autoPick]', e); } }, 600);
+}
+
 async function loadSlicerLiveScene(sceneUrl) {
   const base = sceneUrl.slice(0, sceneUrl.lastIndexOf('/') + 1);
   if (/\.json(\?|$)/.test(sceneUrl)) return loadSceneJson(sceneUrl, base);   // full-scene publish format
@@ -2828,6 +3430,7 @@ async function loadSlicerLiveScene(sceneUrl) {
   threeDActive = true;
   await syncDMs();
   renderer.resetCamera(); renderWindow.render(); markDirty();
+  setTimeout(() => { try { autoPickAfterLoad(); } catch (e) { console.warn('[autoPick]', e); } }, 500);
 }
 
 (async () => {
@@ -2836,12 +3439,137 @@ async function loadSlicerLiveScene(sceneUrl) {
     positionOverlay();
     window.addEventListener('resize', positionOverlay);
     requestAnimationFrame(composite);   // start the render loop NOW so CT slices + VR show progressively as they load
+
+    // Lightning state-explorer (top-left bolt + space toggle). The button is up
+    // from the moment the page loads; hooks read live scene state at open time,
+    // so an empty scene -> empty menu and a loaded scene -> real candidates.
+    // v0: applyEntry is a host-side toast/log; no real apply paths are wired yet.
+    // Local drag-and-drop loader (v0: MRB only). Lives at document level so a
+    // drop anywhere in the viewport works. Replace/Add/Cancel prompt when a
+    // scene is already loaded.
+    installLocalDrop({
+      getHasScene: () => mirror.size > 0,
+      loadMrb: async (bytes, dropOpts) => { await loadMrbBytes(bytes, dropOpts); },
+    });
+
+    installLightningMenu({
+      // The menu uses the current scene as the tile preview background — way more
+      // honest than abstract icons (the user can see "this would apply to MY data").
+      // Per-category overlays (CSS filters for W/L, brightness shift, etc.) layer on top.
+      getSnapshot: () => captureSceneSnapshot(1280),
+      // Per-tile REAL re-render: fork scene state, apply each delta, render, capture,
+      // restore. Returns a Map<entry.id, dataURL>. Heavy (~50ms/tile) but honest.
+      generateTilePreviews: async (entries, dims) => {
+        // Loop runs while the canvas is covered by the menu's freeze layer, so
+        // any flicker from rapid state mutation is invisible to the user. The
+        // expensive bit is syncDMs (rebuilds DMs from mirror state on each
+        // mutation); we minimize the rAF wait but still need one to let the
+        // GPU upload settle before toDataURL pulls bytes.
+        //
+        // Capture each preview at FULL CANVAS RESOLUTION so the carousel
+        // (which can display the preview at ~980 px wide) doesn't have to
+        // upscale. Tile thumbnails downscale crisply via background-size:cover.
+        // JPEG @ q=0.78 keeps each preview around 80-120 KB.
+        const saved = captureSceneState();
+        const out = new Map();
+        const tileW = (dims && dims.w) || 1280;
+        _lmToastSuppress = true;
+        try {
+          for (const e of entries) {
+            try {
+              _applyCatalogEntryImpl(e);
+              await _renderTick(1);                          // 1 rAF: render + GPU upload settle
+              const img = captureSceneSnapshot(tileW);
+              if (img) out.set(e.id, img);
+            } catch (err) { console.warn('[tile-preview]', e.id, err); }
+            try { await restoreSceneState(saved); } catch (err) { console.warn('[tile-preview restore]', err); }
+            // No second tick — restoreSceneState already calls render at its end.
+          }
+        } finally { _lmToastSuppress = false; }
+        return out;
+      },
+      getCapabilities: () => {
+        const caps = { hasVolume: false, hasSegmentation: false };
+        for (const n of mirror.values()) {
+          if (n.class === 'vtkMRMLScalarVolumeNode') caps.hasVolume = true;
+          if (n.class === 'vtkMRMLSegmentationNode') caps.hasSegmentation = true;
+        }
+        // Modality may come from the URL param (window.__IDC_MOD when ?ct=&seg=)
+        // OR from the live SEGRoulette pick (_srCurrent.m). Normalize PT -> PET
+        // to match the catalog's PET label.
+        const m = window.__IDC_MOD || (typeof _srCurrent !== 'undefined' && _srCurrent && _srCurrent.m) || null;
+        if (m) caps.activeModality = m === 'PT' ? 'PET' : m;
+        // Count segments for bundles that need minSegments. The IDC pipeline
+        // stashes them on window.__caseSegments after the labelmap decode.
+        const segs = window.__caseSegments;
+        if (segs && segs.length) caps.segmentCount = segs.length;
+        return caps;
+      },
+      applyEntry: (entry) => {
+        // Real apply: layout deltas hit setMaxView; VR-preset deltas rebuild
+        // the active volume's VolumeProperty attrs and re-render. See
+        // applyCatalogEntry above. Unsupported layouts (compare grids etc.)
+        // toast their own status from applyLayoutDelta.
+        try { applyCatalogEntry(entry); }
+        catch (e) { console.error('[lightning] apply threw', e); _lmToast('Apply failed: ' + (e && e.message || e)); }
+      },
+      // Dynamic catalog entries — scene-specific, computed at menu-open time.
+      // For multi-series studies (ReMIND): every OTHER cached series in the
+      // study becomes a "Switch to: <label>" entry. The lightning menu pulls
+      // these and merges them with the static catalog before ranking.
+      getDynamicEntries: () => {
+        const out = [];
+        const studies = window.__remindStudies;
+        if (studies && studies.length > 1) {
+          for (let i = 0; i < studies.length; i++) {
+            if (i === _remindActiveIdx) continue;
+            const s = studies[i];
+            out.push({
+              category: 'series-switch',
+              id: 'series-switch-' + i,
+              label: 'Series → ' + s.label,
+              description: 'Switch to ' + s.label + (s.hasSeg ? ' (with segmentation)' : ''),
+              delta: { kind: 'series-switch', seriesIdx: i, seriesLabel: s.label },
+              source: [{ kind: 'authored', note: 'Dynamic: from window.__remindStudies cache' }],
+            });
+          }
+        }
+        return out;
+      },
+      // Drag-to-mix: apply BOTH deltas as a single undoable step. Most
+      // category pairs compose cleanly (layout + camera, VR-preset + W/L,
+      // etc.); the few conflicting pairs (two layouts, two VR presets) just
+      // have the second win, no special handling.
+      applyMixed: (entryA, entryB) => {
+        historyCapture();
+        let label = (entryA?.label || '?') + '  +  ' + (entryB?.label || '?');
+        const prev = _lmToastSuppress;
+        _lmToastSuppress = true;       // suppress the per-delta confirmations; we'll toast the mix at the end
+        try {
+          _applyCatalogEntryImpl(entryA);
+          _applyCatalogEntryImpl(entryB);
+        } catch (e) {
+          console.error('[mix]', e);
+          _lmToastSuppress = prev;
+          _lmToast('Mix failed: ' + (e && e.message || e));
+          return;
+        }
+        _lmToastSuppress = prev;
+        _lmToast('Mixed: ' + label);
+      },
+    });
     if (window.__SEGROULETTE) await loadSEGRoulette();                              // spin a random IDC SEG + its CT/MR/PET source
+    else if (window.__REMIND_STUDY) await loadReMINDStudy();                        // ReMIND multi-series + chip-bar switch
     else if (window.__IDC_CT) {   // client-side IDC (optional ctb/segb buckets); a shared link also carries case context
       if (window.__IDC_CASE) setupSharedCase(window.__IDC_CASE);
       await loadIDCScene(window.__IDC_CT, window.__IDC_SEG, window.__IDC_MOD || 'CT', window.__IDC_CTB, window.__IDC_SEGB);
     }
-    else await loadSlicerLiveScene(window.__SLICERLIVE_SCENE_URL);
+    else if (window.__SLICERLIVE_SCENE_URL) await loadSlicerLiveScene(window.__SLICERLIVE_SCENE_URL);
+    else if (window.__DROPMODE) {
+      // Empty scene; drag-drop hook is already installed and waiting.
+      document.getElementById('status').textContent = 'SlicerLive  •  drop an .mrb here';
+      threeDActive = true;
+    }
     return;
   }
   if (!(await pullMRML())) { console.warn('[offload] MRML server not reachable; overlay disabled'); return; }

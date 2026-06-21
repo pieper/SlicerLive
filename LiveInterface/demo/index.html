@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>LiveInterface demo</title>
+  <link rel="stylesheet" href="../dist/liveinterface.css" />
+  <style>
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--lw-bg, #1c1f24);
+      color: var(--lw-fg, #e6e8eb);
+      font-family: var(--lw-font, system-ui, sans-serif);
+      min-height: 100vh;
+    }
+    h1 { margin: 0 0 4px; font-weight: 600; font-size: 20px; letter-spacing: 0.2px; }
+    .sub { color: var(--lw-fg-muted, #9aa1ab); font-size: 13px; margin-bottom: 18px; }
+    .panel {
+      background: var(--lw-bg-elevated, #262a31);
+      border: 1px solid var(--lw-border, #353a42);
+      border-radius: var(--lw-radius, 6px);
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .status-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    pre {
+      font-family: var(--lw-font-mono);
+      font-size: 12px;
+      color: var(--lw-fg-muted);
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    button { font: inherit; padding: 4px 10px; border-radius: 4px; border: 1px solid var(--lw-border); background: var(--lw-bg); color: var(--lw-fg); cursor: pointer; }
+    button:hover { border-color: var(--lw-accent); }
+  </style>
+</head>
+<body>
+  <h1>LiveInterface demo</h1>
+  <div class="sub">Reusable widgets for SlicerLive and qSlicerWebWidget. Canvas2D + SVG.</div>
+
+  <div class="panel">
+    <div class="status-row"><strong>ColorPicker</strong></div>
+    <div style="display:flex; gap:20px; flex-wrap:wrap; align-items:flex-start;">
+      <div id="cp1"></div>
+      <div id="cp2"></div>
+    </div>
+    <pre id="cp-log" style="margin-top:10px"></pre>
+  </div>
+
+  <div class="panel">
+    <div class="status-row"><strong>TransferFunctionEditor</strong></div>
+    <div id="tf-editor" style="margin: 6px 0;"></div>
+    <div style="display:flex; gap:10px; margin-top:8px; flex-wrap: wrap; align-items: center;">
+      <button id="tf-reset" type="button">Reset to ramp</button>
+      <button id="tf-preset-ct" type="button">CT-Bone-ish preset</button>
+      <button id="tf-copy-mrml" type="button">Copy MRML attribute</button>
+      <span id="tf-mrml-hint" style="font-size:11px; color: var(--lw-fg-muted);">click + drag a handle · click empty area to add · double-click or Delete to remove · Arrow keys nudge (Shift = bigger)</span>
+    </div>
+    <pre id="tf-log" style="margin-top:10px"></pre>
+  </div>
+
+  <div class="panel">
+    <div class="status-row"><strong>CombinedTransferFunctionEditor</strong></div>
+    <div id="ctf-editor" style="margin: 6px 0;"></div>
+    <div style="display:flex; gap:10px; margin-top:8px; flex-wrap: wrap; align-items: center;">
+      <button id="ctf-reset" type="button">Reset</button>
+      <button id="ctf-preset" type="button">CT-Bone color preset</button>
+      <button id="ctf-copy" type="button">Copy MRML attributes</button>
+      <span id="ctf-hint" style="font-size:11px; color: var(--lw-fg-muted);">drag handle = move · click handle = color picker · double-click = remove · drag square puck = pan all (Shift = scale) · right-click anywhere = layer menu · chips top-left = switch / hide layers</span>
+    </div>
+    <pre id="ctf-log" style="margin-top:10px"></pre>
+  </div>
+
+  <div class="panel">
+    <div class="status-row">
+      <strong>Histogram</strong>
+      <label style="font-size:12px; margin-left:auto; display:flex; gap:5px; align-items:center;">
+        <input id="hg-log" type="checkbox"> log scale
+      </label>
+    </div>
+    <div style="display:flex; gap:18px; flex-wrap:wrap;">
+      <div id="hg-ct" style="width:380px;"></div>
+      <div id="hg-mr" style="width:380px;"></div>
+    </div>
+    <pre id="hg-log-text" style="margin-top:10px"></pre>
+  </div>
+
+  <script src="../dist/liveinterface.iife.js"></script>
+  <script>
+    (() => {
+      const LW = window.LiveInterface;
+      LW.injectThemeStylesheet();
+
+      // ColorPicker
+      const cpLog = document.getElementById('cp-log');
+      const cp1 = new LW.ColorPicker(document.getElementById('cp1'), {
+        initial: { rgb: [0.36, 0.66, 0.90], alpha: 1.0 },
+      });
+      const cp2 = new LW.ColorPicker(document.getElementById('cp2'), {
+        initial: { rgb: [0.95, 0.66, 0.28], alpha: 0.7 },
+      });
+      const fmt = (cp, label) => {
+        const s = cp.getState();
+        return `${label}: rgb(${s.rgb.map((c) => (c*255).toFixed(0)).join(',')}) a=${s.alpha.toFixed(2)}`;
+      };
+      const report = () => {
+        cpLog.textContent = fmt(cp1, 'cp1') + '\n' + fmt(cp2, 'cp2');
+      };
+      cp1.on('change', report);
+      cp2.on('change', report);
+      report();
+
+      // Synthetic CT + MR
+      const ctData = synthesizeCT(64 * 64 * 64);
+      const mrData = synthesizeMR(64 * 64 * 64);
+
+      // Histograms
+      const hgCT = new LW.Histogram(document.getElementById('hg-ct'), {
+        width: 380, height: 140, color: [0.95, 0.66, 0.28],
+      });
+      const hgMR = new LW.Histogram(document.getElementById('hg-mr'), {
+        width: 380, height: 140, color: [0.36, 0.66, 0.90],
+      });
+      hgCT.setData(ctData, { min: -1024, max: 3071, bins: 256 });
+      hgMR.setData(mrData, { bins: 256 });
+      const logToggle = document.getElementById('hg-log');
+      logToggle.addEventListener('change', () => {
+        hgCT.setLogScale(logToggle.checked);
+        hgMR.setLogScale(logToggle.checked);
+      });
+      document.getElementById('hg-log-text').textContent =
+        `CT histogram: ${ctData.length.toLocaleString()} voxels, ` +
+        `range [${hgCT.getState().range[0]}, ${hgCT.getState().range[1]}], ` +
+        `maxBin = ${hgCT.getState().maxBin.toLocaleString()}\n` +
+        `MR histogram: ${mrData.length.toLocaleString()} voxels, ` +
+        `range [${hgMR.getState().range[0].toFixed(0)}, ${hgMR.getState().range[1].toFixed(0)}], ` +
+        `maxBin = ${hgMR.getState().maxBin.toLocaleString()}`;
+
+      // TransferFunctionEditor on the CT data
+      const tfHost = document.getElementById('tf-editor');
+      const tfLog = document.getElementById('tf-log');
+      const tfEditor = new LW.TransferFunctionEditor(tfHost, {
+        width: 760, height: 220,
+        range: [-1024, 3071],
+        controlPoints: [
+          { x: -1024, y: 0 },
+          { x:   200, y: 0 },
+          { x:   400, y: 0.4 },
+          { x:   700, y: 0.85 },
+          { x:  3071, y: 1.0 },
+        ],
+        curveColor: [0.36, 0.82, 0.95],
+        histogramColor: [0.55, 0.58, 0.65],
+        binCount: 256,
+      });
+      tfEditor.setData(ctData, { min: -1024, max: 3071 });
+      const reportTf = (e) => {
+        const pts = (e && e.controlPoints) || tfEditor.getState().controlPoints;
+        tfLog.textContent =
+          `controlPoints (${pts.length}):\n  ` +
+          pts.map((p) => `(${p.x.toPrecision(5)}, ${p.y.toFixed(3)})`).join('\n  ') +
+          `\nMRML attribute: ${tfEditor.toMrmlAttribute()}`;
+      };
+      tfEditor.on('change', reportTf);
+      reportTf();
+
+      document.getElementById('tf-reset').onclick = () => {
+        tfEditor.setControlPoints([
+          { x: -1024, y: 0 },
+          { x:  3071, y: 1.0 },
+        ]);
+        reportTf();
+      };
+      document.getElementById('tf-preset-ct').onclick = () => {
+        tfEditor.setControlPoints([
+          { x: -1024, y: 0 },
+          { x:    80, y: 0 },
+          { x:   180, y: 0.15 },
+          { x:   400, y: 0.55 },
+          { x:   800, y: 0.85 },
+          { x:  1500, y: 0.95 },
+          { x:  3071, y: 1.0 },
+        ]);
+        reportTf();
+      };
+      document.getElementById('tf-copy-mrml').onclick = () => {
+        navigator.clipboard?.writeText(tfEditor.toMrmlAttribute());
+        document.getElementById('tf-mrml-hint').textContent =
+          'copied: ' + tfEditor.toMrmlAttribute();
+      };
+
+      // CombinedTransferFunctionEditor — color + opacity at each control point
+      const ctfHost = document.getElementById('ctf-editor');
+      const ctfLog = document.getElementById('ctf-log');
+      // Default multi-layer CT preset:
+      //   Bone layer  — Rorden's CT_Bones window (180→391→600 HU) +
+      //                 Anna Frühstück's warm red→orange→cream→white palette,
+      //                 extended above 600 HU for dense-bone highlights.
+      //   Skin layer  — anchored on Rorden's CT_Surface window (-600→-249→100)
+      //                 but with low alpha (peak ~0.09) so the body surface is
+      //                 only suggested, never obscuring the view inside.
+      const presetCTBoneAndSkin = [
+        {
+          name: 'Skin', visible: true,
+          controlPoints: [
+            { x: -1024, opacity: 0,    rgb: [0.95, 0.78, 0.65] },
+            { x:  -600, opacity: 0,    rgb: [0.95, 0.78, 0.65] },
+            { x:  -249, opacity: 0.05, rgb: [0.96, 0.78, 0.65] },
+            { x:   100, opacity: 0.09, rgb: [0.96, 0.80, 0.68] },
+            { x:   180, opacity: 0,    rgb: [0.95, 0.78, 0.65] },
+            { x:  3071, opacity: 0,    rgb: [0.95, 0.78, 0.65] },
+          ],
+        },
+        {
+          name: 'Bone', visible: true,
+          controlPoints: [
+            { x: -1024, opacity: 0,    rgb: [0.60, 0.10, 0.02] },
+            { x:   180, opacity: 0,    rgb: [0.60, 0.10, 0.02] },
+            { x:   200, opacity: 0.08, rgb: [0.75, 0.20, 0.08] },
+            { x:   391, opacity: 0.39, rgb: [0.95, 0.55, 0.20] },
+            { x:   600, opacity: 0.63, rgb: [1.00, 0.85, 0.50] },
+            { x:  1200, opacity: 0.88, rgb: [1.00, 0.95, 0.85] },
+            { x:  3071, opacity: 1.00, rgb: [1.00, 1.00, 0.98] },
+          ],
+        },
+      ];
+      const ctf = new LW.CombinedTransferFunctionEditor(ctfHost, {
+        width: 760, height: 240,
+        range: [-1024, 3071],
+        layers: presetCTBoneAndSkin,
+        histogramColor: [0.45, 0.48, 0.55],
+        binCount: 256,
+      });
+      ctf.setData(ctData, { min: -1024, max: 3071 });
+      const reportCtf = () => {
+        const layers = ctf.getLayers();
+        const active = ctf.getActiveLayer();
+        const attrs = ctf.toMrmlAttributes();
+        const layerLines = layers.map((l) => {
+          const marker = l.id === active.id ? '●' : ' ';
+          const vis = l.visible ? '' : ' (hidden)';
+          return `  ${marker} ${l.name}${vis}: ${l.controlPoints.length} pts`;
+        });
+        ctfLog.textContent =
+          `layers (active = ${active?.name ?? 'none'}):\n` +
+          layerLines.join('\n') +
+          `\n\nactive points (${active?.controlPoints.length ?? 0}):\n  ` +
+          (active?.controlPoints ?? []).map((p) => {
+            const rgb = p.rgb.map((c) => (c * 255) | 0).join(',');
+            return `x=${p.x.toPrecision(5)}  α=${p.opacity.toFixed(3)}  rgb=(${rgb})`;
+          }).join('\n  ') +
+          `\n\ncomposited MRML output (blend='max'):\n` +
+          `  scalarOpacity = ${attrs.scalarOpacity}\n` +
+          `  colorTransfer = ${attrs.colorTransfer}`;
+      };
+      ctf.on('change', reportCtf);
+      reportCtf();
+
+      document.getElementById('ctf-reset').onclick = () => {
+        ctf.setLayers(presetCTBoneAndSkin);
+        reportCtf();
+      };
+      document.getElementById('ctf-preset').onclick = () => {
+        // Single-layer CT-Bone (Slicer presets.xml style, opacity-only color)
+        ctf.setLayers([{
+          name: 'CT-Bone',
+          controlPoints: [
+            { x: -1024, opacity: 0,    rgb: [0.0, 0.0, 0.0] },
+            { x:    80, opacity: 0,    rgb: [0.3, 0.05, 0.05] },
+            { x:   180, opacity: 0.15, rgb: [0.6, 0.18, 0.15] },
+            { x:   400, opacity: 0.55, rgb: [0.85, 0.50, 0.30] },
+            { x:   800, opacity: 0.85, rgb: [1.0, 0.88, 0.72] },
+            { x:  1500, opacity: 0.95, rgb: [1.0, 0.97, 0.90] },
+            { x:  3071, opacity: 1.0,  rgb: [1.0, 1.0, 1.0] },
+          ],
+        }]);
+        reportCtf();
+      };
+      document.getElementById('ctf-copy').onclick = () => {
+        const a = ctf.toMrmlAttributes();
+        const txt = `scalarOpacity="${a.scalarOpacity}" colorTransfer="${a.colorTransfer}"`;
+        navigator.clipboard?.writeText(txt);
+        document.getElementById('ctf-hint').textContent = 'copied: ' + txt;
+      };
+    })();
+
+    function gauss(seed) {
+      let s = seed;
+      const rand = () => ((s = (s * 1664525 + 1013904223) | 0) >>> 0) / 4294967296;
+      return () => {
+        let u, v, w;
+        do { u = 2 * rand() - 1; v = 2 * rand() - 1; w = u * u + v * v; } while (w >= 1 || w === 0);
+        return u * Math.sqrt(-2 * Math.log(w) / w);
+      };
+    }
+    function synthesizeCT(n) {
+      const out = new Float32Array(n);
+      const g = gauss(42);
+      for (let i = 0; i < n; i++) {
+        const r = Math.random();
+        if (r < 0.45)      out[i] = -1000 + g() * 40;
+        else if (r < 0.90) out[i] =    50 + g() * 60;
+        else               out[i] =   700 + g() * 250;
+      }
+      return out;
+    }
+    function synthesizeMR(n) {
+      const out = new Float32Array(n);
+      const g = gauss(7);
+      for (let i = 0; i < n; i++) {
+        const r = Math.random();
+        if (r < 0.55) out[i] = 220 + g() * 30;
+        else          out[i] = 380 + g() * 40;
+      }
+      return out;
+    }
+  </script>
+</body>
+</html>

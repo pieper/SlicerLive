@@ -9,7 +9,7 @@ docker run --rm -v "$DIR":/work -w /work node:20-slim sh -c '
   set -e
   [ -f package.json ] || npm init -y >/dev/null 2>&1
   echo ">> installing @kitware/vtk.js + esbuild…"
-  npm i --no-audit --no-fund --silent @kitware/vtk.js@36.2.0 esbuild >/dev/null 2>&1
+  npm i --no-audit --no-fund --silent @kitware/vtk.js@36.2.0 esbuild fflate >/dev/null 2>&1
   echo ">> bundling…"
   for entry in "slicerlive.js:slicerlive-bundle.js"; do
     src=${entry%%:*}; out=${entry##*:}

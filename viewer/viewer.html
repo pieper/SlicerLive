@@ -26,8 +26,19 @@
   const _ct = _params.get('ct') || '';           // client-side IDC: ?ct=<crdc_series_uuid>&seg=<crdc_series_uuid>
   const _seg = _params.get('seg') || '';
   const _roulette = _params.has('segroulette');   // SEGRoulette: spin a random IDC SEG (CT/MR/PET source) into the viewer
+  const _drop = _params.has('drop');              // Drop mode: empty viewer ready to receive a drag-and-dropped local file (v0: .mrb)
+  const _remind = _params.has('remind');          // ReMIND sample case (ReMIND-049 pre-op T1+contrast + cerebrum SEG)
   window.__OFFLOAD_STANDALONE = true;            // full-window vtk.js render, no video / desktop compositor
   window.__SLICERLIVE_SCENE_URL = _scene;
+  window.__DROPMODE = _drop;
+  if (_remind) {
+    // ReMIND-049 pre-op multi-series study: T1+contrast/cerebrum, T2-SPACE/tumor, T2-FLAIR.
+    // The full series list is hardcoded in slicerlive.js (loadReMINDStudy) so it can fetch them
+    // in parallel and surface a chip bar to switch the active volume. All series live in
+    // idc-open-data; found via IDCClient against the live IDC index.
+    window.__REMIND_STUDY = true;
+    window.__REMIND_CASE = 'ReMIND-049 (pre-op)';
+  }
   if (_ct) { window.__IDC_CT = _ct; window.__IDC_SEG = _seg; window.__IDC_MOD = _params.get('mod') || 'CT';
              window.__IDC_CTB = _params.get('ctb') || ''; window.__IDC_SEGB = _params.get('segb') || '';   // optional IDC buckets (default idc-open-data)
              // a shared "Copy link" carries case context -> reconstruct the Details popup on a fresh open
@@ -36,7 +47,7 @@
                lic: _params.get('lic') || '', su: _params.get('su') || '', pid: _params.get('pid') || '',
                u: _params.get('u') || '', idoi: _params.get('idoi') || '', sdoi: _params.get('sdoi') || '' }; }
   if (_roulette) window.__SEGROULETTE = true;
-  if (!_scene && !_ct && !_roulette) document.getElementById('err').textContent = 'No ?scene=<mrml-url>, ?ct=&seg=, or ?segroulette provided.';
+  if (!_scene && !_ct && !_roulette && !_drop && !_remind) document.getElementById('err').textContent = 'No ?scene=<mrml-url>, ?ct=&seg=, ?segroulette, ?remind, or ?drop provided.';
   window.addEventListener('offload-build', (e) => {
     document.getElementById('status').textContent = 'SlicerLive ' + e.detail + (_scene ? '  •  ' + _scene : '');
   });

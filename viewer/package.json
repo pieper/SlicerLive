@@ -11,6 +11,7 @@
   "description": "",
   "dependencies": {
     "@kitware/vtk.js": "^36.2.0",
-    "esbuild": "^0.28.1"
+    "esbuild": "^0.28.1",
+    "fflate": "^0.8.3"
   }
 }

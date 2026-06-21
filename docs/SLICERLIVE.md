@@ -27,6 +27,27 @@ Rationale: the desktop-sharing infra and the client-GPU MRML rendering are indep
 audiences; splitting lets each be adopted/contributed to on its own, and keeps SlicerLive lightweight (no
 GStreamer/CUDA) for the static-viewer common case.
 
+## 1b. Naming — SlicerLive, LiveScene, LiveInterface (2026-06-19)
+SlicerLive has three brand-level names. They show up across this doc, the repo layout, and downstream
+extensions — keeping them straight matters more than the spelling.
+
+| Name | What it is | Replaces (and why) |
+|---|---|---|
+| **SlicerLive** | The parent project — "live 3D Slicer scenes on the web." | n/a — the umbrella brand. |
+| **LiveScene** | SlicerLive's **runtime semantic graph** — the in-browser/in-runtime representation of a Slicer scene. A scene graph with bidirectional node refs, modified-event propagation, transactional updates, and the Observer/MVP semantics that make Slicer pipelines work. | Conceptually replaces MRML *when talking about SlicerLive's runtime layer*. "Markup Language" baggage out; "MR" ambiguity out; scene-graph semantics preserved (not a flat reactive store). **Note:** "MRML" is still the right word for the actual Slicer **file format** that SlicerLive ingests (`.mrml`, `.mrb`) — only the runtime-concept name changes. |
+| **LiveInterface** | SlicerLive's user/agent-facing **interaction layer**. Contains UI primitives today (the `LiveInterface/` package — ColorPicker, TransferFunctionEditor, etc.) and is intended as the surface an agent composes against a LiveScene per user. | Replaces an earlier "LiveWidgets" name. "Widgets" implied a closed catalog of pre-built controls; "Interface" covers conversational, voice, spatial, gesture, and traditional controls equally — and the human-vs-agent ambiguity is a feature, not a bug, because the agent's path into LiveScene is a literal API and the human's path is mediated through the same surface. |
+
+**Design principle (the *why* for LiveInterface's openness):** SlicerLive treats every user as having their
+own ability profile — older, slower, faster, more expert, less expert, sensorily or cognitively different.
+Rather than building separate "novice mode" / "accessibility mode" UIs, the architectural commitment is
+that **LiveScene is the universal mediation layer**, and an AI agent reading LiveScene is the primary
+adaptive surface for any user. Same scene, same backend, agent generates per-user interaction. The
+LiveInterface package ships reusable primitives today; the generative-composition path is the longer arc.
+Lineage: Wobbrock's ability-based design (ABD-MT 2024, AutoABD 2025), Kat Holmes' *Mismatch* / Microsoft
+Inclusive Design Toolkit, and the generative-UI research line (Google's Generative UI 2025, DynaVis,
+Biscuit, Jelly, Portal UX Agent). Hard guardrail: adaptation is in **presentation** only — never hide or
+soften the underlying data. "Show me everything anyway" must always work.
+
 ## 2. Architecture — layered, host-pluggable
 | Layer | What | Where (PLUGGABLE — viewer only needs CORS URLs) |
 |---|---|---|

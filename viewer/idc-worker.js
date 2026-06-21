@@ -131,7 +131,18 @@ async function buildVolume(ctKeys) {
 // Map each SEG frame pixel (col,row) -> CT IJK using the SEG's OWN ImageOrientation/Position (per frame, oblique-
 // safe) -- the SEG may be stored flipped vs the CT (here colDir is negated), so a naive (col,row)->(i,j) is wrong.
 function buildLabelmap(ds, bits, ct) {
-  const [nx, ny, nz] = ct.dims, frameBytes = (nx * ny) >> 3;
+  // The SEG may be authored at a DIFFERENT grid from the reference volume
+  // (e.g. ReMIND-049 cerebrum SEG is 336x268x224 at 0.488 mm while the
+  // reference T1+contrast is 256x224x192 at 0.977 mm). So iterate over the
+  // SEG's OWN (Rows, Columns) for byte indexing -- the world-space-to-ref-IJK
+  // mapping below already uses the SEG's IOP/PixelSpacing, so the geometry is
+  // correct; only the byte iteration was wrong (it used ct.dims, which
+  // misindexes a different-resolution SEG and reads scrambled bits, producing
+  // a bbox-shaped block in the rendered surface).
+  const [nx, ny, nz] = ct.dims;                              // REFERENCE volume dims (target labelmap shape)
+  const segCols = Number(ds.Columns) || nx;                  // SEG's own grid (x direction inside a frame)
+  const segRows = Number(ds.Rows)    || ny;                  // SEG's own grid (y direction inside a frame)
+  const frameBytes = (segCols * segRows + 7) >> 3;           // bitpacked SEG frame size, round up
   const lab = new Uint8Array(nx * ny * nz);
   const M = ct.ijkToRAS, inv = invAffine(M);
   const toIJK = (lps) => { const r = lps2ras(lps); return [
@@ -143,6 +154,23 @@ function buildLabelmap(ds, bits, ct) {
   const sPs = (shared.PixelMeasuresSequence?.[0]?.PixelSpacing || ct.ps).map(Number);
   const colW = sIop.slice(0, 3).map((v) => v * sPs[1]);   // LPS world delta per +1 column (the i / DICOM rowDir)
   const rowW = sIop.slice(3, 6).map((v) => v * sPs[0]);   // LPS world delta per +1 row    (the j / DICOM colDir)
+  // Slice-normal extrusion: a SEG voxel is a SLAB of thickness `SliceThickness` along
+  // (colW × rowW), not a single 0-thickness plane. When the SEG slice spacing exceeds
+  // the reference's k-voxel size, the naive "one ref voxel per SEG voxel" mapping leaves
+  // empty reference slices between adjacent SEG frames -- visible as striped/laminated
+  // 3D surfaces and missing rows in coronal/sagittal MPRs (ReMIND-049 tumor SEG is the
+  // canonical example). Fix: fill a slab of reference voxels along the slice normal,
+  // sized so consecutive SEG frames overlap by ~1 voxel rather than leaving gaps.
+  const sliceThickness = Number(shared.PixelMeasuresSequence?.[0]?.SliceThickness) || sPs[0];
+  // colW & rowW are unit-IOP * spacing; their cross is sliceThickness-units away from
+  // the unit slice normal, so re-normalize via raw IOP basis (rows are unit vectors).
+  const ioX = sIop.slice(0, 3), ioY = sIop.slice(3, 6);
+  const snLps = [                                                     // unit slice normal in LPS
+    ioX[1] * ioY[2] - ioX[2] * ioY[1],
+    ioX[2] * ioY[0] - ioX[0] * ioY[2],
+    ioX[0] * ioY[1] - ioX[1] * ioY[0],
+  ];
+  const halfSlabLps = snLps.map((c) => c * sliceThickness * 0.5);     // ±half-slab vector in LPS
   const colors = [], names = {};   // parse segment colors/names up front so we can announce names while processing
   for (const s of (ds.SegmentSequence || [])) {
     const rgb = s.RecommendedDisplayCIELabValue ? dcmjs.data.Colors.dicomlab2RGB(s.RecommendedDisplayCIELabValue) : [1, 1, 1];
@@ -152,8 +180,14 @@ function buildLabelmap(ds, bits, ct) {
   const seenSeg = new Set();
   const perFrame = ds.PerFrameFunctionalGroupsSequence || [];
   const ref = (perFrame[0]?.PlanePositionSequence?.[0]?.ImagePositionPatient || [0, 0, 0]).map(Number), o0 = toIJK(ref);
-  const diCol = sub(toIJK([ref[0] + colW[0], ref[1] + colW[1], ref[2] + colW[2]]), o0);   // IJK step per +1 column
-  const diRow = sub(toIJK([ref[0] + rowW[0], ref[1] + rowW[1], ref[2] + rowW[2]]), o0);   // IJK step per +1 row
+  const diCol = sub(toIJK([ref[0] + colW[0], ref[1] + colW[1], ref[2] + colW[2]]), o0);   // ref-IJK step per +1 SEG column
+  const diRow = sub(toIJK([ref[0] + rowW[0], ref[1] + rowW[1], ref[2] + rowW[2]]), o0);   // ref-IJK step per +1 SEG row
+  const halfSlabIJK = sub(toIJK([ref[0] + halfSlabLps[0], ref[1] + halfSlabLps[1], ref[2] + halfSlabLps[2]]), o0);   // ±half-slab in ref IJK
+  // Number of integer steps to walk the slab (each step ~1 ref voxel). We slightly
+  // OVERSAMPLE (round up + ensure at least 1 step on each side) so consecutive SEG
+  // frames overlap by ~1 ref voxel and no stripes remain.
+  const slabLen = Math.hypot(halfSlabIJK[0], halfSlabIJK[1], halfSlabIJK[2]);
+  const slabSteps = Math.max(1, Math.ceil(slabLen));
   for (let f = 0; f < perFrame.length; f++) {
     const fg = perFrame[f];
     const segNum = fg.SegmentIdentificationSequence?.[0]?.ReferencedSegmentNumber;
@@ -161,13 +195,21 @@ function buildLabelmap(ds, bits, ct) {
     if (!segNum || !ippLps) continue;
     if (!seenSeg.has(segNum)) { seenSeg.add(segNum); post({ t: 'seg', name: names[segNum] || ('Segment ' + segNum) }); }
     const o = toIJK(ippLps), fb = f * frameBytes;
-    for (let row = 0; row < ny; row++) {
-      const bi = o[0] + row * diRow[0], bj = o[1] + row * diRow[1], bk = o[2] + row * diRow[2], rb = row * nx;
-      for (let col = 0; col < nx; col++) {
+    for (let row = 0; row < segRows; row++) {
+      const bi = o[0] + row * diRow[0], bj = o[1] + row * diRow[1], bk = o[2] + row * diRow[2], rb = row * segCols;
+      for (let col = 0; col < segCols; col++) {
         const p = rb + col;
         if (!((bits[fb + (p >> 3)] >> (p & 7)) & 1)) continue;
-        const i = Math.round(bi + col * diCol[0]), j = Math.round(bj + col * diCol[1]), k = Math.round(bk + col * diCol[2]);
-        if (i >= 0 && i < nx && j >= 0 && j < ny && k >= 0 && k < nz) lab[k * nx * ny + j * nx + i] = segNum;
+        // Center of the SEG voxel in reference IJK (fractional)
+        const ci = bi + col * diCol[0], cj = bj + col * diCol[1], ck = bk + col * diCol[2];
+        // Extrude along the slice normal: step from -half-slab to +half-slab
+        for (let s = -slabSteps; s <= slabSteps; s++) {
+          const t = slabSteps > 0 ? s / slabSteps : 0;
+          const ii = Math.round(ci + t * halfSlabIJK[0]);
+          const jj = Math.round(cj + t * halfSlabIJK[1]);
+          const kk = Math.round(ck + t * halfSlabIJK[2]);
+          if (ii >= 0 && ii < nx && jj >= 0 && jj < ny && kk >= 0 && kk < nz) lab[kk * nx * ny + jj * nx + ii] = segNum;
+        }
       }
     }
     if (f % 200 === 0) prog(`SEG ${f}/${perFrame.length}`, 0.55 + 0.4 * f / perFrame.length);

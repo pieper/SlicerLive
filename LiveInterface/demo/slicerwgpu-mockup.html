@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SlicerWGPU · LiveInterface mockup</title>
+  <link rel="stylesheet" href="../dist/liveinterface.css" />
+  <style>
+    :root { --panel-w: 500px; --row-pad: 12px; }
+    body {
+      margin: 0; padding: 18px;
+      background: var(--lw-bg);
+      color: var(--lw-fg);
+      font-family: var(--lw-font);
+      min-height: 100vh;
+    }
+    h1 { font-size: 14px; font-weight: 600; margin: 0 0 4px; letter-spacing: 0.2px; }
+    .subtitle { font-size: 11px; color: var(--lw-fg-muted); margin-bottom: 14px; }
+
+    .panel {
+      width: var(--panel-w);
+      background: var(--lw-bg-elevated);
+      border: 1px solid var(--lw-border);
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+    .section { border-top: 1px solid var(--lw-border); }
+    .section:first-child { border-top: 0; }
+    .section-head {
+      padding: 10px var(--row-pad) 8px;
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px; font-weight: 600; letter-spacing: 1px;
+      text-transform: uppercase; color: var(--lw-fg-muted);
+      user-select: none;
+    }
+    .section-head .caret { font-size: 9px; opacity: 0.7; }
+    .section-head .end { margin-left: auto; text-transform: none; letter-spacing: 0; }
+    .section-body { padding: 4px var(--row-pad) 12px; }
+
+    .row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 4px 0; font-size: 12px;
+    }
+    .row label.label { flex: 0 0 96px; color: var(--lw-fg-muted); }
+    .row .value { color: var(--lw-fg); font-variant-numeric: tabular-nums; }
+    .row select {
+      flex: 1; padding: 4px 6px;
+      background: var(--lw-bg); color: var(--lw-fg);
+      border: 1px solid var(--lw-border); border-radius: 4px;
+      font: inherit;
+    }
+    .row input[type="checkbox"] { accent-color: var(--lw-accent); }
+
+    .mod-pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 2px 8px; font-size: 11px;
+      background: var(--lw-bg); border: 1px solid var(--lw-border);
+      border-radius: 9px;
+    }
+    .mod-pill.modality { border-color: var(--lw-accent); color: var(--lw-fg); }
+    .mod-pill strong { font-weight: 600; }
+
+    .legend { font-size: 10px; color: var(--lw-fg-muted); margin-top: 6px; }
+
+    .tag {
+      display: inline-block; padding: 1px 6px; margin-right: 4px;
+      font-size: 10px; border-radius: 3px;
+      background: rgba(90, 169, 230, 0.18); color: var(--lw-accent);
+    }
+
+    .toggle-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 6px 0; font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <h1>SlicerWGPU · Rendering Overrides (LiveInterface mockup)</h1>
+  <div class="subtitle">
+    All section bodies are real LiveInterface primitives. Open
+    <code>SceneRendering.py:278</code> placeholder is the landing site.
+    Click cards, drag handles, slide everything — state goes to the
+    console log via change events.
+  </div>
+
+  <div class="panel">
+    <!-- Bridge / view selection -->
+    <div class="section">
+      <div class="section-head"><span class="caret">▼</span> Bridge</div>
+      <div class="section-body">
+        <div class="toggle-row">
+          <label><input type="checkbox" checked> Render with SlicerWGPU</label>
+          <span class="value">bridge OK</span>
+        </div>
+        <div class="row">
+          <label class="label">Views</label>
+          <label><input type="checkbox" checked> View 1</label>
+          <label><input type="checkbox"> View 2</label>
+        </div>
+      </div>
+    </div>
+
+    <!-- Volume context -->
+    <div class="section">
+      <div class="section-head">
+        <span class="caret">▼</span> Volume context
+        <span class="tag">VolumeContext</span>
+      </div>
+      <div class="section-body">
+        <div class="row" id="ctx-pills">
+          <label class="label">Detected</label>
+          <!-- populated by guessModality -->
+        </div>
+        <div class="row">
+          <label class="label">Intent</label>
+          <select id="intent">
+            <option value="bone">Bone + skin (default)</option>
+            <option value="soft">Soft tissue</option>
+            <option value="angio">Vasculature</option>
+            <option value="lung">Lung</option>
+          </select>
+        </div>
+        <div class="legend">
+          Modality + units come from MRML/DICOM (will fall back to a
+          histogram-based guess). Intent shortlists the preset library below.
+        </div>
+      </div>
+    </div>
+
+    <!-- Preset library -->
+    <div class="section">
+      <div class="section-head">
+        <span class="caret">▼</span> Presets
+        <span class="tag">PresetPicker</span>
+      </div>
+      <div class="section-body">
+        <div id="presets"></div>
+        <div class="legend">
+          Shortlist filtered by Modality + Intent. (Next step: each card's
+          strip becomes a mini-rendering of the current volume with that preset
+          applied, instead of a static gradient.)
+        </div>
+      </div>
+    </div>
+
+    <!-- Scalar TF — the real CombinedTransferFunctionEditor -->
+    <div class="section">
+      <div class="section-head">
+        <span class="caret">▼</span> Scalar transfer function
+        <span class="tag">CombinedTransferFunctionEditor</span>
+      </div>
+      <div class="section-body">
+        <div id="ctf"></div>
+        <div class="legend">
+          Drives <code>vtkVolumeProperty.GetRGBTransferFunction()</code> +
+          <code>GetScalarOpacity()</code> → SlicerWGPU
+          <code>lut_array</code> (256×4 RGBA).
+        </div>
+      </div>
+    </div>
+
+    <!-- Gradient opacity — the real (opacity-only) TransferFunctionEditor -->
+    <div class="section">
+      <div class="section-head">
+        <span class="caret">▼</span> Gradient opacity
+        <span class="tag">TransferFunctionEditor</span>
+        <span class="end"><input type="checkbox" checked id="grad-enabled"> Enabled</span>
+      </div>
+      <div class="section-body">
+        <div id="grad-tf"></div>
+        <div class="legend">
+          1D curve over gradient magnitude → SlicerWGPU
+          <code>grad_lut_array</code> (256×1 α). Default <em>Glass</em>-style
+          ramp sharpens surfaces without losing internal detail.
+        </div>
+      </div>
+    </div>
+
+    <!-- Window / Level — the real WindowLevelEditor -->
+    <div class="section">
+      <div class="section-head">
+        <span class="caret">▼</span> Window / Level
+        <span class="tag">WindowLevelEditor</span>
+      </div>
+      <div class="section-body">
+        <div id="wl"></div>
+        <div class="legend">
+          Drives SlicerWGPU's <code>clim</code> (scalar range the TF applies
+          across). Drag either edge handle, click the background to snap, or
+          arrow-key for fine control.
+        </div>
+      </div>
+    </div>
+
+    <!-- Shading — the real PhongShadingPanel -->
+    <div class="section">
+      <div class="section-head">
+        <span class="caret">▼</span> Shading
+        <span class="tag">PhongShadingPanel</span>
+      </div>
+      <div class="section-body">
+        <div id="phong"></div>
+        <div class="legend">
+          Drives <code>k_ambient / k_diffuse / k_specular / shininess</code>
+          on the <code>ImageField</code>. The preview is a live Phong-shaded
+          sphere using current coefficients + material color.
+        </div>
+      </div>
+    </div>
+
+    <!-- Lighting — the real LightingPanel -->
+    <div class="section">
+      <div class="section-head">
+        <span class="caret">▼</span> Lighting
+        <span class="tag">LightingPanel</span>
+      </div>
+      <div class="section-body">
+        <div id="lighting"></div>
+        <div class="legend">
+          Drag the warm key light + cool fill light around the front
+          hemisphere. Maps to scene-wide
+          <code>light_direction/intensity</code> +
+          <code>fill_light_*</code> uniforms.
+        </div>
+      </div>
+    </div>
+
+    <!-- Ray-march — stays as a small set of native sliders for now -->
+    <div class="section">
+      <div class="section-head">
+        <span class="caret">▼</span> Ray-march
+        <span class="tag">RayMarchPanel (mock)</span>
+      </div>
+      <div class="section-body">
+        <div class="row">
+          <label class="label">Sample step</label>
+          <input type="range" min="0.25" max="4" step="0.05" value="1.0" style="flex:1; accent-color: var(--lw-accent);">
+          <span class="value">1.00 mm</span>
+        </div>
+        <div class="row">
+          <label class="label">Opacity unit</label>
+          <input type="range" min="0.1" max="10" step="0.1" value="1.0" style="flex:1; accent-color: var(--lw-accent);">
+          <span class="value">1.0 mm</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="../dist/liveinterface.iife.js"></script>
+  <script>
+    (() => {
+      const LW = window.LiveInterface;
+      LW.injectThemeStylesheet();
+
+      // Synthetic head-like CT volume (32×32×32 HU values). Has actual
+      // spatial structure so the MIPs the preset picker computes look like
+      // a head: air, skin, bone shell, soft interior.
+      const VOL_DIM = 32;
+      function gauss(seed) {
+        let s = seed;
+        const rand = () => ((s = (s * 1664525 + 1013904223) | 0) >>> 0) / 4294967296;
+        return () => {
+          let u, v, w;
+          do { u = 2 * rand() - 1; v = 2 * rand() - 1; w = u*u + v*v; } while (w >= 1 || w === 0);
+          return u * Math.sqrt(-2 * Math.log(w) / w);
+        };
+      }
+      function synthHead(N) {
+        const out = new Float32Array(N * N * N);
+        const c = N * 0.5 - 0.5;
+        const g = gauss(42);
+        // Slightly oblate spheroid: head is wider L–R than A–P.
+        const rxOut = N * 0.42, ryOut = N * 0.40, rzOut = N * 0.43;
+        const rxSk  = N * 0.39, rySk  = N * 0.37, rzSk  = N * 0.40;
+        const rxIn  = N * 0.34, ryIn  = N * 0.32, rzIn  = N * 0.36;
+        for (let z = 0; z < N; z++) {
+          for (let y = 0; y < N; y++) {
+            for (let x = 0; x < N; x++) {
+              const dx = (x - c) / rxOut;
+              const dy = (y - c) / ryOut;
+              const dz = (z - c) / rzOut;
+              const rOut = Math.sqrt(dx*dx + dy*dy + dz*dz);
+              const sk  = Math.sqrt(((x-c)/rxSk)**2 + ((y-c)/rySk)**2 + ((z-c)/rzSk)**2);
+              const inn = Math.sqrt(((x-c)/rxIn)**2 + ((y-c)/ryIn)**2 + ((z-c)/rzIn)**2);
+              let hu;
+              if (rOut > 1.05)       hu = -1000 + g() * 30; // air
+              else if (rOut > 1.0)   hu =   -50 + g() * 20; // skin
+              else if (sk  > 1.0)    hu =    20 + g() * 25; // fat / subcut
+              else if (inn > 1.0)    hu =   850 + g() * 200; // bone shell (skull)
+              else                   hu =    35 + g() * 25; // brain / interior
+              out[z*N*N + y*N + x] = hu;
+            }
+          }
+        }
+        return out;
+      }
+      const ctData = synthHead(VOL_DIM);
+
+      // MIP along the Z axis (top-down view) of the head volume — gives
+      // each preset card a thumbnail to apply its TF onto.
+      function mipZ(volume, N) {
+        const mip = new Float32Array(N * N);
+        for (let y = 0; y < N; y++) {
+          for (let x = 0; x < N; x++) {
+            let m = -Infinity;
+            for (let z = 0; z < N; z++) {
+              const v = volume[z*N*N + y*N + x];
+              if (v > m) m = v;
+            }
+            mip[y*N + x] = m;
+          }
+        }
+        return mip;
+      }
+      const ctMip = mipZ(ctData, VOL_DIM);
+
+      // Default 2-layer Skin + Bone preset (Rorden window × Anna palette).
+      const PRESET_SKIN_BONE = [
+        {
+          name: 'Skin', visible: true,
+          controlPoints: [
+            { x: -1024, opacity: 0,    rgb: [0.95, 0.78, 0.65] },
+            { x:  -600, opacity: 0,    rgb: [0.95, 0.78, 0.65] },
+            { x:  -249, opacity: 0.05, rgb: [0.96, 0.78, 0.65] },
+            { x:   100, opacity: 0.09, rgb: [0.96, 0.80, 0.68] },
+            { x:   180, opacity: 0,    rgb: [0.95, 0.78, 0.65] },
+            { x:  3071, opacity: 0,    rgb: [0.95, 0.78, 0.65] },
+          ],
+        },
+        {
+          name: 'Bone', visible: true,
+          controlPoints: [
+            { x: -1024, opacity: 0,    rgb: [0.60, 0.10, 0.02] },
+            { x:   180, opacity: 0,    rgb: [0.60, 0.10, 0.02] },
+            { x:   200, opacity: 0.08, rgb: [0.75, 0.20, 0.08] },
+            { x:   391, opacity: 0.39, rgb: [0.95, 0.55, 0.20] },
+            { x:   600, opacity: 0.63, rgb: [1.00, 0.85, 0.50] },
+            { x:  1200, opacity: 0.88, rgb: [1.00, 0.95, 0.85] },
+            { x:  3071, opacity: 1.00, rgb: [1.00, 1.00, 0.98] },
+          ],
+        },
+      ];
+
+      // 1) Combined TF
+      const ctf = new LW.CombinedTransferFunctionEditor(document.getElementById('ctf'), {
+        width: 460, height: 200,
+        range: [-1024, 3071],
+        layers: PRESET_SKIN_BONE,
+        histogramColor: [0.45, 0.48, 0.55],
+        binCount: 256,
+      });
+      ctf.setData(ctData, { min: -1024, max: 3071 });
+
+      // 2) Gradient opacity
+      const gradData = (() => {
+        const n = 32 * 32 * 32;
+        const out = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+          const r = Math.random();
+          out[i] = r < 0.85 ? Math.random() * 0.15 : 0.15 + Math.random() * 0.85;
+        }
+        return out;
+      })();
+      const gradTF = new LW.TransferFunctionEditor(document.getElementById('grad-tf'), {
+        width: 460, height: 110, range: [0, 1],
+        controlPoints: [
+          { x: 0,   y: 0 },
+          { x: 0.1, y: 0 },
+          { x: 0.3, y: 0.5 },
+          { x: 1,   y: 1 },
+        ],
+        curveColor: [0.50, 0.86, 0.95],
+        histogramColor: [0.55, 0.58, 0.65],
+        binCount: 128,
+      });
+      gradTF.setData(gradData);
+
+      // 3) Window / Level
+      const wl = new LW.WindowLevelEditor(document.getElementById('wl'), {
+        width: 460, height: 90,
+        range: [-1024, 3071],
+        value: [-300, 1200],
+        binCount: 256,
+        histogramColor: [0.36, 0.66, 0.90],
+      });
+      wl.setData(ctData, { min: -1024, max: 3071 });
+      wl.on('change', (e) => console.log('wl', e));
+
+      // 4) Shading
+      const phong = new LW.PhongShadingPanel(document.getElementById('phong'), {
+        initial: {
+          ambient: 0.4, diffuse: 0.7, specular: 0.2, shininess: 12,
+          materialColor: [0.98, 0.82, 0.65],
+        },
+      });
+      phong.on('change', (s) => console.log('phong', s));
+
+      // 5) Lighting
+      const lighting = new LW.LightingPanel(document.getElementById('lighting'), {
+        initial: {
+          key:  { direction: [0.45, -0.55, 0.7], intensity: 1.0 },
+          fill: { direction: [-0.5, 0.35, 0.8],  intensity: 0.35 },
+          cameraRelative: false,
+        },
+      });
+      lighting.on('change', (s) => console.log('lighting', s));
+
+      // Real TF layer definitions for each preset, so the picker can
+      // render data-driven thumbnails instead of static gradient strips.
+      const PRESETS_BY_ID = {
+        'ct-bone-skin': PRESET_SKIN_BONE,
+        'ct-surface': [{
+          name: 'Surface', visible: true,
+          controlPoints: [
+            { x: -1024, opacity: 0,    rgb: [0.95, 0.78, 0.65] },
+            { x:  -600, opacity: 0,    rgb: [0.95, 0.78, 0.65] },
+            { x:  -200, opacity: 0.18, rgb: [0.96, 0.80, 0.68] },
+            { x:    50, opacity: 0.45, rgb: [0.98, 0.85, 0.72] },
+            { x:   200, opacity: 0.20, rgb: [0.95, 0.78, 0.65] },
+            { x:  3071, opacity: 0,    rgb: [0.95, 0.78, 0.65] },
+          ],
+        }],
+        'ct-skull': [{
+          name: 'Skull', visible: true,
+          controlPoints: [
+            { x: -1024, opacity: 0,    rgb: [0.30, 0.20, 0.15] },
+            { x:   140, opacity: 0,    rgb: [0.30, 0.20, 0.15] },
+            { x:   400, opacity: 0.40, rgb: [0.75, 0.65, 0.55] },
+            { x:  1024, opacity: 0.90, rgb: [1.0,  0.98, 0.96] },
+            { x:  3071, opacity: 1.0,  rgb: [1.0,  1.0,  1.0]  },
+          ],
+        }],
+        'ct-soft': [{
+          name: 'Soft', visible: true,
+          controlPoints: [
+            { x: -1024, opacity: 0,    rgb: [0.40, 0.20, 0.20] },
+            { x:  -200, opacity: 0,    rgb: [0.40, 0.20, 0.20] },
+            { x:    50, opacity: 0.55, rgb: [0.95, 0.80, 0.65] },
+            { x:   300, opacity: 0.65, rgb: [1.0,  0.92, 0.78] },
+            { x:  3071, opacity: 0.65, rgb: [1.0,  0.92, 0.78] },
+          ],
+        }],
+        'ct-vessels': [{
+          name: 'Vessels', visible: true,
+          controlPoints: [
+            { x: -1024, opacity: 0,    rgb: [0.20, 0,    0]    },
+            { x:   150, opacity: 0,    rgb: [0.20, 0,    0]    },
+            { x:   300, opacity: 0.55, rgb: [0.95, 0.30, 0.30] },
+            { x:   700, opacity: 0.85, rgb: [1.00, 0.75, 0.75] },
+            { x:  3071, opacity: 1.00, rgb: [1.0,  1.0,  1.0]  },
+          ],
+        }],
+        'mr-default': [{
+          name: 'Gray', visible: true,
+          controlPoints: [
+            { x: -1024, opacity: 0,    rgb: [0, 0, 0] },
+            { x:    50, opacity: 0,    rgb: [0, 0, 0] },
+            { x:   500, opacity: 0.45, rgb: [0.55, 0.55, 0.55] },
+            { x:  1500, opacity: 0.85, rgb: [1, 1, 1] },
+            { x:  3071, opacity: 1.0,  rgb: [1, 1, 1] },
+          ],
+        }],
+      };
+
+      const presets = new LW.PresetPicker(document.getElementById('presets'), {
+        columns: 2,
+        presets: [
+          { id: 'ct-bone-skin', name: 'CT-Bone + Skin',
+            description: 'Rorden CT_Bones × Anna palette (2 layers)',
+            swatch: 'linear-gradient(to right, #3a1a08, #ed6800, #fffaf0)',
+            tags: ['CT', 'bone'],
+            tfLayers: PRESETS_BY_ID['ct-bone-skin'] },
+          { id: 'ct-surface', name: 'CT_Surface',
+            description: 'Skin envelope',
+            swatch: 'linear-gradient(to right, #866b56, #fffaf5)',
+            tags: ['CT', 'soft'],
+            tfLayers: PRESETS_BY_ID['ct-surface'] },
+          { id: 'ct-skull', name: 'CT_Skull',
+            description: 'Window 140–1024 HU',
+            swatch: 'linear-gradient(to right, #2a2622, #fffaf5)',
+            tags: ['CT', 'bone'],
+            tfLayers: PRESETS_BY_ID['ct-skull'] },
+          { id: 'ct-soft', name: 'CT_Soft_Tissue',
+            description: 'Soft-tissue ramp',
+            swatch: 'linear-gradient(to right, #4a2a2a, #f5dcba)',
+            tags: ['CT', 'soft'],
+            tfLayers: PRESETS_BY_ID['ct-soft'] },
+          { id: 'ct-vessels', name: 'CT_Vessels',
+            description: 'Contrast-enhanced angio',
+            swatch: 'linear-gradient(to right, #2a0000, #ffbaba)',
+            tags: ['CT', 'angio'],
+            tfLayers: PRESETS_BY_ID['ct-vessels'] },
+          { id: 'mr-default', name: 'MR-Default',
+            description: 'Generic gray ramp',
+            swatch: 'linear-gradient(to right, #000, #fff)',
+            tags: ['MR'],
+            tfLayers: PRESETS_BY_ID['mr-default'] },
+        ],
+        activeId: 'ct-bone-skin',
+        filter: ['CT'],
+      });
+      // Hand the picker the actual data — each card now renders the MIP
+      // of the current volume through its own TF.
+      presets.setPreviewData({
+        mip: ctMip,
+        dims: [VOL_DIM, VOL_DIM],
+        range: [-1024, 3071],
+      });
+      presets.on('change', (e) => {
+        const layers = PRESETS_BY_ID[e.activeId];
+        if (layers) ctf.setLayers(layers);
+      });
+
+      // Modality heuristic on the actual histogram
+      const ctxBins = LW.computeBins(ctData, { bins: 256, min: -1024, max: 3071 });
+      const guess = LW.guessModality(ctxBins.bins, ctxBins.range);
+      const pillRow = document.getElementById('ctx-pills');
+      const fmtRange = (r) => `[${r[0]}, ${r[1]}]`;
+      const modPill = document.createElement('span');
+      modPill.className = 'mod-pill modality';
+      modPill.innerHTML = `<strong>${guess.modality}</strong>` +
+        (guess.confidence < 1 ? `&nbsp;<span style="color:var(--lw-fg-muted)">guessed</span>` : '');
+      const unitsPill = document.createElement('span');
+      unitsPill.className = 'mod-pill';
+      unitsPill.innerHTML = `units&nbsp;<strong>${guess.units}</strong>`;
+      const rangePill = document.createElement('span');
+      rangePill.className = 'mod-pill';
+      rangePill.textContent = fmtRange(ctxBins.range);
+      const confPill = document.createElement('span');
+      confPill.className = 'mod-pill';
+      confPill.innerHTML = `conf&nbsp;<strong>${guess.confidence.toFixed(2)}</strong>`;
+      pillRow.append(modPill, unitsPill, rangePill, confPill);
+
+      // Intent filter wires straight into the preset picker's tag filter.
+      const intent = document.getElementById('intent');
+      intent.addEventListener('change', () => {
+        const map = { bone: 'bone', soft: 'soft', angio: 'angio', lung: 'soft' };
+        const tag = map[intent.value];
+        presets.setFilter(tag ? [guess.modality, tag] : [guess.modality]);
+      });
+
+      // Update sliders' value labels for the remaining native HTML inputs (Ray-march).
+      document.querySelectorAll('input[type="range"]').forEach((r) => {
+        const sib = r.nextElementSibling;
+        if (!sib || !sib.classList.contains('value')) return;
+        const base = sib.textContent.trim();
+        const unit = base.replace(/^[\-0-9.]+/, '');
+        r.addEventListener('input', () => {
+          const v = Number(r.value);
+          sib.textContent = (Number.isInteger(v) ? v.toFixed(0) : v.toFixed(2)) + unit;
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

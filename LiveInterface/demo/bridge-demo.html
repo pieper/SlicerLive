@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>LiveInterface · TF bridge demo</title>
+  <link rel="stylesheet" href="../dist/liveinterface.css" />
+  <style>
+    body {
+      margin: 0; padding: 16px;
+      background: var(--lw-bg, #1c1f24);
+      color: var(--lw-fg, #e6e8eb);
+      font-family: var(--lw-font, system-ui, sans-serif);
+      min-height: 100vh;
+    }
+    h1 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+    .sub { font-size: 11px; color: var(--lw-fg-muted); margin-bottom: 14px; }
+    .status { display: flex; gap: 6px; align-items: center; font-size: 11px; margin-bottom: 14px; flex-wrap: wrap; }
+    .pill {
+      padding: 2px 8px; border-radius: 10px;
+      background: var(--lw-bg-elevated);
+      border: 1px solid var(--lw-border);
+      font-family: var(--lw-font-mono);
+    }
+    .pill.ok  { border-color: #2e6f4e; color: #d8f0e2; }
+    .pill.err { border-color: #6e2f25; color: #f3d6cf; }
+    .pill strong { font-weight: 600; }
+    .panel {
+      background: var(--lw-bg-elevated);
+      border: 1px solid var(--lw-border);
+      border-radius: 6px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    pre.log {
+      font-family: var(--lw-font-mono);
+      font-size: 10px;
+      color: var(--lw-fg-muted);
+      max-height: 140px;
+      overflow: auto;
+      margin: 0;
+      white-space: pre-wrap;
+    }
+    .legend { font-size: 11px; color: var(--lw-fg-muted); margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h1>TF bridge demo</h1>
+  <div class="sub">
+    <code>CombinedTransferFunctionEditor</code> ↔ Python
+    <code>TFBridge</code> ↔ <code>vtkMRMLVolumePropertyNode</code>.
+    Bridge uses Slicer's <code>window.slicerPython.evalPython</code> (JS → Py)
+    and <code>qSlicerWebWidget.evalJS</code> (Py → JS).
+  </div>
+
+  <div class="status">
+    <span class="pill" id="ch-status">connecting…</span>
+    <span class="pill" id="node-info">node …</span>
+    <span class="pill" id="range-info">range …</span>
+  </div>
+
+  <div class="panel">
+    <div id="ctf"></div>
+    <div class="legend">
+      Edit the curve — the MRML node is updated in-place.
+      Apply a different preset from Slicer's Volume Rendering module and
+      the editor in here reloads automatically.
+    </div>
+  </div>
+
+  <div class="panel">
+    <div style="font-size:11px; color: var(--lw-fg-muted); margin-bottom:6px"><strong>ACTIVITY</strong></div>
+    <pre class="log" id="log"></pre>
+  </div>
+
+  <script src="../dist/liveinterface.iife.js"></script>
+  <script>
+    (() => {
+      const LW = window.LiveInterface;
+      LW.injectThemeStylesheet();
+      const chStatus = document.getElementById('ch-status');
+      const nodeInfo = document.getElementById('node-info');
+      const rangeInfo = document.getElementById('range-info');
+      const log = document.getElementById('log');
+      const ctfHost = document.getElementById('ctf');
+      let editor = null;
+      let suppressNextPush = false;
+
+      function logLine(msg) {
+        const t = new Date().toLocaleTimeString();
+        log.textContent = `[${t}] ${msg}\n` + log.textContent;
+      }
+
+      // Slicer's evalPython signature is (QString code, int mode) where:
+      //   EvalInput   = 0  → expression mode; the resulting value is returned as QString
+      //   FileInput   = 1  → statement / file mode (default in C++); returns empty
+      //   SingleInput = 2  → single line mode
+      // We need EvalInput for getters and FileInput for setters.
+      const EVAL_INPUT = 0;
+      const FILE_INPUT = 1;
+      function _evalPython(code, mode) {
+        return new Promise((resolve, reject) => {
+          const sp = window.slicerPython;
+          if (!sp) { reject(new Error('slicerPython not yet injected')); return; }
+          try {
+            sp.evalPython(code, mode, (result) => resolve(result));
+          } catch (e) { reject(e); }
+        });
+      }
+      const pyExpr = (expr) => _evalPython(expr, EVAL_INPUT);
+      const pyStmt = (stmt) => _evalPython(stmt, FILE_INPUT);
+
+      // Wait up to 5 s for Slicer's injected channel object.
+      async function waitForSlicerPython(timeoutMs = 5000) {
+        const t0 = performance.now();
+        while (!window.slicerPython) {
+          if (performance.now() - t0 > timeoutMs) {
+            throw new Error('slicerPython never appeared (timeout)');
+          }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+
+      function buildEditor(range, layers) {
+        if (editor) { try { editor.dispose(); } catch (_) {} ctfHost.replaceChildren(); }
+        editor = new LW.CombinedTransferFunctionEditor(ctfHost, {
+          width: 500, height: 230,
+          range, layers,
+          binCount: 256,
+        });
+        editor.on('change', async (e) => {
+          if (suppressNextPush) { suppressNextPush = false; return; }
+          const payload = JSON.stringify(e.layers.map((l) => ({
+            name: l.name, visible: l.visible, controlPoints: l.controlPoints,
+          })));
+          try {
+            await pyStmt('slicer._lw_bridge.setLayers(' + JSON.stringify(payload) + ')');
+            logLine(`JS → bridge.setLayers (${e.layers.length} layers, ` +
+                    `${e.layers.reduce((s,l)=>s+l.controlPoints.length,0)} points)`);
+          } catch (err) {
+            logLine('push error: ' + err.message);
+          }
+        });
+      }
+
+      // Python → JS push: bridge.evalJS calls into this.
+      window._lwOnLayersChanged = (payload) => {
+        try {
+          const data = typeof payload === 'string' ? JSON.parse(payload) : payload;
+          suppressNextPush = true;
+          if (editor) editor.setLayers(data.layers);
+          logLine(`bridge → JS layersChanged (${data.layers.length} layers)`);
+        } catch (e) {
+          logLine('layersChanged parse error: ' + e.message);
+        }
+      };
+
+      (async () => {
+        try {
+          await waitForSlicerPython();
+          chStatus.textContent = 'connected';
+          chStatus.classList.add('ok');
+          // Tell the bridge it can now push to this page.
+          await pyStmt('slicer._lw_bridge.set_push_widget(slicer._lw_bridge_widget)');
+          // Initial state pull — wrap expression in stdout capture
+          const stateStr = await pyExpr('slicer._lw_bridge.getState()');
+          const data = JSON.parse(stateStr);
+          nodeInfo.textContent = `node ${data.nodeID}`;
+          rangeInfo.textContent = `range [${data.range[0].toFixed(0)}, ${data.range[1].toFixed(0)}]`;
+          buildEditor(data.range, data.layers);
+          logLine(`init: ${data.layers.length} layer(s), ` +
+                  `${data.layers[0]?.controlPoints?.length ?? 0} points`);
+        } catch (e) {
+          chStatus.textContent = 'error: ' + e.message;
+          chStatus.classList.add('err');
+          logLine('init failed: ' + e.message);
+        }
+      })();
+    })();
+  </script>
+</body>
+</html>

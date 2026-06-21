@@ -1,0 +1,28 @@
+.lw-histogram {
+  position: relative;
+  display: block;
+  background: var(--lw-bg-elevated);
+  border: 1px solid var(--lw-border);
+  border-radius: var(--lw-radius);
+  overflow: hidden;
+}
+.lw-histogram canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.lw-histogram .lw-hg-axis {
+  position: absolute;
+  inset: auto 6px 4px 6px;
+  display: flex;
+  justify-content: space-between;
+  font: 10px var(--lw-font-mono);
+  color: var(--lw-fg-muted);
+  pointer-events: none;
+  opacity: 0.7;
+}
+.lw-histogram .lw-hg-no-gpu {
+  font-size: 12px;
+  color: var(--lw-error);
+  padding: 6px 8px;
+}

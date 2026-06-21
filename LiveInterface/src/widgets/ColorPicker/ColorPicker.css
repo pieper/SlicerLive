@@ -1,0 +1,110 @@
+.lw-color-picker {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--lw-bg-elevated);
+  border: 1px solid var(--lw-border);
+  border-radius: var(--lw-radius);
+  user-select: none;
+  width: max-content;
+}
+
+.lw-color-picker .lw-cp-top {
+  display: flex;
+  gap: 8px;
+}
+
+.lw-color-picker .lw-cp-hsv,
+.lw-color-picker .lw-cp-hue,
+.lw-color-picker .lw-cp-alpha {
+  position: relative;
+  border-radius: 5px;
+  overflow: hidden;
+  cursor: crosshair;
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15);
+}
+.lw-color-picker canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.lw-color-picker .lw-cp-hsv { width: 200px; height: 200px; }
+.lw-color-picker .lw-cp-hue { width: 18px; height: 200px; cursor: ns-resize; }
+.lw-color-picker .lw-cp-alpha { height: 18px; cursor: ew-resize; }
+
+.lw-color-picker .lw-cp-handle {
+  position: absolute;
+  pointer-events: none;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.55), 0 1px 2px rgba(0,0,0,0.5);
+  border-radius: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translate(-50%, -50%);
+}
+.lw-color-picker .lw-cp-bar-handle {
+  position: absolute;
+  pointer-events: none;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.55);
+  border-radius: 2px;
+}
+.lw-color-picker .lw-cp-hue .lw-cp-bar-handle {
+  left: -1px; right: -1px; height: 4px; transform: translateY(-50%);
+}
+.lw-color-picker .lw-cp-alpha .lw-cp-bar-handle {
+  top: -1px; bottom: -1px; width: 4px; transform: translateX(-50%);
+}
+
+.lw-color-picker .lw-cp-bottom {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lw-color-picker .lw-cp-swatch {
+  width: 28px; height: 28px;
+  border-radius: 5px;
+  border: 1px solid var(--lw-border);
+  background-image:
+    linear-gradient(45deg, #aaa 25%, transparent 25%, transparent 75%, #aaa 75%),
+    linear-gradient(45deg, #aaa 25%, transparent 25%, transparent 75%, #aaa 75%);
+  background-size: 10px 10px;
+  background-position: 0 0, 5px 5px;
+  position: relative;
+  overflow: hidden;
+}
+.lw-color-picker .lw-cp-swatch::after {
+  content: '';
+  position: absolute; inset: 0;
+  background: var(--lw-cp-swatch-color, #fff);
+}
+.lw-color-picker .lw-cp-hex {
+  flex: 1;
+  font-family: var(--lw-font-mono);
+  font-size: 13px;
+  padding: 5px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--lw-border);
+  background: var(--lw-bg);
+  color: var(--lw-fg);
+  outline: none;
+  min-width: 90px;
+}
+.lw-color-picker .lw-cp-hex:focus {
+  border-color: var(--lw-accent);
+}
+
+.lw-color-picker:focus-within .lw-cp-handle,
+.lw-color-picker:focus-within .lw-cp-bar-handle {
+  box-shadow: 0 0 0 2px var(--lw-accent), 0 1px 2px rgba(0,0,0,0.5);
+}
+
+.lw-color-picker .lw-cp-no-gpu {
+  font-size: 12px;
+  color: var(--lw-error);
+  padding: 6px 8px;
+  border: 1px dashed var(--lw-error);
+  border-radius: 4px;
+}
