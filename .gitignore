@@ -6,3 +6,5 @@ _*.png
 mrhead/
 idctest.html
 viewer/idcdemo/
+__pycache__/
+*.pyc
