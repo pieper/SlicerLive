@@ -1,7 +1,12 @@
 # Remote wgpu Render + Stream — Plan and Research Notes
 
-Status: **planning / research complete, no code written yet.**
+Status: **prior spike RECOVERED on this machine — resuming as "swap VTK → wgpu", not green-field.**
 Last updated: 2026-07-01.
+
+> **Note on machines.** This plan doc was written on a *different* computer, where the
+> spike code wasn't present — hence the "not found" open item below. The actual
+> slicerlive modal experiments were done on **this** machine and are committed here. The
+> open item is resolved; see "Recovery result" immediately below it.
 
 Goal (verbatim from [`wgpu-remote.md`](wgpu-remote.md)): render the SlicerLive gallery
 and scenes remotely on a **modal.com** GPU and stream them to a local browser page
@@ -14,27 +19,47 @@ researched, the decided approach, and the open item (finding a prior deployment)
 
 ---
 
-## ⚠️ Open item — locate the prior modal deployment (resume here)
+## ✅ Recovery result — the prior spike is HERE (was on this machine all along)
 
-The task assumed a container "already built and debugged … currently up on modal.com
-rendering the bumblebee microCT scan." **On this machine that code was not found** — not
-on disk, not in any `modal_app.py`, not in the Claude chat histories. The user believes
-it was built with Claude on a **different machine**. Before building green-field, recover
-it from that machine:
+The plan above (written on another computer) assumed the render container was built "on a
+different machine" and unrecoverable. In fact the slicerlive modal experiments were done
+**on this machine** and are committed to this repo. Recovered artifacts:
 
-- Run `modal app list` — the authoritative list of deployed apps. Anything **other than**
-  `lnq-segmenter` and `nninteractive-slicer-server` is a candidate.
-- Look for a `modal_app.py` whose image imports **wgpu-py + GStreamer/nvenc** and which
-  **fetches the bumblebee volume from a GitHub URL** at startup (the data is pulled from
-  GitHub by the server, MorphoDepot-style — not baked into the image). That import
-  signature is the fingerprint of the render server (the two known modal apps are
-  inference REST services and import neither wgpu nor gstreamer).
-- If found: copy its directory/URL here and we adapt it instead of rebuilding.
-- If not found: proceed green-field with the milestone plan below.
+- **Modal app:** `slicerlive` (`ap-Sqvf1XqHKSEtkGwkXSimA1`), deployed 2026-06-21 11:13 EDT.
+  This is the third `modal app list` entry beyond `lnq-segmenter` /
+  `nninteractive-slicer-server` that the checklist below said to look for.
+- **Source:** [`tools/modal_spike/`](../tools/modal_spike/) — 22 files. The main harness is
+  [`live_render_nvenc.py`](../tools/modal_spike/live_render_nvenc.py) (render-first
+  multiscale Zarr pyramid /8→/1 with progressive swap, **VTK GPU volume render via EGL on
+  an L4**, NVENC-native ABGR, Modal `@concurrent`, H.264 → browser WebCodecs), plus
+  `live_render.py` and the probe/benchmark suite (`vulkan_probe`, `nvenc_*_probe`,
+  `vtk_egl_probe`, `zarr_bench`, `chunk_bench`, `pyramid_build`, `idc_probe`, JS2 tooling).
+- **Commit:** `b116c80` — *"LiveRenderer: Modal GPU remote-render spikes + progressive
+  NVENC/WebCodecs"* (one commit after this plan doc's own commit `3d5257e`). Also added
+  [`docs/LIVE-ARCHITECTURE.md`](LIVE-ARCHITECTURE.md).
+- **Building session:** Claude chat
+  `~/.claude/projects/-Users-pieper-slicer-slicer-skill/c6ab9fa4-6add-4816-86a7-0dc48bedd639.jsonl`
+  (2026-06-20 → 06-21).
 
-The only on-disk trace of "bumblebee" is a dataset-size example (11.4 GB μCT) in
-[`MORPHODEPOT-JETSTREAM2.md`](MORPHODEPOT-JETSTREAM2.md) — cited as a scan *too big for the
-browser*, which is the motivating case for remote rendering.
+**Measured findings from that spike:** cold boot ~5 s (slim image), time-to-first-frame
+~4.5 s (coarse-first), NVENC ~1 ms/frame, Modal Volume vs JS2 read a wash (~50–71 MB/s).
+The bumblebee μCT is the 11.4 GB "too big for the browser" motivating case
+([`MORPHODEPOT-JETSTREAM2.md`](MORPHODEPOT-JETSTREAM2.md)).
+
+**So the milestones below re-anchor** from green-field (build a renderer) to integration:
+the harness already renders, encodes, transports, and displays end-to-end with **VTK**.
+The remaining work is to **swap the VTK render call for the `slicer-wgpu` package** and
+tidy the module boundary (web/encode/transport in SlicerLive, rendering in slicer-wgpu).
+See "Revised milestone plan (VTK → wgpu swap)" below.
+
+<details><summary>Original open-item checklist (kept for the record — now satisfied)</summary>
+
+- Run `modal app list` — anything other than `lnq-segmenter` /
+  `nninteractive-slicer-server` is a candidate → **`slicerlive`**.
+- Look for a harness importing wgpu/nvenc that fetches the volume from a URL at startup →
+  `tools/modal_spike/live_render_nvenc.py` (VTK today, not wgpu yet; fetches a Zarr
+  pyramid, not a single GitHub blob).
+</details>
 
 ---
 
@@ -92,55 +117,80 @@ a `<video>`/canvas display beside it.
 
 ---
 
-## Decided approach
+## Decided approach (revised after recovery)
+
+The spike already renders→encodes→streams→displays end-to-end with **VTK GPU raycast (EGL
+on L4)**. The remaining work is a **renderer swap plus a clean module boundary**, not a
+green-field build. Two repos are involved, and the split is deliberate:
+
+| Concern | Home | Notes |
+|---|---|---|
+| **Rendering** (volume → RGBA numpy) | **`slicer-wgpu`** (pip package, `github.com/pieper/slicer-wgpu`) | Already pip-installable (`pip install git+https://github.com/pieper/slicer-wgpu.git`, deps numpy/wgpu/pygfx/rendercanvas). Gains a **headless offscreen renderer** with a numpy+camera-matrix API and no `vtk`/`slicer`/Qt at call time. The pygfx volume renderer already exists in [`slicer_wgpu/demos/single_volume.py`](../../latest/slicer-wgpu/slicer_wgpu/demos/single_volume.py) (`SlicerVolumeRenderer`/`SlicerVolumeMaterial` + WGSL); MRML/VTK coupling is isolated to `build_renderer_for_volume`/`patient_to_texture_matrix`. |
+| **Web / transport / encode / data** | **`SlicerLive`** | Modal app, FastAPI + WebSocket server, NVENC (PyNvVideoCodec, ABGR), camera-input coalescing, progressive Zarr pyramid loader, browser client (viewer + WebCodecs decode + `<video>` wiring). Promoted from `tools/modal_spike/` into a real module. |
 
 | Decision | Choice | Why |
 |---|---|---|
-| Renderer | **Standalone wgpu driver** (Slicer-free) | Thinnest container; lift SlicerWGPU's WGSL + material packing out of pygfx `Shared` / `ImageField`. |
-| First scene | **Small test volume first** | Prove render→encode→stream→browser before out-of-core work. |
-| Transport on modal | **WebSocket / TCP (WSS)** | Modal web endpoints expose only HTTPS/TCP, **not raw UDP** → QUIC/WebTransport can't run on modal. desktopia's WSS fallback already works; identical WebCodecs client. QUIC stays for vast.ai. |
-| Bumblebee data | **Fetched from GitHub by the server** at startup | Keeps the image thin; matches SlicerLive's data-by-URL model. Deferred to M4 (11.4 GB needs bricking/downsampling). |
+| Renderer | **`slicer-wgpu` headless renderer** (pip-installed on modal from GitHub) | Puts rendering in the rendering repo; deletes the ~300 MB VTK image floor → faster cold boot. |
+| Container GPU API | **wgpu-py → Vulkan** (offscreen, no surface) | Same core the browser will use; already Vulkan-forced on Linux. `tools/modal_spike/vulkan_probe.py` already tested Vulkan on modal. |
+| First scene | **Small test volume first** | Prove wgpu render→encode→stream on the existing harness before the 11.4 GB case. |
+| Transport on modal | **WebSocket / TCP (WSS)** | Modal exposes HTTPS/TCP only, no raw UDP → no QUIC/WebTransport on modal. The spike's WS + WebCodecs path already works; QUIC stays for vast.ai. |
+| Data | **Progressive Zarr pyramid** (Modal Volume today; JS2/GitHub-URL option) | Keep the recovered `_load_finer_bg` coarse→fine loader as-is; renderer choice doesn't affect it. |
 
 ---
 
-## Milestone plan (green-field; skip/adapt M1–M3 if prior deployment is recovered)
+## Revised milestone plan (VTK → wgpu swap)
 
-**M1 — Standalone headless wgpu renderer.** New dir (e.g. `SlicerWGPU/StandaloneRenderer/`
-or a new repo). Extract ray-march WGSL + material packing into a driver that: creates a
-wgpu-py **Vulkan** device directly (no pygfx `Shared`), uploads a numpy volume as a 3D
-texture (minimal `ImageField` replacement), applies the JSON transfer function, and
-renders a frame to a numpy RGBA array given camera matrices. Validate locally on a small
-volume.
+**R1 — Headless renderer in `slicer-wgpu`.** Add a Slicer-free offscreen renderer (e.g.
+`slicer_wgpu/headless.py`) exposing: `HeadlessVolumeRenderer(width, height)`;
+`set_volume(array, spacing, origin=...)`; `set_transfer_function(color_pts, opacity_pts,
+scalar_range)`; `set_camera(...)` or `render(camera) -> np.ndarray[H,W,4] uint8`. Reuse
+`SlicerVolumeRenderer`/`SlicerVolumeMaterial` from `demos/single_volume.py`; compute
+`patient_to_texture` from spacing/origin (no `vtk`). Validate locally against a small
+volume (parity vs. the VTK frame). Confirm offscreen works **without Qt** (wgpu offscreen
+canvas, not the rendercanvas-Qt fork).
 
-**M2 — Frame source into desktopia's encoder.** Add an `appsrc` frame-producer path to
-`server.py` (`Broadcaster` accepts a Python frame callback instead of a capture element).
-Reinterpret the existing browser mouse/keyboard messages as **camera orbit/zoom/pan**
-updating the renderer's view matrices for the next frame (replaces the XTEST `Injector`).
-Run M1+M2 locally end-to-end: browser ↔ local GPU.
+**R2 — Swap the render seam in the harness (local).** In `live_render_nvenc.py`, replace
+the VTK setup (~210–238) and `render_h264`'s VTK render+readback (~252–277) with calls to
+the `slicer-wgpu` renderer, keeping NVENC/ABGR/WebSocket/progressive-swap untouched. The
+renderer returns RGBA→ we keep the existing flip + RGBA→ABGR → NVENC. Run locally
+end-to-end (browser ↔ local GPU) if a local GPU is available, else straight to R3.
 
-**M3 — Thin modal container.** A `modal_app.py` (patterned on the two existing ones) with a
-GPU function exposing desktopia's **WebSocket** server via `@modal.web_server`. Image =
-wgpu-py + Vulkan loader + NVIDIA ICD + GStreamer/nvenc + aioquic/websockets — **no Slicer,
-no desktop**. Volume fetched from GitHub URL (or a modal Volume). Deploy; stream a small
-scene to the browser.
+**R3 — Promote into SlicerLive + thin modal image.** Move the server out of
+`tools/modal_spike/` into a real module (e.g. `server/` or `LiveRenderer/`). Modal image =
+`pip install git+https://github.com/pieper/slicer-wgpu.git` + Vulkan loader/ICD +
+PyNvVideoCodec + zarr/fastapi — **no VTK, no Slicer**. Deploy; stream the small scene, then
+bumblebee, via the recovered progressive path. Compare cold-boot/TTFF/fps to the VTK
+baseline (cold ~5 s, TTFF ~4.5 s, NVENC ~1 ms).
 
-**M4 — SlicerLive wiring + scale up.** Add the remote `RenderMode` path to the viewer
-(video element + connect to the modal WSS URL); wire the gallery/scene catalog to launch
-remote render for big scenes; then tackle the 11.4 GB bumblebee (out-of-core / bricking /
-downsample — its own sub-problem).
+**R4 — Browser wiring in the SlicerLive viewer.** Add the `RenderMode=Remote` path to
+[`viewer/slicerlive.js`](../viewer/slicerlive.js): a `<video>`/canvas element beside the
+vtk.js host (compositing seam at `offload3d`/`offload3d-out`, ~lines 56–66), a WebCodecs
+`VideoDecoder` (`avc1.640028`, adapt desktopia `client/index.html` ~534–692), and the
+modal WSS connect. Wire the gallery to route big scenes to remote render. Then tackle the
+11.4 GB bumblebee out-of-core sub-problem.
+
+<details><summary>Original green-field M1–M4 (superseded by R1–R4 above)</summary>
+
+M1 standalone wgpu renderer · M2 frame source into desktopia's GStreamer encoder · M3 thin
+modal container · M4 SlicerLive wiring. Superseded because the spike already provides the
+encoder (PyNvVideoCodec, not GStreamer), transport (FastAPI WS), data loader, and a working
+deploy — only the renderer swap and browser wiring remain.
+</details>
 
 ---
 
 ## Risks / unknowns
 
-- **wgpu-py on Vulkan inside a modal GPU container** — needs the Vulkan loader + NVIDIA ICD
-  present and a headless (no-surface) adapter. Verify adapter enumeration succeeds on
-  modal's GPU image.
-- **NVENC access on modal GPUs** — desktopia relies on `libnvidia-encode.so`. Confirm it's
-  available on modal, else fall back to `x264enc` (CPU) for M3.
-- **Standalone extraction cost** — decoupling from pygfx `Shared` and `ImageField` is the
-  main engineering effort in M1.
-- **Big-volume handling (bumblebee)** — 11.4 GB won't fit naive GPU upload; M4 problem.
+- **wgpu-py offscreen on Vulkan inside modal** — needs the Vulkan loader + NVIDIA ICD and a
+  no-surface adapter. `tools/modal_spike/vulkan_probe.py` already exercised this; re-run in
+  the new image. Watch for the `rendercanvas` Qt dependency — use the plain wgpu offscreen
+  canvas so no Qt/PythonQt is pulled into the container.
+- **wgpu vs. VTK visual parity** — the pygfx renderer's TF/gradient-opacity/lighting must
+  match the VTK preset the spike used, or the demo looks different. R1 includes a parity check.
+- **NVENC on modal GPUs** — already working in the spike via PyNvVideoCodec (ABGR, ~1 ms);
+  unchanged by the swap.
+- **Big-volume handling (bumblebee)** — 11.4 GB won't fit a naive GPU upload; the progressive
+  pyramid covers coarse levels, full-res out-of-core is the R4 sub-problem.
 
 ---
 
