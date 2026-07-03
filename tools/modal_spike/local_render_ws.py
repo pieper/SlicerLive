@@ -772,7 +772,67 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>LiveRenderer (lo
 const v=document.getElementById('v'),s=document.getElementById('s'),st=document.getElementById('stats'),dbg=document.getElementById('dbg'),lvl=document.getElementById('lvl'),res=document.getElementById('res');
 function showRes(fw,fh){ const ww=Math.round(innerWidth*devicePixelRatio),wh=Math.round(innerHeight*devicePixelRatio);
   res.textContent = fw+'×'+fh+(fw!==ww||fh!==wh ? ' → '+ww+'×'+wh : '') ; }
-const ctx=v.getContext('2d');
+// v4a superresolution upsample: draw frames through WebGL2 — Catmull-Rom (bicubic) resampling plus
+// a light edge sharpen when upscaling reduced motion frames; exact passthrough at 1:1 (heroes).
+// Browser drawImage bilinear made motion frames soft; this is the first rung of the superres ladder
+// (next rungs: temporal reprojection of the last hero by camera delta, then a learned recurrent model).
+let gl=null,ctx=null,glo=null;
+(function(){
+  try{ gl=v.getContext('webgl2',{antialias:false,preserveDrawingBuffer:true}); }catch(_){ gl=null; }
+  if(!gl){ ctx=v.getContext('2d'); return; }
+  try{
+    const vsrc=`#version 300 es
+layout(location=0) in vec2 p; out vec2 uv;
+void main(){ uv=p*0.5+0.5; gl_Position=vec4(p,0.,1.); }`;
+    const fsrc=`#version 300 es
+precision highp float;
+uniform sampler2D uT; uniform vec2 uTS,uFit; uniform float uScale,uSharp;
+in vec2 uv; out vec4 o;
+vec3 cr(vec2 q){
+  vec2 s=q*uTS-0.5, f=fract(s), b=floor(s)+0.5;
+  vec2 f2=f*f, f3=f2*f;
+  vec2 w0=-0.5*f3+f2-0.5*f, w1=1.5*f3-2.5*f2+1.0, w2=-1.5*f3+2.0*f2+0.5*f, w3=0.5*f3-0.5*f2;
+  float wx[4]; float wy[4];
+  wx[0]=w0.x; wx[1]=w1.x; wx[2]=w2.x; wx[3]=w3.x;
+  wy[0]=w0.y; wy[1]=w1.y; wy[2]=w2.y; wy[3]=w3.y;
+  vec3 c=vec3(0.);
+  for(int j=0;j<4;j++) for(int i=0;i<4;i++)
+    c+=texture(uT,(b+vec2(float(i-1),float(j-1)))/uTS).rgb*wx[i]*wy[j];
+  return c;
+}
+void main(){
+  vec2 q=(uv-0.5)/uFit+0.5;                       // aspect-fit (letterbox) in UV space
+  if(q.x<0.||q.x>1.||q.y<0.||q.y>1.){ o=vec4(0.027,0.027,0.051,1.); return; }
+  q.y=1.0-q.y;                                    // ImageBitmap rows are top-down
+  vec3 c;
+  if(uScale<=1.001){ c=texture(uT,q).rgb; }       // native frame -> exact 1:1
+  else{
+    c=cr(q);                                      // bicubic reconstruction
+    vec2 px=1.0/uTS;
+    vec3 n=(texture(uT,q+vec2(px.x,0.)).rgb+texture(uT,q-vec2(px.x,0.)).rgb
+           +texture(uT,q+vec2(0.,px.y)).rgb+texture(uT,q-vec2(0.,px.y)).rgb)*0.25;
+    c=clamp(c+(c-n)*uSharp,0.0,1.0);              // gentle unsharp, upscales only
+  }
+  o=vec4(c,1.0);
+}`;
+    const sh=(t,s)=>{const h=gl.createShader(t);gl.shaderSource(h,s);gl.compileShader(h);
+      if(!gl.getShaderParameter(h,gl.COMPILE_STATUS))throw gl.getShaderInfoLog(h);return h;};
+    const pr=gl.createProgram();
+    gl.attachShader(pr,sh(gl.VERTEX_SHADER,vsrc)); gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,fsrc));
+    gl.linkProgram(pr);
+    if(!gl.getProgramParameter(pr,gl.LINK_STATUS))throw gl.getProgramInfoLog(pr);
+    gl.useProgram(pr);
+    const buf=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1, 3,-1, -1,3]),gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+    const tex=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,tex);
+    for(const [k,val] of [[gl.TEXTURE_MIN_FILTER,gl.LINEAR],[gl.TEXTURE_MAG_FILTER,gl.LINEAR],
+                          [gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]])
+      gl.texParameteri(gl.TEXTURE_2D,k,val);
+    glo={ts:gl.getUniformLocation(pr,'uTS'),fit:gl.getUniformLocation(pr,'uFit'),
+         sc:gl.getUniformLocation(pr,'uScale'),shp:gl.getUniformLocation(pr,'uSharp')};
+  }catch(err){ gl=null; ctx=v.getContext('2d'); }
+})();
 let pendingTarget=null;
 function renderLevels(cat){ lvl.style.display='';
   if(document.activeElement===lvl) return;   // don't rebuild an open dropdown (it would close it)
@@ -816,7 +876,11 @@ function shipShot(tag){ try{ const t=document.createElement('canvas'); t.width=4
     fr.onload=()=>{ if(ws&&ws.readyState===1){try{ws.send(JSON.stringify({shot:fr.result.split(',')[1],tag:tag}))}catch(_){}} };
     fr.readAsDataURL(b); },'image/png'); }catch(_){}}
 function sampleRep(){ const S=300, x0=Math.max(0,(v.width-S)>>1), y0=Math.max(0,(v.height-S)>>1);
-  const im=ctx.getImageData(x0,y0,S,S).data; let n=0,c=0;
+  // Read via a temp 2d canvas so this works for both the WebGL and 2d draw paths
+  // (drawImage FROM a WebGL canvas needs preserveDrawingBuffer:true — set at init).
+  const t=document.createElement('canvas'); t.width=S; t.height=S;
+  const c2=t.getContext('2d'); c2.drawImage(v,x0,y0,S,S,0,0,S,S);
+  const im=c2.getImageData(0,0,S,S).data; let n=0,c=0;
   for(let by=0;by<S-2;by+=3)for(let bx=0;bx<S-2;bx+=3){
     let mx=0,cn=1; const i0=(by*S+bx)*4, r0=im[i0],g0=im[i0+1],b0=im[i0+2];
     for(let y=0;y<3;y++)for(let x=0;x<3;x++){const i=((by+y)*S+bx+x)*4;
@@ -826,14 +890,29 @@ function sampleRep(){ const S=300, x0=Math.max(0,(v.width-S)>>1), y0=Math.max(0,
   return {rep:n?Math.round(100*c/n):-1,bright:n};}
 function sendDiag(o){ if(ws&&ws.readyState===1){try{ws.send(JSON.stringify({diag:o}))}catch(_){}} }
 function drawFrame(bm){
-  // Size the canvas backing to the FRAME's own pixels and draw 1:1; CSS (#v object-fit:contain)
-  // scales it into the window preserving aspect. This is the original known-good path: it never
-  // stretches (so no aspect distortion when the server frame size lags a resize) and a crisp
-  // full-res frame is drawn pixel-for-pixel, not nearest-upscaled.
-  if(v.width!==bm.width||v.height!==bm.height){ v.width=bm.width; v.height=bm.height; ctx.imageSmoothingEnabled=true; }
-  ctx.drawImage(bm,0,0);
-  drawLog.push(bm.width+'x'+bm.height); if(drawLog.length>14)drawLog.shift();
-  showRes(bm.width,bm.height);
+  const bmW=bm.width||bm.displayWidth, bmH=bm.height||bm.displayHeight;  // ImageBitmap | VideoFrame
+  if(gl){
+    // Superres path: canvas backing = window device px; the shader aspect-fits the frame into it,
+    // Catmull-Rom + sharpen when the frame is smaller (motion), exact passthrough at 1:1 (hero).
+    const bw=lastW||bmW, bh=lastH||bmH;
+    if(v.width!==bw||v.height!==bh){ v.width=bw; v.height=bh; }
+    gl.viewport(0,0,v.width,v.height);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,bm);
+    const fa=bmW/bmH, ca=v.width/v.height;
+    const qx=fa>ca?1:fa/ca, qy=fa>ca?ca/fa:1;
+    gl.uniform2f(glo.ts,bmW,bmH);
+    gl.uniform2f(glo.fit,qx,qy);
+    gl.uniform1f(glo.sc,(v.width*qx)/bmW);
+    gl.uniform1f(glo.shp,0.22);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+  }else{
+    // Fallback: size the canvas backing to the FRAME's own pixels and draw 1:1; CSS
+    // (#v object-fit:contain) scales it into the window preserving aspect (browser bilinear).
+    if(v.width!==bmW||v.height!==bmH){ v.width=bmW; v.height=bmH; ctx.imageSmoothingEnabled=true; }
+    ctx.drawImage(bm,0,0);
+  }
+  drawLog.push(bmW+'x'+bmH); if(drawLog.length>14)drawLog.shift();
+  showRes(bmW,bmH);
 }
 // Convergence indicator (v1): a small semi-transparent pie in the lower-left that fills as the
 // settled view refines to native res, then fades — subtle enough to live in the periphery, and its
@@ -884,7 +963,7 @@ function updateStats(){ const L=lat; const b=L.tot?('finger→photon '+Math.roun
   st.textContent=info+'\\n'+fps+' fps  ·  '+b; }
 function setupDecoder(codec){
   if(!('VideoDecoder' in window)){dstate='NO WebCodecs';D();s.textContent='this browser lacks WebCodecs (use Chrome/Edge)';return;}
-  dec=new VideoDecoder({output:fr=>{ try{ if(v.width!==fr.displayWidth){v.width=fr.displayWidth;v.height=fr.displayHeight;} ctx.drawImage(fr,0,0); showRes(fr.displayWidth,fr.displayHeight);}catch(dx){dstate='DRAW ERR: '+dx.message;} fr.close();
+  dec=new VideoDecoder({output:fr=>{ try{ drawFrame(fr);}catch(dx){dstate='DRAW ERR: '+dx.message;} fr.close();
     if(ws&&ws.readyState===1){try{ws.send('{"ack":1}')}catch(e){}}   // pace the server: 1 credit back per drawn frame
     const q=tsq.shift(); if(q&&q.cts>0){ const now=performance.now(); const tot=now-q.cts, dec=now-q.d0;
       const net=Math.max(0,tot-q.sms-dec), wait=Math.max(0,q.sms-q.rms-q.ems); const a=0.85,b=0.15, L=lat;
