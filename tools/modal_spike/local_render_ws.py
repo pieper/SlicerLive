@@ -49,7 +49,10 @@ MOTION_RES = os.environ.get("MOTION_RES", "1").lower() in ("1", "true", "on", "y
 # Adaptive geometry v0: while moving, render a DENSE reduced frame targeting this many on-GPU
 # pixels (client upsamples). A big 4K/retina window drops to a fraction of its pixels (render
 # cost ~pixels), a small window stays full-res. Hero (settled) frames always render full-res.
-MOTION_TARGET_PX = int(os.environ.get("MOTION_TARGET_PX", "1200000"))  # ~1.2 MP (~1280x960)
+MOTION_TARGET_PX = int(os.environ.get("MOTION_TARGET_PX", "1200000"))  # initial pixel budget (~1.2 MP)
+# v2 budget controller: during motion, steer the pixel budget so the MEASURED render time tracks
+# this target — adapts to scene complexity (TF/zoom changes cost) and GPU speed, not just window px.
+MOTION_TARGET_MS = float(os.environ.get("MOTION_TARGET_MS", "12"))
 DBG_SEND = os.environ.get("DBG_SEND", "0").lower() in ("1", "true", "on", "yes")  # log settle sends
 LABEL = "synthetic volume (local wgpu + libx264, no Vulkan/NVENC)"
 
@@ -408,6 +411,7 @@ class RenderState:
         self.fine_step = None      # ray-march step for a settled view (voxel spacing)
         self.coarse_step = None    # coarser step used while the camera is moving (fast)
         self.full_size = (W, H)    # client's requested full framebuffer size (device px)
+        self.budget_px = float(MOTION_TARGET_PX)   # live motion pixel budget (v2 controller)
         # bumblebee level management
         self.catalog = []            # [{name, ds, shape, vram_mb, disk_mb, maxdim, feasible}]
         self.cache = {}              # name -> (arr, spacing, (lo,hi))  (loaded volumes, kept in RAM)
@@ -600,12 +604,22 @@ class RenderState:
         return self.render_latest(scale)
 
     def motion_scale(self):
-        """Linear resolution fraction for motion frames: target a fixed on-GPU pixel budget so a
-        big (4K/retina) window renders at a fraction of its pixels while moving but a small window
-        stays full-res. Snapped to 1/f by the renderer; hero (settled) frames always render 1.0."""
+        """Linear resolution fraction for motion frames: target the LIVE pixel budget so a big
+        (4K/retina) window renders a fraction of its pixels while moving but a small window stays
+        full-res. Snapped to 1/f by the renderer; hero (settled) frames always render 1.0."""
         fw, fh = self.full_size
-        s = math.sqrt(MOTION_TARGET_PX / max(1, fw * fh))
+        s = math.sqrt(self.budget_px / max(1, fw * fh))
         return max(0.25, min(1.0, s))
+
+    def tune_budget(self, render_ms):
+        """v2 budget controller: nudge the motion pixel budget so measured render time tracks
+        MOTION_TARGET_MS. Multiplicative + clamped per step (stable, no oscillation), bounded to
+        [0.3 MP, 16 MP]. Complexity spikes (dense TF, deep zoom) shrink the budget; simple views
+        and fast GPUs let it grow back — the same knob v0 keyed off window size alone."""
+        if render_ms <= 0:
+            return
+        adj = max(0.8, min(1.25, MOTION_TARGET_MS / render_ms))
+        self.budget_px = max(3e5, min(16e6, self.budget_px * adj))
 
     def render_frame(self, enc):
         """Render + encode in one call (used only for the initial warmup handshake)."""
@@ -1223,6 +1237,8 @@ def build_app():
                         r0 = time.monotonic()
                         rgba, _ = await loop.run_in_executor(STATE.pool, lambda s=step, sc=scale: STATE.render_quality(s, sc))
                         slot["render_ms"] = (time.monotonic() - r0) * 1000.0
+                        if dirty and not forced:
+                            STATE.tune_budget(slot["render_ms"])   # v2: track MOTION_TARGET_MS
                         slot["rgba"] = rgba; slot["ts"] = pace["input_ts"]; slot["input_rt"] = pace["input_rt"]
                         slot["hero"] = False           # moving -> fast JPEG
                         slot["conv"] = 0.0             # actively interacting -> convergence bar hidden
