@@ -402,7 +402,13 @@ def _load_nrrd(path):
 
 class RenderState:
     def __init__(self):
-        self.pool = ThreadPoolExecutor(max_workers=1)
+        self.pool = ThreadPoolExecutor(max_workers=1)      # owns the wgpu device: ALL renders
+        # Separate encoder thread (image/MJPEG mode): JPEG/AVIF encode is pure CPU (PIL releases
+        # the GIL) and must NOT queue behind renders — user input preempts everything, and a 4K
+        # hero encode (~70ms) sitting on the render thread was delaying the first motion frame.
+        # (NVENC stays on self.pool: CUDA contexts are thread-affine.)
+        self.encpool = ThreadPoolExecutor(max_workers=2)   # 2: a motion encode can start while an
+                                                           # abandoned intermediate encode drains
         self.lock = threading.Lock()
         self.pending = {"az": 0.0, "el": 0.0, "dz": 0.0}
         self.renderer = None
@@ -653,9 +659,10 @@ class RenderState:
 
     def dispose(self):
         """Reap this session: drop the renderer (GPU targets/textures GC with it) and stop the
-        pool thread. Called when the socket closes or the idle reaper fires."""
+        pool threads. Called when the socket closes or the idle reaper fires."""
         self.renderer = None
         self.pool.shutdown(wait=False)
+        self.encpool.shutdown(wait=False)
 
 
 # Sessions are PER-PROCESS: the front process (default) serves the page and, for each /ws
@@ -1318,7 +1325,9 @@ def build_app():
                         slot["render_ms"] = (time.monotonic() - r0) * 1000.0
                         if dirty and not forced:
                             STATE.tune_budget(slot["render_ms"])   # v2: track MOTION_TARGET_MS
-                        slot["rgba"] = rgba; slot["ts"] = pace["input_ts"]; slot["input_rt"] = pace["input_rt"]
+                        # Copy: encode now runs on its own thread, and the next render would
+                        # overwrite this reduced-canvas buffer mid-encode (tearing) otherwise.
+                        slot["rgba"] = rgba.copy(); slot["ts"] = pace["input_ts"]; slot["input_rt"] = pace["input_rt"]
                         slot["hero"] = False           # moving -> fast JPEG
                         slot["conv"] = 0.0             # actively interacting -> convergence bar hidden
                         pace["prog_active"] = False    # any settle refinement is now stale; restart on next settle
@@ -1428,8 +1437,30 @@ def build_app():
                         rgba = slot["rgba"]; last_ver = slot["ver"]; fts = slot["ts"]
                         s_irt = slot["input_rt"]; s_rms = slot["render_ms"]; hero = slot["hero"]
                         conv = slot["conv"]
+                        # User input preempts refinement: if the camera is moving again, a settle
+                        # intermediate (0<conv<1) is already obsolete — drop it unencoded (a 4K
+                        # JPEG costs ~70ms) so the next motion frame reaches the user immediately.
+                        if 0.0 < conv < 1.0:
+                            with STATE.lock:
+                                moving = bool(STATE.pending["az"] or STATE.pending["el"] or STATE.pending["dz"])
+                            if moving:
+                                continue
                         e0 = time.monotonic()
-                        d = await loop.run_in_executor(STATE.pool, lambda: enc.encode(rgba, hero=hero))
+                        # Preemptive encode: don't await blindly — while a refinement intermediate
+                        # is encoding (~70ms at 4K), watch for a superseding MOTION frame; if one
+                        # lands, ABANDON this encode (the 2nd encpool worker starts the motion
+                        # frame immediately) so user input never queues behind refinement.
+                        etask = asyncio.ensure_future(
+                            loop.run_in_executor(STATE.encpool, lambda: enc.encode(rgba, hero=hero)))
+                        abandoned = False
+                        while not etask.done():
+                            await asyncio.wait([etask], timeout=0.004)
+                            if conv > 0.0 and slot["ver"] > last_ver and slot["conv"] <= 0.0:
+                                abandoned = True     # newer motion frame: discard this refinement
+                                break                # (heroes too — the view re-settles after motion)
+                        if abandoned:
+                            continue
+                        d = etask.result()
                         ems = (time.monotonic() - e0) * 1000.0
                         if DBG_SEND and (conv > 0.0 or hero):
                             print(f"SEND ver={last_ver} conv={conv:.2f} hero={hero} "
