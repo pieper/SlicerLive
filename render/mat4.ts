@@ -82,18 +82,24 @@ export function invert(a: Mat4): Mat4 {
   return o;
 }
 
-// Build a RAS(patient) -> texture[0,1] matrix for an axis-aligned volume
-// centered at the origin with the given per-axis spacing and dims.
-// Mirrors single_volume.patient_to_texture_matrix for the centered demo case.
-export function patientToTextureCentered(dims: Vec3, spacing: Vec3): Mat4 {
-  // world = (ijk - (dims-1)/2) * spacing  =>  ijk = world/spacing + (dims-1)/2
-  // tex   = (ijk + 0.5) / dims
+// Build a RAS(patient) -> texture[0,1] matrix for an axis-aligned volume whose
+// world box is [center - ext, center + ext], ext = dims*spacing/2. tex(world) =
+// world*scale + (0.5 - center*scale), scale = 1/(dims*spacing). center=0 -> the
+// origin-centered case (translate 0.5), matching single_volume's voxel-center map.
+export function patientToTexture(dims: Vec3, spacing: Vec3, center: Vec3 = [0, 0, 0]): Mat4 {
   const m = new Float32Array(16); // column-major
   for (let a = 0; a < 3; a++) {
-    const s = 1 / (spacing[a] * dims[a]);      // world -> tex scale
-    m[a * 4 + a] = s;                          // diagonal (col a, row a)
-    m[12 + a] = (((dims[a] - 1) / 2) + 0.5) / dims[a]; // translation (col 3, row a)
+    const s = 1 / (spacing[a] * dims[a]);
+    m[a * 4 + a] = s;                    // diagonal (col a, row a)
+    m[12 + a] = 0.5 - center[a] * s;     // translation (col 3, row a)
   }
   m[15] = 1;
   return m;
+}
+
+/** World-space AABB [min,max] of an axis-aligned volume box centered at `center`. */
+export function volumeAABB(dims: Vec3, spacing: Vec3, center: Vec3 = [0, 0, 0]): [Vec3, Vec3] {
+  const ext: Vec3 = [dims[0] * spacing[0] / 2, dims[1] * spacing[1] / 2, dims[2] * spacing[2] / 2];
+  return [[center[0] - ext[0], center[1] - ext[1], center[2] - ext[2]],
+          [center[0] + ext[0], center[1] + ext[1], center[2] + ext[2]]];
 }

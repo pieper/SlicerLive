@@ -6,7 +6,7 @@
 // Runs identically in the browser and in Deno (same WebGPU API).
 
 import type { Gpu } from "./device.ts";
-import { type Mat4, type Vec3, identity, invert, lookAt, multiply, patientToTextureCentered, perspectiveZO } from "./mat4.ts";
+import { type Mat4, type Vec3, identity, invert, lookAt, multiply, patientToTexture, perspectiveZO } from "./mat4.ts";
 
 // Default offscreen/PNG target; browser canvas passes its (srgb) preferred format.
 const DEFAULT_FORMAT: GPUTextureFormat = "rgba8unorm-srgb"; // auto linear->sRGB on write
@@ -214,7 +214,7 @@ export class VolumeRenderer {
     });
     this.dev.queue.writeTexture({ texture: this.volTex }, v.data.buffer, { bytesPerRow: dx * 4, rowsPerImage: dy }, [dx, dy, dz]);
     // centered axis-aligned geometry
-    this.mat.set(patientToTextureCentered(v.dims, v.spacing), 0);
+    this.mat.set(patientToTexture(v.dims, v.spacing), 0);
     const ext: Vec3 = [dx * v.spacing[0] / 2, dy * v.spacing[1] / 2, dz * v.spacing[2] / 2];
     this.setBoundsMinMax([-ext[0], -ext[1], -ext[2]], [ext[0], ext[1], ext[2]]);
     const minSp = Math.min(...v.spacing);

@@ -1,5 +1,6 @@
-// Minimal, dependency-free PNG encoder (8-bit RGBA). Uses stored (uncompressed)
-// zlib blocks so there is no deflate dependency — fine for verification output.
+// Minimal, dependency-free PNG encoder (8-bit RGBA). Uses the platform
+// CompressionStream('deflate') (built into Deno and browsers) for real zlib
+// compression, so output stays small.
 
 function crc32(buf: Uint8Array, start: number, end: number): number {
   let c = 0xffffffff;
@@ -10,30 +11,19 @@ function crc32(buf: Uint8Array, start: number, end: number): number {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function adler32(buf: Uint8Array): number {
-  let a = 1, b = 0;
-  for (let i = 0; i < buf.length; i++) { a = (a + buf[i]) % 65521; b = (b + a) % 65521; }
-  return ((b << 16) | a) >>> 0;
-}
-
-function zlibStore(raw: Uint8Array): Uint8Array {
-  const nBlocks = Math.max(1, Math.ceil(raw.length / 65535));
-  const out = new Uint8Array(2 + raw.length + nBlocks * 5 + 4);
-  let p = 0;
-  out[p++] = 0x78; out[p++] = 0x01;               // zlib header
-  let off = 0;
-  for (let bi = 0; bi < nBlocks; bi++) {
-    const len = Math.min(65535, raw.length - off);
-    out[p++] = bi === nBlocks - 1 ? 1 : 0;         // BFINAL, BTYPE=00 (stored)
-    out[p++] = len & 0xff; out[p++] = (len >> 8) & 0xff;
-    const nlen = ~len & 0xffff;
-    out[p++] = nlen & 0xff; out[p++] = (nlen >> 8) & 0xff;
-    out.set(raw.subarray(off, off + len), p); p += len; off += len;
-  }
-  const ad = adler32(raw);
-  out[p++] = (ad >>> 24) & 0xff; out[p++] = (ad >>> 16) & 0xff;
-  out[p++] = (ad >>> 8) & 0xff; out[p++] = ad & 0xff;
-  return out.subarray(0, p);
+async function deflateZlib(data: Uint8Array): Promise<Uint8Array> {
+  const cs = new CompressionStream("deflate"); // RFC1950 zlib wrapper — exactly what IDAT wants
+  const writer = cs.writable.getWriter();
+  writer.write(data);
+  writer.close();
+  const chunks: Uint8Array[] = [];
+  const reader = cs.readable.getReader();
+  for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); }
+  const len = chunks.reduce((n, c) => n + c.length, 0);
+  const out = new Uint8Array(len);
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
 }
 
 function chunk(type: string, data: Uint8Array): Uint8Array {
@@ -47,7 +37,7 @@ function chunk(type: string, data: Uint8Array): Uint8Array {
 }
 
 /** rgba: tightly-packed width*height*4 bytes. Returns a PNG file. */
-export function encodePNG(rgba: Uint8Array, width: number, height: number): Uint8Array {
+export async function encodePNG(rgba: Uint8Array, width: number, height: number): Promise<Uint8Array> {
   const ihdr = new Uint8Array(13);
   const dv = new DataView(ihdr.buffer);
   dv.setUint32(0, width); dv.setUint32(4, height);
@@ -56,12 +46,12 @@ export function encodePNG(rgba: Uint8Array, width: number, height: number): Uint
   const stride = width * 4;
   const filtered = new Uint8Array((stride + 1) * height);
   for (let y = 0; y < height; y++) {
-    filtered[y * (stride + 1)] = 0;                          // filter type 0 (none)
+    filtered[y * (stride + 1)] = 0; // filter type 0 (none)
     filtered.set(rgba.subarray(y * stride, y * stride + stride), y * (stride + 1) + 1);
   }
 
   const sig = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
-  const parts = [sig, chunk("IHDR", ihdr), chunk("IDAT", zlibStore(filtered)), chunk("IEND", new Uint8Array(0))];
+  const parts = [sig, chunk("IHDR", ihdr), chunk("IDAT", await deflateZlib(filtered)), chunk("IEND", new Uint8Array(0))];
   const total = parts.reduce((n, p) => n + p.length, 0);
   const out = new Uint8Array(total);
   let o = 0;

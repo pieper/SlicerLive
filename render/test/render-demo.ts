@@ -56,9 +56,8 @@ r.setBackground(0.07, 0.08, 0.12);
 r.setCamera([40, -320, 110], [0, 0, 0], [0, 0, 1], 26, W, H);
 
 const rgba = await r.renderToRGBA(W, H);
-const png = encodePNG(rgba, W, H);
 const outPath = new URL("./dvr-demo.png", import.meta.url).pathname;
-await Deno.writeFile(outPath, png);
+await Deno.writeFile(outPath, await encodePNG(rgba, W, H));
 
 // quick sanity: count non-background pixels
 let lit = 0;
