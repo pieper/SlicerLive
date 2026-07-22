@@ -5,15 +5,15 @@ import { bakeColorizeRGBA } from "../bake.ts";
 import { RGBAVolumeField } from "../fields.ts";
 import type { Vec3 } from "../mat4.ts";
 
-export const D = 112, SP = 1.5, DIST = 440;
+export const D = 200, SP = 0.85, DIST = 440;
 
 export function makeLabelmap(): Uint8Array {
   const lab = new Uint8Array(D * D * D);
   const c = (D - 1) / 2;
   const blobs: Array<[Vec3, number, number]> = [
-    [[c - 30, c, c], 22, 1],
-    [[c + 30, c, c], 22, 2],
-    [[c, c + 6, c + 30], 18, 3],
+    [[c - 54, c, c], 40, 1],
+    [[c + 54, c, c], 40, 2],
+    [[c, c + 12, c + 54], 33, 3],
   ];
   for (let z = 0; z < D; z++) for (let y = 0; y < D; y++) for (let x = 0; x < D; x++) {
     for (const [ctr, r, label] of blobs) {
@@ -35,6 +35,6 @@ export function palette(): Float32Array {
 /** Bake the synthetic segmentation and wrap it as an RGBAVolumeField. */
 export function buildColorizeField(dev: GPUDevice): RGBAVolumeField {
   const dims: Vec3 = [D, D, D], sp: Vec3 = [SP, SP, SP];
-  const tex = bakeColorizeRGBA(dev, makeLabelmap(), dims, palette(), 1.8);
+  const tex = bakeColorizeRGBA(dev, makeLabelmap(), dims, palette(), 3.0);
   return new RGBAVolumeField(tex, dims, sp, { opacityUnitDistance: SP, shade: [0.30, 0.78, 0.5, 28] });
 }

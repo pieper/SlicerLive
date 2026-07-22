@@ -18,6 +18,7 @@ export interface Field {
   fillUniforms(out: Float32Array, off: number): void;   // write block at float offset `off`
   bindEntries(slot: number, base: number): GPUBindGroupEntry[];
   aabb(): [Vec3, Vec3];
+  sampleStep(): number;                  // preferred ray-march step (mm); scene uses the min
 }
 
 export interface ImageFieldOpts {
@@ -37,6 +38,7 @@ export class ImageField implements Field {
   private clim: [number, number];
   private shade: [number, number, number, number];
   private unit: number;
+  private stepMm: number;
   private box: [Vec3, Vec3];
 
   constructor(dev: GPUDevice, data: Float32Array, dims: Vec3, spacing: Vec3, lut: Uint8Array, opts: ImageFieldOpts) {
@@ -49,11 +51,13 @@ export class ImageField implements Field {
     this.box = volumeAABB(dims, spacing, center);
     this.clim = opts.clim;
     this.shade = opts.shade ?? [0.35, 0.75, 0.35, 20];
-    this.unit = opts.opacityUnitDistance ?? Math.min(...spacing);
+    this.stepMm = Math.min(...spacing);
+    this.unit = opts.opacityUnitDistance ?? this.stepMm;
   }
 
   uniformFloats() { return 28; }        // mat4(16) + clim(4) + shade(4) + params(4)
   aabb(): [Vec3, Vec3] { return this.box; }
+  sampleStep(): number { return this.stepMm; }
 
   structMembers(s: number): string {
     return [
@@ -88,7 +92,7 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let unit = max(u_material.img${s}_params.x, 1e-3);
   let opacity = clamp(1.0 - pow(1.0 - clamp(tf.a, 0.0, 1.0), step / unit), 0.0, 1.0);
   if (opacity <= 0.001) { return vec4<f32>(0.0); }
-  let h = step;
+  let h = step * 2.0;   // wider central difference -> smoother normals (less shading aliasing on coarse volumes)
   let g = vec3<f32>(
     sampc_img${s}(wp + vec3<f32>(h,0,0)) - sampc_img${s}(wp - vec3<f32>(h,0,0)),
     sampc_img${s}(wp + vec3<f32>(0,h,0)) - sampc_img${s}(wp - vec3<f32>(0,h,0)),
@@ -143,6 +147,7 @@ export class RGBAVolumeField implements Field {
   private p2t: Mat4;
   private shade: [number, number, number, number];
   private unit: number;
+  private stepMm: number;
   private box: [Vec3, Vec3];
 
   constructor(tex: GPUTexture, dims: Vec3, spacing: Vec3, opts: RGBAFieldOpts = {}) {
@@ -151,11 +156,13 @@ export class RGBAVolumeField implements Field {
     this.p2t = patientToTexture(dims, spacing, center);
     this.box = volumeAABB(dims, spacing, center);
     this.shade = opts.shade ?? [0.30, 0.75, 0.45, 24];
-    this.unit = opts.opacityUnitDistance ?? Math.min(...spacing);
+    this.stepMm = Math.min(...spacing);
+    this.unit = opts.opacityUnitDistance ?? this.stepMm;
   }
 
   uniformFloats() { return 24; }        // mat4(16) + params(4) + shade(4)
   aabb(): [Vec3, Vec3] { return this.box; }
+  sampleStep(): number { return this.stepMm; }
 
   structMembers(s: number): string {
     return [
@@ -184,7 +191,7 @@ fn sample_field_rgba${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let unit = max(u_material.rgba${s}_params.x, 1e-3);
   let opacity = clamp(1.0 - pow(1.0 - clamp(c.a, 0.0, 1.0), step / unit), 0.0, 1.0);
   if (opacity <= 0.001) { return vec4<f32>(0.0); }
-  let h = step;
+  let h = step * 2.0;   // wider central difference -> smoother normals (less shading aliasing on coarse volumes)
   let g = vec3<f32>(
     alpha_rgba${s}(wp + vec3<f32>(h,0,0)) - alpha_rgba${s}(wp - vec3<f32>(h,0,0)),
     alpha_rgba${s}(wp + vec3<f32>(0,h,0)) - alpha_rgba${s}(wp - vec3<f32>(0,h,0)),
