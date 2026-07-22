@@ -1,5 +1,11 @@
 # MRML sync over CouchDB / PouchDB — design & phased investigation
 
+> **Superseded for vocabulary + overall shape by [`ARCHITECTURE.md`](ARCHITECTURE.md) (2026-06-21), and gated by
+> its §8 substrate decision.** The Couch/Pouch substrate is *deferred, not adopted*: the built system is
+> hub-authoritative (WebServer + content-addressed buckets + WS hot-channel). This note becomes live again only if
+> SlicerLive needs authority-free multi-master p2p — see `ARCHITECTURE.md` §8. Its conflict/lease/rate-adaptation
+> and displayable-manager-survey detail remain the reference regardless of substrate.
+
 Status: design proposal (2026-06). Successor to the VTK-render-window-level sync spike
 (`offload/spike/`), which proved client-GPU rendering + compositing but is the wrong sync layer
 (see `MEMORY`/project notes: "as wrong as doing it at the OpenGL level").

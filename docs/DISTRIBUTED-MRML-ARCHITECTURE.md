@@ -1,5 +1,10 @@
 # Distributed MRML: scene closures, places, and render pathways
 
+> **Superseded for vocabulary + overall shape by [`ARCHITECTURE.md`](ARCHITECTURE.md) (2026-06-21).** This note is
+> the origin of the "place / closure / render-pathway / lease" model and the offloadability test — all carried
+> forward. The canonical doc keeps "place" as the umbrella term and renames the role-specific layers
+> (LiveRenderer / LiveModule / LiveInterface); the module-logic-as-external-connection idea becomes LiveModule.
+
 *Status: living design note. Captures the architecture that fell out of the desktopia 3D/2D offload
 work (2026-06). Companion to `MRML-COUCH-DESIGN.md` (which covers the sync substrate: hot/cold,
 conflict ordering, backend-vs-protocol). This doc is about the **shape**: what the units of

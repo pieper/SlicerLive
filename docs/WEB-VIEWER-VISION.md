@@ -1,5 +1,10 @@
 # Lightweight web viewer — vision + render-isolation inventory
 
+> **Superseded for vocabulary + overall shape by [`ARCHITECTURE.md`](ARCHITECTURE.md) (2026-06-21).** This note
+> remains the reference for the render-isolation inventory (what offloads cleanly vs. needs special-casing) and the
+> tiered pay-only-when-the-data-demands-it model. Its layer terms map onto the canonical participants × transports
+> model in `ARCHITECTURE.md`.
+
 *Design note (2026-06-12). Builds on `DISTRIBUTED-MRML-ARCHITECTURE.md` (places/closures/render-pathways)
 and `MRML-COUCH-DESIGN.md` (sync substrate). This doc captures the **lightweight-viewer product direction**
 and the **feature inventory** for what offloads cleanly vs. what needs special handling.*

@@ -1,5 +1,10 @@
 # SlicerLive — live 3D Slicer scenes on the web
 
+> **Superseded for vocabulary + overall shape by [`ARCHITECTURE.md`](ARCHITECTURE.md) (2026-06-21).** This note
+> remains the reference for the product framing, scene formats, the launcher/router, IDC input, and the build
+> roadmap. Where its terms differ from the canonical model (places × transports; LiveScene / LiveRenderer /
+> LiveModule / LiveInterface), `ARCHITECTURE.md` wins.
+
 *Founding design note (2026-06-13). The unifying product for the offload work: a Slicer **save** that is
 **alive** on the web — rendered live on the client, always current (every save republishes), one click from
 the full native app or a cloud GPU. Builds on `WEB-VIEWER-VISION.md`, `MORPHODEPOT-JETSTREAM2.md`,
