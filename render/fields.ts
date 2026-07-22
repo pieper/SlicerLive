@@ -151,6 +151,7 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
 
 export interface RGBAFieldOpts {
   center?: Vec3;
+  ijkToRAS?: ArrayLike<number>;          // real rotated/anisotropic geometry (aligns with an ImageField)
   opacityUnitDistance?: number;
   shade?: [number, number, number, number];
 }
@@ -170,16 +171,26 @@ export class RGBAVolumeField implements Field {
   constructor(tex: GPUTexture, dims: Vec3, spacing: Vec3, opts: RGBAFieldOpts = {}) {
     const center = opts.center ?? [0, 0, 0];
     this.tex = tex;
-    this.p2t = patientToTexture(dims, spacing, center);
-    this.box = volumeAABB(dims, spacing, center);
+    if (opts.ijkToRAS) {
+      this.p2t = patientToTextureFromIjkToRAS(opts.ijkToRAS, dims);
+      this.box = volumeAABBFromIjkToRAS(opts.ijkToRAS, dims);
+      this.stepMm = Math.min(...spacingFromIjkToRAS(opts.ijkToRAS));
+    } else {
+      this.p2t = patientToTexture(dims, spacing, center);
+      this.box = volumeAABB(dims, spacing, center);
+      this.stepMm = Math.min(...spacing);
+    }
     this.shade = opts.shade ?? [0.30, 0.75, 0.45, 24];
-    this.stepMm = Math.min(...spacing);
     this.unit = opts.opacityUnitDistance ?? this.stepMm;
   }
 
   uniformFloats() { return 24; }        // mat4(16) + params(4) + shade(4)
   aabb(): [Vec3, Vec3] { return this.box; }
   sampleStep(): number { return this.stepMm; }
+  /** Swap the baked texture in place (e.g. after re-baking an updated mask). The
+   *  geometry is unchanged; the caller refreshes the SceneRenderer bind group. */
+  setTexture(tex: GPUTexture, destroyPrev = true) { if (destroyPrev && this.tex !== tex) this.tex.destroy(); this.tex = tex; }
+  get texture(): GPUTexture { return this.tex; }
 
   structMembers(s: number): string {
     return [

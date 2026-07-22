@@ -155,6 +155,18 @@ ${dispatch}
     this.mat[4] = mx[0]; this.mat[5] = mx[1]; this.mat[6] = mx[2];
   }
 
+  /** Rebuild the bind group from the fields' current resources (e.g. after a field
+   *  swapped a texture) without recompiling the pipeline. Field set/structure must be unchanged. */
+  refreshBindings() {
+    const entries: GPUBindGroupEntry[] = [
+      { binding: 0, resource: { buffer: this.camBuf } },
+      { binding: 1, resource: { buffer: this.matBuf } },
+      { binding: 2, resource: this.sampler },
+    ];
+    for (const p of this.placed) entries.push(...p.field.bindEntries(p.slot, p.bbase));
+    this.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries });
+  }
+
   setCamera(eye: Vec3, center: Vec3, up: Vec3, fovyDeg: number, width: number, height: number) {
     const view = lookAt(eye, center, up);
     const proj = perspectiveZO((fovyDeg * Math.PI) / 180, width / height, 1, 100000);

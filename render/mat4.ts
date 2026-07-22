@@ -148,6 +148,15 @@ export function volumeAABBFromIjkToRAS(ijkToRAS: ArrayLike<number>, dims: Vec3):
   return [lo, hi];
 }
 
+/** Apply a row-major 4x4 (e.g. ijkToRAS) to a point. */
+export function applyRowMajor(m: ArrayLike<number>, p: Vec3): Vec3 {
+  return [
+    m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3],
+    m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7],
+    m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11],
+  ];
+}
+
 /** Effective voxel spacing (mm) from ijkToRAS column norms (i,j,k axis lengths). */
 export function spacingFromIjkToRAS(ijkToRAS: ArrayLike<number>): Vec3 {
   const col = (c: number): number => Math.hypot(ijkToRAS[c], ijkToRAS[4 + c], ijkToRAS[8 + c]);

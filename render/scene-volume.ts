@@ -65,6 +65,7 @@ function lutFromWindowLevel(): Uint8Array {
 
 export interface SceneVolume {
   field: ImageField;
+  voxels: Float32Array;         // raw scalar volume (HU for CT), (z,y,x) C-order — for the segmenter
   dims: [number, number, number];
   ijkToRAS: number[];
   name: string;
@@ -129,5 +130,5 @@ export async function loadSceneVolumeField(
   const [lo, hi] = field.aabb();
   const center: Vec3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
   const radius = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2;
-  return { field, dims: zv.dims, ijkToRAS, name: vol.name ?? "volume", range: zv.range, center, radius, win, lev };
+  return { field, voxels: zv.data, dims: zv.dims, ijkToRAS, name: vol.name ?? "volume", range: zv.range, center, radius, win, lev };
 }
