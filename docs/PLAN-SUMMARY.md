@@ -16,7 +16,8 @@ only the halves it needs:
 ## Decisions locked (2026-07-22)
 1. **TypeScript** for the shared backbone — WebGPU is one API spec, so the same renderer runs in browser **and**
    native. Python stays a first-class *participant* (Slicer, nnInteractive, training, local helper), not duplicated.
-2. **Deno** for the native/headless path (built-in WebGPU/Dawn).
+2. **Deno** for the native/headless path (built-in WebGPU via Rust `wgpu` — same standard `navigator.gpu` API as
+   the browser; note the engine differs from Chrome's Dawn, so verify result parity across engines).
 3. Core + participant framework + TS **LiveRenderer** live **inside `SlicerLive/`**; vtk.js kept until parity, then
    retired; TS renderer is a portable package (browser + Deno).
 4. Canonical vocabulary (LiveRenderer / LiveInterface / LiveModule); "nnModule" was a typo.

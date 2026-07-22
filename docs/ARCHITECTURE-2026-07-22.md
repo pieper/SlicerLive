@@ -23,7 +23,9 @@ a concrete direction:
    thereby stops being a privileged core and becomes a **LiveRenderer participant** — the "fourth implementation of
    the same displayer contract" made real.
 2. **One language for the shared backbone: TypeScript.** Because WebGPU is one API spec, the *same* TS renderer runs
-   in the browser and natively in **Deno** (Dawn) — "same rendering code, browser or native" becomes literally true.
+   in the browser and natively in **Deno** (built-in WebGPU via Rust `wgpu` — the same standard `navigator.gpu` API)
+   — "same rendering code, browser or native" becomes literally true (same API; note the engine differs from
+   Chrome's Dawn, so result parity is verified across engines, §2).
    Python cannot match this (Pyodide can't load wgpu-py), so Python-everywhere would share *less* renderer code.
 3. **Python is retained as a first-class *participant*, not as duplicated code.** Desktop Slicer (hub), the
    nnInteractive teacher, training, and the working `tools/modal_spike/local_render_ws.py` helper all join over the
@@ -59,8 +61,11 @@ load-bearing decision (lock-free SHM, free p2p dedup, trivial caching). See the 
   SceneRenderer; per-sample contribution sum → one front-to-back OVER) + `SlicerWGPU/wgpu_vtk_inject.py`'s explicit
   binding/`Mat`-struct layout, `RGBAVolumeField`, and the `add_colorize_volume` GPU **compute** bake. WGSL is shared
   verbatim across browser and native; only host orchestration is re-authored in TS.
-- **Language:** **TypeScript**. Browser via `navigator.gpu`; native/headless via **Deno**'s built-in WebGPU (same
-  API). No Pyodide in the hot path. nnLive's tuned WGSL runtime (`wgpu-net.js`) is already TS.
+- **Language:** **TypeScript**. Browser via `navigator.gpu`; native/headless via **Deno**'s built-in WebGPU — the
+  same standard API, implemented on Rust `wgpu` (`wgpu-native`, the same engine `wgpu-py` binds to; also Firefox's).
+  The API is identical, but the *implementation* differs by runtime (Chrome = Dawn; Deno/Firefox = wgpu), so exact
+  result parity is a thing to verify across engines, not assume — pair the same engine when parity matters (Firefox
+  ≈ Deno; a Node+Dawn binding ≈ Chrome). No Pyodide in the hot path. nnLive's WGSL runtime (`wgpu-net.js`) is TS.
 - **Home:** the reactive core + participant framework + TS LiveRenderer land **inside `SlicerLive/`**; the vtk.js
   path stays until the WebGPU path reaches parity, then retires. The TS renderer is a portable package the browser
   and a Deno helper both import.

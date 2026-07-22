@@ -33,7 +33,11 @@ first-class *participant*, not duplicated code.**
 
 **Why TS and not Python+Pyodide** — the decisive fact is that **WebGPU is one API spec**:
 - In TS, identical code (`navigator.gpu`, `GPUDevice`, WGSL) runs in the browser **and** natively in **Deno**
-  (built-in WebGPU via Dawn) or Node (Dawn bindings). "Same renderer code, browser and native" is literally true.
+  (built-in WebGPU on Rust `wgpu`/`wgpu-native`) or Node (Dawn or wgpu-native bindings). "Same renderer code,
+  browser and native" is literally true (same standard API). Caveat: the *engine* differs by runtime — Chrome uses
+  Dawn, Deno/Firefox use wgpu — so "same results" is verified across engines, not assumed; pair the same engine when
+  exact parity matters (Firefox ≈ Deno's wgpu; a Node+Dawn binding ≈ Chrome). Note Deno's wgpu is the *same* engine
+  `wgpu-py` binds to — the split below is about API surface + host language, not the underlying GPU implementation.
 - In Python, native uses **wgpu-py** (its own surface over wgpu-native), but **Pyodide cannot load wgpu-py**
   (a Rust native ext); in-browser Python would drive `navigator.gpu` through the Pyodide→JS bridge — a *different*
   API than wgpu-py. So Python-everywhere needs an abstraction over wgpu-py vs pyodide-JS-WebGPU, i.e. it shares
@@ -246,7 +250,8 @@ renderers. The boundary is a judgment call revisited per use case — captured h
 
 **Resolved (2026-07-22):**
 1. **Language** — **TypeScript** for the shared backbone; Python stays a first-class participant (not duplicated).
-2. **Native runtime** — **Deno** (built-in WebGPU via Dawn; identical API to the browser).
+2. **Native runtime** — **Deno** (built-in WebGPU on Rust `wgpu`; identical standard API to the browser — engine
+   differs from Chrome's Dawn, so verify result parity across engines).
 3. **Repo layout** — the reactive core + participant framework + TS **LiveRenderer** and other components land
    **inside `SlicerLive/`** (its real backbone); the vtk.js path stays until the WebGPU path reaches parity, then
    retires. The TS renderer is a portable package usable by both the browser and a Deno helper.
