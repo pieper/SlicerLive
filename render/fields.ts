@@ -127,3 +127,95 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     ];
   }
 }
+
+export interface RGBAFieldOpts {
+  center?: Vec3;
+  opacityUnitDistance?: number;
+  shade?: [number, number, number, number];
+}
+
+/** A pre-baked rgba16float volume (color + smoothed presence-alpha), e.g. the
+ *  ColorizeVolume bake of a segmentation. Density-mode DVR with headlight Phong. */
+export class RGBAVolumeField implements Field {
+  readonly kind = "rgba";
+  readonly bindingCount = 1;            // baked rgba texture (sampler shared)
+  private tex: GPUTexture;
+  private p2t: Mat4;
+  private shade: [number, number, number, number];
+  private unit: number;
+  private box: [Vec3, Vec3];
+
+  constructor(tex: GPUTexture, dims: Vec3, spacing: Vec3, opts: RGBAFieldOpts = {}) {
+    const center = opts.center ?? [0, 0, 0];
+    this.tex = tex;
+    this.p2t = patientToTexture(dims, spacing, center);
+    this.box = volumeAABB(dims, spacing, center);
+    this.shade = opts.shade ?? [0.30, 0.75, 0.45, 24];
+    this.unit = opts.opacityUnitDistance ?? Math.min(...spacing);
+  }
+
+  uniformFloats() { return 24; }        // mat4(16) + params(4) + shade(4)
+  aabb(): [Vec3, Vec3] { return this.box; }
+
+  structMembers(s: number): string {
+    return [
+      `  rgba${s}_p2t : mat4x4<f32>,`,
+      `  rgba${s}_params : vec4<f32>,`,  // opacity_unit_distance, _, _, _
+      `  rgba${s}_shade : vec4<f32>,`,   // ka, kd, ks, shininess
+    ].join("\n");
+  }
+
+  declareBindings(s: number, base: number): string {
+    return `@group(0) @binding(${base}) var t_rgba${s} : texture_3d<f32>;`;
+  }
+
+  samplingWGSL(s: number): string {
+    return /* wgsl */ `
+fn alpha_rgba${s}(wp : vec3<f32>) -> f32 {
+  let t4 = u_material.rgba${s}_p2t * vec4<f32>(wp, 1.0);
+  return textureSampleLevel(t_rgba${s}, s_lin, clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).a;
+}
+fn sample_field_rgba${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
+  let t4 = u_material.rgba${s}_p2t * vec4<f32>(wp, 1.0);
+  let tex = t4.xyz;
+  if (any(tex < vec3<f32>(0.0)) || any(tex > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
+  let c = textureSampleLevel(t_rgba${s}, s_lin, tex, 0.0);
+  let step = u_material.scene.x;
+  let unit = max(u_material.rgba${s}_params.x, 1e-3);
+  let opacity = clamp(1.0 - pow(1.0 - clamp(c.a, 0.0, 1.0), step / unit), 0.0, 1.0);
+  if (opacity <= 0.001) { return vec4<f32>(0.0); }
+  let h = step;
+  let g = vec3<f32>(
+    alpha_rgba${s}(wp + vec3<f32>(h,0,0)) - alpha_rgba${s}(wp - vec3<f32>(h,0,0)),
+    alpha_rgba${s}(wp + vec3<f32>(0,h,0)) - alpha_rgba${s}(wp - vec3<f32>(0,h,0)),
+    alpha_rgba${s}(wp + vec3<f32>(0,0,h)) - alpha_rgba${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);
+  let glen = length(g);
+  let ka = u_material.rgba${s}_shade.x; let kd = u_material.rgba${s}_shade.y;
+  let ks = u_material.rgba${s}_shade.z; let sh = u_material.rgba${s}_shade.w;
+  var lit_srgb = c.rgb * ka;
+  if (glen > 1e-6) {
+    var n = g / glen;
+    if (dot(n, -rd) < 0.0) { n = -n; }
+    let view_dir = normalize(-rd);
+    let ldotn = dot(view_dir, n);
+    if (ldotn > 0.0) {
+      let refl = normalize(2.0 * ldotn * n - view_dir);
+      let rdotv = max(0.0, dot(refl, view_dir));
+      lit_srgb = c.rgb * (ka + kd * ldotn) + vec3<f32>(ks * pow(rdotv, sh));
+    }
+  }
+  let lit = srgb2physical(clamp(lit_srgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+  return vec4<f32>(lit * opacity, opacity);
+}`;
+  }
+
+  fillUniforms(out: Float32Array, off: number) {
+    out.set(this.p2t, off);
+    out[off + 16] = this.unit;
+    out[off + 20] = this.shade[0]; out[off + 21] = this.shade[1]; out[off + 22] = this.shade[2]; out[off + 23] = this.shade[3];
+  }
+
+  bindEntries(_s: number, base: number): GPUBindGroupEntry[] {
+    return [{ binding: base, resource: this.tex.createView() }];
+  }
+}
