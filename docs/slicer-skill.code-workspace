@@ -1,0 +1,23 @@
+{
+	"folders": [
+		{
+			"path": "../../slicer-skill"
+		},
+		{
+			"path": "../../latest/SlicerQueryAtlas"
+		},
+		{
+			"path": "../../../dcmjs/dcmjs"
+		},
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../latest/SlicerWGPU"
+		},
+		{
+			"path": "../../latest/slicer-wgpu"
+		}
+	],
+	"settings": {}
+}

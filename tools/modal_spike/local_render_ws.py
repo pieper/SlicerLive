@@ -42,6 +42,13 @@ LEVEL = os.environ.get("LEVEL", "L4")                 # bumblebee pyramid level:
 # (otherwise finer levels over-accumulate opacity). Tunable for overall density.
 BEE_OUD = float(os.environ.get("OUD", "1.0"))
 MOTION_SAMPLES = int(os.environ.get("MOTION_SAMPLES", "300"))  # ~ray-march samples while dragging
+# Settled ray-march step as a fraction of a voxel. 1 sample/voxel (1.0) undersamples ~1-voxel-thin
+# features (hairs/bristles): with per-pixel jitter, neighbouring pixels stochastically hit/miss the
+# thin feature -> it breaks into a dashed line. Oversampling (e.g. 0.34 -> 3 samples/voxel) catches
+# the feature regardless of jitter phase. Opacity is step-invariant (1-(1-a)^(step/unit)) so this
+# changes only aliasing, not brightness. VTK's spacing-locked path uses 0.5 (2x).
+OVERSAMPLE = float(os.environ.get("OVERSAMPLE", "0.34"))
+TF_MODE = os.environ.get("TF_MODE", "linear")   # "linear": grayscale window/level (default, for tuning) | "amber"
 MOTION_LOD = os.environ.get("MOTION_LOD", "0").lower() in ("1", "true", "on", "yes")  # coarse-while-moving
 MAX_DIM = int(os.environ.get("MAX_DIM", "8192"))  # framebuffer axis cap (allows 8K; GPU 2D limit ~16-32K)
 MOTION_SCALE = float(os.environ.get("MOTION_SCALE", "0.5"))  # render at this fraction while dragging (upsampled client-side)
@@ -54,6 +61,7 @@ MOTION_TARGET_PX = int(os.environ.get("MOTION_TARGET_PX", "1200000"))  # initial
 # this target — adapts to scene complexity (TF/zoom changes cost) and GPU speed, not just window px.
 MOTION_TARGET_MS = float(os.environ.get("MOTION_TARGET_MS", "12"))
 DBG_SEND = os.environ.get("DBG_SEND", "0").lower() in ("1", "true", "on", "yes")  # log settle sends
+LIVE_TF = os.environ.get("LIVE_TF", "/root/live_tf.json")  # write a TF spec here -> applies live
 LABEL = "synthetic volume (local wgpu + libx264, no Vulkan/NVENC)"
 
 
@@ -337,15 +345,18 @@ def bumblebee_catalog():
     return cat
 
 
-def bumblebee_tf(lo, hi):
-    """diceCT color/opacity transfer function (fractions of [lo,hi]), from live_render_nvenc.py."""
-    rg = (hi - lo) or 1.0
-    cfr = [(0.00, 0, 0, 0), (0.06, 0.35, 0.10, 0.10), (0.20, 0.85, 0.40, 0.16),
-           (0.42, 0.96, 0.80, 0.45), (0.65, 0.70, 0.92, 0.62), (1.00, 0.88, 0.97, 1.0)]
-    ofr = [(0.00, 0.0), (0.04, 0.03), (0.13, 0.17), (0.32, 0.42), (0.60, 0.70), (1.00, 0.93)]
-    color = [(lo + fr * rg, r, g, b) for fr, r, g, b in cfr]
-    opacity = [(lo + fr * rg, a) for fr, a in ofr]
-    return color, opacity
+def amber_tf_dict(p, lo, hi):
+    """'Amber museum' diceCT transfer function as an absolute-scalar spec (see the TF study): opacity
+    onset ABOVE the low-density hair/cuticle so rays reach the interior, an amber->pale-white density
+    ramp so stained dense tissue saturates bright, penetrating OUD + ambient fill. p is a {percentile:
+    value} dict of in-window tissue values; anchors at p70/p83/p85/p93/p95."""
+    P = lambda q: p[q]
+    return {
+        "oud": 0.6, "ambient": 0.35, "diffuse": 0.82, "specular": 0.22, "shininess": 14.0,
+        "color": [(lo, 0, 0, 0), (P(70), .60, .34, .14), (P(85), .92, .72, .38),
+                  (P(95), .99, .93, .78), (hi, 1, 1, .96)],
+        "opacity": [(lo, 0), (P(70), 0), (P(83), .34), (P(93), .78), (hi, 1)],
+    }
 
 
 # --------------------------------------------------------------------------
@@ -411,6 +422,10 @@ class RenderState:
                                                            # abandoned intermediate encode drains
         self.lock = threading.Lock()
         self.pending = {"az": 0.0, "el": 0.0, "dz": 0.0}
+        self.pending_wl = None       # latest window (wlo, whi) — coalesced like camera input
+        self.pending_go = None       # latest gradient-opacity (on, glo, ghi) — coalesced
+        self.clim = (0.0, 1.0)          # current single-volume TF domain (set on _apply)
+        self.bee_p = {}                 # bumblebee tissue percentiles (for live TF edits)
         self.renderer = None
         self.adapter_info = None
         self.dataset = DATA
@@ -425,6 +440,20 @@ class RenderState:
         self.lprog = {}              # name -> 0..1 download fraction
         self.current = None          # level currently on the GPU / displayed
         self.target = None           # quality ceiling chosen by the user (finest allowed)
+        self._applying = None        # level whose GPU upload is in-flight (guards against a 2nd upload)
+        # linear window/level + histogram experimentation state
+        self.domain = (0.0, 1.0)     # scalar range of the TF LUT; window/level moves within it
+        self.wl = None               # (window_lo, window_hi) absolute scalar; None -> pick a default
+        self.hist = None             # scalar histogram counts over the domain (list[int])
+        self.ghist = None            # gradient-magnitude histogram counts (list[int])
+        self.hist_ver = 0            # bumps on level change so the client refreshes its histogram
+        self.grad_on = False         # gradient-opacity modulation enabled
+        self.grad_wl = (0.05, 0.40)  # gradient window as a fraction of gmax_ref
+        self.gmax_ref = 1.0          # gradient-magnitude reference (raw scalar / mm)
+        self.warp_mode = "linear"    # ramp warp: linear | log | equalize (histogram equalization)
+        self.preset = "grayscale"    # look preset: grayscale | dicect (SlicerMorph hot-iron)
+        self.cdf_x = None            # tissue CDF (for equalize warp): bin centers + cumulative fraction
+        self.cdf_y = None
         self._wake = threading.Event()
 
     def ensure_renderer(self):
@@ -520,19 +549,170 @@ class RenderState:
         self.dataset = "multivol: CTACardio + Panoramix"
 
     def _apply(self, name):
-        """Swap the renderer onto a cached level (runs on the pool thread). Camera is preserved."""
-        arr, spacing, (lo, hi) = self.cache[name]
-        self.renderer.set_volume(arr, spacing=spacing, scalar_range=(lo, hi),
+        """Swap the renderer onto a cached level (runs on the pool thread). Camera is preserved.
+        Starts from the 'amber museum' diceCT TF (penetrating, ambient-lit) and stores the volume's
+        tissue percentiles + clim so live TF edits (apply_tf_dict) map cleanly to this specimen."""
+        arr, spacing, (lo, hi0) = self.cache[name]
+        # Tissue percentiles from a strided subsample (~20M voxels): cheap even for L1 (avoids the
+        # multi-GB boolean mask + 16 full np.percentile passes over ~2.8B voxels), so we recompute
+        # per level and keep the TF anchors matched to the displayed data.
+        s = max(1, int(round((arr.size / 2.0e7) ** (1.0 / 3.0))))
+        sub = arr[::s, ::s, ::s]
+        tis = sub[sub > lo]
+        self.bee_p = {q: float(np.percentile(tis, q))
+                      for q in (50, 60, 68, 70, 72, 75, 80, 83, 85, 88, 90, 93, 95, 97, 99, 99.5)}
+        # Scalar domain for the TF LUT — deliberately WIDER than the data so window/level can be
+        # dragged BEYOND the tissue min/max to explore (e.g. push the low edge below all tissue, or the
+        # high edge past the densest cuticle so nothing saturates). Tissue spans ~[lo, P99.9]; pad 50%
+        # of that span on each side. The histogram is drawn over this wide domain, so the data sits in
+        # the middle with empty headroom margins the handles can reach.
+        p999 = float(np.percentile(tis, 99.9))
+        span = max(1.0, p999 - lo)
+        dlo = lo - 0.5 * span
+        dhi = p999 + 0.5 * span
+        self.domain = (dlo, dhi)
+        self.clim = (dlo, dhi)
+        counts, edges = np.histogram(np.clip(tis, dlo, dhi), bins=192, range=(dlo, dhi))
+        self.hist = [int(c) for c in counts]
+        # Tissue CDF over the domain (for the 'equalize' warp): equal voxel populations -> equal ramp.
+        self.cdf_x = (0.5 * (edges[:-1] + edges[1:])).astype(np.float64)
+        cdf = np.cumsum(counts).astype(np.float64)
+        self.cdf_y = cdf / max(float(cdf[-1]), 1.0)
+        self.hist_ver += 1
+        # Gradient-magnitude histogram + scale for the gradient-opacity control. Central differences
+        # on the subsample -> raw-scalar/mm; gref (P99.5 of nonzero gradients) is the reference, so a
+        # window fraction f maps to shader gradient_range = f*gref and the histogram x-axis is f in
+        # [0,1]. (Subsample gradients slightly under-read fullres edges, so treat it as a guide.)
+        gs = sub.astype(np.float32)
+        gx, gy, gz = np.gradient(gs)
+        gmag = np.sqrt(gx * gx + gy * gy + gz * gz) / (float(min(spacing)) * s)
+        gpos = gmag[gmag > 0]
+        gref = float(np.percentile(gpos, 99.5)) if gpos.size else 1.0
+        self.gmax_ref = gref
+        gc, _ = np.histogram(np.clip(gmag / gref, 0.0, 1.0), bins=128, range=(0.0, 1.0))
+        self.ghist = [int(c) for c in gc]
+        self.renderer.set_volume(arr, spacing=spacing, scalar_range=(dlo, dhi),
                                  opacity_unit_distance=BEE_OUD)
-        c, o = bumblebee_tf(lo, hi)
-        self.renderer.set_transfer_function(c, o, (lo, hi))
-        self.current = name
-        self.dataset = f"bumblebee {name} {tuple(arr.shape)}"
+        if TF_MODE == "amber":
+            self.apply_tf_dict(amber_tf_dict(self.bee_p, lo, self.bee_p[99]))
+        else:
+            wlo, whi = self.wl if self.wl else (self.bee_p[70], self.bee_p[99])
+            self.set_window(wlo, whi)   # persisted window survives level swaps
+            if self.grad_on:            # set_volume reset the material -> re-apply grad opacity
+                self.set_gradient_opacity(True, *self.grad_wl)
         # Motion-adaptive ray-march: fine = voxel spacing (crisp, settled); coarse ~= a fixed
         # ~MOTION_SAMPLES steps across the volume (fast, while dragging) on the SAME texture.
-        extent = max(d * s for d, s in zip(arr.shape[::-1], spacing))
-        self.fine_step = float(min(spacing))
+        extent = max(dim * s for dim, s in zip(arr.shape[::-1], spacing))
+        self.fine_step = float(min(spacing)) * OVERSAMPLE   # oversample thin features (see OVERSAMPLE)
         self.coarse_step = max(self.fine_step, extent / MOTION_SAMPLES)
+        self.current = name
+        self.lstate[name] = "loaded"     # upload done; renderLevels now labels it "showing" (active)
+        self._applying = None            # GPU upload finished; allow the next level to be scheduled
+        self.dataset = f"bumblebee {name} {tuple(arr.shape)}"
+
+    def apply_tf_dict(self, d):
+        """Apply a transfer-function spec (absolute scalar control points + material params) to the
+        single-volume renderer and bump the epoch so the render loop repaints. Used by _apply and by
+        the live TF watcher — this is the seam the agent-render-critique loop writes through."""
+        r = self.renderer
+        mat = getattr(r, "_material", None)
+        if mat is None:            # multivol SceneRenderer: no single-material TF path
+            return
+        lo, hi = self.clim
+        if "oud" in d:       mat.opacity_unit_distance = float(d["oud"])
+        if "ambient" in d:   mat.k_ambient = float(d["ambient"])
+        if "diffuse" in d:   mat.k_diffuse = float(d["diffuse"])
+        if "specular" in d:  mat.k_specular = float(d["specular"])
+        if "shininess" in d: mat.shininess = float(d["shininess"])
+        color = [tuple(c) for c in d["color"]]
+        opacity = [tuple(o) for o in d["opacity"]]
+        r.set_transfer_function(color, opacity, (lo, hi))   # bumps epoch
+
+    def _warp(self, xs):
+        """Map data values -> a warped ramp coordinate. linear=identity; log spreads the low/mid of a
+        right-skewed HDR histogram (X-ray attenuation is ~log-normal); equalize warps by the tissue CDF
+        so equal voxel populations get equal ramp range (histogram equalization). The warp is applied
+        only to the RAMP construction here — the histogram + handles stay in raw data units."""
+        dlo, dhi = self.domain
+        if self.warp_mode == "log":
+            c = 0.02 * max(1.0, dhi - dlo)
+            return np.log(np.maximum(xs - dlo + c, 1e-9))
+        if self.warp_mode == "equalize" and self.cdf_x is not None:
+            return np.interp(xs, self.cdf_x, self.cdf_y)
+        return np.asarray(xs, dtype=np.float64)
+
+    def _build_lut(self, wlo, whi):
+        """256x4 RGBA LUT over the domain for the current (warp, preset). 'grayscale' is a black->white
+        ramp; 'dicect' is the SlicerMorph hot-iron diceCT look — a concave opacity curve (shallow
+        translucent plateau through soft tissue, steep rise to opaque at the dense end) with a
+        black->red->orange->yellow->white color ramp. Both run across [wlo,whi] in warped coordinates."""
+        dlo, dhi = self.domain
+        xs = np.linspace(dlo, dhi, 256)
+        ws = self._warp(xs)
+        wl = float(self._warp(np.array([wlo]))[0]); wh = float(self._warp(np.array([whi]))[0])
+        u = np.clip((ws - wl) / max(1e-9, wh - wl), 0.0, 1.0)   # 0..1 across the window (warped)
+        if self.preset == "dicect":
+            op = np.interp(u, [0.0, 0.08, 0.50, 0.80, 0.95, 1.0], [0.0, 0.14, 0.22, 0.55, 0.90, 1.0])
+            rr = np.interp(u, [0.0, 0.12, 0.30, 1.0],            [0.0, 0.60, 1.0, 1.0])
+            gg = np.interp(u, [0.0, 0.12, 0.30, 0.55, 1.0],      [0.0, 0.0, 0.50, 1.0, 1.0])
+            bb = np.interp(u, [0.0, 0.55, 0.85, 1.0],            [0.0, 0.0, 0.60, 1.0])
+        else:                                                    # grayscale ramp
+            op = u; rr = u; gg = u; bb = u
+        return np.stack([rr, gg, bb, op], axis=1).astype(np.float32)
+
+    def set_window(self, wlo, whi):
+        """Window/level: build the LUT for the current (warp, preset) across [wlo,whi] over the fixed
+        domain and install it in place (cheap — no re-upload). Below the window is transparent; above is
+        opaque. warp (linear/log/equalize) reshapes the ramp; preset (grayscale/diceCT) the look."""
+        import pygfx
+        r = self.renderer
+        mat = getattr(r, "_material", None)
+        if mat is None:
+            return
+        dlo, dhi = self.domain
+        wlo, whi = float(wlo), float(whi)
+        if whi <= wlo:
+            whi = wlo + max(1.0, (dhi - dlo) * 1e-3)
+        wlo = max(dlo, min(wlo, dhi)); whi = max(dlo, min(whi, dhi))
+        self.wl = (wlo, whi)
+        mat.opacity_unit_distance = BEE_OUD
+        if self.preset == "dicect":     # SlicerMorph diceCT shading (glossier)
+            mat.k_ambient = 0.30; mat.k_diffuse = 0.60; mat.k_specular = 0.50; mat.shininess = 40.0
+        else:
+            mat.k_ambient = 0.30; mat.k_diffuse = 0.85; mat.k_specular = 0.20; mat.shininess = 12.0
+        mat.lut_texture = pygfx.Texture(self._build_lut(wlo, whi), dim=1)   # in-place via _reuse_texture
+        mat.clim = (dlo, dhi)
+        r._invalidate()                 # bump epoch so the render loop repaints
+
+    def set_gradient_opacity(self, enabled, glo=0.02, ghi=0.15):
+        """Gradient-opacity modulation (VTK-style): multiply each sample's opacity by a ramp of the
+        local gradient magnitude, so flat interiors fade out and surfaces/edges stay opaque. glo/ghi
+        are the gradient window as a FRACTION of gmax_ref (= scalar-domain span per voxel); a linear
+        ramp maps gradient magnitude [glo,ghi]*gmax_ref -> opacity multiplier [0,1]."""
+        import pygfx
+        mat = getattr(self.renderer, "_material", None)
+        if mat is None:
+            return
+        self.grad_on = bool(enabled)
+        self.grad_wl = (float(glo), float(ghi))
+        if enabled:
+            ramp = np.linspace(0.0, 1.0, 256, dtype=np.float32).reshape(256, 1)
+            mat.grad_lut_texture = pygfx.Texture(ramp, dim=1)
+            g = self.gmax_ref
+            glo2, ghi2 = float(glo) * g, float(ghi) * g
+            if ghi2 <= glo2:
+                ghi2 = glo2 + g * 1e-3
+            mat.gradient_range = (glo2, ghi2)
+            mat.gradient_opacity_enabled = 1.0
+        else:
+            mat.gradient_opacity_enabled = 0.0
+
+    def hist_message(self):
+        dlo, dhi = self.domain
+        wl = self.wl or (dlo, dhi)
+        return {"hist": {"ver": self.hist_ver, "lo": dlo, "hi": dhi,
+                         "wl": [wl[0], wl[1]], "counts": self.hist or [],
+                         "gcounts": self.ghist or []}}
 
     def _best_for_target(self):
         """Finest cached level that is not finer than the target ceiling."""
@@ -544,7 +724,14 @@ class RenderState:
 
     def _update_display(self):
         best = self._best_for_target()
-        if best and best != self.current:
+        if best and best != self.current and best != self._applying:
+            # Mark the GPU-upload phase up front so the client shows "loading GPU…" while the
+            # (possibly multi-GB) 3D texture uploads on the render thread. The display stays on the
+            # current, coarser level until _apply finishes and flips self.current — we never switch
+            # the actual rendering onto a half-uploaded texture. The self._applying guard keeps a
+            # second _update_display (loader vs. user pick) from queueing a duplicate upload.
+            self.lstate[best] = "uploading"
+            self._applying = best
             self.pool.submit(lambda: self._apply(best))
 
     def set_target(self, name):
@@ -594,7 +781,15 @@ class RenderState:
         with self.lock:
             az, el, dz = self.pending["az"], self.pending["el"], self.pending["dz"]
             self.pending = {"az": 0.0, "el": 0.0, "dz": 0.0}
+            pw = self.pending_wl; self.pending_wl = None
+            pg = self.pending_go; self.pending_go = None
             moved = bool(az or el or dz)
+        # Apply the LATEST window/level & gradient opacity right before rendering (coalesced: rapid
+        # drags overwrite the pending value, so only the newest is applied — stale ones never render).
+        if pw is not None:
+            self.set_window(pw[0], pw[1])
+        if pg is not None:
+            self.set_gradient_opacity(pg[0], pg[1], pg[2])
         r = self.renderer
         if az or el:
             r.orbit(az, el)
@@ -768,15 +963,57 @@ PAGE = """<!doctype html><html><head><meta charset=utf-8><title>LiveRenderer (lo
 #dwrap{position:fixed;left:12px;bottom:10px;z-index:9;color:#ff5;display:flex;align-items:center;gap:5px}
 #dbg{font:12px ui-monospace,monospace;white-space:pre;text-shadow:0 1px 2px #000}
 #lvl{position:fixed;left:50%;transform:translateX(-50%);top:8px;z-index:5;background:#12121ce0;color:#cde;border:1px solid #557;border-radius:6px;font:12px system-ui;padding:4px 8px;cursor:pointer}
-#lvl:disabled{opacity:.5}</style></head>
+#lvl:disabled{opacity:.5}
+#gpu{position:fixed;left:50%;top:36px;transform:translateX(-50%);z-index:6;display:none;
+  align-items:center;gap:8px;background:#1a1206ee;border:1px solid #b8791f;border-radius:6px;
+  padding:5px 12px;color:#ffcf7a;font:12px system-ui;text-shadow:0 1px 2px #000;box-shadow:0 4px 18px rgba(0,0,0,.6)}
+#gpu.on{display:flex}
+#gpu .sp{width:12px;height:12px;border:2px solid #ffcf7a;border-top-color:transparent;border-radius:50%;
+  animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){#gpu .sp{animation:none}}
+#wl{position:fixed;left:50%;transform:translateX(-50%);bottom:14px;z-index:8;width:384px;
+  background:#0c0c13ea;border:1px solid #333b;border-radius:9px;padding:9px 10px 8px}
+#histwrap{position:relative;touch-action:none;cursor:ew-resize;user-select:none}
+#histc{display:block;width:384px;height:72px;background:#05050a;border-radius:4px}
+#wltrack{position:relative;height:14px;margin-top:2px;pointer-events:none}
+#wlsel{position:absolute;top:5px;height:4px;background:linear-gradient(90deg,#000,#fff);border:1px solid #667;border-radius:2px}
+.wlh{position:absolute;top:0;width:9px;height:14px;margin-left:-4.5px;background:#ffcf7a;border:1px solid #000;border-radius:3px;box-shadow:0 1px 3px #000}
+#wllab{display:flex;justify-content:space-between;align-items:center;font:11px ui-monospace,monospace;color:#9ab;margin-top:5px}
+#wlrst{cursor:pointer;color:#ffcf7a;opacity:.8;padding:1px 6px;border:1px solid #ffcf7a55;border-radius:4px}
+#wlrst:hover{opacity:1}
+#tfrow{display:flex;gap:14px;align-items:center;margin-top:6px;font:11px ui-monospace,monospace;color:#9ab}
+#tfrow label{display:flex;align-items:center;gap:4px}
+#tfrow select{background:#12121ce0;color:#cde;border:1px solid #557;border-radius:4px;font:11px system-ui;padding:1px 4px;cursor:pointer}
+#gochk{display:flex;align-items:center;gap:5px;cursor:pointer;color:#cde;user-select:none}
+#gochk input{accent-color:#e6a94e;cursor:pointer}
+#gowrap{margin-top:7px;display:none}
+#gowrap.on{display:block}
+#gohistwrap{position:relative;touch-action:none;cursor:ew-resize;user-select:none}
+#ghistc{display:block;width:384px;height:44px;background:#05050a;border-radius:4px}
+#gotrack{position:relative;height:14px;margin-top:2px;pointer-events:none}
+#gosel{position:absolute;top:5px;height:4px;background:#79b8ff88;border:1px solid #4a7;border-radius:2px;pointer-events:none}
+.goh{position:absolute;top:0;width:9px;height:14px;margin-left:-4.5px;background:#79b8ff;border:1px solid #000;border-radius:3px;pointer-events:none}
+#gotxt{font:10px ui-monospace,monospace;color:#78c;margin-top:3px;display:block}</style></head>
 <body><div id=brand>LiveRenderer <small>· local · wgpu(Metal) + libx264 + WebCodecs</small></div>
 <div id=swrap><span id=s>connecting…</span><span class=qh data-h=status>?</span></div>
 <div id=res></div>
 <div id=stwrap><span class=qh data-h=stats>?</span><span id=stats></span></div>
 <div id=dwrap><span id=dbg></span><span class=qh data-h=debug>?</span></div><select id=lvl style=display:none title="resolution level"></select>
 <div id=pop></div><canvas id=v></canvas><div id=pie></div>
+<div id=gpu><span class=sp></span><span id=gput>loading GPU…</span></div>
+<div id=wl>
+  <div id=histwrap><canvas id=histc width=384 height=72></canvas>
+    <div id=wltrack><div id=wlsel></div><div id=hlo class=wlh></div><div id=hhi class=wlh></div></div></div>
+  <div id=wllab><label id=gochk><input type=checkbox id=goen> grad opacity</label>
+    <span id=wltxt>linear window/level</span><span id=wlrst title="reset to full range">reset</span></div>
+  <div id=tfrow><label>warp <select id=warpSel><option value=linear>linear</option><option value=log>log</option><option value=equalize>equalize</option></select></label>
+    <label>look <select id=presetSel><option value=grayscale>grayscale</option><option value=dicect>diceCT</option></select></label></div>
+  <div id=gowrap><div id=gohistwrap><canvas id=ghistc width=384 height=44></canvas>
+    <div id=gotrack><div id=gosel></div><div id=glo class=goh></div><div id=ghi class=goh></div></div></div>
+    <span id=gotxt>gradient window</span></div></div>
 <script>
-const v=document.getElementById('v'),s=document.getElementById('s'),st=document.getElementById('stats'),dbg=document.getElementById('dbg'),lvl=document.getElementById('lvl'),res=document.getElementById('res');
+const v=document.getElementById('v'),s=document.getElementById('s'),st=document.getElementById('stats'),dbg=document.getElementById('dbg'),lvl=document.getElementById('lvl'),res=document.getElementById('res'),gpu=document.getElementById('gpu'),gput=document.getElementById('gput');
 function showRes(fw,fh){ const ww=Math.round(innerWidth*devicePixelRatio),wh=Math.round(innerHeight*devicePixelRatio);
   res.textContent = fw+'×'+fh+(fw!==ww||fh!==wh ? ' → '+ww+'×'+wh : '') ; }
 // v4a superresolution upsample: draw frames through WebGL2 — Catmull-Rom (bicubic) resampling plus
@@ -842,11 +1079,18 @@ void main(){
 })();
 let pendingTarget=null;
 function renderLevels(cat){ lvl.style.display='';
+  // GPU-upload banner: while a (multi-GB) level texture uploads on the render thread the image
+  // holds on the current coarser level and can't repaint — surface that plainly (with a spinner
+  // that keeps animating client-side during the freeze) so it never reads as a mystery hang.
+  const up=cat.levels.find(L=>L.state==='uploading');
+  if(up){ gput.textContent='Loading '+up.name+' into GPU… (showing '+(cat.active||'…')+')'; gpu.classList.add('on'); }
+  else gpu.classList.remove('on');
   if(document.activeElement===lvl) return;   // don't rebuild an open dropdown (it would close it)
   if(lvl.options.length!==cat.levels.length){ lvl.innerHTML=cat.levels.map(L=>'<option></option>').join(''); }
   cat.levels.forEach((L,i)=>{ const o=lvl.options[i]; o.value=L.name; o.disabled=!L.feasible;
     let s = !L.feasible ? 'too large for GPU'
           : L.name===cat.active ? 'showing'
+          : L.state==='uploading' ? 'loading GPU…'
           : L.state==='downloading' ? Math.round(L.progress*100)+'%'
           : L.state==='loaded' ? 'ready'
           : L.disk_mb+' MB';
@@ -855,6 +1099,88 @@ function renderLevels(cat){ lvl.style.display='';
   else { pendingTarget=null; lvl.value=cat.target; }
 }
 lvl.addEventListener('change',()=>{ pendingTarget=lvl.value; if(ws&&ws.readyState===1){try{ws.send(JSON.stringify({settarget:lvl.value}))}catch(e){}} });
+
+// ---- linear window/level + histogram + gradient opacity ---------------------
+const histc=document.getElementById('histc'), hg=histc.getContext('2d'),
+      histwrap=document.getElementById('histwrap'), wlsel=document.getElementById('wlsel'),
+      hlo=document.getElementById('hlo'), hhi=document.getElementById('hhi'),
+      wltxt=document.getElementById('wltxt'), wlrst=document.getElementById('wlrst'),
+      goen=document.getElementById('goen'), gowrap=document.getElementById('gowrap'),
+      gohistwrap=document.getElementById('gohistwrap'), ghistc=document.getElementById('ghistc'), ghg=document.getElementById('ghistc').getContext('2d'),
+      gotrack=document.getElementById('gotrack'), gosel=document.getElementById('gosel'),
+      goloh=document.getElementById('glo'), gohih=document.getElementById('ghi'), gotxt=document.getElementById('gotxt');
+let HD={lo:0,hi:1,ver:-1}, WL={lo:0,hi:1};   // scalar domain + window (absolute intensity)
+let GW={lo:0.05,hi:0.40};                    // gradient window (fraction of the gradient scale)
+function onHist(h){
+  const domChanged=(h.lo!==HD.lo||h.hi!==HD.hi||h.ver!==HD.ver);
+  HD={lo:h.lo,hi:h.hi,ver:h.ver}; drawHist(h.counts);
+  if(h.gcounts) drawGHist(h.gcounts);
+  if(domChanged){ WL={lo:h.wl[0],hi:h.wl[1]}; }
+  layoutWL(); layoutGO();
+}
+function drawGHist(counts){
+  const W=ghistc.width,H=ghistc.height; ghg.clearRect(0,0,W,H);
+  if(!counts||!counts.length) return;
+  let mx=0; for(const c of counts) if(c>mx)mx=c; const lm=Math.log(mx+1)||1, bw=W/counts.length;
+  ghg.fillStyle='#5a86c8';
+  for(let i=0;i<counts.length;i++){ const bh=Math.log(counts[i]+1)/lm*H; ghg.fillRect(i*bw,H-bh,Math.max(1,bw-0.4),bh); }
+}
+function drawHist(counts){
+  const W=histc.width,H=histc.height; hg.clearRect(0,0,W,H);
+  if(!counts||!counts.length) return;
+  let mx=0; for(const c of counts) if(c>mx)mx=c; const lm=Math.log(mx+1)||1, bw=W/counts.length;
+  hg.fillStyle='#e6a94e';
+  for(let i=0;i<counts.length;i++){ const bh=Math.log(counts[i]+1)/lm*H; hg.fillRect(i*bw,H-bh,Math.max(1,bw-0.4),bh); }
+}
+const v2x=v=>(v-HD.lo)/((HD.hi-HD.lo)||1)*histc.width;
+const x2v=x=>HD.lo+(x/histc.width)*(HD.hi-HD.lo);
+function layoutWL(){
+  const xlo=Math.max(0,Math.min(histc.width,v2x(WL.lo))), xhi=Math.max(0,Math.min(histc.width,v2x(WL.hi)));
+  hlo.style.left=xlo+'px'; hhi.style.left=xhi+'px'; wlsel.style.left=xlo+'px'; wlsel.style.width=Math.max(0,xhi-xlo)+'px';
+  wltxt.textContent='L '+Math.round((WL.lo+WL.hi)/2)+' · W '+Math.round(WL.hi-WL.lo);
+}
+let wlSendT=0;
+function sendWL(){ layoutWL(); const now=performance.now();
+  if(ws&&ws.readyState===1&&now-wlSendT>45){ wlSendT=now; try{ws.send(JSON.stringify({wl:{lo:WL.lo,hi:WL.hi}}))}catch(e){} } }
+const pxOf=(e,r)=>((e.touches?e.touches[0].clientX:e.clientX)-r.left)*histc.width/r.width;
+// forgiving drag: the WHOLE histogram is the surface — grab the nearest edge, or the middle to shift level
+histwrap.addEventListener('pointerdown',ev=>{ ev.preventDefault();
+  const r=histc.getBoundingClientRect(), x0=pxOf(ev,r), xlo=v2x(WL.lo), xhi=v2x(WL.hi);
+  const mode=(x0>xlo+14&&x0<xhi-14)?'band':(Math.abs(x0-xlo)<=Math.abs(x0-xhi)?'lo':'hi');
+  const lo0=WL.lo, hi0=WL.hi, v0=x2v(x0), eps=(HD.hi-HD.lo)*0.003;
+  const move=e=>{ const v=x2v(pxOf(e,r));
+    if(mode==='lo') WL.lo=Math.max(HD.lo,Math.min(v,WL.hi-eps));
+    else if(mode==='hi') WL.hi=Math.min(HD.hi,Math.max(v,WL.lo+eps));
+    else { let dv=v-v0,nlo=lo0+dv,nhi=hi0+dv; if(nlo<HD.lo){nhi+=HD.lo-nlo;nlo=HD.lo;} if(nhi>HD.hi){nlo-=nhi-HD.hi;nhi=HD.hi;} WL.lo=nlo; WL.hi=nhi; }
+    sendWL(); };
+  const up=()=>{ removeEventListener('pointermove',move); removeEventListener('pointerup',up); sendWL(); };
+  addEventListener('pointermove',move); addEventListener('pointerup',up); });
+wlrst.addEventListener('click',ev=>{ ev.stopPropagation(); WL={lo:HD.lo,hi:HD.hi}; sendWL(); });
+const warpSel=document.getElementById('warpSel'), presetSel=document.getElementById('presetSel');
+function sendTFMode(){ if(ws&&ws.readyState===1){try{ws.send(JSON.stringify({tfmode:{warp:warpSel.value,preset:presetSel.value}}))}catch(e){}} }
+warpSel.addEventListener('change',sendTFMode);
+presetSel.addEventListener('change',sendTFMode);
+
+// gradient opacity: checkbox + normalized window (fraction of the gradient scale)
+function layoutGO(){ const W=ghistc.width;
+  goloh.style.left=(GW.lo*W)+'px'; gohih.style.left=(GW.hi*W)+'px';
+  gosel.style.left=(GW.lo*W)+'px'; gosel.style.width=Math.max(0,(GW.hi-GW.lo)*W)+'px';
+  gotxt.textContent='gradient window '+GW.lo.toFixed(2)+'–'+GW.hi.toFixed(2)+(goen.checked?'':' (off)'); }
+let goSendT=0;
+function sendGO(force){ layoutGO(); const now=performance.now();
+  if(ws&&ws.readyState===1&&(force||now-goSendT>45)){ goSendT=now; try{ws.send(JSON.stringify({go:{on:goen.checked,lo:GW.lo,hi:GW.hi}}))}catch(e){} } }
+goen.addEventListener('change',()=>{ gowrap.classList.toggle('on',goen.checked); sendGO(true); });
+gohistwrap.addEventListener('pointerdown',ev=>{ ev.preventDefault(); const r=ghistc.getBoundingClientRect();
+  const fx=e=>Math.max(0,Math.min(1,((e.touches?e.touches[0].clientX:e.clientX)-r.left)/r.width));
+  const x0=fx(ev), mode=(x0>GW.lo+0.05&&x0<GW.hi-0.05)?'band':(Math.abs(x0-GW.lo)<=Math.abs(x0-GW.hi)?'lo':'hi');
+  const lo0=GW.lo, hi0=GW.hi, v0=x0;
+  const move=e=>{ const v=fx(e);
+    if(mode==='lo') GW.lo=Math.min(v,GW.hi-0.01);
+    else if(mode==='hi') GW.hi=Math.max(v,GW.lo+0.01);
+    else { let dv=v-v0,nlo=lo0+dv,nhi=hi0+dv; if(nlo<0){nhi-=nlo;nlo=0;} if(nhi>1){nlo-=nhi-1;nhi=1;} GW.lo=nlo; GW.hi=nhi; }
+    sendGO(); };
+  const up=()=>{ removeEventListener('pointermove',move); removeEventListener('pointerup',up); sendGO(true); };
+  addEventListener('pointermove',move); addEventListener('pointerup',up); });
 let ws,dec=null,started=false,tsv=0,drag=false,px=0,py=0,pend=null,frames=0,t0=performance.now(),fps=0,info='';
 let nbin=0,ndec=0,dstate='',tsq=[],lat={tot:0,net:0,wait:0,ren:0,enc:0,dec:0},mode='video',latestImg=null,imgResolve=null,imgStarted=false,lastW=0,lastH=0,rzTimer=null,shownBm=null,lastDrawnW=0,byed=false;
 function sendResize(){   // match the server framebuffer to this window, pixel-for-pixel (device pixels)
@@ -1002,6 +1328,7 @@ function connect(){
         if(o.cam){ savedCam=o.cam; try{localStorage.setItem('lr_cam',JSON.stringify(o.cam));}catch(_){} return; }
         if(o.bye){ byed=true; s.textContent='session idle — drag to resume'; try{ws.close()}catch(_){} return; }
         if(o.catalog){renderLevels(o.catalog);return;}
+        if(o.hist){onHist(o.hist);return;}
         if(o.info){info=o.info;updateStats();return;} }catch(_){}
       s.textContent=e.data; return; }
     nbin++; if(nbin<=3)D();
@@ -1178,6 +1505,8 @@ def build_app():
             {"info": f"wgpu: {STATE.adapter_info}\\n{enc_name} · ttf {round(time.time()-t_conn,2)}s"}))
         if STATE.catalog:
             await sock.send_text(json.dumps(STATE.catalog_message()))
+        if STATE.hist:
+            await sock.send_text(json.dumps(STATE.hist_message()))
 
         stop = asyncio.Event()
         input_wake = asyncio.Event()   # producer wakes on new camera input
@@ -1277,6 +1606,39 @@ def build_app():
                         STATE.set_target(str(m["settarget"]))
                         pace["force"] = True               # repaint at the new level promptly
                         input_wake.set()
+                    elif "wl" in m:                        # linear window/level drag — coalesce like camera
+                        wm = m["wl"] or {}
+                        try:
+                            wlo = float(wm["lo"]); whi = float(wm["hi"])
+                        except (KeyError, TypeError, ValueError):
+                            wlo = None
+                        if wlo is not None:
+                            with STATE.lock:
+                                STATE.pending_wl = (wlo, whi)   # newest wins; producer drains + renders once
+                            pace["last_input"] = time.monotonic()
+                            input_wake.set()
+                    elif "go" in m:                       # gradient-opacity on/off + window — coalesce
+                        gm = m["go"] or {}
+                        on = bool(gm.get("on"))
+                        try:
+                            glo = float(gm.get("lo", 0.02)); ghi = float(gm.get("hi", 0.15))
+                        except (TypeError, ValueError):
+                            glo, ghi = 0.02, 0.15
+                        with STATE.lock:
+                            STATE.pending_go = (on, glo, ghi)
+                        pace["last_input"] = time.monotonic()
+                        input_wake.set()
+                    elif "tfmode" in m:                   # warp (linear/log/equalize) + look preset
+                        tm = m["tfmode"] or {}
+                        w = tm.get("warp"); p = tm.get("preset")
+                        if w in ("linear", "log", "equalize"):
+                            STATE.warp_mode = w
+                        if p in ("grayscale", "dicect"):
+                            STATE.preset = p
+                        with STATE.lock:                  # re-apply current window with the new mode
+                            STATE.pending_wl = STATE.wl or (STATE.bee_p[70], STATE.bee_p[99])
+                        pace["last_input"] = time.monotonic()
+                        input_wake.set()
                     else:
                         with STATE.lock:
                             STATE.pending["az"] += -float(m.get("dx", 0)) * 0.4
@@ -1295,6 +1657,7 @@ def build_app():
                 while not stop.is_set():
                     with STATE.lock:
                         dirty = bool(STATE.pending["az"] or STATE.pending["el"] or STATE.pending["dz"])
+                        tf_pending = STATE.pending_wl is not None or STATE.pending_go is not None
                     now = time.monotonic()
                     # Invalidation epoch: any structural change (volume/TF/reset/resize/level swap)
                     # bumps renderer.epoch. Treat that like fresh input -> re-render + re-settle.
@@ -1312,7 +1675,7 @@ def build_app():
                     # Render a bit ahead of the client's cadence, but never faster than ~120fps
                     # nor slower-checked than every 0.2s. This is the "don't over-render" governor.
                     interval = min(max(pace["client_dt"] * 0.75, 1.0 / 120), 0.2)
-                    if (dirty or pace["force"] or external) and (now - last) >= interval:
+                    if (dirty or tf_pending or pace["force"] or external) and (now - last) >= interval:
                         forced = pace["force"]; pace["force"] = False
                         # Full-res by default; MOTION_LOD=1 renders coarse while dragging (fine when settled).
                         step = STATE.coarse_step if (dirty and MOTION_LOD) else STATE.fine_step
@@ -1514,11 +1877,42 @@ def build_app():
                         f"render {pace['render_fps']} / send {pace['send_fps']} / client {cfps} fps"}))
                     if STATE.catalog:
                         await sock.send_text(json.dumps(STATE.catalog_message()))
+                    if STATE.hist and STATE.hist_ver != pace.get("hist_ver_sent"):
+                        pace["hist_ver_sent"] = STATE.hist_ver   # refresh histogram on level change
+                        await sock.send_text(json.dumps(STATE.hist_message()))
             except Exception:
                 stop.set()
 
+        async def tf_watcher():
+            # Live transfer-function apply: an out-of-band chooser (the agent's propose->render->
+            # critique loop) writes a TF spec to LIVE_TF; this applies it to the session renderer and
+            # forces a repaint. Applied on connect too, so a reconnect restores the last-picked TF.
+            last = 0.0
+            try:
+                while not stop.is_set():
+                    await asyncio.sleep(0.3)
+                    try:
+                        mt = os.path.getmtime(LIVE_TF)
+                    except OSError:
+                        continue
+                    if mt <= last:
+                        continue
+                    last = mt
+                    try:
+                        with open(LIVE_TF) as f:
+                            d = json.load(f)
+                    except Exception:
+                        continue
+                    await loop.run_in_executor(STATE.pool, lambda dd=d: STATE.apply_tf_dict(dd))
+                    pace["force"] = True; input_wake.set()
+                    if DBG_SEND:
+                        print(f"TF applied from {LIVE_TF}", flush=True)
+            except Exception:
+                pass
+
         _send = image_sender if mode == "image" else consumer
-        tasks = [asyncio.create_task(t()) for t in (receiver, producer, _send, statline)]
+        watchers = (receiver, producer, _send, statline, tf_watcher)
+        tasks = [asyncio.create_task(t()) for t in watchers]
         try:
             await stop.wait()
         finally:
