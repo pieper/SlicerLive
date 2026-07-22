@@ -103,3 +103,53 @@ export function volumeAABB(dims: Vec3, spacing: Vec3, center: Vec3 = [0, 0, 0]):
   return [[center[0] - ext[0], center[1] - ext[1], center[2] - ext[2]],
           [center[0] + ext[0], center[1] + ext[1], center[2] + ext[2]]];
 }
+
+/** Transpose a row-major flat 4x4 into a column-major Mat4 (and vice-versa). */
+export function transpose4(m: ArrayLike<number>): Mat4 {
+  const o = new Float32Array(16);
+  for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) o[c * 4 + r] = m[r * 4 + c];
+  return o;
+}
+
+// --- Real (rotated / anisotropic) volume geometry from a Slicer ijkToRAS -------
+// ijkToRAS is the row-major 4x4 that maps a voxel-center index (i,j,k,1) -> RAS,
+// exactly as stored in the scene json. dims = [nx,ny,nz] (i,j,k extents).
+//
+// Texture coords are [0,1]^3 with voxel center i at u=(i+0.5)/nx, so
+// (i,j,k) = diag(nx,ny,nz)*(u,v,w) - 0.5. texToRAS = ijkToRAS * A with
+// A the homogeneous (u,v,w,1)->(i,j,k,1) map; patientToTexture = inverse(texToRAS).
+
+/** Column-major RAS(patient) -> texture[0,1] matrix for a volume with the given ijkToRAS. */
+export function patientToTextureFromIjkToRAS(ijkToRAS: ArrayLike<number>, dims: Vec3): Mat4 {
+  return invert(texToRASFromIjkToRAS(ijkToRAS, dims));
+}
+
+/** Column-major texture[0,1] -> RAS matrix (the inverse of patientToTexture). */
+export function texToRASFromIjkToRAS(ijkToRAS: ArrayLike<number>, dims: Vec3): Mat4 {
+  const M = transpose4(ijkToRAS);                 // -> column-major
+  const A = new Float32Array(16);                 // (u,v,w,1) -> (i,j,k,1), column-major
+  for (let a = 0; a < 3; a++) { A[a * 4 + a] = dims[a]; A[12 + a] = -0.5; }
+  A[15] = 1;
+  return multiply(M, A);
+}
+
+/** World-space AABB [min,max] enclosing the sampled box (tex in [0,1]^3) of an ijkToRAS volume. */
+export function volumeAABBFromIjkToRAS(ijkToRAS: ArrayLike<number>, dims: Vec3): [Vec3, Vec3] {
+  const t2r = texToRASFromIjkToRAS(ijkToRAS, dims);
+  const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
+  for (let c = 0; c < 8; c++) {
+    const u = c & 1, v = (c >> 1) & 1, w = (c >> 2) & 1;
+    for (let r = 0; r < 3; r++) {
+      const p = t2r[r] * u + t2r[4 + r] * v + t2r[8 + r] * w + t2r[12 + r];
+      if (p < lo[r]) lo[r] = p;
+      if (p > hi[r]) hi[r] = p;
+    }
+  }
+  return [lo, hi];
+}
+
+/** Effective voxel spacing (mm) from ijkToRAS column norms (i,j,k axis lengths). */
+export function spacingFromIjkToRAS(ijkToRAS: ArrayLike<number>): Vec3 {
+  const col = (c: number): number => Math.hypot(ijkToRAS[c], ijkToRAS[4 + c], ijkToRAS[8 + c]);
+  return [col(0), col(1), col(2)];
+}

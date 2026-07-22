@@ -72,15 +72,26 @@ export class SliceRenderer {
     this.setOverlayOpacity(0.55);
   }
 
-  setTextures(scalar: GPUTexture, overlay: GPUTexture) {
-    this.scalar = scalar; this.overlay = overlay;
+  private emptyOverlay?: GPUTexture;
+  private transparentOverlay(): GPUTexture {
+    if (!this.emptyOverlay) {
+      this.emptyOverlay = this.dev.createTexture({ size: [1, 1, 1], dimension: "3d", format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      this.dev.queue.writeTexture({ texture: this.emptyOverlay }, new Uint16Array(4), { bytesPerRow: 8, rowsPerImage: 1 }, [1, 1, 1]);
+    }
+    return this.emptyOverlay;
+  }
+
+  /** Set the grayscale scalar (r32float 3d) and, optionally, a colored overlay
+   *  (rgba16float 3d, e.g. a ColorizeVolume bake). Omit overlay for a plain MPR. */
+  setTextures(scalar: GPUTexture, overlay?: GPUTexture) {
+    this.scalar = scalar; this.overlay = overlay ?? this.transparentOverlay();
     this.bind = this.dev.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.ubuf } },
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: scalar.createView() },
-        { binding: 3, resource: overlay.createView() },
+        { binding: 3, resource: this.overlay.createView() },
       ],
     });
   }

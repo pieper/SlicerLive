@@ -6,7 +6,15 @@
 // Uniform discipline: every uniform member is a vec4 or mat4x4 (16-byte aligned),
 // packed sequentially, so struct layout and CPU packing stay in sync by construction.
 
-import { type Mat4, type Vec3, patientToTexture, volumeAABB } from "./mat4.ts";
+import {
+  type Mat4,
+  type Vec3,
+  patientToTexture,
+  patientToTextureFromIjkToRAS,
+  spacingFromIjkToRAS,
+  volumeAABB,
+  volumeAABBFromIjkToRAS,
+} from "./mat4.ts";
 
 export interface Field {
   readonly kind: string;                 // WGSL family, e.g. "img"
@@ -23,7 +31,8 @@ export interface Field {
 
 export interface ImageFieldOpts {
   clim: [number, number];
-  center?: Vec3;                         // world center (default origin)
+  center?: Vec3;                         // world center (default origin); ignored when ijkToRAS is given
+  ijkToRAS?: ArrayLike<number>;          // row-major 4x4 voxel-center->RAS (real, rotated/anisotropic geometry)
   opacityUnitDistance?: number;          // default min(spacing)
   shade?: [number, number, number, number]; // ka, kd, ks, shininess
 }
@@ -47,17 +56,25 @@ export class ImageField implements Field {
     dev.queue.writeTexture({ texture: this.volTex }, data, { bytesPerRow: dims[0] * 4, rowsPerImage: dims[1] }, dims as [number, number, number]);
     this.lutTex = dev.createTexture({ size: [256, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
-    this.p2t = patientToTexture(dims, spacing, center);
-    this.box = volumeAABB(dims, spacing, center);
+    if (opts.ijkToRAS) {   // real (rotated/anisotropic) geometry straight from the scene
+      this.p2t = patientToTextureFromIjkToRAS(opts.ijkToRAS, dims);
+      this.box = volumeAABBFromIjkToRAS(opts.ijkToRAS, dims);
+      this.stepMm = Math.min(...spacingFromIjkToRAS(opts.ijkToRAS));
+    } else {               // synthetic axis-aligned box centered at `center`
+      this.p2t = patientToTexture(dims, spacing, center);
+      this.box = volumeAABB(dims, spacing, center);
+      this.stepMm = Math.min(...spacing);
+    }
     this.clim = opts.clim;
     this.shade = opts.shade ?? [0.35, 0.75, 0.35, 20];
-    this.stepMm = Math.min(...spacing);
     this.unit = opts.opacityUnitDistance ?? this.stepMm;
   }
 
   uniformFloats() { return 28; }        // mat4(16) + clim(4) + shade(4) + params(4)
   aabb(): [Vec3, Vec3] { return this.box; }
   sampleStep(): number { return this.stepMm; }
+  /** The r32float 3D scalar texture (e.g. to share with a SliceRenderer for MPR). */
+  volumeTexture(): GPUTexture { return this.volTex; }
 
   structMembers(s: number): string {
     return [
