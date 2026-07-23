@@ -52,8 +52,22 @@ Installed by each browser demo so the harness can read/set exact state instead o
 - `harness/verify-harness.ts` — smoke test: WebGPU present, page initializes, input lands, capture
 - `harness/check-hook.ts` — reads camera, drags, re-reads, and asserts the delta equals the binding math
 
-## Status / next
-The current 3D binding is still ad-hoc (`azimuth += dx*0.008`), verified only self-consistently.
-**Next:** replace it with Slicer's real bindings from `vtkMRMLThreeDViewInteractorStyle` /
-`vtkMRMLSliceViewInteractorStyle` (+ VTK camera math), and assert equality against native Slicer
-camera state for the same synthetic drag.
+## Verified parity (all numeric, vs a live Slicer)
+
+| What | Script | Result |
+|---|---|---|
+| Startup geometry (volume, slice offsets, FOV, camera) | `compare-startup.ts` | ALL MATCH |
+| `VtkCamera` port vs real VTK (5 cases incl. accumulation + tilted up-vector) | `verify-vtk-camera.ts` | == to 1e-6 |
+| Drag through the real `vtkMRMLCameraWidget` vs TS + browser DOM | `verify-drag-parity.ts` | == to 1e-6 / 1e-4 |
+| rotate / pan / zoom / wheel bindings | `verify-actions.ts` | ALL MATCH (~1e-7) |
+
+`render/vtk-camera.ts` is a faithful port of vtkCamera (Azimuth, Elevation, OrthogonalizeViewUp,
+Dolly, Roll) and `render/vtk-interactor.ts` of vtkMRMLCameraWidget's bindings + constants
+(MotionFactor 10, MouseWheelMotionFactor 1). No ad-hoc camera math remains in the 3D view.
+
+Ground-truth dumps the MCP side writes: `/tmp/slicer-startup.json`, `/tmp/vtk-camera-truth.json`,
+`/tmp/slicer-drag-truth.json`, `/tmp/slicer-actions-truth.json`.
+
+## Next
+Slice-view interaction (`vtkMRMLSliceViewInteractorStyle`) still uses a placeholder wheel binding;
+then the SlicerWGPU selftest ports, then ROI clipping / markups curves.

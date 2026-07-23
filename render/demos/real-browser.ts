@@ -6,7 +6,8 @@
 import { initDevice } from "../device.ts";
 import { buildRealScene } from "./real-scene.ts";
 import { slicerDefaultOffset01 } from "../slice-renderer.ts";
-import { orbitEye } from "./sphere-scene.ts";
+import { VtkCamera } from "../vtk-camera.ts";
+import { CameraInteractor } from "../vtk-interactor.ts";
 import type { Vec3 } from "../mat4.ts";
 import { installIntrospection } from "../introspect.ts";
 
@@ -53,24 +54,18 @@ async function main() {
     sagittal: slicerDefaultOffset01("sagittal", rs.sv.dims, rs.sv.ijkToRAS, rasLo0, rasHi0),
   };
 
-  const { radius } = rs.sv;
   // Slicer's DEFAULT 3D camera (vtkMRMLCameraNode): position (0,500,0), focalPoint at the
   // RAS ORIGIN (not the volume centre), viewUp +S, viewAngle 30. Slicer does not refit the
   // camera when a volume is loaded, so parity means adopting the same fixed default.
-  const center: Vec3 = [0, 0, 0];
-  const FOVY = 30;
-  let az = Math.PI, elev = 0, dist = 500;
-  const eyeAt = (): Vec3 => {
-    const o = orbitEye(az, elev, dist);
-    return [center[0] + o[0], center[1] + o[1], center[2] + o[2]];
-  };
+  const camera = VtkCamera.slicerDefault();
+  const interactor = new CameraInteractor(camera, () => draw3d());
 
   const drawPlane = (p: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal" }) => {
     rs.slice.setPlane(p.orient, off[p.cell]);
     rs.slice.renderToView(cx[p.cell].getCurrentTexture().createView({ format: srgb }), cv[p.cell].width, cv[p.cell].height);
   };
   const draw3d = () => {
-    rs.scene.setCamera(eyeAt(), center, [0, 0, 1], FOVY, cv.threeD.width, cv.threeD.height);
+    rs.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, cv.threeD.width, cv.threeD.height);
     rs.scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
   };
   const drawAll = () => { for (const p of planes) drawPlane(p); draw3d(); status(`${rs.sv.name} · real ${rs.sv.dims.join("×")} volume · 3 MPR + 3D VR · scroll a slice, drag 3D to orbit`); };
@@ -85,27 +80,45 @@ async function main() {
   for (const p of planes) {
     cv[p.cell].addEventListener("wheel", (e) => { e.preventDefault(); off[p.cell] = Math.max(0, Math.min(1, off[p.cell] + (e.deltaY > 0 ? 0.02 : -0.02))); drawPlane(p); }, { passive: false });
   }
-  let dragging = false, lx = 0, ly = 0;
-  cv.threeD.addEventListener("pointerdown", (e) => { dragging = true; lx = e.clientX; ly = e.clientY; cv.threeD.setPointerCapture(e.pointerId); });
-  cv.threeD.addEventListener("pointerup", (e) => { dragging = false; cv.threeD.releasePointerCapture(e.pointerId); });
-  cv.threeD.addEventListener("pointermove", (e) => {
-    if (!dragging) return;
-    az += (e.clientX - lx) * 0.008; elev = Math.max(-1.4, Math.min(1.4, elev - (e.clientY - ly) * 0.008));
-    lx = e.clientX; ly = e.clientY; draw3d();
+  // 3D view interaction — Slicer's vtkMRMLCameraWidget bindings, verbatim:
+  //   left=rotate · left+shift / middle=pan · right / left+shift+ctrl=zoom · left+ctrl=spin
+  const viewSize = () => ({ w: cv.threeD.clientWidth, h: cv.threeD.clientHeight });
+  const localXY = (e: PointerEvent | MouseEvent) => {
+    const r = cv.threeD.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+  cv.threeD.addEventListener("contextmenu", (e) => e.preventDefault());  // right-drag = zoom
+  cv.threeD.addEventListener("pointerdown", (e) => {
+    const { x, y } = localXY(e), { h } = viewSize();
+    interactor.start(e.button as 0 | 1 | 2, x, y, h, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
+    cv.threeD.setPointerCapture(e.pointerId);
+    hook?.logEvent("cameraStart", { action: interactor.action, x, y, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
   });
-  cv.threeD.addEventListener("wheel", (e) => { e.preventDefault(); dist = Math.max(50, Math.min(3000, dist * (e.deltaY > 0 ? 1.08 : 0.93))); draw3d(); }, { passive: false });
+  cv.threeD.addEventListener("pointerup", (e) => { interactor.end(); cv.threeD.releasePointerCapture(e.pointerId); });
+  cv.threeD.addEventListener("pointermove", (e) => {
+    if (interactor.action === "none") return;
+    const { x, y } = localXY(e), { w, h } = viewSize();
+    interactor.move(x, y, w, h);
+  });
+  cv.threeD.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    interactor.wheel(e.deltaY < 0);   // browser: deltaY<0 = scroll away = VTK MouseWheelForward = zoom in
+    hook?.logEvent("cameraWheel", { deltaY: e.deltaY, distance: camera.distance });
+  }, { passive: false });
 
   // --- automation/introspection hook for the Slicer A/B harness ----------------
   const [rasLo, rasHi] = rs.sv.field.aabb();
   const hook = installIntrospection({
     getCamera: () => ({
-      azimuth: az, elevation: elev, distance: dist,
-      position: eyeAt(), focalPoint: [...center] as Vec3, viewUp: [0, 0, 1], viewAngle: FOVY,
+      azimuth: 0, elevation: 0, distance: camera.distance,   // orbit params retired; vtkCamera state is authoritative
+      position: [...camera.position] as Vec3, focalPoint: [...camera.focalPoint] as Vec3,
+      viewUp: [...camera.viewUp] as Vec3, viewAngle: camera.viewAngle,
     }),
     setCamera: (p) => {
-      if (p.azimuth !== undefined) az = p.azimuth;
-      if (p.elevation !== undefined) elev = p.elevation;
-      if (p.distance !== undefined) dist = p.distance;
+      if (p.position) camera.position = [...p.position] as Vec3;
+      if (p.focalPoint) camera.focalPoint = [...p.focalPoint] as Vec3;
+      if (p.viewUp) camera.viewUp = [...p.viewUp] as Vec3;
+      if (p.viewAngle !== undefined) camera.viewAngle = p.viewAngle;
       draw3d();
     },
     getPlanes: () => {
