@@ -1,14 +1,31 @@
-// MPR slice renderer — crisp 2D orthographic reslice of a scalar volume with a
-// colored segmentation overlay. Texture-space slicing (axis-aligned IJK planes;
-// world-oriented reslice is a later refinement). One draw = one plane; the 4-up
-// uses three of these (axial/sagittal/coronal) + the 3D DVR SceneRenderer.
+// MPR slice renderer — an ANATOMICALLY CORRECT orthographic reslice of a scalar
+// volume (+ optional colored overlay). The plane is defined in RAS (patient) space;
+// each output pixel maps view(u,v) -> RAS -> texture[0,1] via the volume's
+// patientToTexture, which folds in the real ijkToRAS (rotation + anisotropic spacing).
+// This is the WebGPU equivalent of Slicer's vtkImageReslice / the legacy viewer's
+// xyToIJK = inv(ijkToRAS)*xyToRAS. Voxel-index (IJK) planes are NOT anatomical planes
+// for an oblique/anisotropic acquisition, so we never slice in texture space directly.
+//
+// Aspect: the view is isotropic in mm (letterboxed) so proportions are never distorted;
+// a plane axis with fewer/thicker slices (e.g. a sagittally-acquired volume's R axis)
+// still shows at its true physical size. One draw = one plane; the 4-up uses three.
 
 import type { Gpu } from "./device.ts";
+import { applyMat4, type Mat4, type Vec3 } from "./mat4.ts";
 
 const DEFAULT_FORMAT: GPUTextureFormat = "rgba8unorm-srgb";
 
+export type Orientation = "axial" | "coronal" | "sagittal";
+
 const SHADER = /* wgsl */ `
-struct U { a : vec4<f32>, b : vec4<f32> };  // a: axis, offset, win, lev ; b: overlayOpacity, sizeX, sizeY, _
+struct U {
+  p2t : mat4x4<f32>,     // RAS -> texture[0,1] (folds in ijkToRAS: rotation + anisotropy)
+  origin : vec4<f32>,    // RAS of the plane center (for the current scrub offset)
+  uvec : vec4<f32>,      // RAS vector spanning the view width  (isotropic mm)
+  vvec : vec4<f32>,      // RAS vector spanning the view height (isotropic mm)
+  params : vec4<f32>,    // win, lev, overlayOpacity, _
+  size : vec4<f32>,      // sizeX, sizeY, _, _
+};
 @group(0) @binding(0) var<uniform> u : U;
 @group(0) @binding(1) var s_lin : sampler;
 @group(0) @binding(2) var t_scalar : texture_3d<f32>;
@@ -27,22 +44,30 @@ fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
 }
 @fragment
 fn fs_main(v : V) -> @location(0) vec4<f32> {
-  let uv = v.position.xy / vec2<f32>(u.b.y, u.b.z);      // [0,1] within this view
-  let s = u.a.y;
-  let axis = u32(u.a.x);
-  var tex : vec3<f32>;
-  if (axis == 0u) { tex = vec3<f32>(s, uv.x, uv.y); }        // sagittal (fix X)
-  else if (axis == 1u) { tex = vec3<f32>(uv.x, s, uv.y); }   // coronal  (fix Y)
-  else { tex = vec3<f32>(uv.x, uv.y, s); }                    // axial    (fix Z)
+  let uv = v.position.xy / u.size.xy;                 // [0,1], y down
+  let ras = u.origin.xyz + u.uvec.xyz * (uv.x - 0.5) + u.vvec.xyz * (0.5 - uv.y);
+  let t4 = u.p2t * vec4<f32>(ras, 1.0);
+  let tex = t4.xyz;
+  if (any(tex < vec3<f32>(0.0)) || any(tex > vec3<f32>(1.0))) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
   let val = textureSampleLevel(t_scalar, s_lin, tex, 0.0).r;
-  let win = max(u.a.z, 1e-6);
-  let g = clamp((val - (u.a.w - win * 0.5)) / win, 0.0, 1.0);
+  let win = max(u.params.x, 1e-6);
+  let g = clamp((val - (u.params.y - win * 0.5)) / win, 0.0, 1.0);
   var col = vec3<f32>(g);
   let ov = textureSampleLevel(t_overlay, s_lin, tex, 0.0);
-  col = mix(col, ov.rgb, clamp(ov.a * u.b.x, 0.0, 1.0));
+  col = mix(col, ov.rgb, clamp(ov.a * u.params.z, 0.0, 1.0));
   return vec4<f32>(srgb2physical(col), 1.0);
 }
 `;
+
+// Standard anatomical plane bases (RAS). uDir/vDir span the view; nAxis is the RAS
+// axis the plane scrubs along. Screen-up = +vDir (superior for cor/sag, anterior for
+// axial); screen-right = uDir. Geometry/aspect are exact; L/R display convention is
+// neurological (+R to the right) — a display preference, not a geometry choice.
+const BASES: Record<Orientation, { uDir: Vec3; vDir: Vec3; uAxis: number; vAxis: number; nAxis: number }> = {
+  axial: { uDir: [1, 0, 0], vDir: [0, 1, 0], uAxis: 0, vAxis: 1, nAxis: 2 },
+  coronal: { uDir: [1, 0, 0], vDir: [0, 0, 1], uAxis: 0, vAxis: 2, nAxis: 1 },
+  sagittal: { uDir: [0, 1, 0], vDir: [0, 0, 1], uAxis: 1, vAxis: 2, nAxis: 0 },
+};
 
 export class SliceRenderer {
   private dev: GPUDevice;
@@ -50,10 +75,16 @@ export class SliceRenderer {
   private pipeline: GPURenderPipeline;
   private sampler: GPUSampler;
   private ubuf: GPUBuffer;
-  private u = new Float32Array(8);  // a(4) + b(4)
+  private u = new Float32Array(36);  // p2t(16) + origin(4) + uvec(4) + vvec(4) + params(4) + size(4)
   private bind?: GPUBindGroup;
-  private scalar?: GPUTexture;
   private overlay?: GPUTexture;
+
+  // volume geometry + current plane
+  private p2t: Mat4 = new Float32Array(16);
+  private rasLo: Vec3 = [-1, -1, -1];
+  private rasHi: Vec3 = [1, 1, 1];
+  private orient: Orientation = "axial";
+  private offset01 = 0.5;
 
   constructor(gpu: Gpu, format: GPUTextureFormat = DEFAULT_FORMAT) {
     this.dev = gpu.device;
@@ -66,9 +97,8 @@ export class SliceRenderer {
       primitive: { topology: "triangle-list", cullMode: "none" },
     });
     this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
-    this.ubuf = this.dev.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.ubuf = this.dev.createBuffer({ size: this.u.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setWindowLevel(255, 127);
-    this.setSlice(2, 0.5);
     this.setOverlayOpacity(0.55);
   }
 
@@ -81,10 +111,18 @@ export class SliceRenderer {
     return this.emptyOverlay;
   }
 
+  /** Volume geometry: patientToTexture (RAS->tex[0,1], encodes ijkToRAS) + the RAS
+   *  bounding box (for plane extents/scrub range). Get both from the ImageField. */
+  setVolume(p2t: Mat4, rasLo: Vec3, rasHi: Vec3) {
+    this.p2t = p2t; this.rasLo = rasLo; this.rasHi = rasHi;
+    this.u.set(p2t, 0);
+  }
+
   /** Set the grayscale scalar (r32float 3d) and, optionally, a colored overlay
-   *  (rgba16float 3d, e.g. a ColorizeVolume bake). Omit overlay for a plain MPR. */
+   *  (rgba16float 3d) — which MUST share the same geometry (ijkToRAS/dims) so the
+   *  same RAS->tex mapping addresses both. Omit overlay for a plain MPR. */
   setTextures(scalar: GPUTexture, overlay?: GPUTexture) {
-    this.scalar = scalar; this.overlay = overlay ?? this.transparentOverlay();
+    this.overlay = overlay ?? this.transparentOverlay();
     this.bind = this.dev.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -96,12 +134,60 @@ export class SliceRenderer {
     });
   }
 
-  setSlice(axis: 0 | 1 | 2, offset01: number) { this.u[0] = axis; this.u[1] = Math.max(0, Math.min(1, offset01)); }
-  setWindowLevel(win: number, lev: number) { this.u[2] = win; this.u[3] = lev; }
-  setOverlayOpacity(o: number) { this.u[4] = o; }
+  // Uniform float layout: p2t[0..15] origin[16..19] uvec[20..23] vvec[24..27] params[28..31] size[32..35]
+  /** Select the anatomical plane and scrub position (0..1 along the plane normal, RAS bbox). */
+  setPlane(orient: Orientation, offset01: number) {
+    this.orient = orient;
+    this.offset01 = Math.max(0, Math.min(1, offset01));
+  }
+  setWindowLevel(win: number, lev: number) { this.u[28] = win; this.u[29] = lev; }
+  setOverlayOpacity(o: number) { this.u[30] = o; }
+
+  /** Physical size (mm) of the square view for the current plane (isotropic, letterboxed). */
+  private viewSpanMm(): number {
+    const b = BASES[this.orient];
+    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
+    const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
+    return Math.max(uExt, vExt) * 1.02; // small border
+  }
+
+  /** Plane center in RAS for the current scrub offset. */
+  private planeCenter(): Vec3 {
+    const b = BASES[this.orient];
+    const c: Vec3 = [
+      (this.rasLo[0] + this.rasHi[0]) / 2,
+      (this.rasLo[1] + this.rasHi[1]) / 2,
+      (this.rasLo[2] + this.rasHi[2]) / 2,
+    ];
+    c[b.nAxis] = this.rasLo[b.nAxis] + this.offset01 * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    return c;
+  }
+
+  /** Map a view (u,v) in [0,1] (y down) to normalized texture coords for the current
+   *  plane — for click picking. Returns the tex coord; the caller converts to IJK via
+   *  ijk = tex*dims - 0.5. Anisotropy/rotation are handled by the same p2t the shader uses. */
+  viewToTex(u: number, v: number): Vec3 {
+    const b = BASES[this.orient];
+    const span = this.viewSpanMm();
+    const c = this.planeCenter();
+    const ras: Vec3 = [
+      c[0] + b.uDir[0] * (u - 0.5) * span + b.vDir[0] * (0.5 - v) * span,
+      c[1] + b.uDir[1] * (u - 0.5) * span + b.vDir[1] * (0.5 - v) * span,
+      c[2] + b.uDir[2] * (u - 0.5) * span + b.vDir[2] * (0.5 - v) * span,
+    ];
+    return applyMat4(this.p2t, ras);
+  }
 
   private drawInto(view: GPUTextureView, w: number, h: number) {
-    this.u[5] = w; this.u[6] = h;
+    const b = BASES[this.orient];
+    const span = this.viewSpanMm();
+    const c = this.planeCenter();
+    this.u.set(this.p2t, 0);                                                                  // p2t   [0..15]
+    this.u[16] = c[0]; this.u[17] = c[1]; this.u[18] = c[2]; this.u[19] = 0;                   // origin[16..19]
+    this.u[20] = b.uDir[0] * span; this.u[21] = b.uDir[1] * span; this.u[22] = b.uDir[2] * span; this.u[23] = 0; // uvec [20..23]
+    this.u[24] = b.vDir[0] * span; this.u[25] = b.vDir[1] * span; this.u[26] = b.vDir[2] * span; this.u[27] = 0; // vvec [24..27]
+    // params[28..30] set via setWindowLevel/setOverlayOpacity
+    this.u[32] = w; this.u[33] = h;                                                            // size [32..35]
     this.dev.queue.writeBuffer(this.ubuf, 0, this.u);
     const enc = this.dev.createCommandEncoder();
     const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });

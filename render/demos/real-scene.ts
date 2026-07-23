@@ -42,7 +42,9 @@ export async function buildRealScene(
   scene.setBackground(0.05, 0.06, 0.09);
 
   const slice = new SliceRenderer(gpu, format);
-  slice.setTextures(sv.field.volumeTexture());   // grayscale only (no segmentation overlay)
+  const [rasLo, rasHi] = sv.field.aabb();
+  slice.setVolume(sv.field.patientToTexture(), rasLo, rasHi);   // reslice in RAS (honors ijkToRAS)
+  slice.setTextures(sv.field.volumeTexture());                  // grayscale only (no segmentation overlay)
   slice.setWindowLevel(sv.win, sv.lev);
   slice.setOverlayOpacity(0);
 

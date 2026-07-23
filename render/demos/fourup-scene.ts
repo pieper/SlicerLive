@@ -5,13 +5,16 @@ import { N, SPACING, syntheticVolume } from "./sphere-scene.ts";
 import { createScalarTexture } from "../textures.ts";
 import { bakeColorizeRGBA } from "../bake.ts";
 import { RGBAVolumeField } from "../fields.ts";
-import type { Vec3 } from "../mat4.ts";
+import { type Mat4, patientToTexture, type Vec3, volumeAABB } from "../mat4.ts";
 
 export interface FourUpScene {
   scalarTex: GPUTexture;
   colorizeTex: GPUTexture;
   dims: Vec3;
   spacing: Vec3;
+  p2t: Mat4;          // RAS -> tex[0,1] for the MPR reslice
+  rasLo: Vec3;
+  rasHi: Vec3;
   win: number;
   lev: number;
   field3d: RGBAVolumeField; // 3D colorized-segmentation view
@@ -32,5 +35,6 @@ export function buildFourUpScene(dev: GPUDevice): FourUpScene {
   const colorizeTex = bakeColorizeRGBA(dev, lab, dims, pal, 1.5);
   const field3d = new RGBAVolumeField(colorizeTex, dims, spacing, { opacityUnitDistance: SPACING[0], shade: [0.30, 0.78, 0.5, 28] });
 
-  return { scalarTex, colorizeTex, dims, spacing, win: 240, lev: 110, field3d };
+  const [rasLo, rasHi] = volumeAABB(dims, spacing);
+  return { scalarTex, colorizeTex, dims, spacing, p2t: patientToTexture(dims, spacing), rasLo, rasHi, win: 240, lev: 110, field3d };
 }

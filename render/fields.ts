@@ -75,6 +75,8 @@ export class ImageField implements Field {
   sampleStep(): number { return this.stepMm; }
   /** The r32float 3D scalar texture (e.g. to share with a SliceRenderer for MPR). */
   volumeTexture(): GPUTexture { return this.volTex; }
+  /** RAS(patient) -> texture[0,1] matrix (encodes the real ijkToRAS geometry). */
+  patientToTexture(): Mat4 { return this.p2t; }
 
   structMembers(s: number): string {
     return [

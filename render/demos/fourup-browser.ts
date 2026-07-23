@@ -35,16 +35,16 @@ async function main() {
   scene.build([sc.field3d]);
   scene.setBackground(0.05, 0.06, 0.09);
   const slice = new SliceRenderer(gpu, srgb);
+  slice.setVolume(sc.p2t, sc.rasLo, sc.rasHi);
   slice.setTextures(sc.scalarTex, sc.colorizeTex);
   slice.setWindowLevel(sc.win, sc.lev);
   slice.setOverlayOpacity(0.6);
 
   const off = { axial: 0.5, coronal: 0.5, sagittal: 0.55 };
-  const axisOf: Record<string, 0 | 1 | 2> = { axial: 2, coronal: 1, sagittal: 0 };
   let az = 0.5, elev = 0.3, dist = 430;
 
   const drawSlice = (n: "axial" | "coronal" | "sagittal") => {
-    slice.setSlice(axisOf[n], off[n]);
+    slice.setPlane(n, off[n]);
     slice.renderToView(cx[n].getCurrentTexture().createView({ format: srgb }), cv[n].width, cv[n].height);
   };
   const draw3d = () => {

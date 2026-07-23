@@ -20,14 +20,15 @@ scene.setBackground(0.05, 0.06, 0.09);
 scene.setCamera(orbitEye(0.5, 0.3, 430), [0, 0, 0], [0, 0, 1], 28, Q, Q);
 const dvr = await scene.renderToRGBA(Q, Q);
 
-// 3 MPR slices
+// 3 MPR slices — anatomical (RAS) planes, reslicing through patientToTexture
 const slice = new SliceRenderer(gpu);
+slice.setVolume(sc.p2t, sc.rasLo, sc.rasHi);
 slice.setTextures(sc.scalarTex, sc.colorizeTex);
 slice.setWindowLevel(sc.win, sc.lev);
 slice.setOverlayOpacity(0.6);
-slice.setSlice(2, 0.5); const axial = await slice.renderToRGBA(Q, Q);      // Z
-slice.setSlice(1, 0.5); const coronal = await slice.renderToRGBA(Q, Q);    // Y
-slice.setSlice(0, 0.55); const sagittal = await slice.renderToRGBA(Q, Q);  // X
+slice.setPlane("axial", 0.5); const axial = await slice.renderToRGBA(Q, Q);
+slice.setPlane("coronal", 0.5); const coronal = await slice.renderToRGBA(Q, Q);
+slice.setPlane("sagittal", 0.55); const sagittal = await slice.renderToRGBA(Q, Q);
 
 // tile 2x2: [axial | 3D] / [coronal | sagittal]
 const full = new Uint8Array(FULL * FULL * 4);

@@ -148,6 +148,15 @@ export function volumeAABBFromIjkToRAS(ijkToRAS: ArrayLike<number>, dims: Vec3):
   return [lo, hi];
 }
 
+/** Apply a column-major Mat4 to a point (homogeneous, w-divided). */
+export function applyMat4(m: Mat4, p: Vec3): Vec3 {
+  const x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
+  const y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
+  const z = m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14];
+  const w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15] || 1;
+  return [x / w, y / w, z / w];
+}
+
 /** Apply a row-major 4x4 (e.g. ijkToRAS) to a point. */
 export function applyRowMajor(m: ArrayLike<number>, p: Vec3): Vec3 {
   return [

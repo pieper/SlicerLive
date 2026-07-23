@@ -36,15 +36,13 @@ async function main() {
   status("streaming volume from the bucket…");
   const rs = await buildRealScene(gpu, sceneUrl, srgb, (n) => { mb += n; status(`streaming volume… ${(mb / 1e6).toFixed(1)} MB`); });
 
-  // Assign the three MPR canvases to anatomical planes, and label them.
-  const cellFor: Record<"AXIAL" | "CORONAL" | "SAGITTAL", "axial" | "coronal" | "sagittal"> = { AXIAL: "axial", CORONAL: "coronal", SAGITTAL: "sagittal" };
-  const planes: { cell: "axial" | "coronal" | "sagittal"; axis: 0 | 1 | 2 }[] = [];
-  for (const a of rs.axes) {
-    const cell = cellFor[a.label];
-    planes.push({ cell, axis: a.axis });
-    const lab = document.querySelector(`#lab-${cell}`) as HTMLElement | null;
-    if (lab) lab.textContent = a.label;
-  }
+  // Each MPR canvas renders its own anatomical (RAS) plane — the reslice is
+  // intrinsically anatomical, so no IJK-axis mapping is needed.
+  const planes = [
+    { cell: "axial", orient: "axial" },
+    { cell: "coronal", orient: "coronal" },
+    { cell: "sagittal", orient: "sagittal" },
+  ] as const;
   const off: Record<string, number> = { axial: 0.5, coronal: 0.5, sagittal: 0.5 };
 
   const { center, radius } = rs.sv;
@@ -54,8 +52,8 @@ async function main() {
     return [center[0] + o[0], center[1] + o[1], center[2] + o[2]];
   };
 
-  const drawPlane = (p: { cell: "axial" | "coronal" | "sagittal"; axis: 0 | 1 | 2 }) => {
-    rs.slice.setSlice(p.axis, off[p.cell]);
+  const drawPlane = (p: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal" }) => {
+    rs.slice.setPlane(p.orient, off[p.cell]);
     rs.slice.renderToView(cx[p.cell].getCurrentTexture().createView({ format: srgb }), cv[p.cell].width, cv[p.cell].height);
   };
   const draw3d = () => {
