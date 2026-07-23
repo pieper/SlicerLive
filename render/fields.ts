@@ -19,6 +19,12 @@ import {
 export interface Field {
   readonly kind: string;                 // WGSL family, e.g. "img"
   readonly bindingCount: number;         // texture/sampler bindings beyond the shared trio
+  /** MODIFIER fields (e.g. TransformField) warp other fields' sampling and are never
+   *  composited: the SceneRenderer emits their WGSL but leaves them out of the sum. */
+  readonly modifier?: boolean;
+  /** An attached modifier field whose displacement warps THIS field's sampling. The
+   *  SceneRenderer turns this into the field's transform_point_<kind><slot>() body. */
+  transform?: Field | null;
   uniformFloats(): number;               // size of this field's uniform block (multiple of 4)
   structMembers(slot: number): string;   // WGSL struct member lines (slot-prefixed)
   declareBindings(slot: number, base: number): string;  // WGSL @binding decls
@@ -97,11 +103,11 @@ export class ImageField implements Field {
   samplingWGSL(s: number): string {
     return /* wgsl */ `
 fn sampc_img${s}(wp : vec3<f32>) -> f32 {
-  let t4 = u_material.img${s}_p2t * vec4<f32>(wp, 1.0);
+  let t4 = u_material.img${s}_p2t * vec4<f32>(transform_point_img${s}(wp), 1.0);
   return textureSampleLevel(t_vol_img${s}, s_lin, clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).r;
 }
 fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
-  let t4 = u_material.img${s}_p2t * vec4<f32>(wp, 1.0);
+  let t4 = u_material.img${s}_p2t * vec4<f32>(transform_point_img${s}(wp), 1.0);
   let tex = t4.xyz;
   if (any(tex < vec3<f32>(0.0)) || any(tex > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
   let val = textureSampleLevel(t_vol_img${s}, s_lin, tex, 0.0).r;
@@ -209,11 +215,11 @@ export class RGBAVolumeField implements Field {
   samplingWGSL(s: number): string {
     return /* wgsl */ `
 fn alpha_rgba${s}(wp : vec3<f32>) -> f32 {
-  let t4 = u_material.rgba${s}_p2t * vec4<f32>(wp, 1.0);
+  let t4 = u_material.rgba${s}_p2t * vec4<f32>(transform_point_rgba${s}(wp), 1.0);
   return textureSampleLevel(t_rgba${s}, s_lin, clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0)), 0.0).a;
 }
 fn sample_field_rgba${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
-  let t4 = u_material.rgba${s}_p2t * vec4<f32>(wp, 1.0);
+  let t4 = u_material.rgba${s}_p2t * vec4<f32>(transform_point_rgba${s}(wp), 1.0);
   let tex = t4.xyz;
   if (any(tex < vec3<f32>(0.0)) || any(tex > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
   let c = textureSampleLevel(t_rgba${s}, s_lin, tex, 0.0);

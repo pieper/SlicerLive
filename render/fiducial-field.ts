@@ -85,6 +85,8 @@ export class FiducialField implements Field {
   samplingWGSL(s: number): string {
     return /* wgsl */ `
 fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
+  // an attached TransformField warps where the spheres appear (slicer_wgpu parity)
+  let wp_r = transform_point_fid${s}(wp);
   let n = i32(u_material.fid${s}_params.x);
   var best_depth = -1.0;
   var best_center = vec3<f32>(0.0);
@@ -94,12 +96,12 @@ fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     let sp = u_material.fid${s}_spheres[k];
     let r = sp.w;
     if (r <= 0.0) { continue; }
-    let depth = r - length(wp - sp.xyz);   // > 0 -> inside this sphere
+    let depth = r - length(wp_r - sp.xyz);   // > 0 -> inside this sphere
     if (depth > best_depth) { best_depth = depth; best_center = sp.xyz; best_color = u_material.fid${s}_colors[k]; found = true; }
   }
   if (!found || best_depth <= 0.0) { return vec4<f32>(0.0); }
 
-  let to_wp = wp - best_center;
+  let to_wp = wp_r - best_center;
   var n_hat = to_wp / max(length(to_wp), 1e-6);
   if (dot(n_hat, -rd) < 0.0) { n_hat = -n_hat; }
   let view_dir = normalize(-rd);            // headlight (== normalize(ray_origin - wp) for t>0)

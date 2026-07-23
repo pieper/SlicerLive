@@ -69,8 +69,26 @@ export class SceneRenderer {
   private wgsl(): string {
     const members = this.placed.map((p) => p.field.structMembers(p.slot)).join("\n");
     const decls = this.placed.map((p) => p.field.declareBindings(p.slot, p.bbase)).join("\n");
-    const fns = this.placed.map((p) => p.field.samplingWGSL(p.slot)).join("\n");
-    const dispatch = this.placed.map((p) => `    { let c = sample_field_${p.field.kind}${p.slot}(wp, rd); sum += c; }`).join("\n");
+
+    // Emission order matters (matches slicer_wgpu.scene_renderer):
+    //   1. modifier fields' displacement_grid<M>()   — called by (2)
+    //   2. per-receiver transform_point_<kind><slot>() — called by (3)
+    //   3. receiver fields' sample_field_<kind><slot>()
+    const modifiers = this.placed.filter((p) => p.field.modifier);
+    const receivers = this.placed.filter((p) => !p.field.modifier);
+    const modFns = modifiers.map((p) => p.field.samplingWGSL(p.slot)).join("\n");
+    const slotOf = new Map(this.placed.map((p) => [p.field, p.slot]));
+    const tpFns = receivers.map((p) => {
+      const tf = p.field.transform;
+      const tfSlot = tf && tf.modifier ? slotOf.get(tf) : undefined;
+      const body = tfSlot === undefined ? "  return wp;" : `  return wp + displacement_grid${tfSlot}(wp);`;
+      return `fn transform_point_${p.field.kind}${p.slot}(wp : vec3<f32>) -> vec3<f32> {\n${body}\n}`;
+    }).join("\n");
+    const fieldFns = receivers.map((p) => p.field.samplingWGSL(p.slot)).join("\n");
+    const fns = [modFns, tpFns, fieldFns].filter((s) => s.trim()).join("\n");
+
+    // modifier fields contribute no colour/opacity, so they are not summed
+    const dispatch = receivers.map((p) => `    { let c = sample_field_${p.field.kind}${p.slot}(wp, rd); sum += c; }`).join("\n");
     return /* wgsl */ `
 struct Camera { inv_view_proj : mat4x4<f32>, size : vec4<f32> };
 struct Material {
