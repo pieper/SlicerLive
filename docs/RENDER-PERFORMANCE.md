@@ -99,6 +99,46 @@ impractical. Each field owning a grid over its own extent/resolution gives the
 "small high-res structure inside a big sparse volume" case for free, without a true
 nested hierarchy.
 
+## Negative result: the default AABB-distance skip does NOT pay off
+
+**Tried and rejected — don't re-derive it.** The idea: give every field that lacks its
+own bound a default `skip` = distance to its own world AABB, so rays could skip the parts
+of the scene box outside a given volume. It looks obviously right for Multi-Volume, where
+Panoramix sits +200 mm R of CTACardio and each ray spends much of its span outside one
+volume.
+
+Measured with `render/test/profile-boxskip.ts` (A/B in one process, warmed up, 448²,
+M-series):
+
+| scene | boxSkip off | on | delta |
+|---|---|---|---|
+| MultiVolume | 23.45 ms | 25.50 ms | **+8.7%** |
+| Volume+Fiducials | 26.72 ms | 28.68 ms | **+7.3%** |
+| Segmentation | 6.80 ms | 13.35 ms | **+96.5%** |
+| SingleVolume | 18.66 ms | 15.77 ms | −15.5% |
+
+Why the theory fails: `ImageField`'s out-of-box sample was **already nearly free** — it
+early-returns on the texture-bounds test — so there was no per-step cost to eliminate.
+Meanwhile every field now pays a box distance plus horizon bookkeeping at every step it is
+*inside* its box, which is most of the march (the scene box is the union of the field
+boxes). Fields that already have a cheap early-out are hurt worst: `SegmentField`'s
+`v<=0.02||v>=0.98` test means its sample was ~1 texture fetch, so the added bookkeeping
+nearly **doubles** it. The global all-defer leap almost never fires, because most rays are
+inside at least one volume for their whole traversal.
+
+The lone `SingleVolume` win survives warm-up but has **no algorithmic explanation** — there
+the field box *is* the scene box, so the bound is 0 at every sample and no skip can occur.
+It is almost certainly a shader-compiler/occupancy artifact of restructuring the loop, and
+not something to build on.
+
+Kept behind `SceneRenderer.boxSkip` (default **false**) rather than deleted, so the result
+stays reproducible and can be re-measured on other GPUs — the balance may differ on
+NVIDIA/AMD. **The generalizable lesson:** a skip bound only pays when it removes work that
+was actually expensive. `providesSkip` is opt-in for exactly this reason; a field should
+supply a bound only when it is genuinely informative (like `FiducialField`'s O(N) loop),
+not merely when one is computable. For dense volumes the real win is an occupancy grid over
+air *inside* the box, not the box itself.
+
 ## Gotcha: `layout: "auto"` and the shared sampler
 
 `layout: "auto"` derives the bind group layout from what the shader **actually

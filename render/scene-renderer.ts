@@ -23,6 +23,25 @@ export class SceneRenderer {
   private mat!: Float32Array;
   private bind!: GPUBindGroup;
 
+  /** Emit a default AABB-distance skip for fields that don't supply their own bound.
+   *
+   *  OFF because it MEASURED AS A NET LOSS (render/test/profile-boxskip.ts, 448², M-series):
+   *      MultiVolume +8.7%   Volume+Fiducials +7.3%   Segmentation +96.5%   SingleVolume -15.5%
+   *  The appealing theory — "Panoramix sits +200mm R of CTACardio, so rays spend much of the
+   *  scene box outside one volume" — is true but worthless: ImageField's out-of-box sample was
+   *  ALREADY nearly free (it early-returns on the texture-bounds test), so there was no per-step
+   *  cost to remove. Meanwhile every field pays a box distance + horizon bookkeeping at every
+   *  step it is INSIDE its box, which is most of the march since the scene box is the union of
+   *  the field boxes. Fields with their own cheap early-out are hurt worst — SegmentField
+   *  (`v<=0.02||v>=0.98`) nearly doubles. The lone SingleVolume win survives warm-up but has no
+   *  algorithmic explanation (the box IS the scene box there, so the bound is 0 at every sample)
+   *  and is almost certainly a shader-compiler/occupancy artifact — not something to bank on.
+   *
+   *  Kept behind a flag rather than deleted so the negative result stays reproducible, and
+   *  because it may behave differently on other GPUs (NVIDIA/AMD) — re-measure before enabling.
+   *  The real win for dense volumes is an occupancy grid over air INSIDE the box, not the box. */
+  static boxSkip = false;
+
   private canTime: boolean;
 
   constructor(gpu: Gpu, format: GPUTextureFormat = DEFAULT_FORMAT) {
@@ -89,9 +108,33 @@ export class SceneRenderer {
     // the horizon, not at every step — that caching is the whole point, since computing the
     // bound costs the same as sampling. A field with an attached transform is excluded: a
     // nonlinear warp invalidates a distance measured in un-warped space.
-    const skippers = receivers.filter((p) => p.field.providesSkip && p.field.skipWGSL && !p.field.transform);
+    //
+    // Fields that don't supply their own bound still get a DEFAULT one: the distance to
+    // the field's own world AABB (0 inside it). A field's contribution is by definition
+    // inside its AABB, so this is conservative, and it costs nothing to build. It is what
+    // lets a ray skip the parts of the scene box that lie outside a given volume — e.g.
+    // the gap in Multi-Volume, where Panoramix sits +200mm R of CTACardio and each ray
+    // spends much of its span outside one volume or both.
+    //
+    // The AABB is baked into the shader at build() time, so a field whose geometry
+    // changes must go through build() again (every demo already does — that is also what
+    // re-runs fillUniforms).
+    const wf = (v: number) => (Number.isFinite(v) ? v : 0).toFixed(6);
+    const boxSkipWGSL = (p: Placed) => {
+      const [lo, hi] = p.field.aabb();
+      return `
+fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
+  let q = max(vec3<f32>(${wf(lo[0])}, ${wf(lo[1])}, ${wf(lo[2])}) - wp,
+              wp - vec3<f32>(${wf(hi[0])}, ${wf(hi[1])}, ${wf(hi[2])}));
+  return length(max(q, vec3<f32>(0.0)));   // 0 inside the box, exact distance outside
+}`;
+    };
+    const skippers = receivers.filter((p) => !p.field.transform)
+      .filter((p) => SceneRenderer.boxSkip || (p.field.providesSkip && p.field.skipWGSL));
     const canSkip = new Set(skippers.map((p) => p.field));
-    const skipFns = skippers.map((p) => p.field.skipWGSL!(p.slot)).join("\n");
+    const skipFns = skippers.map((p) =>
+      p.field.providesSkip && p.field.skipWGSL ? p.field.skipWGSL(p.slot) : boxSkipWGSL(p)
+    ).join("\n");
     const fns = [modFns, tpFns, fieldFns, skipFns].filter((s) => s.trim()).join("\n");
     const skipInit = skippers.map((p) => `  var resume_${p.field.kind}${p.slot} : f32 = -1.0e30;`).join("\n");
 
