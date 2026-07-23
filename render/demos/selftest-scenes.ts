@@ -7,9 +7,9 @@
 //
 // Each builder mirrors the corresponding test in SlicerWGPU/SceneRendering/SceneRendering.py.
 
-import { ImageField, RGBAVolumeField } from "../fields.ts";
+import { ImageField, SegmentField } from "../fields.ts";
 import { FiducialField, type Sphere } from "../fiducial-field.ts";
-import { bakeColorizeRGBA } from "../bake.ts";
+import { bakeSegmentPresence } from "../bake.ts";
 import { loadSceneVolumeField, type SceneVolume } from "../scene-volume.ts";
 import type { Vec3 } from "../mat4.ts";
 
@@ -107,27 +107,29 @@ export const SEGMENTS: { name: string; color: [number, number, number]; test: (v
 
 export interface SegmentationScene {
   sv: SceneVolume;
-  labelmap: Uint8Array;
-  colorizeTex: GPUTexture;
-  field3d: RGBAVolumeField;
+  /** One SegmentField per segment — exactly as slicer_wgpu's set_segmentation_node builds
+   *  bridge._segments (the selftest asserts "expected 2 SegmentFields"). */
+  segments: SegmentField[];
   counts: number[];
 }
 
 export async function buildSegmentation(dev: GPUDevice, onBytes?: (n: number) => void): Promise<SegmentationScene> {
   const sv = await loadSceneVolumeField(dev, SCENES.MRHead, onBytes);
   const v = sv.voxels;
-  const labelmap = new Uint8Array(v.length);
-  const counts = [0, 0];
-  for (let i = 0; i < v.length; i++) {
-    const x = v[i];
-    if (SEGMENTS[0].test(x)) { labelmap[i] = 1; counts[0]++; }
-    else if (SEGMENTS[1].test(x)) { labelmap[i] = 2; counts[1]++; }
+  const counts: number[] = [];
+  const segments: SegmentField[] = [];
+  for (const seg of SEGMENTS) {
+    const mask = new Uint8Array(v.length);
+    let n = 0;
+    for (let i = 0; i < v.length; i++) { if (seg.test(v[i])) { mask[i] = 1; n++; } }
+    counts.push(n);
+    // per-segment Gaussian-smoothed presence (sigma 1.5 voxels, slicer_wgpu default) ->
+    // SegmentField `iso` band-shell: crisp opaque isosurface of the smoothed field
+    // (band = 1 voxel, from ijkToRAS spacing), NOT a translucent colorize density.
+    const tex = bakeSegmentPresence(dev, mask, sv.dims, 1.5);
+    segments.push(new SegmentField(tex, sv.dims, [1, 1, 1], {
+      color: seg.color, opacity: 1, ijkToRAS: sv.ijkToRAS,
+    }));
   }
-  const palette = new Float32Array(256 * 4);
-  SEGMENTS.forEach((s, i) => palette.set([s.color[0], s.color[1], s.color[2], 1.0], (i + 1) * 4));
-  const colorizeTex = bakeColorizeRGBA(dev, labelmap, sv.dims, palette, 1.2);
-  const field3d = new RGBAVolumeField(colorizeTex, sv.dims, [1, 1, 1], {
-    ijkToRAS: sv.ijkToRAS, shade: [0.28, 0.8, 0.5, 28],
-  });
-  return { sv, labelmap, colorizeTex, field3d, counts };
+  return { sv, segments, counts };
 }

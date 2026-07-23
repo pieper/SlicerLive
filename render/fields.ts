@@ -157,6 +157,138 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   }
 }
 
+export interface SegmentFieldOpts {
+  color: [number, number, number];
+  opacity?: number;                      // segment 3D opacity (default 1)
+  ijkToRAS?: ArrayLike<number>;
+  center?: Vec3;
+  shade?: [number, number, number, number]; // ka,kd,ks,shin — slicer_wgpu SegmentField default 0.20/0.85/0.30/32
+  bandMm?: number;                       // iso-shell half-thickness (mm); slicer_wgpu default = 1 voxel
+  sampleStepMm?: number;
+}
+
+/** A single segment rendered exactly as slicer_wgpu's SegmentField in its DEFAULT
+ *  `iso` mode (wgpu_vtk_inject.py `_seg_field_wgsl`, `_segment_render_mode = "iso"`).
+ *
+ *  The presence field is a binary labelmap pre-smoothed by a separable Gaussian
+ *  (sigma 1.5 voxels) into `v` in [0,1]. At render we take a 6-tap central-difference
+ *  gradient and treat `v` as a first-order signed-distance field:
+ *      d(x) = |(v - 0.5) / |grad v||          (mm; |grad v| ~ 1/voxel near the boundary)
+ *  Opacity is a 1-voxel band around the v=0.5 isosurface:
+ *      a = 1 - clamp(d / band_mm, 0, 1),  op = a * opacity
+ *  This yields a CRISP, OPAQUE, sub-voxel anti-aliased isosurface SHELL — a pure
+ *  ray-marched surface of the smoothed field, no polygons/marching-cubes.
+ *
+ *  This is deliberately NOT the `surface` variant (gradient-opacity emission
+ *  op = opacity*|grad v|*step), which is translucent and reads like a colorize volume;
+ *  the selftest / paint demo uses `iso`. */
+export class SegmentField implements Field {
+  readonly kind = "seg";
+  readonly bindingCount = 1;             // smoothed-presence texture (sampler shared)
+  private tex: GPUTexture;
+  private p2t: Mat4;
+  private box: [Vec3, Vec3];
+  private color: [number, number, number];
+  private opacity: number;
+  private shade: [number, number, number, number];
+  private bandMm: number;
+  private stepMm: number;
+
+  constructor(tex: GPUTexture, dims: Vec3, spacing: Vec3, opts: SegmentFieldOpts) {
+    this.tex = tex;
+    const center = opts.center ?? [0, 0, 0];
+    let voxelMm: number;
+    if (opts.ijkToRAS) {
+      this.p2t = patientToTextureFromIjkToRAS(opts.ijkToRAS, dims);
+      this.box = volumeAABBFromIjkToRAS(opts.ijkToRAS, dims);
+      voxelMm = Math.min(...spacingFromIjkToRAS(opts.ijkToRAS));
+    } else {
+      this.p2t = patientToTexture(dims, spacing, center);
+      this.box = volumeAABB(dims, spacing, center);
+      voxelMm = Math.min(...spacing);
+    }
+    this.color = opts.color;
+    this.opacity = opts.opacity ?? 1;
+    this.shade = opts.shade ?? [0.20, 0.85, 0.30, 32];
+    // iso-shell band: 1 voxel-worth of thickness (slicer_wgpu SegmentField.band_mm = min spacing)
+    this.bandMm = opts.bandMm ?? voxelMm;
+    // slicer_wgpu SegmentField.sample_step_mm = max(0.5*voxel, 0.1)
+    this.stepMm = opts.sampleStepMm ?? Math.max(0.5 * voxelMm, 0.1);
+  }
+
+  uniformFloats() { return 28; }        // mat4(16) + color(4) + shade(4) + params(4)
+  aabb(): [Vec3, Vec3] { return this.box; }
+  sampleStep(): number { return this.stepMm; }
+  setTexture(tex: GPUTexture, destroyPrev = true) { if (destroyPrev && this.tex !== tex) this.tex.destroy(); this.tex = tex; }
+
+  structMembers(s: number): string {
+    return [
+      `  seg${s}_p2t : mat4x4<f32>,`,
+      `  seg${s}_color : vec4<f32>,`,    // rgb, opacity
+      `  seg${s}_shade : vec4<f32>,`,    // ka, kd, ks, shininess
+      `  seg${s}_params : vec4<f32>,`,   // band_mm, _, _, _
+    ].join("\n");
+  }
+
+  declareBindings(s: number, base: number): string {
+    return `@group(0) @binding(${base}) var t_seg${s} : texture_3d<f32>;`;
+  }
+
+  samplingWGSL(s: number): string {
+    return /* wgsl */ `
+fn v_seg${s}(wp : vec3<f32>) -> f32 {
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = t4.xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 0.0; }
+  return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a;   // Gaussian-smoothed presence in .a
+}
+fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
+  let op0 = u_material.seg${s}_color.a;
+  if (op0 <= 0.0) { return vec4<f32>(0.0); }
+  let v = v_seg${s}(wp);
+  // Skip deep interior / exterior: |grad| ~ 0 there so no shell to emit.
+  if (v <= 0.02 || v >= 0.98) { return vec4<f32>(0.0); }
+  let h = max(u_material.scene.x, 1e-3);
+  let g = vec3<f32>(
+    v_seg${s}(wp + vec3<f32>(h,0,0)) - v_seg${s}(wp - vec3<f32>(h,0,0)),
+    v_seg${s}(wp + vec3<f32>(0,h,0)) - v_seg${s}(wp - vec3<f32>(0,h,0)),
+    v_seg${s}(wp + vec3<f32>(0,0,h)) - v_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);
+  let glen = length(g);
+  if (glen < 1e-5) { return vec4<f32>(0.0); }
+  // Local first-order signed distance to the v=0.5 isosurface (mm), then a
+  // 1-voxel opacity band around it: crisp opaque shell, sub-voxel anti-aliased.
+  let d_mm = abs((v - 0.5) / glen);
+  let band = max(u_material.seg${s}_params.x, 1e-3);
+  let a = 1.0 - clamp(d_mm / band, 0.0, 1.0);
+  if (a <= 0.0) { return vec4<f32>(0.0); }
+  let op = clamp(a * op0, 0.0, 1.0);
+  // Phong from the same gradient, normal flipped to face the camera.
+  var n = g / glen;
+  if (dot(n, -rd) < 0.0) { n = -n; }
+  let ka = u_material.seg${s}_shade.x; let kd = u_material.seg${s}_shade.y;
+  let ks = u_material.seg${s}_shade.z; let sh = u_material.seg${s}_shade.w;
+  let ldn = max(dot(-rd, n), 0.0);
+  let refl = normalize(2.0 * ldn * n + rd);
+  let rdv = max(dot(refl, -rd), 0.0);
+  let col = u_material.seg${s}_color.rgb;
+  var lit = col * ka + col * (kd * ldn) + vec3<f32>(ks * pow(rdv, max(sh, 1.0)));
+  lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
+  return vec4<f32>(lit * op, op);
+}`;
+  }
+
+  fillUniforms(out: Float32Array, off: number) {
+    out.set(this.p2t, off);
+    out[off + 16] = this.color[0]; out[off + 17] = this.color[1]; out[off + 18] = this.color[2]; out[off + 19] = this.opacity;
+    out[off + 20] = this.shade[0]; out[off + 21] = this.shade[1]; out[off + 22] = this.shade[2]; out[off + 23] = this.shade[3];
+    out[off + 24] = this.bandMm;
+  }
+
+  bindEntries(_s: number, base: number): GPUBindGroupEntry[] {
+    return [{ binding: base, resource: this.tex.createView() }];
+  }
+}
+
 export interface RGBAFieldOpts {
   center?: Vec3;
   ijkToRAS?: ArrayLike<number>;          // real rotated/anisotropic geometry (aligns with an ImageField)

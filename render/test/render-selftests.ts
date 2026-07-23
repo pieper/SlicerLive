@@ -94,15 +94,34 @@ const check = (name: string, rgba: Uint8Array, minLit: number, note: string) => 
     `${sc.cta.name} + ${sc.pano.name} (+200mm R)`);
 }
 
-// 4) Segmentation — MRHead thresholds baked through ColorizeVolume
+// 4) Segmentation — MRHead thresholds rendered as SegmentField `iso` shells.
+// This must read as a SOLID OPAQUE surface, not a translucent colorize volume.
+// Regression guard: among the red (Brain) pixels, the vast majority must be
+// FULLY opaque — the dark background must not bleed through. A translucent /
+// gradient-opacity render leaves many half-lit interior pixels and fails this.
 {
   const sc = await buildSegmentation(gpu.device);
   const scene = new SceneRenderer(gpu);
-  scene.build([sc.field3d]);
+  scene.build(sc.segments);
   scene.setBackground(0.05, 0.06, 0.09);
   frame(scene, sc.sv.center, sc.sv.radius, Math.PI, 0.12, 2.6);
-  check("Segmentation", await scene.renderToRGBA(Q, Q), 0.03,
-    `Brain=${sc.counts[0]} High=${sc.counts[1]} voxels`);
+  const rgba = await scene.renderToRGBA(Q, Q);
+  // "red" = the Brain segment covers this pixel (R clearly dominant over B).
+  // "solid" = the dark bluish background (b~23) is NOT bleeding through, i.e. the
+  // shell is opaque. Brightness varies with Phong shading, so we test OPACITY via
+  // low blue (b<80), not brightness. An opaque iso-shell renders ~98% solid here;
+  // a translucent colorize / gradient-opacity render leaks bg and fails this.
+  let red = 0, solid = 0;
+  for (let i = 0; i < Q * Q; i++) {
+    const r = rgba[i * 4], b = rgba[i * 4 + 2];
+    if (r > 90 && r - b > 55) { red++; if (b < 80) solid++; }
+  }
+  const redFrac = red / (Q * Q);
+  const solidFrac = red ? solid / red : 0;
+  const ok = redFrac > 0.10 && solidFrac > 0.90;
+  if (!ok) failures++;
+  console.log(`${ok ? "  OK " : "  XX "} ${"Segmentation".padEnd(22)} red ${(100 * redFrac).toFixed(1)}%  opaque ${(100 * solidFrac).toFixed(1)}%  Brain=${sc.counts[0]} High=${sc.counts[1]}`);
+  results.push({ name: "Segmentation", rgba, note: "" });
 }
 
 // per-scene PNGs double as the gallery card thumbnails

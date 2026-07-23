@@ -107,3 +107,13 @@ export function bakeColorizeRGBA(dev: GPUDevice, labelmap: Uint8Array, dims: Vec
   labelTex.destroy(); texA.destroy();
   return texB; // rgba16float 3D, ready for RGBAVolumeField
 }
+
+/** Bake a BINARY presence mask -> rgba16float whose .a is the Gaussian-smoothed presence
+ *  (sigma in voxels), for a SegmentField. Reuses the colorize pipeline with a 1-entry
+ *  palette (label 1 -> opacity 1); the rgb is unused (SegmentField supplies its own color).
+ *  Slicer_wgpu's SegmentField default sigma is 1.5 voxels. */
+export function bakeSegmentPresence(dev: GPUDevice, mask: Uint8Array, dims: Vec3, sigmaVoxels = 1.5): GPUTexture {
+  const palette = new Float32Array(256 * 4);
+  palette.set([1, 1, 1, 1], 4);   // label 1 -> present, opacity 1
+  return bakeColorizeRGBA(dev, mask, dims, palette, sigmaVoxels);
+}

@@ -62,7 +62,7 @@ async function main() {
     label = `${sc.cta.name} + ${sc.pano.name} (+200 mm R)`;
   } else if (which === "seg") {
     const sc = await buildSegmentation(gpu.device, prog);
-    fields = [sc.field3d];
+    fields = sc.segments;
     center = sc.sv.center; radius = sc.sv.radius;
     label = `${sc.sv.name} · Brain ${sc.counts[0].toLocaleString()} + High ${sc.counts[1].toLocaleString()} voxels`;
   } else {
