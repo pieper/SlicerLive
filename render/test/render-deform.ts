@@ -22,7 +22,7 @@ const shot = async (gain: number) => {
   const scene = new SceneRenderer(gpu);
   scene.build([sc.warp, sc.image, sc.fiducials]);
   scene.setBackground(0.06, 0.07, 0.10);
-  const o = orbitEye(Math.PI, 0.12, radius * 2.6);
+  const o = orbitEye(Math.PI, 0.12, radius * 3.5);   // the warp makes the head taller — frame for it
   scene.setCamera([center[0]+o[0], center[1]+o[1], center[2]+o[2]], center, [0, 0, 1], 26, Q, Q);
   return await scene.renderToRGBA(Q, Q);
 };

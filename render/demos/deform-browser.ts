@@ -33,7 +33,7 @@ async function main() {
   scene.setBackground(0.06, 0.07, 0.10);
 
   const { center, radius } = sc.sv;
-  let az = Math.PI, el = 0.12, dist = radius * 2.6;
+  let az = Math.PI, el = 0.12, dist = radius * 3.5;
   const eyeAt = (): [number, number, number] => {
     const o = orbitEye(az, el, dist);
     return [center[0] + o[0], center[1] + o[1], center[2] + o[2]];

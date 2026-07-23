@@ -43,11 +43,29 @@ export interface DeformScene {
   setTarget(i: number, p: Vec3, dev: GPUDevice): void;
 }
 
-/** Default demo deformation: pull two opposite corners, leaving the rest fixed. */
+/** Default demo deformation: a deliberately DRAMATIC stretch, so the card thumbnail
+ *  reads instantly as "nonlinear transform" rather than a subtle nudge.
+ *
+ *  Corner order from boundsCorners(): 0-3 are the S=lo face, 4-7 the S=hi face; odd
+ *  indices are R=hi. So we lift the whole top face far superior, push the bottom face
+ *  inferior, and squeeze both R faces inward — an elongated, narrowed head. Because a
+ *  TPS with only corner landmarks is smooth and global, the corners have to move a LOT
+ *  before the interior visibly deforms. */
 function defaultTargets(sources: Vec3[]): Vec3[] {
   const t = sources.map((c) => [...c] as Vec3);
-  t[7] = [t[7][0] + 55, t[7][1] + 25, t[7][2] + 20];   // +R+A+S corner pulled out
-  t[0] = [t[0][0] - 30, t[0][1] - 10, t[0][2] - 15];   // -R-A-S corner pulled out
+  //  SIGN CONVENTION (easy to get backwards): a displacement grid maps the OUTPUT point
+  //  to where it SAMPLES the input — the ray-march evaluates the volume at wp + d(wp).
+  //  So to make the head look TALLER we must displace the top face DOWNWARD (sample from
+  //  lower in the data), and to make it look NARROWER we displace the R faces OUTWARD.
+  //  Displacing "the way you want it to move" gives you exactly the inverse deformation.
+  const STRETCH_S = 62;    // elongate along S (tuned so the deformed head still frames)
+  const SQUEEZE_R = 30;    // narrow across R
+  for (let i = 0; i < 8; i++) {
+    const top = i >= 4;                 // S = hi face
+    const rHi = (i & 1) === 1;          // R = hi corner
+    t[i][2] += top ? -STRETCH_S : STRETCH_S * 0.45;
+    t[i][0] += rHi ? SQUEEZE_R : -SQUEEZE_R;
+  }
   return t;
 }
 
