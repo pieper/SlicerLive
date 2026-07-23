@@ -77,10 +77,17 @@ export interface SceneVolume {
 }
 
 /** Fetch a scene json + its scalar volume and return a renderable ImageField. */
+export interface LoadOpts {
+  /** Extra RAS translation folded into ijkToRAS — e.g. the Multi-Volume selftest offsets
+   *  the second volume +200mm along R via a linear transform node. */
+  extraTranslationRAS?: Vec3;
+}
+
 export async function loadSceneVolumeField(
   dev: GPUDevice,
   sceneUrl: string,
   onBytes?: (n: number) => void,
+  opts: LoadOpts = {},
 ): Promise<SceneVolume> {
   const raw = await (await fetch(sceneUrl)).json() as SceneWrapper | Record<string, Node>;
   const wrapper = (raw as SceneWrapper).nodes ? raw as SceneWrapper : { nodes: raw as Record<string, Node> };
@@ -90,8 +97,13 @@ export async function loadSceneVolumeField(
   const vol = Object.values(nodes).find((n) => n.class === "vtkMRMLScalarVolumeNode" && n.attrs?.zarr);
   if (!vol) throw new Error("no zarr ScalarVolumeNode in scene");
   const z = vol.attrs!.zarr as ZarrDesc;
-  const ijkToRAS = vol.attrs!.ijkToRAS as number[];
+  let ijkToRAS = vol.attrs!.ijkToRAS as number[];
   if (!ijkToRAS) throw new Error("volume node has no ijkToRAS");
+  if (opts.extraTranslationRAS) {   // pre-multiply a RAS translation (row-major 4x4)
+    const t = opts.extraTranslationRAS;
+    ijkToRAS = ijkToRAS.slice();
+    ijkToRAS[3] += t[0]; ijkToRAS[7] += t[1]; ijkToRAS[11] += t[2];
+  }
 
   const zv = await fetchZarrVolume(blobBase, z, onBytes);
 
