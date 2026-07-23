@@ -15,6 +15,8 @@ const status = (msg: string, err = false) => {
 
 async function main() {
   const canvas = document.getElementById("gpu") as HTMLCanvasElement;
+  const sceneUrl = new URLSearchParams(location.search).get("scene") ??
+    "https://pieper.github.io/live/legacy/scenes/MRHead.json";
   if (!(navigator as unknown as { gpu?: unknown }).gpu) { status("WebGPU not available — try Chrome/Edge 113+ or Safari 18+.", true); return; }
   status("initializing WebGPU…");
   const gpu = await initDevice();
@@ -23,19 +25,25 @@ async function main() {
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
   ctx.configure({ device: gpu.device, format: preferred, viewFormats: [srgb], alphaMode: "opaque" });
 
-  status("solving thin-plate spline…");
-  const sc = buildDeformScene(gpu.device, 1.0);
+  let mb = 0;
+  status("streaming MRHead from the bucket…");
+  const sc = await buildDeformScene(gpu.device, sceneUrl, (n) => { mb += n; status(`streaming MRHead… ${(mb / 1e6).toFixed(1)} MB`); });
   const scene = new SceneRenderer(gpu, srgb);
   scene.build([sc.warp, sc.image, sc.fiducials]);
   scene.setBackground(0.06, 0.07, 0.10);
 
-  let az = 0.75, el = 0.28, dist = 360;
+  const { center, radius } = sc.sv;
+  let az = Math.PI, el = 0.12, dist = radius * 2.6;
+  const eyeAt = (): [number, number, number] => {
+    const o = orbitEye(az, el, dist);
+    return [center[0] + o[0], center[1] + o[1], center[2] + o[2]];
+  };
   const draw = () => {
     const w = canvas.width, h = canvas.height;
-    scene.setCamera(orbitEye(az, el, dist), [0, 0, 0], [0, 0, 1], 26, w, h);
+    scene.setCamera(eyeAt(), center, [0, 0, 1], 26, w, h);
     const t0 = performance.now();
     scene.renderToView(ctx.getCurrentTexture().createView({ format: srgb }), w, h);
-    status(`Landmark deform (TPS) · gain ${sc.warp.gain.toFixed(2)} · ${w}×${h} · ${(performance.now() - t0).toFixed(0)} ms/frame · drag to orbit`);
+    status(`${sc.sv.name} · TPS landmark deform · gain ${sc.warp.gain.toFixed(2)} · 8 corner landmarks · ${(performance.now() - t0).toFixed(0)} ms/frame · drag to orbit`);
   };
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -62,10 +70,10 @@ async function main() {
     el = Math.max(-1.4, Math.min(1.4, el - (e.clientY - ly) * 0.008));
     lx = e.clientX; ly = e.clientY; draw();
   });
-  canvas.addEventListener("wheel", (e) => { e.preventDefault(); dist = Math.max(120, Math.min(900, dist * (e.deltaY > 0 ? 1.08 : 0.93))); draw(); }, { passive: false });
+  canvas.addEventListener("wheel", (e) => { e.preventDefault(); dist = Math.max(radius * 1.1, Math.min(radius * 8, dist * (e.deltaY > 0 ? 1.08 : 0.93))); draw(); }, { passive: false });
 
   installIntrospection({
-    getCamera: () => ({ azimuth: az, elevation: el, distance: dist, position: orbitEye(az, el, dist), focalPoint: [0, 0, 0], viewUp: [0, 0, 1], viewAngle: 26 }),
+    getCamera: () => ({ azimuth: az, elevation: el, distance: dist, position: eyeAt(), focalPoint: [...center] as [number,number,number], viewUp: [0, 0, 1], viewAngle: 26 }),
     setCamera: (p) => { if (p.azimuth !== undefined) az = p.azimuth; if (p.elevation !== undefined) el = p.elevation; if (p.distance !== undefined) dist = p.distance; draw(); },
     extra: () => ({ gain: sc.warp.gain }),
     render: () => draw(),

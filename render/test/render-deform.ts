@@ -2,7 +2,7 @@
 // gain 1 (warped) side by side. The identity pass MUST match an unwarped render, and
 // the warped pass must differ measurably — that's the regression signal for the whole
 // modifier/transform_point plumbing.
-//   deno run --unstable-webgpu --allow-read --allow-write render/test/render-deform.ts
+//   deno run --unstable-webgpu --allow-read --allow-write --allow-net render/test/render-deform.ts
 import { initDevice } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { encodePNG } from "../png.ts";
@@ -13,12 +13,17 @@ const Q = 460, W = Q * 2;
 const gpu = await initDevice();
 const t0 = performance.now();
 
+// real MRHead, exactly as the selftest loads it
+const sc = await buildDeformScene(gpu.device);
+console.log(`loaded ${sc.sv.name} ${sc.sv.dims} · ${sc.sources.length} corner landmarks · grid 24^3 pad 40mm`);
+const { center, radius } = sc.sv;
 const shot = async (gain: number) => {
-  const sc = buildDeformScene(gpu.device, gain);
+  sc.warp.setGain(gain);
   const scene = new SceneRenderer(gpu);
-  scene.build([sc.warp, sc.image, sc.fiducials]);   // modifier first is fine; order is resolved by slot
+  scene.build([sc.warp, sc.image, sc.fiducials]);
   scene.setBackground(0.06, 0.07, 0.10);
-  scene.setCamera(orbitEye(0.75, 0.28, 360), [0, 0, 0], [0, 0, 1], 26, Q, Q);
+  const o = orbitEye(Math.PI, 0.12, radius * 2.6);
+  scene.setCamera([center[0]+o[0], center[1]+o[1], center[2]+o[2]], center, [0, 0, 1], 26, Q, Q);
   return await scene.renderToRGBA(Q, Q);
 };
 
