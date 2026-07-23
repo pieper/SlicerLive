@@ -20,7 +20,7 @@ rs.slice.setPlane("axial", 0.5); const axial = await rs.slice.renderToRGBA(Q, Q)
 rs.slice.setPlane("coronal", 0.5); const coronal = await rs.slice.renderToRGBA(Q, Q);
 rs.slice.setPlane("sagittal", 0.5); const sagittal = await rs.slice.renderToRGBA(Q, Q);
 
-const o = orbitEye(0.6, 0.25, radius * 3.0);
+const o = orbitEye(Math.PI, 0.12, radius * 3.0);   // anterior view (face), like Slicer's default
 rs.scene.setCamera([center[0] + o[0], center[1] + o[1], center[2] + o[2]] as Vec3, center, [0, 0, 1], 26, Q, Q);
 const dvr = await rs.scene.renderToRGBA(Q, Q);
 

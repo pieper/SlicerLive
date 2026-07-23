@@ -61,9 +61,16 @@ export class FaithfulSegmenter {
     await new Promise<void>((resolve, reject) => {
       const onFirst = (e: MessageEvent) => {
         const d = e.data;
-        if (d.type === "progress") { this.opts.onStatus?.(d.cached ? "model cached" : d.total ? `downloading model ${(d.loaded / 1e6).toFixed(0)}/${(d.total / 1e6).toFixed(0)} MB` : "loading model…"); }
-        else if (d.type === "ready") { this.worker.removeEventListener("message", onFirst); this.wire(); this.opts.onStatus?.(`nnLive faithful 192³ ready · ~${d.ms} ms/click · load ${(d.loadMs / 1000).toFixed(1)}s`); resolve(); }
-        else if (d.type === "error") { this.worker.removeEventListener("message", onFirst); reject(new Error(d.msg)); }
+        if (d.type === "progress") {
+          if (d.what === "tune") this.opts.onStatus?.("autotuning GPU convolutions (one-time)…");
+          else if (d.cached) this.opts.onStatus?.("model weights cached — initializing…");
+          else if (d.total) this.opts.onStatus?.(`downloading nnLive weights ${(d.loaded / 1e6).toFixed(0)}/${(d.total / 1e6).toFixed(0)} MB (${Math.round(100 * d.loaded / d.total)}%) · compiling shaders…`);
+          else this.opts.onStatus?.("loading nnLive model + compiling shaders…");
+        } else if (d.type === "ready") {
+          this.worker.removeEventListener("message", onFirst); this.wire();
+          this.opts.onStatus?.(`nnLive faithful 192³ ready · ~${d.ms} ms/click on this GPU · loaded in ${(d.loadMs / 1000).toFixed(1)}s — click an organ to segment`);
+          resolve();
+        } else if (d.type === "error") { this.worker.removeEventListener("message", onFirst); reject(new Error(d.msg)); }
       };
       this.worker.addEventListener("message", onFirst);
       this.worker.onerror = (e) => reject(e);
@@ -75,6 +82,7 @@ export class FaithfulSegmenter {
     this.worker.addEventListener("message", (e: MessageEvent) => {
       const d = e.data;
       if (d.type === "encoded") {
+        this.opts.onStatus?.(`encoded 192³ in ${d.ms} ms · decoding (perclick)…`);
         const i7 = this.inter.buildInter(this.center, P, this.zoom);
         this.worker.postMessage({ type: "infer", inter: i7.buffer }, [i7.buffer]);
       } else if (d.type === "result") {
@@ -119,6 +127,7 @@ export class FaithfulSegmenter {
   }
 
   private encode() {
+    this.opts.onStatus?.(`encoding 192³ (trunk)${this.zoom > 1 ? ` · zoom ×${this.zoom.toFixed(1)}` : ""}…`);
     const crop = this.enc.extractCrop(this.vol, this.Z, this.Y, this.X, this.center, P, this.zoom, this.stats.mean, this.stats.std);
     this.worker.postMessage({ type: "encode", image: crop.buffer, ctr: this.center, zoom: this.zoom }, [crop.buffer]);
   }

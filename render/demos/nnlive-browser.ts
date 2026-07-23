@@ -79,7 +79,7 @@ async function main() {
   const norm: Record<string, 0 | 1 | 2> = { axial: 2, coronal: 1, sagittal: 0 }; // RAS axis the plane scrubs
 
   const { center: ctr3d, radius } = sv;
-  let az = 0.6, elev = 0.25, dist = radius * 2.6;
+  let az = Math.PI, elev = 0.12, dist = radius * 2.6;  // default: anterior view (face/front toward viewer), like Slicer
   const eyeAt = (): Vec3 => { const o = orbitEye(az, elev, dist); return [ctr3d[0] + o[0], ctr3d[1] + o[1], ctr3d[2] + o[2]]; };
 
   const drawPlane = (p: { cell: string; orient: Orientation }) => {

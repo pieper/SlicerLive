@@ -59,14 +59,18 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
 }
 `;
 
-// Standard anatomical plane bases (RAS). uDir/vDir span the view; nAxis is the RAS
-// axis the plane scrubs along. Screen-up = +vDir (superior for cor/sag, anterior for
-// axial); screen-right = uDir. Geometry/aspect are exact; L/R display convention is
-// neurological (+R to the right) — a display preference, not a geometry choice.
+// Standard anatomical plane bases (RAS), matching Slicer's default Axial/Coronal/Sagittal
+// sliceToRAS presets EXACTLY (RADIOLOGICAL convention). uDir = screen-right in RAS,
+// vDir = screen-up, nAxis = the RAS axis the plane scrubs along:
+//   Axial    screen-right = -R (patient LEFT on the right),   up = +A   (sliceToRAS col0=-R, col1=+A)
+//   Coronal  screen-right = -R,                               up = +S   (col0=-R, col1=+S)
+//   Sagittal screen-right = -A (posterior on the right),      up = +S   (col0=-A, col1=+S)
+// These signs are NOT a free display preference: RAS data shown with +R-to-the-right reads
+// as a left-right (LPS/RAS) flip vs every Slicer view. Never diverge from Slicer's presets.
 const BASES: Record<Orientation, { uDir: Vec3; vDir: Vec3; uAxis: number; vAxis: number; nAxis: number }> = {
-  axial: { uDir: [1, 0, 0], vDir: [0, 1, 0], uAxis: 0, vAxis: 1, nAxis: 2 },
-  coronal: { uDir: [1, 0, 0], vDir: [0, 0, 1], uAxis: 0, vAxis: 2, nAxis: 1 },
-  sagittal: { uDir: [0, 1, 0], vDir: [0, 0, 1], uAxis: 1, vAxis: 2, nAxis: 0 },
+  axial: { uDir: [-1, 0, 0], vDir: [0, 1, 0], uAxis: 0, vAxis: 1, nAxis: 2 },
+  coronal: { uDir: [-1, 0, 0], vDir: [0, 0, 1], uAxis: 0, vAxis: 2, nAxis: 1 },
+  sagittal: { uDir: [0, -1, 0], vDir: [0, 0, 1], uAxis: 1, vAxis: 2, nAxis: 0 },
 };
 
 export class SliceRenderer {

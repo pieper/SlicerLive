@@ -46,7 +46,7 @@ async function main() {
   const off: Record<string, number> = { axial: 0.5, coronal: 0.5, sagittal: 0.5 };
 
   const { center, radius } = rs.sv;
-  let az = 0.6, elev = 0.25, dist = radius * 3.0;
+  let az = Math.PI, elev = 0.12, dist = radius * 3.0;  // default: look from anterior (face toward viewer), like Slicer
   const eyeAt = (): Vec3 => {
     const o = orbitEye(az, elev, dist);
     return [center[0] + o[0], center[1] + o[1], center[2] + o[2]];
