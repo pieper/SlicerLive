@@ -5,8 +5,9 @@
 import { initDevice } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { buildDeformScene } from "./deform-scene.ts";
-import { orbitEye } from "./sphere-scene.ts";
+import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { installIntrospection } from "../introspect.ts";
+import type { Vec3 } from "../mat4.ts";
 
 const status = (msg: string, err = false) => {
   const el = document.getElementById("status");
@@ -33,17 +34,13 @@ async function main() {
   scene.setBackground(0.06, 0.07, 0.10);
 
   const { center, radius } = sc.sv;
-  let az = Math.PI, el = 0.12, dist = radius * 3.5;
-  const eyeAt = (): [number, number, number] => {
-    const o = orbitEye(az, el, dist);
-    return [center[0] + o[0], center[1] + o[1], center[2] + o[2]];
-  };
+  const camera = framedCamera(center as Vec3, radius, 3.5);
   const draw = () => {
     const w = canvas.width, h = canvas.height;
-    scene.setCamera(eyeAt(), center, [0, 0, 1], 26, w, h);
+    scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
     const t0 = performance.now();
     scene.renderToView(ctx.getCurrentTexture().createView({ format: srgb }), w, h);
-    status(`${sc.sv.name} · TPS landmark deform · gain ${sc.warp.gain.toFixed(2)} · 8 corner landmarks · ${(performance.now() - t0).toFixed(0)} ms/frame · drag to orbit`);
+    status(`${sc.sv.name} · TPS landmark deform · gain ${sc.warp.gain.toFixed(2)} · 8 corner landmarks · ${(performance.now() - t0).toFixed(0)} ms/frame · drag=rotate, shift/middle=pan, right=zoom`);
   };
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -61,20 +58,11 @@ async function main() {
     draw();
   });
 
-  let dragging = false, lx = 0, ly = 0;
-  canvas.addEventListener("pointerdown", (e) => { dragging = true; lx = e.clientX; ly = e.clientY; canvas.setPointerCapture(e.pointerId); });
-  canvas.addEventListener("pointerup", (e) => { dragging = false; canvas.releasePointerCapture(e.pointerId); });
-  canvas.addEventListener("pointermove", (e) => {
-    if (!dragging) return;
-    az += (e.clientX - lx) * 0.008;
-    el = Math.max(-1.4, Math.min(1.4, el - (e.clientY - ly) * 0.008));
-    lx = e.clientX; ly = e.clientY; draw();
-  });
-  canvas.addEventListener("wheel", (e) => { e.preventDefault(); dist = Math.max(radius * 1.1, Math.min(radius * 8, dist * (e.deltaY > 0 ? 1.08 : 0.93))); draw(); }, { passive: false });
+  attachCameraControls(canvas, camera, { onChange: draw });
 
   installIntrospection({
-    getCamera: () => ({ azimuth: az, elevation: el, distance: dist, position: eyeAt(), focalPoint: [...center] as [number,number,number], viewUp: [0, 0, 1], viewAngle: 26 }),
-    setCamera: (p) => { if (p.azimuth !== undefined) az = p.azimuth; if (p.elevation !== undefined) el = p.elevation; if (p.distance !== undefined) dist = p.distance; draw(); },
+    getCamera: () => ({ azimuth: 0, elevation: 0, distance: camera.distance, position: [...camera.position] as Vec3, focalPoint: [...camera.focalPoint] as Vec3, viewUp: [...camera.viewUp] as Vec3, viewAngle: camera.viewAngle }),
+    setCamera: (p) => { if (p.position) camera.position = [...p.position] as Vec3; if (p.focalPoint) camera.focalPoint = [...p.focalPoint] as Vec3; if (p.viewUp) camera.viewUp = [...p.viewUp] as Vec3; draw(); },
     extra: () => ({ gain: sc.warp.gain }),
     render: () => draw(),
   });

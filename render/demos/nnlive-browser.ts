@@ -16,7 +16,7 @@ import { RGBAVolumeField } from "../fields.ts";
 import { FiducialField, type Sphere } from "../fiducial-field.ts";
 import { bakeColorizeRGBA } from "../bake.ts";
 import { loadSceneVolumeField } from "../scene-volume.ts";
-import { orbitEye } from "./sphere-scene.ts";
+import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { applyRowMajor, type Vec3 } from "../mat4.ts";
 import { FaithfulSegmenter } from "../faithful-segmenter.ts";
 
@@ -79,15 +79,14 @@ async function main() {
   const norm: Record<string, 0 | 1 | 2> = { axial: 2, coronal: 1, sagittal: 0 }; // RAS axis the plane scrubs
 
   const { center: ctr3d, radius } = sv;
-  let az = Math.PI, elev = 0.12, dist = radius * 2.6;  // default: anterior view (face/front toward viewer), like Slicer
-  const eyeAt = (): Vec3 => { const o = orbitEye(az, elev, dist); return [ctr3d[0] + o[0], ctr3d[1] + o[1], ctr3d[2] + o[2]]; };
+  const camera = framedCamera(ctr3d as Vec3, radius);   // shared Slicer default camera
 
   const drawPlane = (p: { cell: string; orient: Orientation }) => {
     slice.setPlane(p.orient, off[p.cell]);
     slice.renderToView(cx[p.cell].getCurrentTexture().createView({ format: srgb }), cv[p.cell].width, cv[p.cell].height);
   };
   const draw3d = () => {
-    scene.setCamera(eyeAt(), ctr3d, [0, 0, 1], 26, cv.threeD.width, cv.threeD.height);
+    scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, cv.threeD.width, cv.threeD.height);
     scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
   };
   const drawAll = () => { for (const p of planes) drawPlane(p); draw3d(); };
@@ -166,15 +165,7 @@ async function main() {
   }
 
   // 3D orbit / zoom.
-  let dragging = false, lx = 0, ly = 0;
-  cv.threeD.addEventListener("pointerdown", (e) => { dragging = true; lx = e.clientX; ly = e.clientY; cv.threeD.setPointerCapture(e.pointerId); });
-  cv.threeD.addEventListener("pointerup", (e) => { dragging = false; cv.threeD.releasePointerCapture(e.pointerId); });
-  cv.threeD.addEventListener("pointermove", (e) => {
-    if (!dragging) return;
-    az += (e.clientX - lx) * 0.008; elev = Math.max(-1.4, Math.min(1.4, elev - (e.clientY - ly) * 0.008));
-    lx = e.clientX; ly = e.clientY; draw3d();
-  });
-  cv.threeD.addEventListener("wheel", (e) => { e.preventDefault(); dist = Math.max(radius * 1.2, Math.min(radius * 6, dist * (e.deltaY > 0 ? 1.08 : 0.93))); draw3d(); }, { passive: false });
+  attachCameraControls(cv.threeD, camera, { onChange: draw3d });   // shared, identical to every other demo
 
   status(`${sv.name} · nnLive faithful 192³ ready · click an organ in any MPR view · shift-click = background`);
 }

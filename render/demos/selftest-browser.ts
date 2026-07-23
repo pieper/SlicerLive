@@ -10,8 +10,7 @@
 import { initDevice } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import type { Field } from "../fields.ts";
-import { VtkCamera } from "../vtk-camera.ts";
-import { CameraInteractor } from "../vtk-interactor.ts";
+import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { installIntrospection } from "../introspect.ts";
 import { loadSceneVolumeField } from "../scene-volume.ts";
 import { buildMultiVolume, buildSegmentation, buildVolumeAndFiducials, SCENES } from "./selftest-scenes.ts";
@@ -77,12 +76,9 @@ async function main() {
   scene.build(fields);
   scene.setBackground(0.05, 0.06, 0.09);
 
-  // Slicer-faithful camera: framed on the data, then driven by vtkMRMLCameraWidget bindings.
-  const camera = new VtkCamera(
-    [center[0], center[1] + radius * 2.6, center[2]] as Vec3,
-    [...center] as Vec3, [0, 0, 1], 30,
-  );
-  const interactor = new CameraInteractor(camera, () => draw());
+  // Slicer-faithful camera + the SHARED interaction helper (identical across all demos).
+  const camera = framedCamera(center, radius);
+  attachCameraControls(canvas, camera, { onChange: () => draw() });
 
   const draw = () => {
     const w = canvas.width, h = canvas.height;
@@ -97,21 +93,6 @@ async function main() {
     canvas.width = size; canvas.height = size; draw();
   };
   globalThis.addEventListener("resize", resize);
-
-  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-  const local = (e: PointerEvent) => { const r = canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
-  canvas.addEventListener("pointerdown", (e) => {
-    const { x, y } = local(e);
-    interactor.start(e.button as 0 | 1 | 2, x, y, canvas.clientHeight, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
-    canvas.setPointerCapture(e.pointerId);
-  });
-  canvas.addEventListener("pointerup", (e) => { interactor.end(); canvas.releasePointerCapture(e.pointerId); });
-  canvas.addEventListener("pointermove", (e) => {
-    if (interactor.action === "none") return;
-    const { x, y } = local(e);
-    interactor.move(x, y, canvas.clientWidth, canvas.clientHeight);
-  });
-  canvas.addEventListener("wheel", (e) => { e.preventDefault(); interactor.wheel(e.deltaY < 0); }, { passive: false });
 
   installIntrospection({
     getCamera: () => ({
