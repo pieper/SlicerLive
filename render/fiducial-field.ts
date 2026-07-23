@@ -25,6 +25,7 @@ export class FiducialField implements Field {
   private spheres = new Float32Array(MAX * 4); // (cx,cy,cz,radius)
   private colors = new Float32Array(MAX * 4);  // (r,g,b,a)
   private n = 0;
+  private maxR = 0;                     // largest radius in this field (for the skip bound)
   private sh: number;
   private ka: number;
   private kd: number;
@@ -44,10 +45,12 @@ export class FiducialField implements Field {
     this.n = Math.min(list.length, MAX);
     this.spheres.fill(0);
     this.colors.fill(0);
+    this.maxR = 0;
     for (let i = 0; i < this.n; i++) {
       const s = list[i];
       this.spheres.set([s.center[0], s.center[1], s.center[2], s.radius], i * 4);
       this.colors.set(s.color, i * 4);
+      this.maxR = Math.max(this.maxR, s.radius);
     }
   }
 
@@ -72,7 +75,7 @@ export class FiducialField implements Field {
   structMembers(s: number): string {
     return [
       `  fid${s}_params : vec4<f32>,`,   // n_spheres, visible, shininess, k_ambient
-      `  fid${s}_params2 : vec4<f32>,`,  // k_diffuse, k_specular, _, _
+      `  fid${s}_params2 : vec4<f32>,`,  // k_diffuse, k_specular, max_radius, _
       `  fid${s}_light : vec4<f32>,`,    // light_color.rgb, _
       `  fid${s}_spheres : array<vec4<f32>, ${MAX}>,`,
       `  fid${s}_colors : array<vec4<f32>, ${MAX}>,`,
@@ -81,6 +84,30 @@ export class FiducialField implements Field {
 
   declareBindings(_s: number, _base: number): string { return ""; }
   bindEntries(_s: number, _base: number): GPUBindGroupEntry[] { return []; }
+
+  // --- empty-space skipping -------------------------------------------------
+  // The spheres are an exact SDF, so we can hand the ray-marcher a real distance to
+  // leap. Conservative form: nearest-CENTRE distance minus the field's LARGEST radius.
+  // Since min_j(d_j) <= d_k and max_r >= r_k for every k, this never exceeds the true
+  // min_k(d_k - r_k) — so it can't skip over a sphere — and it costs only squared
+  // distances in the loop plus ONE sqrt at the end (cheaper than the sampling loop).
+  readonly providesSkip = true;
+
+  skipWGSL(s: number): string {
+    return /* wgsl */ `
+fn skip_fid${s}(wp : vec3<f32>) -> f32 {
+  let n = i32(u_material.fid${s}_params.x);
+  if (n <= 0) { return 1.0e6; }        // nothing here: unbounded empty space
+  var min_d2 = 1.0e12;
+  for (var k = 0; k < n; k = k + 1) {
+    let sp = u_material.fid${s}_spheres[k];
+    if (sp.w <= 0.0) { continue; }
+    let dv = wp - sp.xyz;
+    min_d2 = min(min_d2, dot(dv, dv));
+  }
+  return max(sqrt(min_d2) - u_material.fid${s}_params2.z, 0.0);
+}`;
+  }
 
   samplingWGSL(s: number): string {
     return /* wgsl */ `
@@ -122,7 +149,7 @@ fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
 
   fillUniforms(out: Float32Array, off: number) {
     out[off + 0] = this.n; out[off + 1] = 1.0; out[off + 2] = this.sh; out[off + 3] = this.ka;
-    out[off + 4] = this.kd; out[off + 5] = this.ks;
+    out[off + 4] = this.kd; out[off + 5] = this.ks; out[off + 6] = this.maxR;
     out[off + 8] = this.light[0]; out[off + 9] = this.light[1]; out[off + 10] = this.light[2];
     out.set(this.spheres, off + 12);
     out.set(this.colors, off + 12 + MAX * 4);

@@ -25,6 +25,17 @@ export interface Field {
   /** An attached modifier field whose displacement warps THIS field's sampling. The
    *  SceneRenderer turns this into the field's transform_point_<kind><slot>() body. */
   transform?: Field | null;
+  /** Opt-in EMPTY-SPACE SKIPPING. When true, skipWGSL() must define
+   *  `skip_<kind><slot>(wp) -> f32`: a conservative LOWER BOUND on the distance from wp
+   *  within which this field is guaranteed to contribute nothing (0 = "no information",
+   *  which forces the normal fine step). It must NEVER over-estimate or geometry is
+   *  silently skipped over. The SceneRenderer caches the bound per field and coasts,
+   *  so the (often O(N)) bound is evaluated only at horizon boundaries, not every step.
+   *
+   *  NOTE: the renderer disables skipping for any field carrying a `transform`, because a
+   *  nonlinear warp invalidates a distance bound measured in un-warped space. */
+  readonly providesSkip?: boolean;
+  skipWGSL?(slot: number): string;
   uniformFloats(): number;               // size of this field's uniform block (multiple of 4)
   structMembers(slot: number): string;   // WGSL struct member lines (slot-prefixed)
   declareBindings(slot: number, base: number): string;  // WGSL @binding decls

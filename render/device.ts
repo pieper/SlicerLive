@@ -13,7 +13,11 @@ export async function initDevice(): Promise<Gpu> {
   if (!gpu) throw new Error("WebGPU not available (need Chrome/Edge/Safari or Deno --unstable-webgpu)");
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("no WebGPU adapter");
-  const want = ["float32-filterable"].filter((f) => adapter.features.has(f)) as GPUFeatureName[];
+  // timestamp-query is opt-in profiling infra (SceneRenderer.timePass); harmless when
+  // absent. It gives exact GPU pass duration — the honest signal that the async
+  // performance.now() around submit() cannot provide.
+  const want = ["float32-filterable", "timestamp-query"]
+    .filter((f) => adapter.features.has(f)) as GPUFeatureName[];
 
   // Real medical volumes are large: CTACardio is 512x512x321 -> a 336 MB r32float
   // texture, whose writeTexture staging buffer exceeds Chrome's DEFAULT maxBufferSize
