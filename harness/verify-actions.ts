@@ -1,7 +1,8 @@
 import { VtkCamera } from "../render/vtk-camera.ts";
 import { CameraInteractor, actionForButton } from "../render/vtk-interactor.ts";
 import type { Vec3 } from "../render/mat4.ts";
-const t = JSON.parse(await Deno.readTextFile("/tmp/slicer-actions-truth.json"));
+import { fixture } from "./fixtures.ts";
+const t = await fixture<any>("slicer-actions-truth.json");
 const [W,H] = t.viewSize; const [x0,y0] = t.origin;
 const BTN: Record<string, 0|1|2> = { left:0, middle:1, right:2 };
 const cmp = (l:string,a:number[],b:number[],tol:number)=>{const d=Math.max(...a.map((v,i)=>Math.abs(v-b[i])));

@@ -4,6 +4,7 @@
 // via window.__slicerlive and prints a diff table.
 //   deno run -A harness/compare-startup.ts [url]
 import { CDP } from "./cdp.ts";
+import { fixture } from "./fixtures.ts";
 
 const URL_ = Deno.args[0] ?? "http://127.0.0.1:8099/webgpu/real.html";
 const TOL = 1e-3;
@@ -13,7 +14,7 @@ interface SlicerDump {
   slices: Record<string, { orientation: string; sliceOffsetMm: number; fieldOfView: number[]; dimensions: number[] }>;
   camera: { position: number[]; focalPoint: number[]; viewUp: number[]; viewAngle: number };
 }
-const slicer: SlicerDump = JSON.parse(await Deno.readTextFile("/tmp/slicer-startup.json"));
+const slicer = await fixture<SlicerDump>("slicer-startup.json");
 
 const c = await CDP.attachToPage();
 await c.goto(URL_);
@@ -43,10 +44,11 @@ row("level", slicer.volume.level, live.volume.level, near(slicer.volume.level, l
 console.log("\n=== SLICE GEOMETRY (default position after load) ===");
 for (const cell of ["axial", "coronal", "sagittal"]) {
   const s = slicer.slices[cell], l = live.planes[cell];
-  // Slicer reports sliceOffset along the slice normal; sagittal normal is -R so compare |.|
-  const sOff = cell === "sagittal" ? -s.sliceOffsetMm : s.sliceOffsetMm;
-  row(`${cell} offset (mm)`, sOff, l.offsetMm, near(sOff, l.offsetMm, 1e-3),
-    cell === "sagittal" ? "(slicer offset is along -R)" : "");
+  // Both sides now report the offset in Slicer's SIGNED convention (measured along the
+  // slice normal: +S axial, +A coronal, -R sagittal), so they compare directly. The hook
+  // also exposes `rasMm` if you want the raw positive-RAS-axis coordinate instead.
+  row(`${cell} offset (mm)`, s.sliceOffsetMm, l.offsetMm, near(s.sliceOffsetMm, l.offsetMm, 1e-3),
+    cell === "sagittal" ? "(normal is -R)" : "");
 }
 
 console.log("\n=== SLICE FIELD OF VIEW (square viewport => Slicer's fit is the limiting extent) ===");

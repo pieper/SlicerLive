@@ -43,6 +43,10 @@ export interface IntrospectionApi {
   getVolume?(): VolumeState;
   /** Map a view (u,v in [0,1]) in a named MPR cell to a voxel index — the picking path. */
   viewToVoxel?(cell: string, u: number, v: number): [number, number, number];
+  /** Slice stepping, for A/B against Slicer's wheel/key bindings. Return the new offset in mm. */
+  stepSlice?(cell: string, forward: boolean): number;
+  keySlice?(cell: string, key: string): number;
+  setSliceOffsetMm?(cell: string, mm: number): number;
   render?(): void;
   /** Extra demo-specific state (e.g. nnLive click list, mask voxel count). */
   extra?(): Record<string, unknown>;

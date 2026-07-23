@@ -85,15 +85,30 @@ export class CDP {
     return r.result.value as T;
   }
 
-  /** Navigate and wait for load. */
-  async goto(url: string, waitMs = 30000): Promise<void> {
+  /** Navigate and wait for a genuinely NEW document to finish loading.
+   *
+   *  Waiting on Page.loadEventFired alone is not enough: when navigating to the URL the
+   *  page is already on, a subsequent `waitFor(...)` can match state left over from the
+   *  OLD document and the test then runs against a page that is about to be wiped
+   *  (symptom: synthetic input lands during reload, before listeners are attached, and
+   *  silently does nothing). So we stamp the current document and wait until the stamp
+   *  is gone AND readyState is complete — i.e. a different document is fully loaded. */
+  async goto(url: string, waitMs = 60000): Promise<void> {
     await this.send("Page.enable");
-    const loaded = new Promise<void>((resolve) => {
-      const done = () => resolve();
-      this.on("Page.loadEventFired", done);
-    });
+    const stamp = `s${Date.now()}_${Math.round(performance.now())}`;
+    try { await this.eval(`window.__cdpNavStamp = ${JSON.stringify(stamp)}; return 1;`); } catch { /* blank page */ }
     await this.send("Page.navigate", { url });
-    await Promise.race([loaded, new Promise<void>((r) => setTimeout(r, waitMs))]);
+    const end = Date.now() + waitMs;
+    while (Date.now() < end) {
+      try {
+        const fresh = await this.eval<boolean>(
+          `return window.__cdpNavStamp !== ${JSON.stringify(stamp)} && document.readyState === "complete";`,
+        );
+        if (fresh) return;
+      } catch { /* mid-navigation: execution context destroyed */ }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`goto(${url}) did not reach a fresh loaded document within ${waitMs}ms`);
   }
 
   /** Wait until `expr` (a JS expression returning boolean) is true. */

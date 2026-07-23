@@ -5,10 +5,11 @@
 import { VtkCamera } from "../render/vtk-camera.ts";
 import { CameraInteractor, MOTION_FACTOR } from "../render/vtk-interactor.ts";
 import type { Vec3 } from "../render/mat4.ts";
+import { fixture } from "./fixtures.ts";
 
 interface Snap { position: number[]; focalPoint: number[]; viewUp: number[]; distance: number }
 interface Case { name: string; after: Snap; dx?: number; dy?: number; rxf?: number; ryf?: number; factor?: number; dyf?: number }
-const truth: { W: number; H: number; cases: Case[] } = JSON.parse(await Deno.readTextFile("/tmp/vtk-camera-truth.json"));
+const truth = await fixture<{ W: number; H: number; cases: Case[] }>("vtk-camera-truth.json");
 const { W, H } = truth;
 const TOL = 1e-6;
 

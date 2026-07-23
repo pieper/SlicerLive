@@ -8,6 +8,7 @@ import { CDP } from "./cdp.ts";
 import { VtkCamera } from "../render/vtk-camera.ts";
 import { CameraInteractor } from "../render/vtk-interactor.ts";
 import type { Vec3 } from "../render/mat4.ts";
+import { fixture } from "./fixtures.ts";
 
 const URL_ = Deno.args[0] ?? "http://127.0.0.1:8099/webgpu/real.html";
 interface Truth {
@@ -16,7 +17,7 @@ interface Truth {
   before: { position: number[]; focalPoint: number[]; viewUp: number[] };
   after: { position: number[]; focalPoint: number[]; viewUp: number[]; distance: number };
 }
-const t: Truth = JSON.parse(await Deno.readTextFile("/tmp/slicer-drag-truth.json"));
+const t = await fixture<Truth>("slicer-drag-truth.json");
 const [W, H] = t.viewSize;
 const cmp = (label: string, a: number[], b: number[], tol: number) => {
   const d = Math.max(...a.map((v, i) => Math.abs(v - b[i])));
