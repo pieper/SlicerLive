@@ -73,6 +73,42 @@ const BASES: Record<Orientation, { uDir: Vec3; vDir: Vec3; uAxis: number; vAxis:
   sagittal: { uDir: [0, -1, 0], vDir: [0, 0, 1], uAxis: 1, vAxis: 2, nAxis: 0 },
 };
 
+/** Which IJK axis is most aligned with a given RAS axis, per the volume's ijkToRAS
+ *  (row-major). Returns the column index of the 3x3 whose |component| on `rasAxis` is largest. */
+function ijkAxisForRasAxis(ijkToRAS: ArrayLike<number>, rasAxis: 0 | 1 | 2): number {
+  let best = 0, bestMag = -1;
+  for (let c = 0; c < 3; c++) {
+    const mag = Math.abs(ijkToRAS[rasAxis * 4 + c]);
+    if (mag > bestMag) { bestMag = mag; best = c; }
+  }
+  return best;
+}
+
+/** Slicer's DEFAULT slice position for a freshly-loaded volume, as offset01 in the RAS bbox.
+ *
+ *  Slicer does not park the slice at the bounding-box centre — it snaps to the voxel-centre
+ *  plane at index floor((N-1)/2) on the IJK axis aligned with the slice normal. Verified
+ *  against a real Slicer session (MRHead): axial j=127 -> S=-10.2143, coronal i=127 ->
+ *  A=6.9286, sagittal k=64 -> R=-3.4452, all exact. The bbox centre is a half-voxel off. */
+export function slicerDefaultOffset01(
+  orient: Orientation,
+  dims: [number, number, number],
+  ijkToRAS: ArrayLike<number>,
+  rasLo: Vec3,
+  rasHi: Vec3,
+): number {
+  const b = BASES[orient];
+  const n = b.nAxis as 0 | 1 | 2;
+  const a = ijkAxisForRasAxis(ijkToRAS, n);
+  const m = Math.floor((dims[a] - 1) / 2);
+  // RAS component along the normal for a voxel with index a = m (other axes at their centres)
+  const ijk = [(dims[0] - 1) / 2, (dims[1] - 1) / 2, (dims[2] - 1) / 2];
+  ijk[a] = m;
+  const ras = ijkToRAS[n * 4 + 0] * ijk[0] + ijkToRAS[n * 4 + 1] * ijk[1] + ijkToRAS[n * 4 + 2] * ijk[2] + ijkToRAS[n * 4 + 3];
+  const span = rasHi[n] - rasLo[n];
+  return span === 0 ? 0.5 : (ras - rasLo[n]) / span;
+}
+
 export class SliceRenderer {
   private dev: GPUDevice;
   private format: GPUTextureFormat;
@@ -147,12 +183,26 @@ export class SliceRenderer {
   setWindowLevel(win: number, lev: number) { this.u[28] = win; this.u[29] = lev; }
   setOverlayOpacity(o: number) { this.u[30] = o; }
 
-  /** Physical size (mm) of the square view for the current plane (isotropic, letterboxed). */
+  /** Physical size (mm) of the square view for the current plane (isotropic, letterboxed).
+   *  Matches Slicer's FitSliceToBackground: the field of view is exactly the volume's
+   *  extent along the limiting in-plane axis — NO extra margin. (Verified against
+   *  Slicer: Red FOV=[891.78,256] at viewport 634x182 -> vertical FOV == the 256mm
+   *  A-extent, horizontal follows viewport aspect.) */
   private viewSpanMm(): number {
     const b = BASES[this.orient];
     const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
     const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
-    return Math.max(uExt, vExt) * 1.02; // small border
+    return Math.max(uExt, vExt);
+  }
+
+  /** The fitted in-plane extent (mm) used for a given orientation — the value directly
+   *  comparable to a Slicer slice node's fitted fieldOfView. */
+  spanMmFor(orient: Orientation): number {
+    const prev = this.orient;
+    this.orient = orient;
+    const s = this.viewSpanMm();
+    this.orient = prev;
+    return s;
   }
 
   /** Plane center in RAS for the current scrub offset. */

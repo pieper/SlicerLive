@@ -5,6 +5,7 @@
 // live/webgpu/real.js. Scroll a slice to scrub; drag the 3D view to orbit, wheel to zoom.
 import { initDevice } from "../device.ts";
 import { buildRealScene } from "./real-scene.ts";
+import { slicerDefaultOffset01 } from "../slice-renderer.ts";
 import { orbitEye } from "./sphere-scene.ts";
 import type { Vec3 } from "../mat4.ts";
 import { installIntrospection } from "../introspect.ts";
@@ -44,10 +45,21 @@ async function main() {
     { cell: "coronal", orient: "coronal" },
     { cell: "sagittal", orient: "sagittal" },
   ] as const;
-  const off: Record<string, number> = { axial: 0.5, coronal: 0.5, sagittal: 0.5 };
+  // Slicer parity: slices default to the snapped voxel-centre plane, not the bbox centre.
+  const [rasLo0, rasHi0] = rs.sv.field.aabb();
+  const off: Record<string, number> = {
+    axial: slicerDefaultOffset01("axial", rs.sv.dims, rs.sv.ijkToRAS, rasLo0, rasHi0),
+    coronal: slicerDefaultOffset01("coronal", rs.sv.dims, rs.sv.ijkToRAS, rasLo0, rasHi0),
+    sagittal: slicerDefaultOffset01("sagittal", rs.sv.dims, rs.sv.ijkToRAS, rasLo0, rasHi0),
+  };
 
-  const { center, radius } = rs.sv;
-  let az = Math.PI, elev = 0.12, dist = radius * 3.0;  // default: look from anterior (face toward viewer), like Slicer
+  const { radius } = rs.sv;
+  // Slicer's DEFAULT 3D camera (vtkMRMLCameraNode): position (0,500,0), focalPoint at the
+  // RAS ORIGIN (not the volume centre), viewUp +S, viewAngle 30. Slicer does not refit the
+  // camera when a volume is loaded, so parity means adopting the same fixed default.
+  const center: Vec3 = [0, 0, 0];
+  const FOVY = 30;
+  let az = Math.PI, elev = 0, dist = 500;
   const eyeAt = (): Vec3 => {
     const o = orbitEye(az, elev, dist);
     return [center[0] + o[0], center[1] + o[1], center[2] + o[2]];
@@ -58,7 +70,7 @@ async function main() {
     rs.slice.renderToView(cx[p.cell].getCurrentTexture().createView({ format: srgb }), cv[p.cell].width, cv[p.cell].height);
   };
   const draw3d = () => {
-    rs.scene.setCamera(eyeAt(), center, [0, 0, 1], 26, cv.threeD.width, cv.threeD.height);
+    rs.scene.setCamera(eyeAt(), center, [0, 0, 1], FOVY, cv.threeD.width, cv.threeD.height);
     rs.scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
   };
   const drawAll = () => { for (const p of planes) drawPlane(p); draw3d(); status(`${rs.sv.name} · real ${rs.sv.dims.join("×")} volume · 3 MPR + 3D VR · scroll a slice, drag 3D to orbit`); };
@@ -81,14 +93,14 @@ async function main() {
     az += (e.clientX - lx) * 0.008; elev = Math.max(-1.4, Math.min(1.4, elev - (e.clientY - ly) * 0.008));
     lx = e.clientX; ly = e.clientY; draw3d();
   });
-  cv.threeD.addEventListener("wheel", (e) => { e.preventDefault(); dist = Math.max(radius * 1.2, Math.min(radius * 8, dist * (e.deltaY > 0 ? 1.08 : 0.93))); draw3d(); }, { passive: false });
+  cv.threeD.addEventListener("wheel", (e) => { e.preventDefault(); dist = Math.max(50, Math.min(3000, dist * (e.deltaY > 0 ? 1.08 : 0.93))); draw3d(); }, { passive: false });
 
   // --- automation/introspection hook for the Slicer A/B harness ----------------
   const [rasLo, rasHi] = rs.sv.field.aabb();
   const hook = installIntrospection({
     getCamera: () => ({
       azimuth: az, elevation: elev, distance: dist,
-      position: eyeAt(), focalPoint: [...center] as Vec3, viewUp: [0, 0, 1], viewAngle: 26,
+      position: eyeAt(), focalPoint: [...center] as Vec3, viewUp: [0, 0, 1], viewAngle: FOVY,
     }),
     setCamera: (p) => {
       if (p.azimuth !== undefined) az = p.azimuth;
@@ -97,11 +109,11 @@ async function main() {
       draw3d();
     },
     getPlanes: () => {
-      const out: Record<string, { orient: string; offset01: number; offsetMm: number }> = {};
+      const out: Record<string, { orient: string; offset01: number; offsetMm: number; spanMm: number }> = {};
       const nAxis: Record<string, 0 | 1 | 2> = { axial: 2, coronal: 1, sagittal: 0 };
       for (const p of planes) {
         const a = nAxis[p.orient];
-        out[p.cell] = { orient: p.orient, offset01: off[p.cell], offsetMm: rasLo[a] + off[p.cell] * (rasHi[a] - rasLo[a]) };
+        out[p.cell] = { orient: p.orient, offset01: off[p.cell], offsetMm: rasLo[a] + off[p.cell] * (rasHi[a] - rasLo[a]), spanMm: rs.slice.spanMmFor(p.orient) };
       }
       return out;
     },
