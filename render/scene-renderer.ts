@@ -242,6 +242,25 @@ ${dispatch}
     this.mat[4] = mx[0]; this.mat[5] = mx[1]; this.mat[6] = mx[2];
   }
 
+  /** Tier-A interactive update: re-pack every field's uniform block into the resident
+   *  material buffer WITHOUT recompiling the pipeline or rebuilding the bind group. This is
+   *  the render-side of the interaction architecture (ARCHITECTURE-2026-07-24 §7): a
+   *  lightweight drag — clip planes, ROI box geometry, fiducial position, TPS displacement
+   *  grid — mutates node state, the field re-derives its uniforms, and the SAME per-frame
+   *  flush() the renderer already does uploads them. Cost is a CPU re-pack; no shader build.
+   *
+   *  Also refreshes the scene AABB (which is uniform-resident), so a moved field's ray-clip
+   *  bounds stay correct. REQUIRES the field SET and each field's uniformFloats() to be
+   *  unchanged since build() — geometry/appearance may change, STRUCTURE may not. A structural
+   *  change (add/remove a field, a field that resizes its uniform block, or a texture swap
+   *  needing refreshBindings) still goes through build()/refreshBindings(). This is exactly
+   *  why moving geometry must be uniform-resident, never baked into generated WGSL — see the
+   *  box-skip note above and RENDER-PERFORMANCE.md. */
+  syncUniforms() {
+    for (const p of this.placed) p.field.fillUniforms(this.mat, p.uoff);
+    this.recomputeBounds();
+  }
+
   /** Rebuild the bind group from the fields' current resources (e.g. after a field
    *  swapped a texture) without recompiling the pipeline. Field set/structure must be unchanged. */
   refreshBindings() {
