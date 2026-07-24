@@ -10,6 +10,26 @@ export function identity(): Mat4 {
   return m;
 }
 
+/** Column-major translation matrix. */
+export function translation(t: Vec3): Mat4 {
+  const m = identity();
+  m[12] = t[0]; m[13] = t[1]; m[14] = t[2];
+  return m;
+}
+
+/** Column-major rotation by `angle` (radians) about a (not-necessarily-unit) axis. */
+export function rotationAboutAxis(axis: Vec3, angle: number): Mat4 {
+  let x = axis[0], y = axis[1], z = axis[2];
+  const l = Math.hypot(x, y, z) || 1; x /= l; y /= l; z /= l;
+  const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
+  const m = new Float32Array(16);       // m[col*4 + row] = R[row][col]
+  m[0] = c + x * x * t;   m[1] = y * x * t + z * s; m[2] = z * x * t - y * s;
+  m[4] = x * y * t - z * s; m[5] = c + y * y * t;   m[6] = z * y * t + x * s;
+  m[8] = x * z * t + y * s; m[9] = y * z * t - x * s; m[10] = c + z * z * t;
+  m[15] = 1;
+  return m;
+}
+
 // a * b  (both column-major); result column-major.
 export function multiply(a: Mat4, b: Mat4): Mat4 {
   const o = new Float32Array(16);

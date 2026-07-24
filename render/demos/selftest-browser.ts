@@ -11,6 +11,8 @@ import { initDevice } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import type { Field } from "../fields.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
+import { attachWidgetControls, type Handle } from "./widget-control.ts";
+import { makeXformWidget, type XformWidget, type XMeta } from "./xform-widget.ts";
 import { installIntrospection } from "../introspect.ts";
 import { loadSceneVolumeField } from "../scene-volume.ts";
 import { buildMultiVolume, buildSegmentation, buildVolumeAndFiducials, SCENES } from "./selftest-scenes.ts";
@@ -44,6 +46,7 @@ async function main() {
   const prog = (n: number) => { mb += n; status(`streaming data… ${(mb / 1e6).toFixed(1)} MB`); };
 
   let fields: Field[] = [], center: Vec3 = [0, 0, 0], radius = 200, label = "";
+  let widget: XformWidget | null = null;   // multi demo: linear transform widget on Panoramix
   status("streaming data…");
   if (which === "fiducials") {
     const sc = await buildVolumeAndFiducials(gpu.device, prog);
@@ -52,14 +55,17 @@ async function main() {
     label = `${sc.sv.name} + ${sc.lists.length} markup lists × 25 points`;
   } else if (which === "multi") {
     const sc = await buildMultiVolume(gpu.device, prog);
-    fields = sc.fields;
+    // The selftest puts Panoramix's +200mm offset on an INTERACTIVE linear transform node.
+    // Give it a rotate+translate widget so this demo edits that transform live.
+    widget = makeXformWidget(sc.pano.field, sc.pano.radius * 1.5);
+    fields = [...sc.fields, widget.handles];
     center = [
       (sc.cta.center[0] + sc.pano.center[0]) / 2,
       (sc.cta.center[1] + sc.pano.center[1]) / 2,
       (sc.cta.center[2] + sc.pano.center[2]) / 2,
     ];
     radius = Math.max(sc.cta.radius, sc.pano.radius) * 1.35;
-    label = `${sc.cta.name} + ${sc.pano.name} (+200 mm R)`;
+    label = `${sc.cta.name} + ${sc.pano.name} · drag a handle to move/rotate Panoramix`;
   } else if (which === "seg") {
     const sc = await buildSegmentation(gpu.device, prog);
     fields = sc.segments;
@@ -78,6 +84,18 @@ async function main() {
 
   // Slicer-faithful camera + the SHARED interaction helper (identical across all demos).
   const camera = framedCamera(center, radius);
+  // Widget first (capture phase) so a grabbed handle doesn't also move the camera; empty
+  // space bubbles to the camera as the root interactor.
+  if (widget) {
+    attachWidgetControls(canvas, camera, {
+      getHandles: (): Handle[] => widget!.handleList(),
+      getSize: () => ({ w: canvas.width, h: canvas.height }),
+      onDragStart: () => widget!.beginDrag(),
+      onDrag: (h, world) => { widget!.drag(h.data as XMeta, h.world, world); scene.syncUniforms(); },
+      onHover: (h) => { widget!.setHover(h ? h.id : null); scene.syncUniforms(); },
+      onChange: () => draw(),
+    });
+  }
   attachCameraControls(canvas, camera, { onChange: () => draw() });
 
   const draw = () => {
@@ -109,6 +127,21 @@ async function main() {
     extra: () => ({ demo: which, label }),
     render: () => draw(),
   });
+
+  // Debug hook for the on-screen transform-widget harness (multi demo only).
+  if (widget) {
+    (globalThis as unknown as { __xformDbg: unknown }).__xformDbg = {
+      snapshot: () => {
+        const r = canvas.getBoundingClientRect();
+        return {
+          handles: widget!.handleList().map((h) => ({ id: h.id, world: h.world, kind: (h.data as { kind: string }).kind, axis: (h.data as { axis?: number }).axis })),
+          matrix: [...widget!.matrix()],
+          camera: { position: [...camera.position], focalPoint: [...camera.focalPoint], viewUp: [...camera.viewUp], viewAngle: camera.viewAngle },
+          canvas: { w: canvas.width, h: canvas.height, left: r.left, top: r.top, width: r.width, height: r.height },
+        };
+      },
+    };
+  }
   resize();
 }
 main().catch((e) => status("error: " + (e?.message ?? e), true));

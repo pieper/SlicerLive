@@ -7,7 +7,10 @@
 // packed sequentially, so struct layout and CPU packing stay in sync by construction.
 
 import {
+  applyMat4,
+  invert,
   type Mat4,
+  multiply,
   type Vec3,
   patientToTexture,
   patientToTextureFromIjkToRAS,
@@ -15,6 +18,16 @@ import {
   volumeAABB,
   volumeAABBFromIjkToRAS,
 } from "./mat4.ts";
+
+/** AABB of a box [lo,hi] transformed by a 4x4 (its 8 corners re-bounded). */
+function transformedAABB(m: Mat4, lo: Vec3, hi: Vec3): [Vec3, Vec3] {
+  const mn: Vec3 = [Infinity, Infinity, Infinity], mx: Vec3 = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < 8; i++) {
+    const c = applyMat4(m, [i & 1 ? hi[0] : lo[0], i & 2 ? hi[1] : lo[1], i & 4 ? hi[2] : lo[2]]);
+    for (let a = 0; a < 3; a++) { mn[a] = Math.min(mn[a], c[a]); mx[a] = Math.max(mx[a], c[a]); }
+  }
+  return [mn, mx];
+}
 
 export interface Field {
   readonly kind: string;                 // WGSL family, e.g. "img"
@@ -90,11 +103,29 @@ export class ImageField implements Field {
     this.unit = opts.opacityUnitDistance ?? this.stepMm;
   }
 
+  private origP2t?: Mat4;                // sampling matrix + box at identity, for setWorldTransform
+  private origBox?: [Vec3, Vec3];
+
   uniformFloats() { return 28; }        // mat4(16) + clim(4) + shade(4) + params(4)
   aabb(): [Vec3, Vec3] { return this.box; }
   sampleStep(): number { return this.stepMm; }
   /** The r32float 3D scalar texture (e.g. to share with a SliceRenderer for MPR). */
   volumeTexture(): GPUTexture { return this.volTex; }
+
+  /** Centre of the volume in world (RAS) at identity — a natural pivot for a transform widget. */
+  worldCenter(): Vec3 {
+    const [lo, hi] = this.origBox ?? this.box;
+    return [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+  }
+
+  /** Place the volume in the world by a rigid transform M (worldFromLocal): the ray samples
+   *  at p2t·M⁻¹·wp, so the volume appears moved/rotated. A Tier-A interactive update — caller
+   *  does scene.syncUniforms() (which re-packs p2t AND refreshes the ray-entry AABB). */
+  setWorldTransform(m: Mat4) {
+    if (!this.origP2t) { this.origP2t = this.p2t; this.origBox = this.box; }
+    this.p2t = multiply(this.origP2t, invert(m));
+    this.box = transformedAABB(m, this.origBox![0], this.origBox![1]);
+  }
   /** RAS(patient) -> texture[0,1] matrix (encodes the real ijkToRAS geometry). */
   patientToTexture(): Mat4 { return this.p2t; }
 
