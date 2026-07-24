@@ -51,7 +51,7 @@ export class SceneRenderer {
     this.format = format;
     this.canTime = gpu.features.has("timestamp-query");
     this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
-    this.camBuf = this.dev.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.camBuf = this.dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); // invVP(64)+size(16)+eye(16)
   }
 
   /** (Re)build the pipeline for a set of fields. */
@@ -132,7 +132,13 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
   return length(max(q, vec3<f32>(0.0)));   // 0 inside the box, exact distance outside
 }`;
     };
-    const skippers = receivers.filter((p) => !p.field.transform)
+    // GHOST fields (interaction handles) don't composite normally: when a ray enters one,
+    // it dims the ALREADY-ACCUMULATED colour before compositing the handle over it, so the
+    // handle shines through whatever occludes it (ARCHITECTURE-2026-07-24 §3 hover feedback).
+    // They are excluded from the normal sum + the skip/leap machinery.
+    const ghostFields = receivers.filter((p) => p.field.ghost);
+    const normalReceivers = receivers.filter((p) => !p.field.ghost);
+    const skippers = normalReceivers.filter((p) => !p.field.transform)
       .filter((p) => SceneRenderer.boxSkip || (p.field.providesSkip && p.field.skipWGSL));
     const canSkip = new Set(skippers.map((p) => p.field));
     const skipFns = skippers.map((p) =>
@@ -148,7 +154,7 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
     // wireframe itself (clippable=false) is not clipped by its own planes. Widgets are also
     // the skipping fields today, so clipping only ever guards the non-skip branch.
     const guard = (p: Placed, expr: string) => (p.field.clippable === false ? expr : `if (!clipped) { ${expr} }`);
-    const dispatch = receivers.map((p) => {
+    const dispatch = normalReceivers.map((p) => {
       const nm = `${p.field.kind}${p.slot}`;
       if (!canSkip.has(p.field)) {
         return `    { ${guard(p, `let c = sample_field_${nm}(wp, rd); sum += c;`)} all_defer = false; }`;
@@ -162,8 +168,11 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
     }
     if (t < resume_${nm}) { jump_t = min(jump_t, resume_${nm}); } else { all_defer = false; }`;
     }).join("\n");
+    const ghostDispatch = ghostFields.map((p) =>
+      `    { let c = sample_field_${p.field.kind}${p.slot}(wp, rd); gsum += c; all_defer = false; }`
+    ).join("\n");
     return /* wgsl */ `
-struct Camera { inv_view_proj : mat4x4<f32>, size : vec4<f32> };
+struct Camera { inv_view_proj : mat4x4<f32>, size : vec4<f32>, eye : vec4<f32> };
 struct Material {
   bmin : vec4<f32>,
   bmax : vec4<f32>,
@@ -225,6 +234,7 @@ ${skipInit}
     let js = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5; // per-(pixel,sample) jitter
     let wp = ro + rd * (t + js * step);
     var sum = vec4<f32>(0.0);
+    var gsum = vec4<f32>(0.0);   // ghost (handle) contribution, composited with the dim rule
     var all_defer = true;        // every field guarantees emptiness here -> we may leap
     var jump_t = 1.0e30;         // nearest field horizon
     var clipped = false;         // ROI clip: sample on the negative side of any active plane
@@ -234,7 +244,14 @@ ${skipInit}
       if (dot(wp, cp.xyz) + cp.w < 0.0) { clipped = true; break; }
     }
 ${dispatch}
+${ghostDispatch}
     if (sum.a > 0.0) { integrated = integrated + (1.0 - integrated.a) * vec4<f32>(sum.rgb, clamp(sum.a, 0.0, 1.0)); }
+    // Ghost handles: dim what's already in front (so the handle shines through), then OVER.
+    if (gsum.a > 0.0) {
+      let ga = clamp(gsum.a, 0.0, 1.0);
+      integrated = integrated * (1.0 - 0.5 * ga);
+      integrated = integrated + (1.0 - integrated.a) * vec4<f32>(gsum.rgb, ga);
+    }
     // Leap only across space EVERY field proved empty, so no sampled segment ever
     // changes length and the fixed-step opacity integration stays exact.
     if (all_defer && jump_t > t + step) { t = jump_t; } else { t = t + step; }
@@ -323,8 +340,12 @@ ${dispatch}
     const view = lookAt(eye, center, up);
     const proj = perspectiveZO((fovyDeg * Math.PI) / 180, width / height, 1, 100000);
     const invVP: Mat4 = invert(multiply(proj, view));
-    const cam = new Float32Array(20);
-    cam.set(invVP, 0); cam[16] = width; cam[17] = height;
+    const cam = new Float32Array(24);
+    cam.set(invVP, 0);
+    // size = (w, h, focal_px, _); focal_px = pixels per world unit at unit depth, so a sphere
+    // at distance d has projected radius r*focal_px/d — used for screen-constant handle sizing.
+    cam[16] = width; cam[17] = height; cam[18] = (height / 2) / Math.tan((fovyDeg * Math.PI) / 360);
+    cam[20] = eye[0]; cam[21] = eye[1]; cam[22] = eye[2];
     this.dev.queue.writeBuffer(this.camBuf, 0, cam);
   }
 

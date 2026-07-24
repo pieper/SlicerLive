@@ -19,6 +19,11 @@ export interface FiducialOpts {
   lightColor?: Vec3;
   /** Set false so ROI clip planes don't crop these (e.g. widget handles on the box faces). */
   clippable?: boolean;
+  /** SCREEN-SPACE sizing (Slicer-style handles): interpret each sphere's radius as a
+   *  PIXEL radius and size it per-frame from the camera so it stays constant on screen. */
+  screenSpace?: boolean;
+  /** GHOST compositing: the handle dims what's in front of it so it shines through. */
+  ghost?: boolean;
 }
 
 export class FiducialField implements Field {
@@ -29,6 +34,9 @@ export class FiducialField implements Field {
   private n = 0;
   private maxR = 0;                     // largest radius in this field (for the skip bound)
   readonly clippable: boolean;
+  readonly ghost: boolean;
+  readonly providesSkip: boolean;      // off in screen-space mode (radius varies with the camera)
+  private screen: boolean;
   private sh: number;
   private ka: number;
   private kd: number;
@@ -43,6 +51,9 @@ export class FiducialField implements Field {
     this.ks = opts.kSpecular ?? 0.5;
     this.light = opts.lightColor ?? [1, 1, 1];
     this.clippable = opts.clippable ?? true;
+    this.ghost = opts.ghost ?? false;
+    this.screen = opts.screenSpace ?? false;
+    this.providesSkip = !this.screen;
   }
 
   setSpheres(list: Sphere[]) {
@@ -67,11 +78,18 @@ export class FiducialField implements Field {
     if (this.n === 0) return [[-1, -1, -1], [1, 1, 1]];
     const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
     for (let i = 0; i < this.n; i++) {
-      const r = this.spheres[i * 4 + 3];
+      // screen-space: radius is in pixels, the world radius depends on the camera; the box
+      // only feeds ray-entry bounds, so use the centres and expand by a generous margin.
+      const r = this.screen ? 0 : this.spheres[i * 4 + 3];
       for (let a = 0; a < 3; a++) {
         lo[a] = Math.min(lo[a], this.spheres[i * 4 + a] - r);
         hi[a] = Math.max(hi[a], this.spheres[i * 4 + a] + r);
       }
+    }
+    if (this.screen) {
+      const diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+      const m = Math.max(40, diag * 0.15);
+      for (let a = 0; a < 3; a++) { lo[a] -= m; hi[a] += m; }
     }
     return [lo, hi];
   }
@@ -95,7 +113,7 @@ export class FiducialField implements Field {
   // Since min_j(d_j) <= d_k and max_r >= r_k for every k, this never exceeds the true
   // min_k(d_k - r_k) — so it can't skip over a sphere — and it costs only squared
   // distances in the loop plus ONE sqrt at the end (cheaper than the sampling loop).
-  readonly providesSkip = true;
+  // (providesSkip is false in screen-space mode — the world radius varies with the camera.)
 
   skipWGSL(s: number): string {
     return /* wgsl */ `
@@ -125,8 +143,10 @@ fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   var found = false;
   for (var k = 0; k < n; k = k + 1) {
     let sp = u_material.fid${s}_spheres[k];
-    let r = sp.w;
-    if (r <= 0.0) { continue; }
+    if (sp.w <= 0.0) { continue; }
+    // screen-space: sp.w is a PIXEL radius -> world radius = px * distance(eye) / focal_px,
+    // so the sphere stays a constant size on screen. Otherwise sp.w is a world radius.
+    ${this.screen ? `let r = sp.w * length(u_cam.eye.xyz - sp.xyz) / max(u_cam.size.z, 1.0);` : `let r = sp.w;`}
     let depth = r - length(wp_r - sp.xyz);   // > 0 -> inside this sphere
     if (depth > best_depth) { best_depth = depth; best_center = sp.xyz; best_color = u_material.fid${s}_colors[k]; found = true; }
   }

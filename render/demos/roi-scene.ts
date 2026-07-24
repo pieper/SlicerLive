@@ -51,7 +51,8 @@ export async function buildRoiScene(
   const bar = Math.max(1.2, hR * 0.35);
 
   const box = new RoiBoxField(center, half, { color: [1, 0.85, 0.25], barHalfMm: bar });
-  const handles = new FiducialField([], { shininess: 60, kSpecular: 0.4, clippable: false });
+  // Screen-space (constant on-screen size), ghost (shine through), not clipped by the box.
+  const handles = new FiducialField([], { shininess: 60, kSpecular: 0.4, clippable: false, screenSpace: true, ghost: true });
   let hover: number | null = null;
 
   // Handle layout: 6 face centres + 8 corners + 1 centre = 15, in a fixed order so `id`
@@ -68,10 +69,11 @@ export async function buildRoiScene(
   };
 
   const refreshHandles = () => {
+    // radii in PIXELS (screen-space); inactive handles are 50% opaque, hovered = full + larger
     const pins: Sphere[] = metas.map((m, i): Sphere => {
       const on = i === hover;
       const base: [number, number, number] = m.kind === "center" ? [0.4, 1, 0.5] : [0.35, 0.8, 1];
-      return { center: worldOf(m), radius: on ? hR * 1.6 : hR, color: on ? [1, 0.9, 0.3, 1] : [...base, 1] };
+      return { center: worldOf(m), radius: on ? 13 : 8, color: on ? [1, 0.9, 0.3, 1] : [base[0], base[1], base[2], 0.5] };
     });
     handles.setSpheres(pins);
   };

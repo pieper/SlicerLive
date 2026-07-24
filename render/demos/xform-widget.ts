@@ -64,10 +64,12 @@ export function makeXformWidget(target: ImageField, sizeMm: number): XformWidget
     return m.kind === "rotate" ? [c[0], c[1], c[2], 1] : [c[0] * 0.7, c[1] * 0.7, c[2] * 0.7, 1];
   };
 
-  const handles = new FiducialField([], { shininess: 60, kSpecular: 0.4 });
-  const refresh = () => handles.setSpheres(metas.map((m, i): Sphere => ({
-    center: worldOf(m), radius: i === hover ? hR * 1.55 : hR, color: colorOf(m, i === hover),
-  })));
+  const handles = new FiducialField([], { shininess: 60, kSpecular: 0.4, screenSpace: true, ghost: true });
+  const refresh = () => handles.setSpheres(metas.map((m, i): Sphere => {
+    const on = i === hover;
+    const c = colorOf(m, on);
+    return { center: worldOf(m), radius: on ? 13 : 8, color: [c[0], c[1], c[2], on ? 1 : 0.5] };
+  }));
   refresh();
 
   return {

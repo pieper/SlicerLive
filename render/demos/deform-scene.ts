@@ -97,19 +97,20 @@ export async function buildDeformScene(
     (gHi[2] - gLo[2]) / GRID_DIMS[2],
   ];
 
-  const fiducials = new FiducialField([]);
-  const pinR = Math.max(4, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.012);
+  // Screen-space handles (constant size on zoom) that shine through occluders (ghost).
+  const fiducials = new FiducialField([], { screenSpace: true, ghost: true });
   let hover: number | null = null;
 
-  // Pins: 8 cyan sources (reference) + 8 magenta targets (the draggable handles). The
-  // hovered target brightens + grows so the grabbable handle reads clearly.
+  // Pins (radii in PIXELS): 8 cyan sources (reference) + 8 magenta targets (draggable).
+  // Inactive handles are 50% opaque so they're unobtrusive; the hovered target goes full
+  // opacity + larger so the grabbable handle reads clearly.
   const buildPins = () => {
-    const pins: Sphere[] = sources.map((c): Sphere => ({ center: c, radius: pinR, color: [0.25, 0.85, 1, 1] }));
+    const pins: Sphere[] = sources.map((c): Sphere => ({ center: c, radius: 6, color: [0.25, 0.85, 1, 0.5] }));
     for (let i = 0; i < targets.length; i++) {
       const on = i === hover;
       pins.push({
-        center: targets[i], radius: on ? pinR * 1.5 : pinR,
-        color: on ? [1, 0.75, 0.35, 1] : [1, 0.35, 0.85, 1],
+        center: targets[i], radius: on ? 12 : 8,
+        color: on ? [1, 0.75, 0.35, 1] : [1, 0.35, 0.85, 0.5],
       });
     }
     fiducials.setSpheres(pins);
