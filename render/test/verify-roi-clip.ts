@@ -50,6 +50,23 @@ const c1 = roi.snapshot().center;
 const movedBy = Math.hypot(c1[0] - c0[0], c1[1] - c0[1], c1[2] - c0[2]);
 check("centre drag translates", Math.abs(movedBy - Math.hypot(25, 15, 10)) < 1e-3 && roi.snapshot().half[0] === box1.half[0], `moved ${movedBy.toFixed(1)}mm, half unchanged`);
 
+// GHOST shine-through: the handles must remain visible even where an OPAQUE volume region
+// (dense ribs/contrast) occludes them. Regression guard for the ghost post-termination +
+// saturation latch: without them a handle behind a saturated ray is re-buried and vanishes.
+{
+  const roi2 = await buildRoiScene(gpu.device);
+  const scene2 = new SceneRenderer(gpu);
+  scene2.build([roi2.image, roi2.box, roi2.handles]);
+  scene2.setBackground(0.05, 0.06, 0.09);
+  scene2.setClipBox(roi2.lo(), roi2.hi());
+  const cam2 = framedCamera(roi2.sv.center as Vec3, roi2.sv.radius, 2.7);
+  cam2.azimuth(35); cam2.elevation(20);   // off-axis so handles don't stack on the view axis
+  scene2.setCamera(cam2.position, cam2.focalPoint, cam2.viewUp, cam2.viewAngle, 360, 360);
+  const a2 = await scene2.renderToRGBA(360, 360);
+  let blue = 0; for (let i = 0; i < 360 * 360; i++) { const R = a2[i * 4], G = a2[i * 4 + 1], B = a2[i * 4 + 2]; if (B > 110 && B - R > 40 && G > 90) blue++; }
+  check("handles shine through volume", blue > 300, `${blue} blue handle px over the volume`);
+}
+
 gpu.device.destroy();
 console.log(fail === 0 ? "\nROI clip verified." : `\n${fail} FAILED`);
 if (fail) Deno.exit(1);

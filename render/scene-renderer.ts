@@ -238,6 +238,9 @@ fn fs_main(v : Varyings) -> @location(0) vec4<f32> {
   var t = t_near;
   var integrated = vec4<f32>(0.0);
   var safety : i32 = 0;
+  var saturated = false;   // LATCH: once opaque, normal fields stay off even after a ghost
+                           // handle dims the accumulation (else the volume behind the handle
+                           // would re-opaque over it and re-bury the shine-through).
 ${skipInit}
   loop {
     if (t >= t_far || safety >= 5000${hasGhost ? "" : " || integrated.a >= 0.99"}) { break; }
@@ -253,10 +256,10 @@ ${skipInit}
       let cp = u_material.clip_planes[ci];
       if (dot(wp, cp.xyz) + cp.w < 0.0) { clipped = true; break; }
     }
-    // Normal fields stop being sampled once the ray is opaque; GHOST fields keep their skip
-    // horizons and keep going, so a handle behind an opaque region still shines through and
-    // the ray LEAPS between handles on the ghost skip alone (early-termination efficiency).
-${hasGhost ? "    if (integrated.a < 0.99) {" : ""}
+    // Normal fields stop being sampled once the ray is opaque (latched); GHOST fields keep
+    // their skip horizons and keep going, so a handle behind an opaque region still shines
+    // through and the ray LEAPS between handles on the ghost skip (early-termination kept).
+${hasGhost ? "    if (integrated.a >= 0.99) { saturated = true; }\n    if (!saturated) {" : ""}
 ${dispatch}
       if (sum.a > 0.0) { integrated = integrated + (1.0 - integrated.a) * vec4<f32>(sum.rgb, clamp(sum.a, 0.0, 1.0)); }
 ${hasGhost ? "    }" : ""}

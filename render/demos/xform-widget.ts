@@ -46,7 +46,7 @@ export interface XformWidget {
 
 export function makeXformWidget(target: ImageField, _sizeMm: number): XformWidget {
   const C0 = target.worldCenter();
-  const field = new TransformGizmoField(C0, 58);   // 58 px on-screen radius
+  const field = new TransformGizmoField(C0, 88);   // 88 px on-screen radius — comfortably pickable
   let M: Mat4 = identity();
   let M0: Mat4 = identity();
   let pivot0: Vec3 = [...C0] as Vec3;
