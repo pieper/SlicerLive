@@ -17,6 +17,7 @@ export interface Handle {
   world: Vec3;           // current world (RAS) position
   pickPx?: number;       // pick radius in CSS px (default 16)
   cursor?: string;       // CSS cursor while hovered/grabbed (default "grab"/"grabbing")
+  data?: unknown;        // caller metadata (e.g. ROI face/corner/center descriptor)
 }
 
 export interface WidgetControlOpts {

@@ -9,6 +9,7 @@ import { type Mat4, type Vec3, invert, lookAt, multiply, perspectiveZO } from ".
 
 const DEFAULT_FORMAT: GPUTextureFormat = "rgba8unorm-srgb";
 const SCENE_FLOATS = 16; // bmin(4) bmax(4) scene(4) bg(4)
+const CLIP_FLOATS = 36;  // clip_planes: array<vec4,8> (32) + clip_count: vec4 (4), appended as a tail
 
 interface Placed { field: Field; slot: number; uoff: number; bbase: number }
 
@@ -43,6 +44,7 @@ export class SceneRenderer {
   static boxSkip = false;
 
   private canTime: boolean;
+  private clipOff = 0;
 
   constructor(gpu: Gpu, format: GPUTextureFormat = DEFAULT_FORMAT) {
     this.dev = gpu.device;
@@ -64,8 +66,9 @@ export class SceneRenderer {
       bbase += field.bindingCount;
       return p;
     });
-    this.mat = new Float32Array(uoff);
-    this.matBuf = this.dev.createBuffer({ size: uoff * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.clipOff = uoff;                 // clip tail lives after every field block
+    this.mat = new Float32Array(uoff + CLIP_FLOATS);
+    this.matBuf = this.dev.createBuffer({ size: (uoff + CLIP_FLOATS) * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.pipeline = this.dev.createRenderPipeline({
       layout: "auto",
       vertex: { module: this.dev.createShaderModule({ code: this.wgsl() }), entryPoint: "vs_main" },
@@ -138,18 +141,24 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
     const fns = [modFns, tpFns, fieldFns, skipFns].filter((s) => s.trim()).join("\n");
     const skipInit = skippers.map((p) => `  var resume_${p.field.kind}${p.slot} : f32 = -1.0e30;`).join("\n");
 
-    // modifier fields contribute no colour/opacity, so they are not summed
+    // modifier fields contribute no colour/opacity, so they are not summed.
+    // CLIPPING (port of slicer_wgpu's clip_planes/clip_count): a ROI box → up to 8 inward
+    // planes; a sample on the negative side of ANY active plane is discarded. Applied
+    // PER FIELD so `clippable` fields (volumes, segments) are cropped while the ROI-widget
+    // wireframe itself (clippable=false) is not clipped by its own planes. Widgets are also
+    // the skipping fields today, so clipping only ever guards the non-skip branch.
+    const guard = (p: Placed, expr: string) => (p.field.clippable === false ? expr : `if (!clipped) { ${expr} }`);
     const dispatch = receivers.map((p) => {
       const nm = `${p.field.kind}${p.slot}`;
       if (!canSkip.has(p.field)) {
-        return `    { let c = sample_field_${nm}(wp, rd); sum += c; all_defer = false; }`;
+        return `    { ${guard(p, `let c = sample_field_${nm}(wp, rd); sum += c;`)} all_defer = false; }`;
       }
       // Subtract one step from the bound: wp is the JITTERED sample position (up to
       // +/-0.5 step off t), so a full step of slack keeps the horizon conservative.
       return `    if (t >= resume_${nm}) {
       let d_${nm} = max(skip_${nm}(wp) - step, 0.0);
       if (d_${nm} > 0.0) { resume_${nm} = t + d_${nm}; }
-      else { let c = sample_field_${nm}(wp, rd); sum += c; }
+      else { ${guard(p, `let c = sample_field_${nm}(wp, rd); sum += c;`)} }
     }
     if (t < resume_${nm}) { jump_t = min(jump_t, resume_${nm}); } else { all_defer = false; }`;
     }).join("\n");
@@ -161,6 +170,8 @@ struct Material {
   scene : vec4<f32>,   // sample_step, _, _, _
   bg : vec4<f32>,
 ${members}
+  clip_planes : array<vec4<f32>, 8>,   // (nx, ny, nz, offset) inward; tail so field offsets are stable
+  clip_count : vec4<f32>,              // (count, _, _, _)
 };
 @group(0) @binding(0) var<uniform> u_cam : Camera;
 @group(0) @binding(1) var<uniform> u_material : Material;
@@ -216,6 +227,12 @@ ${skipInit}
     var sum = vec4<f32>(0.0);
     var all_defer = true;        // every field guarantees emptiness here -> we may leap
     var jump_t = 1.0e30;         // nearest field horizon
+    var clipped = false;         // ROI clip: sample on the negative side of any active plane
+    let ccount = u32(u_material.clip_count.x);
+    for (var ci = 0u; ci < ccount; ci = ci + 1u) {
+      let cp = u_material.clip_planes[ci];
+      if (dot(wp, cp.xyz) + cp.w < 0.0) { clipped = true; break; }
+    }
 ${dispatch}
     if (sum.a > 0.0) { integrated = integrated + (1.0 - integrated.a) * vec4<f32>(sum.rgb, clamp(sum.a, 0.0, 1.0)); }
     // Leap only across space EVERY field proved empty, so no sampled segment ever
@@ -229,6 +246,24 @@ ${dispatch}
 
   setBackground(r: number, g: number, b: number) { this.mat[12] = r; this.mat[13] = g; this.mat[14] = b; this.mat[15] = 1; }
   setSampleStep(step: number) { this.mat[8] = step; }
+
+  /** Set up to 8 clip planes (nx,ny,nz,offset), inward-normal, keep-side `dot(wp,n)+offset>=0`.
+   *  Written into the uniform tail — a Tier-A update the next flush() uploads; no rebuild. */
+  setClipPlanes(planes: [number, number, number, number][]) {
+    const n = Math.min(planes.length, 8);
+    for (let i = 0; i < n; i++) this.mat.set(planes[i], this.clipOff + i * 4);
+    this.mat[this.clipOff + 32] = n;
+  }
+  clearClip() { this.mat[this.clipOff + 32] = 0; }
+
+  /** Axis-aligned RAS crop box [lo,hi] → 6 inward planes. offset = -dot(faceOrigin, n). */
+  setClipBox(lo: Vec3, hi: Vec3) {
+    this.setClipPlanes([
+      [1, 0, 0, -lo[0]], [-1, 0, 0, hi[0]],   // keep lo.x <= x <= hi.x
+      [0, 1, 0, -lo[1]], [0, -1, 0, hi[1]],
+      [0, 0, 1, -lo[2]], [0, 0, -1, hi[2]],
+    ]);
+  }
 
   /** Scene AABB = union of field AABBs; also picks a default sample step from the smallest field extent. */
   recomputeBounds() {

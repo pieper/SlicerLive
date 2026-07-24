@@ -36,6 +36,9 @@ export interface Field {
    *  nonlinear warp invalidates a distance bound measured in un-warped space. */
   readonly providesSkip?: boolean;
   skipWGSL?(slot: number): string;
+  /** Whether ROI clip planes crop this field (default true). Set false for interaction
+   *  widgets (e.g. the ROI box wireframe) so they aren't clipped by their own planes. */
+  readonly clippable?: boolean;
   uniformFloats(): number;               // size of this field's uniform block (multiple of 4)
   structMembers(slot: number): string;   // WGSL struct member lines (slot-prefixed)
   declareBindings(slot: number, base: number): string;  // WGSL @binding decls

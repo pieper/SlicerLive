@@ -17,6 +17,8 @@ export interface FiducialOpts {
   kDiffuse?: number;
   kSpecular?: number;
   lightColor?: Vec3;
+  /** Set false so ROI clip planes don't crop these (e.g. widget handles on the box faces). */
+  clippable?: boolean;
 }
 
 export class FiducialField implements Field {
@@ -26,6 +28,7 @@ export class FiducialField implements Field {
   private colors = new Float32Array(MAX * 4);  // (r,g,b,a)
   private n = 0;
   private maxR = 0;                     // largest radius in this field (for the skip bound)
+  readonly clippable: boolean;
   private sh: number;
   private ka: number;
   private kd: number;
@@ -39,6 +42,7 @@ export class FiducialField implements Field {
     this.kd = opts.kDiffuse ?? 0.85;
     this.ks = opts.kSpecular ?? 0.5;
     this.light = opts.lightColor ?? [1, 1, 1];
+    this.clippable = opts.clippable ?? true;
   }
 
   setSpheres(list: Sphere[]) {
