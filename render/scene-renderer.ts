@@ -140,10 +140,19 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
     const ghostFields = receivers.filter((p) => p.field.ghost);
     const normalReceivers = receivers.filter((p) => !p.field.ghost);
     const clipGuard = (p: Placed, expr: string) => (p.field.clippable === false ? expr : `if (!clipped) { ${expr} }`);
-    // A skip-branch: evaluate the (cached) skip horizon; sample into `acc` only when reached.
-    const skipBranch = (p: Placed, acc: string, clip: boolean): string => {
+    // Sample + accumulate. Normal fields SUM into `sum` (composited once per step). GHOST
+    // fields (handles) are SURFACES, not media: integrating them as a volume compounds their
+    // per-sample opacity toward 1 over the many samples through a handle. Instead we track the
+    // single MAX-opacity sample (the solid core: 0.5 inactive / 1.0 active) and its colour —
+    // no accumulation, no compounding — and blend it once at the end.
+    const sampleInto = (nm: string, ghost: boolean) =>
+      ghost
+        ? `let c = sample_field_${nm}(wp, rd); if (c.a > g_op) { g_op = c.a; g_col = c.rgb / max(c.a, 1e-4); }`
+        : `let c = sample_field_${nm}(wp, rd); sum += c;`;
+    // A skip-branch: evaluate the (cached) skip horizon; sample only when reached.
+    const skipBranch = (p: Placed, clip: boolean, ghost = false): string => {
       const nm = `${p.field.kind}${p.slot}`;
-      const smp = `let c = sample_field_${nm}(wp, rd); ${acc} += c;`;
+      const smp = sampleInto(nm, ghost);
       // Subtract one step: wp is the JITTERED sample position (up to +/-0.5 step off t).
       return `    if (t >= resume_${nm}) {
       let d_${nm} = max(skip_${nm}(wp) - step, 0.0);
@@ -152,9 +161,9 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
     }
     if (t < resume_${nm}) { jump_t = min(jump_t, resume_${nm}); } else { all_defer = false; }`;
     };
-    const plainBranch = (p: Placed, acc: string, clip: boolean): string => {
+    const plainBranch = (p: Placed, clip: boolean, ghost = false): string => {
       const nm = `${p.field.kind}${p.slot}`;
-      const smp = `let c = sample_field_${nm}(wp, rd); ${acc} += c;`;
+      const smp = sampleInto(nm, ghost);
       return `    { ${clip ? clipGuard(p, smp) : smp} all_defer = false; }`;
     };
 
@@ -175,10 +184,10 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
     // planes; a sample on the negative side of ANY active plane is discarded. Applied PER
     // FIELD so `clippable` fields (volumes, segments) are cropped while widgets are not.
     const dispatch = normalReceivers.map((p) =>
-      canSkip.has(p.field) ? skipBranch(p, "sum", true) : plainBranch(p, "sum", true)
+      canSkip.has(p.field) ? skipBranch(p, true) : plainBranch(p, true)
     ).join("\n");
     const ghostDispatch = ghostFields.map((p) =>
-      ghostCanSkip.has(p.field) ? skipBranch(p, "gsum", false) : plainBranch(p, "gsum", false)
+      ghostCanSkip.has(p.field) ? skipBranch(p, false, true) : plainBranch(p, false, true)
     ).join("\n");
     const hasGhost = ghostFields.length > 0;
     return /* wgsl */ `
@@ -241,13 +250,14 @@ fn fs_main(v : Varyings) -> @location(0) vec4<f32> {
   var saturated = false;   // LATCH: once opaque, normal fields stay off even after a ghost
                            // handle dims the accumulation (else the volume behind the handle
                            // would re-opaque over it and re-bury the shine-through).
+  var g_op = 0.0;          // ghost (handle) surface: max opacity along the ray (0.5 inactive /
+  var g_col = vec3<f32>(0.0);  // 1.0 active) and its colour — tracked, never accumulated.
 ${skipInit}
   loop {
     if (t >= t_far || safety >= 5000${hasGhost ? "" : " || integrated.a >= 0.99"}) { break; }
     let js = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5; // per-(pixel,sample) jitter
     let wp = ro + rd * (t + js * step);
     var sum = vec4<f32>(0.0);
-    var gsum = vec4<f32>(0.0);   // ghost (handle) contribution, composited with the dim rule
     var all_defer = true;        // every field guarantees emptiness here -> we may leap
     var jump_t = 1.0e30;         // nearest field horizon
     var clipped = false;         // ROI clip: sample on the negative side of any active plane
@@ -264,14 +274,18 @@ ${dispatch}
       if (sum.a > 0.0) { integrated = integrated + (1.0 - integrated.a) * vec4<f32>(sum.rgb, clamp(sum.a, 0.0, 1.0)); }
 ${hasGhost ? "    }" : ""}
 ${ghostDispatch}
-    // Ghost handles: dim what's already in front (so the handle shines through), then OVER.
-    if (gsum.a > 0.0) {
-      let ga = clamp(gsum.a, 0.0, 1.0);
-      integrated = integrated * (1.0 - 0.5 * ga);
-      integrated = integrated + (1.0 - integrated.a) * vec4<f32>(gsum.rgb, ga);
-    }
     if (all_defer && jump_t > t + step) { t = jump_t; } else { t = t + step; }
     safety = safety + 1;
+  }
+  // GHOST x-ray, applied ONCE (never compounding): the volume IN FRONT of a handle is shown
+  // at residual = 1 - handle_opacity (50% for an inactive handle at opacity 0.5, 0% for an
+  // active/hovered handle at opacity 1.0), then the handle (colour g_col at opacity g_op)
+  // draws over it.
+  if (g_op > 0.001) {
+    let ga = clamp(g_op, 0.0, 1.0);
+    let residual = 1.0 - ga;
+    let fA = integrated.a * residual;
+    integrated = vec4<f32>(integrated.rgb * residual + (1.0 - fA) * g_col * ga, fA + (1.0 - fA) * ga);
   }
   return vec4<f32>(mix(bg, integrated.rgb, integrated.a), 1.0);
 }`;

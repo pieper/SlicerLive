@@ -64,7 +64,25 @@ check("centre drag translates", Math.abs(movedBy - Math.hypot(25, 15, 10)) < 1e-
   scene2.setCamera(cam2.position, cam2.focalPoint, cam2.viewUp, cam2.viewAngle, 360, 360);
   const a2 = await scene2.renderToRGBA(360, 360);
   let blue = 0; for (let i = 0; i < 360 * 360; i++) { const R = a2[i * 4], G = a2[i * 4 + 1], B = a2[i * 4 + 2]; if (B > 110 && B - R > 40 && G > 90) blue++; }
-  check("handles shine through volume", blue > 300, `${blue} blue handle px over the volume`);
+  check("handles shine through volume", blue > 200, `${blue} blue handle px over the volume`);
+}
+
+// GHOST residual: an INACTIVE handle behind the volume shows the volume in front at ~50%
+// (blended, muted); a HOVERED handle punches through fully (residual 0, pure bright colour).
+{
+  const bright = async (hover: number | null) => {
+    const r = await buildRoiScene(gpu.device); r.setHover(hover);
+    const sc = new SceneRenderer(gpu); sc.build([r.image, r.handles]); sc.setBackground(0.05, 0.06, 0.09); sc.setClipBox(r.lo(), r.hi());
+    const cam = framedCamera(r.sv.center as Vec3, r.sv.radius, 2.7); cam.azimuth(35); cam.elevation(20);
+    sc.setCamera(cam.position, cam.focalPoint, cam.viewUp, cam.viewAngle, 360, 360);
+    const px = await sc.renderToRGBA(360, 360);
+    // find the most strongly-green pixel (the centre handle) and return ITS brightness
+    let bestG = -1, bright = 0;
+    for (let i = 0; i < 360 * 360; i++) { const R = px[i * 4], G = px[i * 4 + 1], B = px[i * 4 + 2]; const g = G - (R + B) / 2; if (g > bestG) { bestG = g; bright = Math.max(R, G, B); } }
+    return bright;
+  };
+  const inactive = await bright(null), hovered = await bright(14);   // 14 = centre handle
+  check("hovered handle punches through", hovered > inactive + 50, `brightest centre px: inactive ${inactive}, hovered ${hovered}`);
 }
 
 gpu.device.destroy();
