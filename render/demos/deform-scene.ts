@@ -9,9 +9,10 @@
 //                   to a displacement grid, which warps the volume live
 //
 // The selftest starts at identity (targets == sources) and deforms as the user drags a
-// control point. Until markup picking lands (next milestone) this demo ships a preset
-// target offset plus a gain slider, so gain 0 is exactly the selftest's initial state
-// and gain 1 shows a full deformation. `setTarget()` is wired for the picking work.
+// control point. This demo ships a dramatic default deformation (so the card thumbnail
+// reads instantly) plus a gain slider, and the magenta target pins are DRAGGABLE:
+// setTarget() re-solves the TPS and re-uploads the displacement texture in place (Tier-A,
+// no pipeline rebuild — see ARCHITECTURE-2026-07-24 §6.1), driven by widget-control.ts.
 import { ImageField } from "../fields.ts";
 import { FiducialField, type Sphere } from "../fiducial-field.ts";
 import { TransformField, sampleDisplacementGrid, tps3d } from "../transform-field.ts";
@@ -38,9 +39,14 @@ export interface DeformScene {
   fiducials: FiducialField;
   sources: Vec3[];
   targets: Vec3[];
-  /** Rebuild the TPS + displacement grid from the current targets (as the selftest does). */
-  rebuild(dev: GPUDevice): void;
+  /** Move landmark i's TARGET to p and re-solve the TPS IN PLACE (re-uploads the same
+   *  displacement texture + refreshes the pin uniforms — no new fields, no pipeline
+   *  rebuild). Caller does scene.syncUniforms() + redraw. This is the Tier-A interactive
+   *  landmark drag (ARCHITECTURE-2026-07-24 §6.1). */
   setTarget(i: number, p: Vec3, dev: GPUDevice): void;
+  /** Highlight a target pin (hover feedback) without touching the warp — just recolours
+   *  the pin uniforms. Pass null to clear. Caller does scene.syncUniforms() + redraw. */
+  highlightTarget(i: number | null): void;
 }
 
 /** Default demo deformation: a deliberately DRAMATIC stretch, so the card thumbnail
@@ -91,31 +97,38 @@ export async function buildDeformScene(
     (gHi[2] - gLo[2]) / GRID_DIMS[2],
   ];
 
-  let warp!: TransformField;
   const fiducials = new FiducialField([]);
   const pinR = Math.max(4, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.012);
+  let hover: number | null = null;
+
+  // Pins: 8 cyan sources (reference) + 8 magenta targets (the draggable handles). The
+  // hovered target brightens + grows so the grabbable handle reads clearly.
+  const buildPins = () => {
+    const pins: Sphere[] = sources.map((c): Sphere => ({ center: c, radius: pinR, color: [0.25, 0.85, 1, 1] }));
+    for (let i = 0; i < targets.length; i++) {
+      const on = i === hover;
+      pins.push({
+        center: targets[i], radius: on ? pinR * 1.5 : pinR,
+        color: on ? [1, 0.75, 0.35, 1] : [1, 0.35, 0.85, 1],
+      });
+    }
+    fiducials.setSpheres(pins);
+  };
+
+  // One-time build of the persistent warp field; setTarget updates it in place thereafter.
+  const solveDisp = () => sampleDisplacementGrid(GRID_DIMS, spacing, center, tps3d(sources, targets));
+  const warp = new TransformField(dev, solveDisp(), GRID_DIMS, spacing, { gain: 1, center });
+  image.transform = warp;
+  buildPins();
 
   const scene: DeformScene = {
-    sv, image, warp: undefined as unknown as TransformField, fiducials, sources, targets,
-    rebuild(d: GPUDevice) {
-      const f = tps3d(sources, targets);                       // basis R, as SetBasisToR()
-      const disp = sampleDisplacementGrid(GRID_DIMS, spacing, center, f);
-      warp = new TransformField(d, disp, GRID_DIMS, spacing, { gain: 1, center });
-      image.transform = warp;
-      scene.warp = warp;
-      const pins: Sphere[] = [
-        ...sources.map((c): Sphere => ({ center: c, radius: pinR, color: [0.25, 0.85, 1, 1] })),
-        ...targets.map((c, i): Sphere => ({
-          center: c, radius: pinR,
-          // only show a magenta target pin where it actually differs from its source
-          color: Math.hypot(c[0] - sources[i][0], c[1] - sources[i][1], c[2] - sources[i][2]) > 1e-6
-            ? [1, 0.35, 0.85, 1] : [0, 0, 0, 0],
-        })),
-      ];
-      fiducials.setSpheres(pins);
+    sv, image, warp, fiducials, sources, targets,
+    setTarget(i: number, p: Vec3, d: GPUDevice) {
+      targets[i] = [...p] as Vec3;
+      warp.updateDisplacement(d, solveDisp());   // in-place texture re-upload, no new field
+      buildPins();
     },
-    setTarget(i: number, p: Vec3, d: GPUDevice) { targets[i] = [...p] as Vec3; scene.rebuild(d); },
+    highlightTarget(i: number | null) { hover = i; buildPins(); },
   };
-  scene.rebuild(dev);
   return scene;
 }

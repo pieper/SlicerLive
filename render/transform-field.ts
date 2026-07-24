@@ -32,6 +32,7 @@ export class TransformField implements Field {
   readonly modifier = true;          // never composited into the ray-march sum
   readonly bindingCount = 1;         // displacement texture (sampler shared)
   private tex: GPUTexture;
+  private dims: Vec3;
   private p2t: Mat4;
   private box: [Vec3, Vec3];
   private gainValue: number;
@@ -41,13 +42,14 @@ export class TransformField implements Field {
   constructor(dev: GPUDevice, displacement: Float32Array, dims: Vec3, spacing: Vec3, opts: TransformFieldOpts = {}) {
     const center = opts.center ?? [0, 0, 0];
     this.gainValue = opts.gain ?? 1;
+    this.dims = [...dims] as Vec3;
     this.tex = dev.createTexture({
       size: dims as [number, number, number],
       dimension: "3d",
       format: "rgba32float",
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-    dev.queue.writeTexture({ texture: this.tex }, displacement, { bytesPerRow: dims[0] * 16, rowsPerImage: dims[1] }, dims as [number, number, number]);
+    this.updateDisplacement(dev, displacement);
     this.p2t = patientToTexture(dims, spacing, center);
     this.box = volumeAABB(dims, spacing, center);
     this.stepMm = Math.min(...spacing);
@@ -55,6 +57,20 @@ export class TransformField implements Field {
 
   get gain(): number { return this.gainValue; }
   setGain(g: number) { this.gainValue = g; }
+
+  /** Re-upload the displacement grid into the EXISTING texture (same dims) — a Tier-A
+   *  interactive update (ARCHITECTURE-2026-07-24 §7): a TPS re-solve on a landmark drag
+   *  writes new values into the same texture the bind group already points at, so no new
+   *  field, no pipeline/bind rebuild. The grid geometry (dims/spacing/center → p2t) is
+   *  fixed at construction; only the per-voxel displacement changes. */
+  updateDisplacement(dev: GPUDevice, displacement: Float32Array) {
+    dev.queue.writeTexture(
+      { texture: this.tex },
+      displacement,
+      { bytesPerRow: this.dims[0] * 16, rowsPerImage: this.dims[1] },
+      this.dims as [number, number, number],
+    );
+  }
 
   uniformFloats() { return 20; }     // mat4(16) + params(4)
   aabb(): [Vec3, Vec3] { return this.box; }

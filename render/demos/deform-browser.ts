@@ -6,6 +6,7 @@ import { initDevice } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { buildDeformScene } from "./deform-scene.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
+import { attachWidgetControls, type Handle } from "./widget-control.ts";
 import { installIntrospection } from "../introspect.ts";
 import type { Vec3 } from "../mat4.ts";
 
@@ -35,12 +36,13 @@ async function main() {
 
   const { center, radius } = sc.sv;
   const camera = framedCamera(center as Vec3, radius, 3.5);
+  let msg = "drag a magenta pin to deform · drag empty space to rotate";
   const draw = () => {
     const w = canvas.width, h = canvas.height;
     scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
     const t0 = performance.now();
     scene.renderToView(ctx.getCurrentTexture().createView({ format: srgb }), w, h);
-    status(`${sc.sv.name} · TPS landmark deform · gain ${sc.warp.gain.toFixed(2)} · 8 corner landmarks · ${(performance.now() - t0).toFixed(0)} ms/frame · drag=rotate, shift/middle=pan, right=zoom`);
+    status(`${sc.sv.name} · TPS landmark deform · gain ${sc.warp.gain.toFixed(2)} · ${(performance.now() - t0).toFixed(0)} ms/frame · ${msg}`);
   };
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -49,13 +51,25 @@ async function main() {
   };
   globalThis.addEventListener("resize", resize);
 
-  // gain slider: 0 = identity, 1 = full warp. Only the uniform changes — no rebuild.
+  // gain slider: 0 = identity, 1 = full warp. Tier-A: only the uniform changes — syncUniforms,
+  // no pipeline rebuild.
   const slider = document.getElementById("gain") as HTMLInputElement | null;
   slider?.addEventListener("input", () => {
     sc.warp.setGain(Number(slider.value) / 100);
-    scene.build([sc.warp, sc.image, sc.fiducials]);   // refresh uniforms
-    scene.setBackground(0.06, 0.07, 0.10);
+    scene.syncUniforms();
     draw();
+  });
+
+  // Draggable TPS landmarks: the 8 magenta TARGET pins. Grab a pin -> re-solve the TPS in
+  // place (syncUniforms, no rebuild) as you drag; empty space bubbles to the camera.
+  attachWidgetControls(canvas, camera, {
+    getHandles: (): Handle[] => sc.targets.map((world, id) => ({ id, world: world as Vec3, cursor: "grab" })),
+    getSize: () => ({ w: canvas.width, h: canvas.height }),
+    onDragStart: (h) => { msg = `dragging landmark ${h.id}`; },
+    onDrag: (h, world) => { sc.setTarget(h.id, world, gpu.device); scene.syncUniforms(); },
+    onDragEnd: () => { msg = "drag a magenta pin to deform · drag empty space to rotate"; },
+    onHover: (h) => { sc.highlightTarget(h ? h.id : null); scene.syncUniforms(); },
+    onChange: draw,
   });
 
   attachCameraControls(canvas, camera, { onChange: draw });
@@ -66,6 +80,20 @@ async function main() {
     extra: () => ({ gain: sc.warp.gain }),
     render: () => draw(),
   });
+
+  // Debug hook for the on-screen drag harness: current targets + camera + canvas rect, so
+  // the test can locate a pin in client px, synthesize a drag, and confirm the target moved.
+  (globalThis as unknown as { __deformDbg: unknown }).__deformDbg = {
+    snapshot: () => {
+      const r = canvas.getBoundingClientRect();
+      return {
+        targets: sc.targets.map((t) => [...t]),
+        camera: { position: [...camera.position], focalPoint: [...camera.focalPoint], viewUp: [...camera.viewUp], viewAngle: camera.viewAngle },
+        canvas: { w: canvas.width, h: canvas.height, left: r.left, top: r.top, width: r.width, height: r.height },
+        gain: sc.warp.gain,
+      };
+    },
+  };
   resize();
 }
 main().catch((e) => status("error: " + (e?.message ?? e), true));
