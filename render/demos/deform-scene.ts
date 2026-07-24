@@ -59,18 +59,18 @@ export interface DeformScene {
  *  before the interior visibly deforms. */
 function defaultTargets(sources: Vec3[]): Vec3[] {
   const t = sources.map((c) => [...c] as Vec3);
-  //  SIGN CONVENTION (easy to get backwards): a displacement grid maps the OUTPUT point
-  //  to where it SAMPLES the input — the ray-march evaluates the volume at wp + d(wp).
-  //  So to make the head look TALLER we must displace the top face DOWNWARD (sample from
-  //  lower in the data), and to make it look NARROWER we displace the R faces OUTWARD.
-  //  Displacing "the way you want it to move" gives you exactly the inverse deformation.
+  //  A target is FORWARD: where you want the material at that source corner to move TO.
+  //  The renderer samples at wp + d(wp), so buildDeformScene solves the INVERSE spline
+  //  (tps3d(targets, sources)) — you author targets intuitively and the volume follows the
+  //  pull. To make the head TALLER, move the top face UP and the bottom face DOWN; to make
+  //  it NARROWER, move both R faces toward the centre.
   const STRETCH_S = 62;    // elongate along S (tuned so the deformed head still frames)
   const SQUEEZE_R = 30;    // narrow across R
   for (let i = 0; i < 8; i++) {
     const top = i >= 4;                 // S = hi face
     const rHi = (i & 1) === 1;          // R = hi corner
-    t[i][2] += top ? -STRETCH_S : STRETCH_S * 0.45;
-    t[i][0] += rHi ? SQUEEZE_R : -SQUEEZE_R;
+    t[i][2] += top ? STRETCH_S : -STRETCH_S * 0.45;
+    t[i][0] += rHi ? -SQUEEZE_R : SQUEEZE_R;
   }
   return t;
 }
@@ -116,7 +116,11 @@ export async function buildDeformScene(
   };
 
   // One-time build of the persistent warp field; setTarget updates it in place thereafter.
-  const solveDisp = () => sampleDisplacementGrid(GRID_DIMS, spacing, center, tps3d(sources, targets));
+  // Solve the INVERSE spline (centres at the targets, values source-target) so the volume
+  // follows the pull: the renderer samples at wp + d(wp), and d(target_i) = source_i - target_i
+  // makes the output at a dragged pin fetch the input from the original corner. Building it
+  // the other way (tps3d(sources, targets)) moves the volume OPPOSITE the drag.
+  const solveDisp = () => sampleDisplacementGrid(GRID_DIMS, spacing, center, tps3d(targets, sources));
   const warp = new TransformField(dev, solveDisp(), GRID_DIMS, spacing, { gain: 1, center });
   image.transform = warp;
   buildPins();

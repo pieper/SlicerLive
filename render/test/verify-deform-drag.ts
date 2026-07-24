@@ -9,7 +9,22 @@ import { initDevice } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { buildDeformScene } from "../demos/deform-scene.ts";
 import { framedCamera } from "../demos/camera-control.ts";
+import { tps3d } from "../transform-field.ts";
 import type { Vec3 } from "../mat4.ts";
+
+// DIRECTION (sign) guard: the volume must follow the pull, not recede from it. The renderer
+// samples at wp + d(wp), so a pin dragged to T (from source S) must have d(T) ~ S - T, i.e.
+// point BACK toward the source. buildDeformScene must solve tps3d(targets, sources); building
+// it the other way inverts the deformation (the bug the user caught).
+{
+  const S: Vec3[] = [];
+  for (const z of [-50, 50]) for (const y of [-50, 50]) for (const x of [-50, 50]) S.push([x, y, z]);
+  const T = S.map((c) => [...c] as Vec3); T[7] = [S[7][0] + 30, S[7][1], S[7][2]];   // pull corner 7 +x
+  const d = tps3d(T, S)(T[7]);            // same arg order buildDeformScene uses
+  const followsPull = d[0] < -10;          // points back toward source (-x), volume follows +x pull
+  console.log(`direction (volume follows pull): ${followsPull ? "OK" : "FAIL"} (d(T7).x = ${d[0].toFixed(1)}, want < -10)`);
+  if (!followsPull) Deno.exit(1);
+}
 
 const Q = 256;
 const gpu = await initDevice();
