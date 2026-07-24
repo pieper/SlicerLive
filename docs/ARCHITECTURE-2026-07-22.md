@@ -1,7 +1,8 @@
 # SlicerLive architecture — iteration 2026-07-22
 
-*Status: latest canonical iteration. **Supersedes [`ARCHITECTURE.md`](ARCHITECTURE.md) (2026-06-21)**, which
-remains on disk as the prior version. From now on the architecture note is kept as **versioned, dated files**; each
+*Status: superseded by [`ARCHITECTURE-2026-07-24.md`](ARCHITECTURE-2026-07-24.md) (which adds the interaction/event
+model + multi-rate impedance matching and overturns nothing here). **Supersedes [`ARCHITECTURE.md`](ARCHITECTURE.md)
+(2026-06-21)**, which remains on disk as the prior version. From now on the architecture note is kept as **versioned, dated files**; each
 new iteration opens with a "what changed since the prior version" summary (§0) so the project's evolution across
 machines and experiments stays legible. The enduring thesis, two-axis model, authority/lease model, content-
 addressing rationale, and the substrate (hub-vs-p2p) decision are **unchanged** — see the 2026-06-21 doc for their

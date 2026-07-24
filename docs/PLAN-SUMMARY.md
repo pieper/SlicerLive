@@ -21,7 +21,8 @@ only the halves it needs:
 3. Core + participant framework + TS **LiveRenderer** live **inside `SlicerLive/`**; vtk.js kept until parity, then
    retired; TS renderer is a portable package (browser + Deno).
 4. Canonical vocabulary (LiveRenderer / LiveInterface / LiveModule); "nnModule" was a typo.
-5. Architecture notes = **versioned, dated files** with change summaries. Latest: `ARCHITECTURE-2026-07-22.md`.
+5. Architecture notes = **versioned, dated files** with change summaries. Latest: `ARCHITECTURE-2026-07-24.md`
+   (interaction/event model + multi-rate impedance matching; supersedes `ARCHITECTURE-2026-07-22.md`, overturns nothing).
 
 ## Milestones
 - **M0** — Reactive LiveScene core: node-state store + change events + content-addressed blobs + closure engine +

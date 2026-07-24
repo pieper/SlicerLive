@@ -245,6 +245,14 @@ requirement, which is rare here — peers usually own different nodes/views).
    Slicer built-in WebServer module extended, or a new versioned component.
 8. **Unified authority across >2 places + preemption** — built for one client↔hub; generalize (§5).
 
+*Added 2026-07-24 (see [`ARCHITECTURE-2026-07-24.md`](ARCHITECTURE-2026-07-24.md) §§3–4, 9):*
+
+9. **Event-dispatch API** — the pluggable interactor stack (`hitTest`/`onGrab*`/`cursor`), pointer-capture (grab-or-bubble) semantics, camera-root composition across a multi-view layout.
+10. **Suggestion/snap provider interface** — ranked candidate writes during a drag; render-local vs. module-tier providers; commit-on-release tolerance (wishlist).
+11. **Per-tier rate-control policy** — how each interaction loop (render-local / transport-sync / module-dependency) measures dependency headroom and picks its rate; the predict-then-reconcile contract.
+12. **Hard-realtime / haptic loop as a distinct clock** — a bounded-latency control loop coexisting with best-effort render/sync loops over shared LiveScene state without coupling; likely its own deterministic transport binding.
+13. **Adaptive-resolution controller** — transport-headroom → render-resolution/quality control law on `RenderMode=Remote`.
+
 ---
 
 ## Appendix — vocabulary map (vision ↔ older docs ↔ code)
