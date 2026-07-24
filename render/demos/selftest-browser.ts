@@ -12,7 +12,7 @@ import { SceneRenderer } from "../scene-renderer.ts";
 import type { Field } from "../fields.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachWidgetControls, type Handle } from "./widget-control.ts";
-import { makeXformWidget, type XformWidget, type XMeta } from "./xform-widget.ts";
+import { componentOf, makeXformWidget, type XformWidget, type XMeta } from "./xform-widget.ts";
 import { installIntrospection } from "../introspect.ts";
 import { loadSceneVolumeField } from "../scene-volume.ts";
 import { buildMultiVolume, buildSegmentation, buildVolumeAndFiducials, SCENES } from "./selftest-scenes.ts";
@@ -58,7 +58,7 @@ async function main() {
     // The selftest puts Panoramix's +200mm offset on an INTERACTIVE linear transform node.
     // Give it a rotate+translate widget so this demo edits that transform live.
     widget = makeXformWidget(sc.pano.field, sc.pano.radius * 1.5);
-    fields = [...sc.fields, widget.handles];
+    fields = [...sc.fields, widget.field];
     center = [
       (sc.cta.center[0] + sc.pano.center[0]) / 2,
       (sc.cta.center[1] + sc.pano.center[1]) / 2,
@@ -86,13 +86,17 @@ async function main() {
   const camera = framedCamera(center, radius);
   // Widget first (capture phase) so a grabbed handle doesn't also move the camera; empty
   // space bubbles to the camera as the root interactor.
+  // gizmo pick points are screen-constant, so they must be placed at the same world scale
+  // the shader draws the glyphs — derived from the camera's focal length + pivot distance.
+  const focalPx = () => (canvas.height / 2) / Math.tan((camera.viewAngle * Math.PI) / 360);
   if (widget) {
     attachWidgetControls(canvas, camera, {
-      getHandles: (): Handle[] => widget!.handleList(),
+      getHandles: (): Handle[] => widget!.handleList(widget!.scaleFor(camera.position, focalPx())),
       getSize: () => ({ w: canvas.width, h: canvas.height }),
-      onDragStart: () => widget!.beginDrag(),
+      onDragStart: (h) => { widget!.setActive(componentOf(h.data as XMeta)); widget!.beginDrag(); },
       onDrag: (h, world) => { widget!.drag(h.data as XMeta, h.world, world); scene.syncUniforms(); },
-      onHover: (h) => { widget!.setHover(h ? h.id : null); scene.syncUniforms(); },
+      onDragEnd: () => { widget!.setActive(null); scene.syncUniforms(); },
+      onHover: (h) => { widget!.setActive(h ? componentOf(h.data as XMeta) : null); scene.syncUniforms(); },
       onChange: () => draw(),
     });
   }
@@ -134,8 +138,10 @@ async function main() {
       snapshot: () => {
         const r = canvas.getBoundingClientRect();
         return {
-          handles: widget!.handleList().map((h) => ({ id: h.id, world: h.world, kind: (h.data as { kind: string }).kind, axis: (h.data as { axis?: number }).axis })),
+          handles: widget!.handleList(widget!.scaleFor(camera.position, focalPx())).map((h) => ({ id: h.id, world: h.world, kind: (h.data as { kind: string }).kind, axis: (h.data as { axis?: number }).axis })),
           matrix: [...widget!.matrix()],
+          active: widget!.field.activeId,
+          scale: widget!.scaleFor(camera.position, focalPx()),
           camera: { position: [...camera.position], focalPoint: [...camera.focalPoint], viewUp: [...camera.viewUp], viewAngle: camera.viewAngle },
           canvas: { w: canvas.width, h: canvas.height, left: r.left, top: r.top, width: r.width, height: r.height },
         };

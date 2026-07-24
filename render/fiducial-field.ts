@@ -53,7 +53,7 @@ export class FiducialField implements Field {
     this.clippable = opts.clippable ?? true;
     this.ghost = opts.ghost ?? false;
     this.screen = opts.screenSpace ?? false;
-    this.providesSkip = !this.screen;
+    this.providesSkip = true;   // both modes provide a skip (screen-space uses the camera)
   }
 
   setSpheres(list: Sphere[]) {
@@ -116,6 +116,23 @@ export class FiducialField implements Field {
   // (providesSkip is false in screen-space mode — the world radius varies with the camera.)
 
   skipWGSL(s: number): string {
+    // Screen-space: each sphere's world radius depends on the camera, so use exact
+    // per-sphere distance-to-surface. World mode: nearest-centre minus the field's max radius.
+    if (this.screen) {
+      return /* wgsl */ `
+fn skip_fid${s}(wp : vec3<f32>) -> f32 {
+  let n = i32(u_material.fid${s}_params.x);
+  if (n <= 0) { return 1.0e6; }
+  var best = 1.0e12;
+  for (var k = 0; k < n; k = k + 1) {
+    let sp = u_material.fid${s}_spheres[k];
+    if (sp.w <= 0.0) { continue; }
+    let r = sp.w * length(u_cam.eye.xyz - sp.xyz) / max(u_cam.size.z, 1.0);
+    best = min(best, length(wp - sp.xyz) - r);
+  }
+  return max(best, 0.0);
+}`;
+    }
     return /* wgsl */ `
 fn skip_fid${s}(wp : vec3<f32>) -> f32 {
   let n = i32(u_material.fid${s}_params.x);

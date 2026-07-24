@@ -19,7 +19,7 @@ const ctaBox0 = JSON.stringify(sc.cta.field.aabb());
 
 // (1) centre drag = pure translation by the camera-plane delta
 w.beginDrag();
-const p0 = w.handleList()[0].world;               // centre handle
+const p0 = w.handleList(50)[0].world;               // centre handle
 const delta: Vec3 = [40, -25, 15];
 w.drag({ kind: "translate-cam" }, p0, [p0[0] + delta[0], p0[1] + delta[1], p0[2] + delta[2]]);
 const m1 = w.matrix();
@@ -30,8 +30,8 @@ check("centre drag = pure translation", transOk && noRot, `t=[${m1[12].toFixed(0
 // (2) rotate handle about axis Z (id 6): a 90° swing in the XY plane about the pivot
 const wr = makeXformWidget(sc.pano.field, sc.pano.radius * 1.5);
 wr.beginDrag();
-const rotH = wr.handleList().find((h) => (h.data as { kind: string; axis?: number }).kind === "rotate" && (h.data as { axis: number }).axis === 2)!;
-const pivot = wr.handleList()[0].world;           // centre = pivot at identity
+const rotH = wr.handleList(50).find((h) => (h.data as { kind: string; axis?: number }).kind === "rotate" && (h.data as { axis: number }).axis === 2)!;
+const pivot = wr.handleList(50)[0].world;           // centre = pivot at identity
 // start handle offset (in XY) -> rotate it 90° about Z: (dx,dy) -> (-dy,dx)
 const rx = rotH.world[0] - pivot[0], ry = rotH.world[1] - pivot[1];
 const target: Vec3 = [pivot[0] - ry, pivot[1] + rx, rotH.world[2]];
