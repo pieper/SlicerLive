@@ -63,6 +63,9 @@ function lutFromWindowLevel(): Uint8Array {
   return lut;
 }
 
+/** A markup control point read from the scene (RAS world position). */
+export interface Markup { ras: Vec3; label: string; color: [number, number, number] }
+
 export interface SceneVolume {
   field: ImageField;
   voxels: Float32Array;         // raw scalar volume (HU for CT), (z,y,x) C-order — for the segmenter
@@ -74,6 +77,26 @@ export interface SceneVolume {
   radius: number;               // world bounding radius (for camera distance)
   win: number;                  // display window (for MPR grayscale)
   lev: number;                  // display level
+  markups: Markup[];            // fiducial control points from the scene's Markups nodes (RAS)
+}
+
+/** Read all Markups-node control points from a scene's node dict, in RAS. Control points
+ *  accept either `{position:[x,y,z], label}` or a bare `[x,y,z]`; colour from the node. */
+function parseMarkups(nodes: Record<string, Node>): Markup[] {
+  const out: Markup[] = [];
+  for (const n of Object.values(nodes)) {
+    if (!/Markups.*Node$/.test(n.class)) continue;
+    const cps = (n.attrs?.controlPoints ?? n.attrs?.markups) as unknown[] | undefined;
+    if (!Array.isArray(cps)) continue;
+    const color = (n.attrs?.color as [number, number, number]) ?? [1, 0.85, 0.2];
+    cps.forEach((cp, i) => {
+      const c = cp as { position?: number[]; label?: string } & number[];
+      const p = (c.position ?? cp) as number[];
+      if (!Array.isArray(p) || p.length < 3) return;
+      out.push({ ras: [p[0], p[1], p[2]], label: c.label ?? `${n.name ?? "F"}-${i + 1}`, color });
+    });
+  }
+  return out;
 }
 
 /** Fetch a scene json + its scalar volume and return a renderable ImageField. */
@@ -142,5 +165,5 @@ export async function loadSceneVolumeField(
   const [lo, hi] = field.aabb();
   const center: Vec3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
   const radius = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2;
-  return { field, voxels: zv.data, dims: zv.dims, ijkToRAS, name: vol.name ?? "volume", range: zv.range, center, radius, win, lev };
+  return { field, voxels: zv.data, dims: zv.dims, ijkToRAS, name: vol.name ?? "volume", range: zv.range, center, radius, win, lev, markups: parseMarkups(nodes) };
 }

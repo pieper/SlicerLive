@@ -9,7 +9,7 @@ import { slicerDefaultOffset01 } from "../slice-renderer.ts";
 import { VtkCamera } from "../vtk-camera.ts";
 import { CameraInteractor } from "../vtk-interactor.ts";
 import { SliceInteractor, mmToOffset01, offset01ToMm } from "../slice-interactor.ts";
-import type { Vec3 } from "../mat4.ts";
+import { lookAt, multiply, perspectiveZO, type Vec3 } from "../mat4.ts";
 import { installIntrospection } from "../introspect.ts";
 
 const status = (msg: string, err = false) => {
@@ -55,6 +55,62 @@ async function main() {
     sagittal: slicerDefaultOffset01("sagittal", rs.sv.dims, rs.sv.ijkToRAS, rasLo0, rasHi0),
   };
 
+  // --- markups: draw the scene's control points on the slices (2D overlay) + in 3D, and
+  // click one (2D or 3D) to jump all slices to it (Slicer "Jump to Slice"). ---
+  const markups = rs.sv.markups;
+  const nAxisOf: Record<string, 0 | 1 | 2> = { axial: 2, coronal: 1, sagittal: 0 };
+  // one transparent 2D canvas over each slice cell (pointer-events:none -> clicks fall through)
+  const ovc: Record<string, HTMLCanvasElement> = {};
+  const ov2d: Record<string, CanvasRenderingContext2D> = {};
+  for (const p of planes) {
+    const o = document.createElement("canvas");
+    o.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;border-radius:5px;background:transparent;";
+    cv[p.cell].parentElement!.appendChild(o);
+    ovc[p.cell] = o; ov2d[p.cell] = o.getContext("2d")!;
+  }
+  const MARK_TOL_MM = 40;   // fade a markup out beyond this distance from the plane
+  const drawOverlay = (p: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal" }) => {
+    const o = ovc[p.cell], ctx = ov2d[p.cell];
+    const w = cv[p.cell].clientWidth, h = cv[p.cell].clientHeight;
+    if (!w || !h) return;
+    const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
+    if (o.width !== Math.floor(w * dpr)) { o.width = Math.floor(w * dpr); o.height = Math.floor(h * dpr); }
+    ctx.setTransform(o.width / w, 0, 0, o.height / h, 0, 0);   // draw in CSS px
+    ctx.clearRect(0, 0, w, h);
+    for (const m of markups) {
+      const { u, v, distMm } = rs.slice.rasToView(p.orient, off[p.cell], m.ras, w / h);
+      if (u < 0 || u > 1 || v < 0 || v > 1) continue;
+      const ad = Math.abs(distMm);
+      if (ad > MARK_TOL_MM) continue;
+      const near = ad < 3;                                       // ~on the plane
+      ctx.globalAlpha = near ? 1 : Math.max(0.2, 1 - ad / MARK_TOL_MM);
+      ctx.fillStyle = `rgb(${m.color.map((c) => Math.round(c * 255)).join(",")})`;
+      ctx.strokeStyle = "rgba(0,0,0,0.7)"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(u * w, v * h, near ? 6 : 4, 0, Math.PI * 2);
+      if (near) { ctx.fill(); ctx.stroke(); } else { ctx.stroke(); }   // off-plane -> hollow ring
+    }
+    ctx.globalAlpha = 1;
+  };
+  // nearest markup to a slice-view click (u,v in [0,1] within a cell of size w×h), or null
+  const markupAtSlice = (p: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal" }, u: number, v: number, w: number, h: number) => {
+    let best: typeof markups[number] | null = null, bestD = 14;
+    for (const m of markups) {
+      const pr = rs.slice.rasToView(p.orient, off[p.cell], m.ras, w / h);
+      if (Math.abs(pr.distMm) > MARK_TOL_MM) continue;
+      const d = Math.hypot((pr.u - u) * w, (pr.v - v) * h);
+      if (d < bestD) { bestD = d; best = m; }
+    }
+    return best;
+  };
+  const jumpAll = (ras: Vec3) => {
+    for (const q of planes) {
+      const a = nAxisOf[q.orient];
+      off[q.cell] = Math.max(0, Math.min(1, (ras[a] - rasLo0[a]) / (rasHi0[a] - rasLo0[a])));
+      drawPlane(q);
+    }
+    draw3d();
+  };
+
   // Slicer's DEFAULT 3D camera (vtkMRMLCameraNode): position (0,500,0), focalPoint at the
   // RAS ORIGIN (not the volume centre), viewUp +S, viewAngle 30. Slicer does not refit the
   // camera when a volume is loaded, so parity means adopting the same fixed default.
@@ -66,6 +122,7 @@ async function main() {
     if (!shown(p.cell)) return;
     rs.slice.setPlane(p.orient, off[p.cell]);
     rs.slice.renderToView(cx[p.cell].getCurrentTexture().createView({ format: srgb }), cv[p.cell].width, cv[p.cell].height);
+    drawOverlay(p);   // markup glyphs on top
   };
   const draw3d = () => {
     if (!shown("threeD")) return;
@@ -115,7 +172,7 @@ async function main() {
   // left-drag over a slice = scroll it (Slicer's standalone-4up default): up/right = forward,
   // down/left = back, one step per SCROLL_PX. Wheel + keys still work as before.
   const SCROLL_PX = 7;
-  let sliceDrag: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal"; x: number; y: number; acc: number } | null = null;
+  let sliceDrag: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal"; x: number; y: number; acc: number; moved: number } | null = null;
   for (const p of planes) {
     cv[p.cell].addEventListener("wheel", (e) => {
       e.preventDefault();
@@ -125,13 +182,14 @@ async function main() {
     }, { passive: false });
     cv[p.cell].addEventListener("pointerdown", (e) => {
       if (isDoubleClick(p.cell, e)) return;                // double-click -> maximize/restore
-      if (e.button !== 0) return;                          // left = scroll
+      if (e.button !== 0) return;                          // left = scroll (or click a markup)
       e.preventDefault();
-      sliceDrag = { cell: p.cell, orient: p.orient, x: e.clientX, y: e.clientY, acc: 0 };
+      sliceDrag = { cell: p.cell, orient: p.orient, x: e.clientX, y: e.clientY, acc: 0, moved: 0 };
       cv[p.cell].setPointerCapture(e.pointerId);
     });
     cv[p.cell].addEventListener("pointermove", (e) => {
       if (!sliceDrag || sliceDrag.cell !== p.cell) return;
+      sliceDrag.moved += Math.abs(e.clientX - sliceDrag.x) + Math.abs(e.clientY - sliceDrag.y);
       sliceDrag.acc += (e.clientX - sliceDrag.x) - (e.clientY - sliceDrag.y);   // right/up = forward
       sliceDrag.x = e.clientX; sliceDrag.y = e.clientY;
       while (Math.abs(sliceDrag.acc) >= SCROLL_PX) {
@@ -141,7 +199,17 @@ async function main() {
       }
       drawPlane(p);
     });
-    const endDrag = (e: PointerEvent) => { if (sliceDrag?.cell === p.cell) { sliceDrag = null; try { cv[p.cell].releasePointerCapture(e.pointerId); } catch { /* already released */ } } };
+    const endDrag = (e: PointerEvent) => {
+      if (sliceDrag?.cell !== p.cell) return;
+      const wasClick = sliceDrag.moved < 5;
+      sliceDrag = null;
+      try { cv[p.cell].releasePointerCapture(e.pointerId); } catch { /* already released */ }
+      if (wasClick && markups.length) {                    // a click (not a scroll) -> jump to a markup
+        const r = cv[p.cell].getBoundingClientRect();
+        const m = markupAtSlice(p, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height, r.width, r.height);
+        if (m) { jumpAll(m.ras); hook?.logEvent("markupJump", { from: p.cell, ras: m.ras, label: m.label }); }
+      }
+    };
     cv[p.cell].addEventListener("pointerup", endDrag);
     cv[p.cell].addEventListener("pointercancel", endDrag);
     // Slicer routes keys to the view under the pointer
@@ -164,16 +232,43 @@ async function main() {
     const r = cv.threeD.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
+  // Nearest markup to a 3D-view click (client px), via the same view·proj the scene draws.
+  const markupAt3D = (clientX: number, clientY: number) => {
+    if (!markups.length) return null;
+    const r = cv.threeD.getBoundingClientRect();
+    const vp = multiply(perspectiveZO((camera.viewAngle * Math.PI) / 180, r.width / r.height, 1, 100000), lookAt(camera.position, camera.focalPoint, camera.viewUp));
+    let best: typeof markups[number] | null = null, bestD = 16;
+    for (const m of markups) {
+      const p = m.ras;
+      const cw = vp[3] * p[0] + vp[7] * p[1] + vp[11] * p[2] + vp[15];
+      if (cw <= 0) continue;
+      const sx = r.left + ((vp[0] * p[0] + vp[4] * p[1] + vp[8] * p[2] + vp[12]) / cw * 0.5 + 0.5) * r.width;
+      const sy = r.top + (1 - ((vp[1] * p[0] + vp[5] * p[1] + vp[9] * p[2] + vp[13]) / cw * 0.5 + 0.5)) * r.height;
+      const d = Math.hypot(sx - clientX, sy - clientY);
+      if (d < bestD) { bestD = d; best = m; }
+    }
+    return best;
+  };
   cv.threeD.addEventListener("contextmenu", (e) => e.preventDefault());  // right-drag = zoom
+  let threeDDown: { x: number; y: number; moved: number } | null = null;
   cv.threeD.addEventListener("pointerdown", (e) => {
     if (isDoubleClick("threeD", e)) return;   // double-click -> maximize/restore
     const { x, y } = localXY(e), { h } = viewSize();
+    threeDDown = { x: e.clientX, y: e.clientY, moved: 0 };
     interactor.start(e.button as 0 | 1 | 2, x, y, h, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
     cv.threeD.setPointerCapture(e.pointerId);
     hook?.logEvent("cameraStart", { action: interactor.action, x, y, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
   });
-  cv.threeD.addEventListener("pointerup", (e) => { interactor.end(); cv.threeD.releasePointerCapture(e.pointerId); });
+  cv.threeD.addEventListener("pointerup", (e) => {
+    interactor.end(); try { cv.threeD.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    if (threeDDown && threeDDown.moved < 5 && e.button === 0) {   // a click (not an orbit) -> jump to a markup
+      const m = markupAt3D(e.clientX, e.clientY);
+      if (m) { jumpAll(m.ras); hook?.logEvent("markupJump", { from: "threeD", ras: m.ras, label: m.label }); }
+    }
+    threeDDown = null;
+  });
   cv.threeD.addEventListener("pointermove", (e) => {
+    if (threeDDown) threeDDown.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
     if (interactor.action === "none") return;
     const { x, y } = localXY(e), { w, h } = viewSize();
     interactor.move(x, y, w, h);
@@ -260,6 +355,20 @@ async function main() {
   cv.threeD.addEventListener("pointerdown", (e) => hook.logEvent("pointerdown", { cell: "threeD", x: e.offsetX, y: e.offsetY, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey }));
   cv.threeD.addEventListener("wheel", (e) => hook.logEvent("wheel", { cell: "threeD", deltaY: e.deltaY, distance: camera.distance }), { passive: true });
 
+  // markup harness hook: control points + a 3D-view projector so a test can click one
+  (globalThis as unknown as { __realDbg: unknown }).__realDbg = {
+    markups: () => markups.map((m) => ({ ras: m.ras, label: m.label })),
+    offsets: () => Object.fromEntries(planes.map((p) => [p.cell, off[p.cell]])),
+    project3D: (ras: Vec3) => {
+      const r = cv.threeD.getBoundingClientRect();
+      const vp = multiply(perspectiveZO((camera.viewAngle * Math.PI) / 180, r.width / r.height, 1, 100000), lookAt(camera.position, camera.focalPoint, camera.viewUp));
+      const cw = vp[3] * ras[0] + vp[7] * ras[1] + vp[11] * ras[2] + vp[15];
+      return {
+        x: r.left + ((vp[0] * ras[0] + vp[4] * ras[1] + vp[8] * ras[2] + vp[12]) / cw * 0.5 + 0.5) * r.width,
+        y: r.top + (1 - ((vp[1] * ras[0] + vp[5] * ras[1] + vp[9] * ras[2] + vp[13]) / cw * 0.5 + 0.5)) * r.height,
+      };
+    },
+  };
   resize();
 }
 main().catch((e) => status("error: " + (e?.message ?? e), true));

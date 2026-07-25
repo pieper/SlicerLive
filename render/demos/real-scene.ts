@@ -4,6 +4,7 @@
 import type { Gpu } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { SliceRenderer } from "../slice-renderer.ts";
+import { FiducialField, type Sphere } from "../fiducial-field.ts";
 import { loadSceneVolumeField, type SceneVolume } from "../scene-volume.ts";
 
 export interface AnatAxis { axis: 0 | 1 | 2; label: "AXIAL" | "CORONAL" | "SAGITTAL"; cls: "red" | "green" | "yellow" }
@@ -28,6 +29,7 @@ export interface RealScene {
   scene: SceneRenderer;
   slice: SliceRenderer;
   axes: AnatAxis[];   // one per IJK axis, anatomically classified
+  markupField?: FiducialField;   // the scene's markup points, drawn in 3D (null if none)
 }
 
 export async function buildRealScene(
@@ -38,7 +40,16 @@ export async function buildRealScene(
 ): Promise<RealScene> {
   const sv = await loadSceneVolumeField(gpu.device, sceneUrl, onBytes);
   const scene = new SceneRenderer(gpu, format);
-  scene.build([sv.field]);
+  // Markup control points from the scene, drawn in 3D as screen-constant spheres. Ghost so
+  // they stay visible (and clickable) through the volume — this is a navigation aid.
+  const rPin = Math.max(3, sv.radius * 0.015);
+  let markupField: FiducialField | undefined;
+  if (sv.markups.length) {
+    const pins: Sphere[] = sv.markups.map((m) => ({ center: m.ras, radius: 9, color: [m.color[0], m.color[1], m.color[2], 1] }));
+    markupField = new FiducialField(pins, { screenSpace: true, ghost: true, shininess: 60 });
+    void rPin;
+  }
+  scene.build(markupField ? [sv.field, markupField] : [sv.field]);
   scene.setBackground(0.05, 0.06, 0.09);
 
   const slice = new SliceRenderer(gpu, format);
@@ -48,5 +59,5 @@ export async function buildRealScene(
   slice.setWindowLevel(sv.win, sv.lev);
   slice.setOverlayOpacity(0);
 
-  return { sv, scene, slice, axes: anatomicalAxes(sv.ijkToRAS) };
+  return { sv, scene, slice, axes: anatomicalAxes(sv.ijkToRAS), markupField };
 }

@@ -237,6 +237,23 @@ export class SliceRenderer {
     return applyMat4(this.p2t, ras);
   }
 
+  /** Project a RAS point onto a plane's view: returns u,v in [0,1] (y down, matching the
+   *  rendered pixels for a viewport of aspect w/h) and the signed distance (mm) from the
+   *  point to the plane along its normal. Inverse of viewToTex; used to place 2D markup
+   *  glyphs and hit-test clicks on them. */
+  rasToView(orient: Orientation, offset01: number, ras: Vec3, aspectWH: number): { u: number; v: number; distMm: number } {
+    const b = BASES[orient];
+    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis], vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
+    const span = Math.max(uExt, vExt);
+    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
+    const c: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    c[b.nAxis] = this.rasLo[b.nAxis] + offset01 * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    const d: Vec3 = [ras[0] - c[0], ras[1] - c[1], ras[2] - c[2]];
+    const u = 0.5 + (d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2]) / uS;
+    const v = 0.5 - (d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2]) / vS;
+    return { u, v, distMm: d[b.nAxis] };
+  }
+
   private drawInto(view: GPUTextureView, w: number, h: number) {
     const b = BASES[this.orient];
     const span = this.viewSpanMm();
