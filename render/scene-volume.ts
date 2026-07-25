@@ -115,7 +115,12 @@ export async function loadSceneVolumeField(
   const raw = await (await fetch(sceneUrl)).json() as SceneWrapper | Record<string, Node>;
   const wrapper = (raw as SceneWrapper).nodes ? raw as SceneWrapper : { nodes: raw as Record<string, Node> };
   const nodes = wrapper.nodes!;
-  const blobBase = wrapper.blobBase ?? sceneUrl.replace(/[^/]*$/, "") + "blobs/";
+  // Resolve blobBase RELATIVE TO THE SCENE FILE (not the page): a portable export can
+  // ship `"blobBase":"blobs/"` next to scene.json and be served from any path. Absolute
+  // blobBase (e.g. the JS2 bucket URL) is returned unchanged by URL resolution.
+  const pageBase = (globalThis as { location?: { href?: string } }).location?.href ?? "file:///";
+  const sceneAbs = new URL(sceneUrl, pageBase).href;
+  const blobBase = new URL(wrapper.blobBase ?? "./blobs/", sceneAbs).href;
 
   const vol = Object.values(nodes).find((n) => n.class === "vtkMRMLScalarVolumeNode" && n.attrs?.zarr);
   if (!vol) throw new Error("no zarr ScalarVolumeNode in scene");

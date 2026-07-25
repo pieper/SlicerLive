@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LiveStory</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b0e14; color: #d7e0ee;
+    font: 15px/1.5 -apple-system, system-ui, "Segoe UI", sans-serif; }
+  #app { display: grid; grid-template-columns: 360px 1fr; height: 100vh; }
+  #narrative { overflow-y: auto; border-right: 1px solid #1e2637; padding: 18px 20px 60px; }
+  #storyTitle { font-size: 20px; font-weight: 650; margin: 2px 0 14px; }
+  .page { border: 1px solid #1e2637; border-radius: 10px; padding: 12px 14px; margin-bottom: 12px;
+    cursor: pointer; transition: border-color .15s, background .15s; }
+  .page:hover { border-color: #2f3f5c; }
+  .page.active { border-color: #4f83d6; background: #121a2b; }
+  .page h3 { margin: 0 0 6px; font-size: 15px; font-weight: 620; color: #eaf0fa; }
+  .page .num { color: #6b7c98; font-weight: 600; margin-right: 6px; }
+  .page p { margin: 6px 0; color: #b7c4da; white-space: pre-wrap; }
+  .page .links { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .page .links a { font-size: 13px; color: #7fb0ff; text-decoration: none; border: 1px solid #26364f;
+    border-radius: 999px; padding: 2px 10px; }
+  .page .links a:hover { background: #16233a; }
+  #viewerWrap { position: relative; }
+  #viewer { width: 100%; height: 100%; border: 0; display: block; }
+  #empty { padding: 40px 20px; color: #6b7c98; }
+  #hint { position: absolute; bottom: 10px; left: 12px; font-size: 12px; color: #6b7c98;
+    background: rgba(11,14,20,.7); padding: 3px 8px; border-radius: 6px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="narrative">
+    <div id="storyTitle">LiveStory</div>
+    <div id="pages"><div id="empty">No story pages yet. Capture views in the LiveStory module.</div></div>
+  </div>
+  <div id="viewerWrap">
+    <iframe id="viewer" title="SlicerLive viewer"></iframe>
+    <div id="hint">Click a page to jump the view</div>
+  </div>
+</div>
+<script type="module">
+  const params = new URLSearchParams(location.search);
+  const sceneUrl = params.get("scene") || "/scenes/scene.json";
+  // viewer renders the scene; story.json sits next to the scene json
+  document.getElementById("viewer").src = "viewer/real.html?scene=" + encodeURIComponent(sceneUrl);
+  const storyUrl = sceneUrl.replace(/\.json$/, ".story.json");
+
+  // Red/Green/Yellow slice -> viewer cell, the RAS component of the slice origin
+  // (row-major sliceToRAS translation: R=idx3, A=idx7, S=idx11) and Slicer's signed
+  // sliceOffset direction along the normal (+S axial, +A coronal, -R sagittal).
+  const SLICE_MAP = { Red: ["axial", 11, 1], Green: ["coronal", 7, 1], Yellow: ["sagittal", 3, -1] };
+
+  function applyPage(page) {
+    const w = document.getElementById("viewer").contentWindow;
+    const api = w && w.__slicerlive;
+    if (!api) return false;
+    if (page.camera) api.setCamera(page.camera);
+    if (page.slices && api.setSliceOffsetMm) {
+      for (const [layout, s] of Object.entries(page.slices)) {
+        const m = SLICE_MAP[layout];
+        if (m && s.sliceToRAS) api.setSliceOffsetMm(m[0], m[2] * s.sliceToRAS[m[1]]);
+      }
+    }
+    if (api.render) api.render();
+    return true;
+  }
+
+  // wait until the embedded viewer has installed __slicerlive.ready
+  function whenViewerReady(cb, tries = 120) {
+    const w = document.getElementById("viewer").contentWindow;
+    if (w && w.__slicerlive && w.__slicerlive.ready) return cb();
+    if (tries <= 0) return;
+    setTimeout(() => whenViewerReady(cb, tries - 1), 250);
+  }
+
+  function selectPage(idx, pages) {
+    document.querySelectorAll(".page").forEach((e, i) => e.classList.toggle("active", i === idx));
+    whenViewerReady(() => applyPage(pages[idx]));
+  }
+
+  fetch(storyUrl).then((r) => r.ok ? r.json() : null).then((story) => {
+    if (!story) return;
+    document.getElementById("storyTitle").textContent = story.title || "LiveStory";
+    const pages = story.pages || [];
+    const host = document.getElementById("pages");
+    if (!pages.length) return;
+    host.innerHTML = "";
+    pages.forEach((p, i) => {
+      const div = document.createElement("div");
+      div.className = "page";
+      const links = (p.links || []).map((l) =>
+        `<a href="${l.url}" target="_blank" rel="noopener">${l.label || l.url}</a>`).join("");
+      div.innerHTML =
+        `<h3><span class="num">${i + 1}.</span>${p.title || "Untitled"}</h3>` +
+        (p.text ? `<p>${p.text}</p>` : "") +
+        (links ? `<div class="links">${links}</div>` : "");
+      div.addEventListener("click", () => selectPage(i, pages));
+      host.appendChild(div);
+    });
+    whenViewerReady(() => selectPage(0, pages));   // open on the first page
+  }).catch(() => {});
+</script>
+</body>
+</html>

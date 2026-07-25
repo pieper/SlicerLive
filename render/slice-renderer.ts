@@ -254,6 +254,24 @@ export class SliceRenderer {
     return { u, v, distMm: d[b.nAxis] };
   }
 
+  /** Map a view (u,v in [0,1], y down) on a plane back to a RAS point ON that plane —
+   *  the exact inverse of rasToView (same aspect convention). Used to drag a 2D markup:
+   *  the point lands on the current slice (its out-of-plane coord becomes the plane offset). */
+  viewToRas(orient: Orientation, offset01: number, u: number, v: number, aspectWH: number): Vec3 {
+    const b = BASES[orient];
+    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis], vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
+    const span = Math.max(uExt, vExt);
+    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
+    const c: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    c[b.nAxis] = this.rasLo[b.nAxis] + offset01 * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    const du = (u - 0.5) * uS, dv = (0.5 - v) * vS;
+    return [
+      c[0] + b.uDir[0] * du + b.vDir[0] * dv,
+      c[1] + b.uDir[1] * du + b.vDir[1] * dv,
+      c[2] + b.uDir[2] * du + b.vDir[2] * dv,
+    ];
+  }
+
   private drawInto(view: GPUTextureView, w: number, h: number) {
     const b = BASES[this.orient];
     const span = this.viewSpanMm();
