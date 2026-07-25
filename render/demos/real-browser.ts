@@ -61,28 +61,61 @@ async function main() {
   const camera = VtkCamera.slicerDefault();
   const interactor = new CameraInteractor(camera, () => draw3d());
 
+  const shown = (n: string) => cv[n].width > 0 && cv[n].height > 0;   // a maximized-away cell has 0 size
   const drawPlane = (p: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal" }) => {
+    if (!shown(p.cell)) return;
     rs.slice.setPlane(p.orient, off[p.cell]);
     rs.slice.renderToView(cx[p.cell].getCurrentTexture().createView({ format: srgb }), cv[p.cell].width, cv[p.cell].height);
   };
   const draw3d = () => {
+    if (!shown("threeD")) return;
     rs.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, cv.threeD.width, cv.threeD.height);
     rs.scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
   };
-  const drawAll = () => { for (const p of planes) drawPlane(p); draw3d(); status(`${rs.sv.name} · real ${rs.sv.dims.join("×")} volume · 3 MPR + 3D VR · scroll a slice, drag 3D to orbit`); };
+  const drawAll = () => { for (const p of planes) drawPlane(p); draw3d(); status(`${rs.sv.name} · real ${rs.sv.dims.join("×")} · left-drag a slice to scroll · double-click to maximize · drag 3D to orbit`); };
 
+  // Cells now fill the page (non-square). Size the drawing buffer to each canvas's actual
+  // client rect; a hidden (maximized-away) cell reports 0 and is left at 0 so we skip it.
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
-    for (const n of names) { const s = Math.floor(cv[n].clientWidth * dpr); cv[n].width = s; cv[n].height = s; }
+    for (const n of names) {
+      cv[n].width = Math.floor(cv[n].clientWidth * dpr);
+      cv[n].height = Math.floor(cv[n].clientHeight * dpr);
+    }
     drawAll();
   };
   globalThis.addEventListener("resize", resize);
+
+  // --- double-click a view to MAXIMIZE it (fill the 4-up), double-click again to restore.
+  // The layout is a CSS grid of separate canvases, so maximize is a class toggle + resize.
+  // Detected from pointerdown timing (slice drags preventDefault, which suppresses dblclick).
+  const grid = document.getElementById("grid")!;
+  const cellDiv = (cell: string) => grid.querySelector<HTMLElement>(`.cell[data-cell="${cell}"]`)!;
+  let maxCell: string | null = null;
+  const toggleMax = (cell: string) => {
+    maxCell = maxCell === cell ? null : cell;
+    for (const n of names) cellDiv(n).classList.toggle("max", n === maxCell);
+    grid.classList.toggle("has-max", maxCell !== null);
+    requestAnimationFrame(resize);   // let the grid re-layout, then re-size the buffers
+  };
+  let lastDown: { t: number; x: number; y: number; cell: string } | null = null;
+  const isDoubleClick = (cell: string, e: PointerEvent): boolean => {
+    const dbl = !!lastDown && lastDown.cell === cell && (e.timeStamp - lastDown.t) < 350 &&
+      Math.hypot(e.clientX - lastDown.x, e.clientY - lastDown.y) < 6;
+    lastDown = dbl ? null : { t: e.timeStamp, x: e.clientX, y: e.clientY, cell };
+    if (dbl) { e.preventDefault(); e.stopPropagation(); toggleMax(cell); }
+    return dbl;
+  };
 
   // Slice-view stepping — Slicer's vtkMRMLSliceIntersectionWidget semantics:
   // wheel fwd / f / Right / Up = increment by the volume spacing along the slice normal;
   // back / b / Left / Down = decrement; steps outside the slice bounds are rejected.
   const sliceIx = new SliceInteractor({ ijkToRAS: rs.sv.ijkToRAS, rasLo: rasLo0, rasHi: rasHi0 });
   let focusedCell: "axial" | "coronal" | "sagittal" | null = null;
+  // left-drag over a slice = scroll it (Slicer's standalone-4up default): up/right = forward,
+  // down/left = back, one step per SCROLL_PX. Wheel + keys still work as before.
+  const SCROLL_PX = 7;
+  let sliceDrag: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal"; x: number; y: number; acc: number } | null = null;
   for (const p of planes) {
     cv[p.cell].addEventListener("wheel", (e) => {
       e.preventDefault();
@@ -90,6 +123,27 @@ async function main() {
       drawPlane(p);
       hook?.logEvent("sliceStep", { cell: p.cell, via: "wheel", forward: e.deltaY < 0, offsetMm: offset01ToMm(p.orient, off[p.cell], rasLo0, rasHi0) });
     }, { passive: false });
+    cv[p.cell].addEventListener("pointerdown", (e) => {
+      if (isDoubleClick(p.cell, e)) return;                // double-click -> maximize/restore
+      if (e.button !== 0) return;                          // left = scroll
+      e.preventDefault();
+      sliceDrag = { cell: p.cell, orient: p.orient, x: e.clientX, y: e.clientY, acc: 0 };
+      cv[p.cell].setPointerCapture(e.pointerId);
+    });
+    cv[p.cell].addEventListener("pointermove", (e) => {
+      if (!sliceDrag || sliceDrag.cell !== p.cell) return;
+      sliceDrag.acc += (e.clientX - sliceDrag.x) - (e.clientY - sliceDrag.y);   // right/up = forward
+      sliceDrag.x = e.clientX; sliceDrag.y = e.clientY;
+      while (Math.abs(sliceDrag.acc) >= SCROLL_PX) {
+        const fwd = sliceDrag.acc > 0;
+        off[p.cell] = sliceIx.wheel(p.orient, off[p.cell], fwd);
+        sliceDrag.acc -= fwd ? SCROLL_PX : -SCROLL_PX;
+      }
+      drawPlane(p);
+    });
+    const endDrag = (e: PointerEvent) => { if (sliceDrag?.cell === p.cell) { sliceDrag = null; try { cv[p.cell].releasePointerCapture(e.pointerId); } catch { /* already released */ } } };
+    cv[p.cell].addEventListener("pointerup", endDrag);
+    cv[p.cell].addEventListener("pointercancel", endDrag);
     // Slicer routes keys to the view under the pointer
     cv[p.cell].addEventListener("pointerenter", () => { focusedCell = p.cell; });
     cv[p.cell].addEventListener("pointerleave", () => { if (focusedCell === p.cell) focusedCell = null; });
@@ -112,6 +166,7 @@ async function main() {
   };
   cv.threeD.addEventListener("contextmenu", (e) => e.preventDefault());  // right-drag = zoom
   cv.threeD.addEventListener("pointerdown", (e) => {
+    if (isDoubleClick("threeD", e)) return;   // double-click -> maximize/restore
     const { x, y } = localXY(e), { h } = viewSize();
     interactor.start(e.button as 0 | 1 | 2, x, y, h, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
     cv.threeD.setPointerCapture(e.pointerId);
@@ -203,7 +258,7 @@ async function main() {
     cv[p.cell].addEventListener("pointerdown", (e) => hook.logEvent("pointerdown", { cell: p.cell, x: e.offsetX, y: e.offsetY, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey }));
   }
   cv.threeD.addEventListener("pointerdown", (e) => hook.logEvent("pointerdown", { cell: "threeD", x: e.offsetX, y: e.offsetY, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey }));
-  cv.threeD.addEventListener("wheel", (e) => hook.logEvent("wheel", { cell: "threeD", deltaY: e.deltaY, distance: dist }), { passive: true });
+  cv.threeD.addEventListener("wheel", (e) => hook.logEvent("wheel", { cell: "threeD", deltaY: e.deltaY, distance: camera.distance }), { passive: true });
 
   resize();
 }

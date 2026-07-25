@@ -118,6 +118,10 @@ export class SliceRenderer {
   private u = new Float32Array(36);  // p2t(16) + origin(4) + uvec(4) + vvec(4) + params(4) + size(4)
   private bind?: GPUBindGroup;
   private overlay?: GPUTexture;
+  // actual in-plane extents (mm) spanned by the LAST rendered viewport, aspect-corrected so
+  // pixels stay isotropic on a non-square view (0 until first render → fall back to the square span).
+  private uSpanMm = 0;
+  private vSpanMm = 0;
 
   // volume geometry + current plane
   private p2t: Mat4 = new Float32Array(16);
@@ -222,12 +226,13 @@ export class SliceRenderer {
    *  ijk = tex*dims - 0.5. Anisotropy/rotation are handled by the same p2t the shader uses. */
   viewToTex(u: number, v: number): Vec3 {
     const b = BASES[this.orient];
-    const span = this.viewSpanMm();
+    const uS = this.uSpanMm || this.viewSpanMm();   // match the last render's aspect
+    const vS = this.vSpanMm || this.viewSpanMm();
     const c = this.planeCenter();
     const ras: Vec3 = [
-      c[0] + b.uDir[0] * (u - 0.5) * span + b.vDir[0] * (0.5 - v) * span,
-      c[1] + b.uDir[1] * (u - 0.5) * span + b.vDir[1] * (0.5 - v) * span,
-      c[2] + b.uDir[2] * (u - 0.5) * span + b.vDir[2] * (0.5 - v) * span,
+      c[0] + b.uDir[0] * (u - 0.5) * uS + b.vDir[0] * (0.5 - v) * vS,
+      c[1] + b.uDir[1] * (u - 0.5) * uS + b.vDir[1] * (0.5 - v) * vS,
+      c[2] + b.uDir[2] * (u - 0.5) * uS + b.vDir[2] * (0.5 - v) * vS,
     ];
     return applyMat4(this.p2t, ras);
   }
@@ -235,11 +240,17 @@ export class SliceRenderer {
   private drawInto(view: GPUTextureView, w: number, h: number) {
     const b = BASES[this.orient];
     const span = this.viewSpanMm();
+    // Aspect-correct so pixels are ISOTROPIC on a non-square viewport: the fitted `span`
+    // fills the SMALLER dimension, the larger dimension shows more (letterbox). Square
+    // viewports (w==h) get uS==vS==span — identical to before, so square demos are unchanged.
+    const uS = span * Math.max(1, w / h);
+    const vS = span * Math.max(1, h / w);
+    this.uSpanMm = uS; this.vSpanMm = vS;
     const c = this.planeCenter();
     this.u.set(this.p2t, 0);                                                                  // p2t   [0..15]
     this.u[16] = c[0]; this.u[17] = c[1]; this.u[18] = c[2]; this.u[19] = 0;                   // origin[16..19]
-    this.u[20] = b.uDir[0] * span; this.u[21] = b.uDir[1] * span; this.u[22] = b.uDir[2] * span; this.u[23] = 0; // uvec [20..23]
-    this.u[24] = b.vDir[0] * span; this.u[25] = b.vDir[1] * span; this.u[26] = b.vDir[2] * span; this.u[27] = 0; // vvec [24..27]
+    this.u[20] = b.uDir[0] * uS; this.u[21] = b.uDir[1] * uS; this.u[22] = b.uDir[2] * uS; this.u[23] = 0; // uvec [20..23]
+    this.u[24] = b.vDir[0] * vS; this.u[25] = b.vDir[1] * vS; this.u[26] = b.vDir[2] * vS; this.u[27] = 0; // vvec [24..27]
     // params[28..30] set via setWindowLevel/setOverlayOpacity
     this.u[32] = w; this.u[33] = h;                                                            // size [32..35]
     this.dev.queue.writeBuffer(this.ubuf, 0, this.u);
