@@ -6,9 +6,11 @@
 // Bundled to live/webgpu/segroulette.js (idc-worker.js sits next to it).
 import { initDevice } from "../device.ts";
 import { slicerDefaultOffset01 } from "../slice-renderer.ts";
+import { SliceInteractor } from "../slice-interactor.ts";
 import { buildSegrouletteScene, type SegrouletteScene } from "./segroulette-scene.ts";
 import { type Crosshair4up, mountCrosshair } from "./crosshair.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
+import { attachSliceControls } from "./slice-control.ts";
 import { loadManifest, loadSeries, spinRandom } from "../vendor/idc_tools/index.js";
 import type { LoadResult, RouletteManifest, SeriesEntry } from "../vendor/idc_tools/types.js";
 import type { Vec3 } from "../mat4.ts";
@@ -51,6 +53,7 @@ async function main() {
   ] as const;
 
   let rs: SegrouletteScene | null = null;
+  let sliceIx: SliceInteractor | null = null;   // Slicer-faithful voxel stepping, rebuilt per case
   const off: Record<string, number> = { axial: 0.5, coronal: 0.5, sagittal: 0.5 };
   // Shared Slicer-faithful 3D camera (framedCamera + attachCameraControls), same as every other
   // demo — so the trackball direction and feel are identical everywhere. Reframed on each spin.
@@ -122,6 +125,7 @@ async function main() {
       status("baking segmentation iso shells…");
       rs = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
       // frame: slices at the Slicer default voxel-centre plane; camera fit to the volume
+      sliceIx = new SliceInteractor({ ijkToRAS: rs.ijkToRAS, rasLo: rs.rasLo, rasHi: rs.rasHi });
       for (const p of planes) off[p.cell] = slicerDefaultOffset01(p.orient, rs.dims, rs.ijkToRAS, rs.rasLo, rs.rasHi);
       const framed = framedCamera(rs.center, rs.radius);   // Slicer-default framing for this case
       camera.position = framed.position; camera.focalPoint = framed.focalPoint;
@@ -142,13 +146,16 @@ async function main() {
   if (SEG_PARAM) spinBtn.textContent = "↻ Reload";
   else if (COL_PARAM) spinBtn.textContent = `🎲 ${COL_PARAM}`;
 
-  // slice scrub + 3D orbit/zoom
+  // slice interaction = the SHARED attachSliceControls (scroll + pan/zoom + contextmenu suppression),
+  // the same one the real demo will use — so right-drag zoom, two-finger/ctrl-wheel zoom and pan all
+  // behave identically and no browser context menu hijacks the right-drag.
   for (const p of planes) {
-    cv[p.cell].addEventListener("wheel", (e) => {
-      e.preventDefault();
-      off[p.cell] = Math.max(0, Math.min(1, off[p.cell] + (e.deltaY > 0 ? 0.015 : -0.015)));
-      drawSlice(p); xhair?.redraw();
-    }, { passive: false });
+    attachSliceControls(cv[p.cell], {
+      orient: p.orient,
+      getSlice: () => rs!.slice,
+      step: (fwd) => { if (sliceIx) off[p.cell] = sliceIx.wheel(p.orient, off[p.cell], fwd); },
+      redraw: () => { drawSlice(p); xhair?.redraw(); },
+    });
   }
   // 3D trackball = the SHARED Slicer-faithful camera controls (identical direction + feel as every
   // other demo): left=rotate, shift/middle=pan, right=zoom, wheel=dolly. Shift+move (no button)
@@ -174,6 +181,7 @@ async function main() {
     camera: () => ({ position: [...camera.position], focalPoint: [...camera.focalPoint], viewUp: [...camera.viewUp] }),
     mode: () => rs?.mode ?? null,
     params: () => ({ s: SEG_PARAM, col: COL_PARAM }),
+    sliceZoom: (o: "axial" | "coronal" | "sagittal") => rs?.slice.zoom(o) ?? 1,
   };
 
   status("SlicerLive SEGRoulette — click Spin to load a random IDC segmentation");

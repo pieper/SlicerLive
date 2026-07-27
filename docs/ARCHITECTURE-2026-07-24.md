@@ -60,6 +60,41 @@ it already got.
 
 ---
 
+## 1b. First-class principle: DRY across ALL SlicerLive components
+
+**Every capability — rendering *and* interaction *and* page/DOM config — is implemented ONCE in a shared module,
+and each gallery card (and, later, each application-specific assembly) is a *composition* of those primitives
+configured for its scenario. A behavior that exists in one component must be *pulled in*, never re-implemented, by
+another that needs it.** The gallery cards are deliberately first-pass proxies for the app-specific assemblies of
+core primitives that SlicerLive will grow — so keeping them DRY now is what makes that customization cheap later.
+
+This is non-negotiable and applies to *all* SlicerLive components, not just the renderer:
+
+- **Rendering (already DRY):** `render/*.ts` — `fields.ts`, `SceneRenderer` (N-field ray-march, incl. `pick()`),
+  `SliceRenderer` (MPR, incl. pan/zoom + `viewToRas`), `bake`, `zarr`, `scene-volume`, `mat4`. A feature added here
+  reaches every card automatically (empty-space skip, ghost x-ray, SegmentField iso, the 3D pick all landed once).
+- **Interaction (the shared layer, still being completed):** `vtk-interactor` (`CameraInteractor`) +
+  `demos/camera-control.ts` (`attachCameraControls`, `framedCamera`); `demos/widget-control.ts`
+  (`attachWidgetControls`); `demos/crosshair.ts` (`mountCrosshair`, shift-move pick); **`demos/slice-control.ts`
+  (`attachSliceControls`) — the shared slice scroll + pan/zoom + `contextmenu` suppression**. Demos *call* these;
+  they do not hand-roll orbit / pan / zoom / event wiring / DOM config.
+- **Page/DOM config counts too:** `contextmenu` preventDefault, `touch-action`, pointer capture, overlay canvases —
+  these are interaction config and belong in the shared control modules, not copy-pasted into each page. (The
+  right-drag context menu that appeared in SEGRoulette but not the real demo was exactly this class of bug: the
+  suppression lived inline in one demo and was never shared.)
+
+**Anti-patterns (treat as debt to pay down the moment they recur):** a per-demo orbit/pan/zoom loop; a per-demo
+event handler that duplicates logic another demo already has; a page that re-declares DOM/interaction config. When
+a demo needs a behavior another already has, the correct move is *extract to a shared module and have both use it* —
+even if that means refactoring a working demo.
+
+**Known duplication debt / status:** `camera-control` + `widget-control` + `crosshair` + `slice-control` are the
+shared interaction layer. `real-browser.ts` historically hand-rolled the richest slice interaction (scroll, pan/zoom,
+markups, maximize) inline; the generic part now lives in `attachSliceControls`, with markup/maximize layered via
+hooks. New demos (SEGRoulette, fourup) must consume the shared controls, never re-implement them.
+
+---
+
 ## 2. Success criteria — the north star
 
 SlicerLive is not a work-alike; it is meant to be an **evolution of 3D Slicer across every engineering dimension,
