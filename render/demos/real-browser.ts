@@ -12,6 +12,8 @@ import { SliceInteractor, mmToOffset01, offset01ToMm } from "../slice-interactor
 import { lookAt, multiply, perspectiveZO, type Vec3 } from "../mat4.ts";
 import { installIntrospection } from "../introspect.ts";
 import { attachScenePick, attachSlicePick, createCrosshair, drawCross, rasToScreen3D } from "./crosshair.ts";
+import { attachSliceControls } from "./slice-control.ts";
+import { attachViewGrid } from "./view-grid.ts";
 
 const status = (msg: string, err = false) => {
   const el = document.getElementById("status");
@@ -187,24 +189,15 @@ async function main() {
   };
   globalThis.addEventListener("resize", resize);
 
-  // --- double-click a view to MAXIMIZE it (fill the 4-up), double-click again to restore.
-  // The layout is a CSS grid of separate canvases, so maximize is a class toggle + resize.
-  // Detected from pointerdown timing (slice drags preventDefault, which suppresses dblclick).
-  const grid = document.getElementById("grid")!;
-  const cellDiv = (cell: string) => grid.querySelector<HTMLElement>(`.cell[data-cell="${cell}"]`)!;
-  let maxCell: string | null = null;
-  const toggleMax = (cell: string) => {
-    maxCell = maxCell === cell ? null : cell;
-    for (const n of names) cellDiv(n).classList.toggle("max", n === maxCell);
-    grid.classList.toggle("has-max", maxCell !== null);
-    requestAnimationFrame(resize);   // let the grid re-layout, then re-size the buffers
-  };
-  let lastDown: { t: number; x: number; y: number; cell: string } | null = null;
-  const isDoubleClick = (cell: string, e: PointerEvent): boolean => {
-    const dbl = !!lastDown && lastDown.cell === cell && (e.timeStamp - lastDown.t) < 350 &&
-      Math.hypot(e.clientX - lastDown.x, e.clientY - lastDown.y) < 6;
-    lastDown = dbl ? null : { t: e.timeStamp, x: e.clientX, y: e.clientY, cell };
-    if (dbl) { e.preventDefault(); e.stopPropagation(); toggleMax(cell); }
+  // --- double-click a view to MAXIMIZE it (shared view-grid: class toggle + resize). Slice cells
+  // detect the double-click via attachSliceControls' onDoubleClick hook; the 3D cell uses the small
+  // inline detector below (its pointerdown must early-return so it doesn't also start an orbit/grab).
+  const grid = attachViewGrid(document.getElementById("grid")!, names, () => resize());
+  let last3D: { t: number; x: number; y: number } | null = null;
+  const isDoubleClick3D = (e: PointerEvent): boolean => {
+    const dbl = !!last3D && (e.timeStamp - last3D.t) < 350 && Math.hypot(e.clientX - last3D.x, e.clientY - last3D.y) < 6;
+    last3D = dbl ? null : { t: e.timeStamp, x: e.clientX, y: e.clientY };
+    if (dbl) { e.preventDefault(); e.stopPropagation(); grid.toggleMax("threeD"); }
     return dbl;
   };
 
@@ -213,110 +206,45 @@ async function main() {
   // back / b / Left / Down = decrement; steps outside the slice bounds are rejected.
   // (sliceIx is constructed above so the markup slab test can read its per-plane spacing.)
   let focusedCell: "axial" | "coronal" | "sagittal" | null = null;
-  // left-drag over a slice = scroll it (Slicer's standalone-4up default): up/right = forward,
-  // down/left = back, one step per SCROLL_PX. Wheel + keys still work as before.
-  const SCROLL_PX = 7;
-  let sliceDrag: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal"; x: number; y: number; acc: number; moved: number } | null = null;
-  // grab-or-bubble: a pointerdown on a control-point glyph GRABS it (drag = move the point,
-  // in-plane, onto this slice; a tiny move = click = jump-all). Otherwise it falls through to
-  // slice scroll. A moved markup re-appears/disappears across the other slices as it crosses them.
-  let markDrag: { cell: "axial" | "coronal" | "sagittal"; moved: number } | null = null;
-  // Slicer-style view navigation: middle-drag (or shift+left-drag) PANS, right-drag ZOOMS
-  // (drag up = in), ctrl/⌘+wheel zooms about the cursor. Left-drag stays slice scroll.
-  let viewDrag: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal"; mode: "pan" | "zoom"; x: number; y: number; pu: number; pv: number } | null = null;
-  const cellUV = (cell: string, e: PointerEvent) => {
-    const r = cv[cell].getBoundingClientRect();
-    return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height, w: r.width, h: r.height };
-  };
+  // Slice interaction = the SHARED attachSliceControls (scroll + pan/zoom + contextmenu). Markups
+  // (grab / drag / jump / hover) and double-click-maximize layer on via its hooks — no bespoke
+  // pointer wiring per demo. Same module SEGRoulette uses, so behaviour is identical everywhere.
   for (const p of planes) {
-    cv[p.cell].addEventListener("contextmenu", (e) => e.preventDefault());   // right-drag = zoom
-    cv[p.cell].addEventListener("wheel", (e) => {
-      e.preventDefault();
-      if (e.ctrlKey || e.metaKey) {                        // ctrl/⌘ + wheel = zoom about the cursor
-        const { u, v, w, h } = cellUV(p.cell, e);
-        rs.slice.zoomAbout(p.orient, Math.exp(-e.deltaY * 0.0015), u, v, w, h);
-        drawPlane(p);
-        hook?.logEvent("sliceZoom", { cell: p.cell, via: "wheel", zoom: rs.slice.zoom(p.orient) });
-        return;
-      }
-      off[p.cell] = sliceIx.wheel(p.orient, off[p.cell], e.deltaY < 0);   // deltaY<0 = MouseWheelForward
-      drawPlane(p);
-      hook?.logEvent("sliceStep", { cell: p.cell, via: "wheel", forward: e.deltaY < 0, offsetMm: offset01ToMm(p.orient, off[p.cell], rasLo0, rasHi0) });
-    }, { passive: false });
-    cv[p.cell].addEventListener("pointerdown", (e) => {
-      if (e.button === 0 && isDoubleClick(p.cell, e)) return;   // double-click left -> maximize/restore
-      const wantPan = e.button === 1 || (e.button === 0 && e.shiftKey);
-      const wantZoom = e.button === 2;
-      if (wantPan || wantZoom) {                           // pan / zoom the view
-        e.preventDefault();
-        const { u, v } = cellUV(p.cell, e);
-        viewDrag = { cell: p.cell, orient: p.orient, mode: wantZoom ? "zoom" : "pan", x: e.clientX, y: e.clientY, pu: u, pv: v };
-        cv[p.cell].style.cursor = wantZoom ? "ns-resize" : "grabbing";
-        cv[p.cell].setPointerCapture(e.pointerId);
-        return;
-      }
-      if (e.button !== 0) return;                          // left = move a markup, else scroll
-      e.preventDefault();
-      const { u, v, w, h } = cellUV(p.cell, e);
-      const grab = markups.length ? markupAtSlice(p, u, v, w, h) : null;
-      if (grab) {                                          // GRAB the control point
-        draggingMarkup = grab; hoverMarkup = grab; markDrag = { cell: p.cell, moved: 0 };
-        cv[p.cell].style.cursor = "grabbing"; drawOverlay(p);
-      } else {                                             // fall through to slice scroll
-        sliceDrag = { cell: p.cell, orient: p.orient, x: e.clientX, y: e.clientY, acc: 0, moved: 0 };
-      }
-      cv[p.cell].setPointerCapture(e.pointerId);
+    attachSliceControls(cv[p.cell], {
+      orient: p.orient,
+      getSlice: () => rs.slice,
+      step: (fwd) => { off[p.cell] = sliceIx.wheel(p.orient, off[p.cell], fwd); },   // Slicer voxel step
+      redraw: () => drawPlane(p),
+      hooks: {
+        onDoubleClick: () => { grid.toggleMax(p.cell); return true; },
+        onLeftGrab: (u, v, w, h) => {                       // grab a control point; else fall to scroll
+          if (!markups.length) return false;
+          const m = markupAtSlice(p, u, v, w, h);
+          if (!m) return false;
+          draggingMarkup = m; hoverMarkup = m; cv[p.cell].style.cursor = "grabbing"; drawOverlay(p);
+          return true;
+        },
+        onLeftDrag: (u, v, w, h) => {
+          if (!draggingMarkup) return;
+          draggingMarkup.ras = rs.slice.viewToRas(p.orient, off[p.cell], u, v, w / h);
+          for (const q of planes) drawOverlay(q);            // may cross into/out of other slices
+          refreshMarkups3D();
+        },
+        onLeftDrop: (movedPx) => {
+          const m = draggingMarkup; if (!m) return;
+          draggingMarkup = null; cv[p.cell].style.cursor = "grab";
+          if (movedPx < 5) { jumpAll(m.ras); hook?.logEvent("markupJump", { from: p.cell, ras: m.ras, label: m.label }); }
+          else { hook?.logEvent("markupMove", { cell: p.cell, ras: m.ras, label: m.label }); for (const q of planes) drawOverlay(q); }
+        },
+        onHover: (u, v, w, h) => {
+          if (!markups.length) return;
+          const m = markupAtSlice(p, u, v, w, h);
+          if (m !== hoverMarkup) { hoverMarkup = m; cv[p.cell].style.cursor = m ? "grab" : "default"; drawOverlay(p); }
+        },
+        onScroll: (fwd) => hook?.logEvent("sliceStep", { cell: p.cell, forward: fwd, offsetMm: offset01ToMm(p.orient, off[p.cell], rasLo0, rasHi0) }),
+        onZoom: () => hook?.logEvent("sliceZoom", { cell: p.cell, zoom: rs.slice.zoom(p.orient) }),
+      },
     });
-    cv[p.cell].addEventListener("pointermove", (e) => {
-      if (viewDrag && viewDrag.cell === p.cell) {          // pan / zoom drag
-        const dx = e.clientX - viewDrag.x, dy = e.clientY - viewDrag.y;
-        const r = cv[p.cell].getBoundingClientRect();
-        if (viewDrag.mode === "pan") rs.slice.panByPixels(p.orient, dx, dy, r.width, r.height);
-        else rs.slice.zoomAbout(p.orient, Math.exp(dy * 0.006), viewDrag.pu, viewDrag.pv, r.width, r.height);   // drag DOWN = zoom in (pull toward you), matching the 3D view
-        viewDrag.x = e.clientX; viewDrag.y = e.clientY;
-        drawPlane(p);
-        return;
-      }
-      if (draggingMarkup && markDrag?.cell === p.cell) {   // move the grabbed point onto this slice
-        markDrag.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
-        const { u, v, w, h } = cellUV(p.cell, e);
-        draggingMarkup.ras = rs.slice.viewToRas(p.orient, off[p.cell], u, v, w / h);
-        for (const q of planes) drawOverlay(q);            // may cross into/out of other slices
-        refreshMarkups3D();
-        return;
-      }
-      if (sliceDrag && sliceDrag.cell === p.cell) {
-        sliceDrag.moved += Math.abs(e.clientX - sliceDrag.x) + Math.abs(e.clientY - sliceDrag.y);
-        sliceDrag.acc += (e.clientX - sliceDrag.x) - (e.clientY - sliceDrag.y);   // right/up = forward
-        sliceDrag.x = e.clientX; sliceDrag.y = e.clientY;
-        while (Math.abs(sliceDrag.acc) >= SCROLL_PX) {
-          const fwd = sliceDrag.acc > 0;
-          off[p.cell] = sliceIx.wheel(p.orient, off[p.cell], fwd);
-          sliceDrag.acc -= fwd ? SCROLL_PX : -SCROLL_PX;
-        }
-        drawPlane(p);
-        return;
-      }
-      if (e.buttons === 0 && markups.length) {             // idle hover -> highlight + grab cursor
-        const { u, v, w, h } = cellUV(p.cell, e);
-        const m = markupAtSlice(p, u, v, w, h);
-        if (m !== hoverMarkup) { hoverMarkup = m; cv[p.cell].style.cursor = m ? "grab" : "default"; drawOverlay(p); }
-      }
-    });
-    const endDrag = (e: PointerEvent) => {
-      try { cv[p.cell].releasePointerCapture(e.pointerId); } catch { /* already released */ }
-      if (viewDrag?.cell === p.cell) { viewDrag = null; cv[p.cell].style.cursor = "default"; return; }
-      if (draggingMarkup && markDrag?.cell === p.cell) {   // finish a markup grab
-        const wasClick = markDrag.moved < 5, m = draggingMarkup;
-        draggingMarkup = null; markDrag = null; cv[p.cell].style.cursor = "grab";
-        if (wasClick) { jumpAll(m.ras); hook?.logEvent("markupJump", { from: p.cell, ras: m.ras, label: m.label }); }
-        else { hook?.logEvent("markupMove", { cell: p.cell, ras: m.ras, label: m.label }); for (const q of planes) drawOverlay(q); }
-        return;
-      }
-      if (sliceDrag?.cell === p.cell) sliceDrag = null;
-    };
-    cv[p.cell].addEventListener("pointerup", endDrag);
-    cv[p.cell].addEventListener("pointercancel", endDrag);
     // Slicer routes keys to the view under the pointer
     cv[p.cell].addEventListener("pointerenter", () => { focusedCell = p.cell; });
     cv[p.cell].addEventListener("pointerleave", () => { if (focusedCell === p.cell) focusedCell = null; });
@@ -385,7 +313,7 @@ async function main() {
     hoverIdx3D = idx; rs.markupField.setActive(idx); rs.scene.syncUniforms(); draw3d();
   };
   cv.threeD.addEventListener("pointerdown", (e) => {
-    if (isDoubleClick("threeD", e)) return;   // double-click -> maximize/restore
+    if (isDoubleClick3D(e)) return;   // double-click -> maximize/restore
     const { x, y } = localXY(e), { h } = viewSize();
     threeDDown = { x: e.clientX, y: e.clientY, moved: 0 };
     // GRAB a control point (left button) before handing the drag to the camera interactor
