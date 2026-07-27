@@ -177,6 +177,15 @@ var SceneRenderer = class _SceneRenderer {
   matBuf;
   mat;
   bind;
+  // PICK pass: a 1x1 ray-trace that reuses the field compositing to find the RAS point where
+  // front-to-back opacity first crosses 50% (Slicer's 3D volume pick). Ghost handles excluded.
+  pickPipeline;
+  pickBind;
+  pickOff = 0;
+  // mat[] offset of the pick_cursor uniform (NDC)
+  pickTarget;
+  // 1x1 rgba32float (wp.xyz, hit)
+  pickReadBuf;
   /** Emit a default AABB-distance skip for fields that don't supply their own bound.
    *
    *  OFF because it MEASURED AS A NET LOSS (render/test/profile-boxskip.ts, 448², M-series):
@@ -217,15 +226,24 @@ var SceneRenderer = class _SceneRenderer {
       return p;
     });
     this.clipOff = uoff;
-    this.mat = new Float32Array(uoff + CLIP_FLOATS);
-    this.matBuf = this.dev.createBuffer({ size: (uoff + CLIP_FLOATS) * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.pickOff = uoff + CLIP_FLOATS;
+    this.mat = new Float32Array(uoff + CLIP_FLOATS + 4);
+    this.matBuf = this.dev.createBuffer({ size: (uoff + CLIP_FLOATS + 4) * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const module = this.dev.createShaderModule({ code: this.wgsl() });
     this.pipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: { module: this.dev.createShaderModule({ code: this.wgsl() }), entryPoint: "vs_main" },
-      fragment: { module: this.dev.createShaderModule({ code: this.wgsl() }), entryPoint: "fs_main", targets: [{ format: this.format }] },
+      vertex: { module, entryPoint: "vs_main" },
+      fragment: { module, entryPoint: "fs_main", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
+    });
+    this.pickPipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module, entryPoint: "vs_main" },
+      fragment: { module, entryPoint: "fs_pick", targets: [{ format: "rgba32float" }] },
       primitive: { topology: "triangle-list", cullMode: "none" }
     });
     this.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
+    if (this.pickPipeline) this.pickBind = this.dev.createBindGroup({ layout: this.pickPipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
     this.setBackground(0.07, 0.08, 0.12);
     const step = this.placed.length ? Math.min(...this.placed.map((p) => p.field.sampleStep())) : 1;
     this.setSampleStep(step * 0.7);
@@ -294,6 +312,9 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
       (p) => ghostCanSkip.has(p.field) ? skipBranch(p, false, true) : plainBranch(p, false, true)
     ).join("\n");
     const hasGhost = ghostFields.length > 0;
+    const pickDispatch = normalReceivers.map(
+      (p) => `    ${clipGuard(p, `{ let c = sample_field_${p.field.kind}${p.slot}(wp, rd); sum += c; }`)}`
+    ).join("\n");
     return (
       /* wgsl */
       `
@@ -306,6 +327,7 @@ struct Material {
 ${members}
   clip_planes : array<vec4<f32>, 8>,   // (nx, ny, nz, offset) inward; tail so field offsets are stable
   clip_count : vec4<f32>,              // (count, _, _, _)
+  pick_cursor : vec4<f32>,             // (ndc_x, ndc_y, _, _) \u2014 the ray for fs_pick
 };
 @group(0) @binding(0) var<uniform> u_cam : Camera;
 @group(0) @binding(1) var<uniform> u_material : Material;
@@ -394,6 +416,47 @@ ${ghostDispatch}
     integrated = vec4<f32>(integrated.rgb * residual + (1.0 - fA) * g_col * ga, fA + (1.0 - fA) * ga);
   }
   return vec4<f32>(mix(bg, integrated.rgb, integrated.a), 1.0);
+}
+
+// PICK: trace the cursor ray (pick_cursor NDC) through the SAME field compositing and return the
+// world (RAS) position where front-to-back opacity first crosses 50% \u2014 Slicer's 3D volume pick.
+// Output: (wp.x, wp.y, wp.z, hit). hit=0 means the ray never reached 50% (empty/miss).
+@fragment
+fn fs_pick() -> @location(0) vec4<f32> {
+  let ro = ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 0.0, 1.0));
+  let rd = normalize(ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 1.0, 1.0)) - ro);
+  let inv = vec3<f32>(1.0) / rd;
+  let tb = (u_material.bmin.xyz - ro) * inv;
+  let tt = (u_material.bmax.xyz - ro) * inv;
+  let tmn = min(tt, tb); let tmx = max(tt, tb);
+  var t_near = max(max(tmn.x, tmn.y), tmn.z);
+  var t_far  = min(min(tmx.x, tmx.y), tmx.z);
+  if (t_far <= t_near || t_far <= 0.0) { return vec4<f32>(0.0); }
+  let step = max(u_material.scene.x, 1e-3);
+  t_near = max(t_near + step, 0.0);
+  t_far  = t_far - step;
+  var t = t_near;
+  var acc = 0.0;
+  var safety : i32 = 0;
+  loop {
+    if (t >= t_far || safety >= 5000 || acc >= 0.5) { break; }
+    let wp = ro + rd * t;
+    var clipped = false;
+    let ccount = u32(u_material.clip_count.x);
+    for (var ci = 0u; ci < ccount; ci = ci + 1u) {
+      let cp = u_material.clip_planes[ci];
+      if (dot(wp, cp.xyz) + cp.w < 0.0) { clipped = true; break; }
+    }
+    var sum = vec4<f32>(0.0);
+${pickDispatch}
+    if (sum.a > 0.0) {
+      let a_new = acc + (1.0 - acc) * clamp(sum.a, 0.0, 1.0);
+      if (a_new >= 0.5) { return vec4<f32>(wp, 1.0); }   // 50% crossing -> the pick point
+      acc = a_new;
+    }
+    t = t + step;
+  }
+  return vec4<f32>(0.0);
 }`
     );
   }
@@ -468,6 +531,7 @@ ${ghostDispatch}
    *  swapped a texture) without recompiling the pipeline. Field set/structure must be unchanged. */
   refreshBindings() {
     this.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
+    if (this.pickPipeline) this.pickBind = this.dev.createBindGroup({ layout: this.pickPipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
   }
   /** Only fields with texture bindings use the shared sampler. `layout: "auto"` derives the
    *  layout from what the shader ACTUALLY references, so in a scene of purely procedural
@@ -502,6 +566,32 @@ ${ghostDispatch}
   }
   flush() {
     this.dev.queue.writeBuffer(this.matBuf, 0, this.mat);
+  }
+  /** Ray-trace the cursor (u,v in [0,1], y down) through the composited fields and return the
+   *  RAS point where front-to-back opacity first reaches 50% — Slicer's 3D volume pick. Traces
+   *  whatever renders (DVR volumes, SegmentField iso shells, RGBA), EXCLUDING ghost handles.
+   *  Uses the camera set by the last setCamera(); returns null if the ray never reaches 50%. */
+  async pick(u, v) {
+    if (!this.pickPipeline || !this.pickBind || !this.placed.length) return null;
+    this.mat[this.pickOff] = u * 2 - 1;
+    this.mat[this.pickOff + 1] = 1 - v * 2;
+    this.flush();
+    if (!this.pickTarget) {
+      this.pickTarget = this.dev.createTexture({ size: [1, 1], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+      this.pickReadBuf = this.dev.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    }
+    const enc = this.dev.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: this.pickTarget.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    pass.setPipeline(this.pickPipeline);
+    pass.setBindGroup(0, this.pickBind);
+    pass.draw(3);
+    pass.end();
+    enc.copyTextureToBuffer({ texture: this.pickTarget }, { buffer: this.pickReadBuf, bytesPerRow: 256, rowsPerImage: 1 }, [1, 1]);
+    this.dev.queue.submit([enc.finish()]);
+    await this.pickReadBuf.mapAsync(GPUMapMode.READ);
+    const r = new Float32Array(this.pickReadBuf.getMappedRange().slice(0, 16));
+    this.pickReadBuf.unmap();
+    return r[3] > 0.5 ? [r[0], r[1], r[2]] : null;
   }
   renderToView(view, width, height) {
     this.flush();
@@ -1833,6 +1923,96 @@ function installIntrospection(api) {
   return hook;
 }
 
+// render/demos/crosshair.ts
+function createCrosshair(visible = true) {
+  const listeners = /* @__PURE__ */ new Set();
+  const notify = () => {
+    for (const cb of listeners) cb();
+  };
+  const st = {
+    ras: null,
+    visible,
+    set(ras) {
+      this.ras = ras;
+      notify();
+    },
+    toggle(on) {
+      this.visible = on ?? !this.visible;
+      notify();
+    },
+    onChange(cb) {
+      listeners.add(cb);
+      return () => listeners.delete(cb);
+    }
+  };
+  return st;
+}
+function drawCross(ctx, x, y, opts = {}) {
+  const size = opts.size ?? 11, gap = opts.gap ?? 3;
+  ctx.save();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = opts.color ?? "rgba(120,220,255,0.95)";
+  ctx.shadowColor = "rgba(0,0,0,0.8)";
+  ctx.shadowBlur = 2;
+  ctx.beginPath();
+  ctx.moveTo(x - size, y);
+  ctx.lineTo(x - gap, y);
+  ctx.moveTo(x + gap, y);
+  ctx.lineTo(x + size, y);
+  ctx.moveTo(x, y - size);
+  ctx.lineTo(x, y - gap);
+  ctx.moveTo(x, y + gap);
+  ctx.lineTo(x, y + size);
+  ctx.stroke();
+  ctx.restore();
+}
+function rasToScreen3D(cam, ras, w, h) {
+  const vp = multiply(perspectiveZO(cam.viewAngle * Math.PI / 180, w / h, 1, 1e5), lookAt(cam.position, cam.focalPoint, cam.viewUp));
+  const cw = vp[3] * ras[0] + vp[7] * ras[1] + vp[11] * ras[2] + vp[15];
+  if (cw <= 0) return null;
+  return {
+    x: (vp[0] * ras[0] + vp[4] * ras[1] + vp[8] * ras[2] + vp[12]) / cw * 0.5 + 0.5,
+    y: 1 - ((vp[1] * ras[0] + vp[5] * ras[1] + vp[9] * ras[2] + vp[13]) / cw * 0.5 + 0.5)
+  };
+}
+var uvOf = (canvas, e) => {
+  const r = canvas.getBoundingClientRect();
+  return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height, aspect: r.width / r.height };
+};
+var isShiftHover = (e) => e.shiftKey && e.buttons === 0;
+function attachScenePick(canvas, scene, state, onJump) {
+  let inFlight = false, queued = null;
+  const run = async (u, v) => {
+    inFlight = true;
+    const ras = await scene.pick(u, v);
+    inFlight = false;
+    if (ras) {
+      state.set(ras);
+      onJump(ras);
+    }
+    if (queued) {
+      const q = queued;
+      queued = null;
+      run(q.u, q.v);
+    }
+  };
+  canvas.addEventListener("pointermove", (e) => {
+    if (!isShiftHover(e)) return;
+    const { u, v } = uvOf(canvas, e);
+    if (inFlight) queued = { u, v };
+    else run(u, v);
+  });
+}
+function attachSlicePick(canvas, slice, cfg, state, onJump) {
+  canvas.addEventListener("pointermove", (e) => {
+    if (!isShiftHover(e)) return;
+    const { u, v, aspect } = uvOf(canvas, e);
+    const ras = slice.viewToRas(cfg.orient, cfg.offset(), u, v, aspect);
+    state.set(ras);
+    onJump(ras);
+  });
+}
+
 // render/demos/real-browser.ts
 var status = (msg, err = false) => {
   const el2 = document.getElementById("status");
@@ -1889,13 +2069,14 @@ async function main() {
   const nAxisOf = { axial: 2, coronal: 1, sagittal: 0 };
   const ovc = {};
   const ov2d = {};
-  for (const p of planes) {
+  for (const p of [...planes, { cell: "threeD" }]) {
     const o = document.createElement("canvas");
     o.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;border-radius:5px;background:transparent;";
     cv[p.cell].parentElement.appendChild(o);
     ovc[p.cell] = o;
     ov2d[p.cell] = o.getContext("2d");
   }
+  const crosshair = createCrosshair(true);
   const slabHalfMm = (orient) => Math.max(0.5, 0.5 * sliceIx.spacing(orient));
   const glyphRadiusPx = (w, h) => Math.max(5, Math.hypot(w, h) * 0.015);
   const drawOverlay = (p) => {
@@ -1923,6 +2104,26 @@ async function main() {
       ctx.strokeStyle = active ? "#ffffff" : "rgba(0,0,0,0.6)";
       ctx.lineWidth = active ? 2 : 1;
       ctx.stroke();
+    }
+    if (crosshair.visible && crosshair.ras) {
+      const c = rs.slice.rasToView(p.orient, off[p.cell], crosshair.ras, w / h);
+      if (c.u >= 0 && c.u <= 1 && c.v >= 0 && c.v <= 1) drawCross(ctx, c.u * w, c.v * h);
+    }
+  };
+  const draw3dOverlay = () => {
+    const o = ovc.threeD, ctx = ov2d.threeD;
+    const w = cv.threeD.clientWidth, h = cv.threeD.clientHeight;
+    if (!w || !h) return;
+    const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
+    if (o.width !== Math.floor(w * dpr)) {
+      o.width = Math.floor(w * dpr);
+      o.height = Math.floor(h * dpr);
+    }
+    ctx.setTransform(o.width / w, 0, 0, o.height / h, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    if (crosshair.visible && crosshair.ras) {
+      const s = rasToScreen3D(camera, crosshair.ras, w, h);
+      if (s) drawCross(ctx, s.x * w, s.y * h);
     }
   };
   const markupAtSlice = (p, u, v, w, h) => {
@@ -1960,6 +2161,7 @@ async function main() {
     if (!shown("threeD")) return;
     rs.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, cv.threeD.width, cv.threeD.height);
     rs.scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
+    draw3dOverlay();
   };
   const drawAll = () => {
     for (const p of planes) drawPlane(p);
@@ -2250,6 +2452,8 @@ async function main() {
     interactor.wheel(e.deltaY < 0);
     hook?.logEvent("cameraWheel", { deltaY: e.deltaY, distance: camera.distance });
   }, { passive: false });
+  attachScenePick(cv.threeD, rs.scene, crosshair, jumpAll);
+  for (const p of planes) attachSlicePick(cv[p.cell], rs.slice, { orient: p.orient, offset: () => off[p.cell] }, crosshair, jumpAll);
   const [rasLo, rasHi] = rs.sv.field.aabb();
   const hook = installIntrospection({
     getCamera: () => ({
@@ -2340,6 +2544,10 @@ async function main() {
     zoom: (cell) => rs.slice.zoom(cell),
     markupActive: () => rs.markupField?.activeIndex ?? -1,
     // hovered 3D glyph index (ghost full-opacity)
+    crosshair: () => crosshair.ras,
+    // shared shift-move crosshair RAS (null if unset)
+    pick3D: (u, v) => rs.scene.pick(u, v),
+    // direct 3D pick (RAS at >=50% opacity)
     // count of glyphs actually drawn on a slice at its current offset (only on-slab points)
     drawnOn: (cell) => {
       const p = planes.find((q) => q.cell === cell);

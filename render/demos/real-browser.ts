@@ -11,6 +11,7 @@ import { CameraInteractor } from "../vtk-interactor.ts";
 import { SliceInteractor, mmToOffset01, offset01ToMm } from "../slice-interactor.ts";
 import { lookAt, multiply, perspectiveZO, type Vec3 } from "../mat4.ts";
 import { installIntrospection } from "../introspect.ts";
+import { attachScenePick, attachSlicePick, createCrosshair, drawCross, rasToScreen3D } from "./crosshair.ts";
 
 const status = (msg: string, err = false) => {
   const el = document.getElementById("status");
@@ -75,12 +76,14 @@ async function main() {
   // one transparent 2D canvas over each slice cell (pointer-events:none -> clicks fall through)
   const ovc: Record<string, HTMLCanvasElement> = {};
   const ov2d: Record<string, CanvasRenderingContext2D> = {};
-  for (const p of planes) {
+  for (const p of [...planes, { cell: "threeD" as const }]) {   // +1 overlay over the 3D view for its crosshair
     const o = document.createElement("canvas");
     o.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;border-radius:5px;background:transparent;";
     cv[p.cell].parentElement!.appendChild(o);
     ovc[p.cell] = o; ov2d[p.cell] = o.getContext("2d")!;
   }
+  // Shared crosshair (SHIFT+move pick): set on a slice via viewToRas, in 3D via SceneRenderer.pick.
+  const crosshair = createCrosshair(true);
   // Slicer parity (vtkSlicerMarkupsWidgetRepresentation2D): a control point is drawn on a
   // slice ONLY when it falls within that slice's slab — Slicer uses ±0.5mm for a 1-unit
   // slice; our slices snap to voxel planes, so the slab half is half the plane's voxel
@@ -109,6 +112,24 @@ async function main() {
       ctx.strokeStyle = active ? "#ffffff" : "rgba(0,0,0,0.6)";
       ctx.lineWidth = active ? 2 : 1;
       ctx.stroke();
+    }
+    if (crosshair.visible && crosshair.ras) {                   // the shared crosshair, projected onto this slice
+      const c = rs.slice.rasToView(p.orient, off[p.cell], crosshair.ras, w / h);
+      if (c.u >= 0 && c.u <= 1 && c.v >= 0 && c.v <= 1) drawCross(ctx, c.u * w, c.v * h);
+    }
+  };
+  // the 3D crosshair, projected with the same view·proj the scene draws with
+  const draw3dOverlay = () => {
+    const o = ovc.threeD, ctx = ov2d.threeD;
+    const w = cv.threeD.clientWidth, h = cv.threeD.clientHeight;
+    if (!w || !h) return;
+    const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
+    if (o.width !== Math.floor(w * dpr)) { o.width = Math.floor(w * dpr); o.height = Math.floor(h * dpr); }
+    ctx.setTransform(o.width / w, 0, 0, o.height / h, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    if (crosshair.visible && crosshair.ras) {
+      const s = rasToScreen3D(camera, crosshair.ras, w, h);
+      if (s) drawCross(ctx, s.x * w, s.y * h);
     }
   };
   // nearest markup on this slice to a click (u,v in [0,1]); Slicer picks within
@@ -150,6 +171,7 @@ async function main() {
     if (!shown("threeD")) return;
     rs.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, cv.threeD.width, cv.threeD.height);
     rs.scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
+    draw3dOverlay();   // crosshair on top
   };
   const drawAll = () => { for (const p of planes) drawPlane(p); draw3d(); status(`${rs.sv.name} · real ${rs.sv.dims.join("×")} · left-drag a slice to scroll · double-click to maximize · drag 3D to orbit`); };
 
@@ -416,6 +438,11 @@ async function main() {
     hook?.logEvent("cameraWheel", { deltaY: e.deltaY, distance: camera.distance });
   }, { passive: false });
 
+  // SHARED shift-move crosshair pick (identical in every demo): 3D via SceneRenderer.pick, each
+  // slice via viewToRas; both jump all views to the RAS. jumpAll redraws slices + 3D (+overlays).
+  attachScenePick(cv.threeD, rs.scene, crosshair, jumpAll);
+  for (const p of planes) attachSlicePick(cv[p.cell], rs.slice, { orient: p.orient, offset: () => off[p.cell] }, crosshair, jumpAll);
+
   // --- automation/introspection hook for the Slicer A/B harness ----------------
   const [rasLo, rasHi] = rs.sv.field.aabb();
   const hook = installIntrospection({
@@ -499,6 +526,8 @@ async function main() {
     slabHalfMm: (cell: "axial" | "coronal" | "sagittal") => slabHalfMm(cell),
     zoom: (cell: "axial" | "coronal" | "sagittal") => rs.slice.zoom(cell),
     markupActive: () => rs.markupField?.activeIndex ?? -1,   // hovered 3D glyph index (ghost full-opacity)
+    crosshair: () => crosshair.ras,                          // shared shift-move crosshair RAS (null if unset)
+    pick3D: (u: number, v: number) => rs.scene.pick(u, v),   // direct 3D pick (RAS at >=50% opacity)
     // count of glyphs actually drawn on a slice at its current offset (only on-slab points)
     drawnOn: (cell: "axial" | "coronal" | "sagittal") => {
       const p = planes.find((q) => q.cell === cell)!;
