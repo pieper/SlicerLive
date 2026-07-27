@@ -9,11 +9,19 @@ import { slicerDefaultOffset01 } from "../slice-renderer.ts";
 import { buildSegrouletteScene, type SegrouletteScene } from "./segroulette-scene.ts";
 import { type Crosshair4up, mountCrosshair } from "./crosshair.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
-import { spinRandom } from "../vendor/idc_tools/index.js";
-import type { LoadResult, SeriesEntry } from "../vendor/idc_tools/types.js";
+import { loadManifest, loadSeries, spinRandom } from "../vendor/idc_tools/index.js";
+import type { LoadResult, RouletteManifest, SeriesEntry } from "../vendor/idc_tools/types.js";
 import type { Vec3 } from "../mat4.ts";
 
 const MANIFEST = "../legacy/segroulette.json";   // reuse the existing roulette manifest (2MB, cache-busted)
+
+// URL params for reproducible testing (reload the page to re-run a case, like the old SEGRoulette):
+//   ?s=<segSeriesUUID>   load one specific SEG series (looked up in the manifest for its source+buckets)
+//   ?col=<collection>    spin randomly but only within this IDC collection (e.g. ?col=nlst)
+const PARAMS = new URLSearchParams(location.search);
+const SEG_PARAM = PARAMS.get("s") || PARAMS.get("seg") || "";
+const COL_PARAM = PARAMS.get("col") || "";
+let cachedManifest: RouletteManifest | null = null;
 
 const status = (msg: string, err = false) => {
   const el = document.getElementById("status");
@@ -93,14 +101,24 @@ async function main() {
   };
 
   const spinBtn = el("spin") as HTMLButtonElement;
+  const onProgress = (p: { msg: string; frac?: number }) => status(`${p.msg}${p.frac ? ` — ${Math.round(p.frac * 100)}%` : ""}`);
+
+  // ?s= loads one specific SEG (looked up in the manifest); ?col= narrows the random pool; else all.
+  async function pickAndLoad(): Promise<LoadResult> {
+    if (SEG_PARAM) {
+      cachedManifest ??= await loadManifest(MANIFEST);
+      const entry = cachedManifest.rows.find((e) => e.s === SEG_PARAM || (e.s ?? "").startsWith(SEG_PARAM));
+      if (!entry) throw new Error(`SEG series "${SEG_PARAM}" not found in the manifest`);
+      return loadSeries(entry, { onProgress });
+    }
+    return spinRandom({ onProgress }, { manifestUrl: MANIFEST, filter: COL_PARAM ? (e) => e.col === COL_PARAM : undefined });
+  }
+
   async function spin() {
     spinBtn.disabled = true;
-    status("spinning… picking a random IDC series");
+    status(SEG_PARAM ? "loading the requested SEG series…" : COL_PARAM ? `spinning within ${COL_PARAM}…` : "spinning… picking a random IDC series");
     try {
-      const res: LoadResult = await spinRandom(
-        { onProgress: (p) => status(`${p.msg}${p.frac ? ` — ${Math.round(p.frac * 100)}%` : ""}`) },
-        { manifestUrl: MANIFEST },
-      );
+      const res: LoadResult = await pickAndLoad();
       status("baking segmentation iso shells…");
       rs = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
       // frame: slices at the Slicer default voxel-centre plane; camera fit to the volume
@@ -121,6 +139,8 @@ async function main() {
     }
   }
   spinBtn.addEventListener("click", spin);
+  if (SEG_PARAM) spinBtn.textContent = "↻ Reload";
+  else if (COL_PARAM) spinBtn.textContent = `🎲 ${COL_PARAM}`;
 
   // slice scrub + 3D orbit/zoom
   for (const p of planes) {
@@ -152,6 +172,8 @@ async function main() {
     crosshair: () => xhair?.state.ras ?? null,
     pick3D: (u: number, v: number) => rs?.scene.pick(u, v) ?? null,
     camera: () => ({ position: [...camera.position], focalPoint: [...camera.focalPoint], viewUp: [...camera.viewUp] }),
+    mode: () => rs?.mode ?? null,
+    params: () => ({ s: SEG_PARAM, col: COL_PARAM }),
   };
 
   status("SlicerLive SEGRoulette — click Spin to load a random IDC segmentation");
