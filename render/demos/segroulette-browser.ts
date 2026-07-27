@@ -109,8 +109,11 @@ async function main() {
       camera.position = framed.position; camera.focalPoint = framed.focalPoint;
       camera.viewUp = framed.viewUp; camera.viewAngle = framed.viewAngle;
       showMeta(res.entry, rs);
+      const d3 = document.querySelector(".lab.d3");
+      if (d3) d3.textContent = rs.mode === "colorized" ? "3D · colorized volume" : rs.mode === "iso" ? "3D · SegmentField iso" : "3D · volume";
       resize();
-      status(`${res.entry?.col ?? "IDC"} · ${res.entry?.m ?? ""} · ${rs.segments.length} segment${rs.segments.length === 1 ? "" : "s"} · scroll a slice, drag 3D to orbit · Spin for another`);
+      const modeNote = rs.mode === "colorized" ? ` (colorized — too many for per-segment iso)` : "";
+      status(`${res.entry?.col ?? "IDC"} · ${res.entry?.m ?? ""} · ${rs.segments.length} segment${rs.segments.length === 1 ? "" : "s"}${modeNote} · scroll a slice, drag 3D to orbit · Spin for another`);
     } catch (e) {
       status("load failed: " + ((e as Error)?.message ?? e) + " — try Spin again", true);
     } finally {
