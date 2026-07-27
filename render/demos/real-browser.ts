@@ -250,7 +250,7 @@ async function main() {
         const dx = e.clientX - viewDrag.x, dy = e.clientY - viewDrag.y;
         const r = cv[p.cell].getBoundingClientRect();
         if (viewDrag.mode === "pan") rs.slice.panByPixels(p.orient, dx, dy, r.width, r.height);
-        else rs.slice.zoomAbout(p.orient, Math.exp(-dy * 0.006), viewDrag.pu, viewDrag.pv, r.width, r.height);
+        else rs.slice.zoomAbout(p.orient, Math.exp(dy * 0.006), viewDrag.pu, viewDrag.pv, r.width, r.height);   // drag DOWN = zoom in (pull toward you), matching the 3D view
         viewDrag.x = e.clientX; viewDrag.y = e.clientY;
         drawPlane(p);
         return;
@@ -357,13 +357,18 @@ async function main() {
   cv.threeD.addEventListener("contextmenu", (e) => e.preventDefault());  // right-drag = zoom
   let threeDDown: { x: number; y: number; moved: number } | null = null;
   let markDrag3D: typeof markups[number] | null = null;
+  let hoverIdx3D = -1;   // hovered 3D markup index -> ghost full-opacity (setActive)
+  const setActive3D = (idx: number) => {   // ghost: raise the hovered/dragged glyph to full opacity
+    if (!rs.markupField || idx === hoverIdx3D) return;
+    hoverIdx3D = idx; rs.markupField.setActive(idx); rs.scene.syncUniforms(); draw3d();
+  };
   cv.threeD.addEventListener("pointerdown", (e) => {
     if (isDoubleClick("threeD", e)) return;   // double-click -> maximize/restore
     const { x, y } = localXY(e), { h } = viewSize();
     threeDDown = { x: e.clientX, y: e.clientY, moved: 0 };
     // GRAB a control point (left button) before handing the drag to the camera interactor
     const grab = e.button === 0 ? markupAt3D(e.clientX, e.clientY) : null;
-    if (grab) { markDrag3D = grab; hoverMarkup = grab; }
+    if (grab) { markDrag3D = grab; hoverMarkup = grab; setActive3D(markups.indexOf(grab)); }
     else interactor.start(e.button as 0 | 1 | 2, x, y, h, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
     cv.threeD.setPointerCapture(e.pointerId);
     hook?.logEvent("cameraStart", { action: markDrag3D ? "markupDrag" : interactor.action, x, y, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
@@ -392,10 +397,19 @@ async function main() {
       for (const q of planes) drawOverlay(q);
       return;
     }
-    if (interactor.action === "none") return;
+    if (interactor.action === "none") {
+      // idle: hover-highlight the nearest 3D markup (ghost -> full opacity on hover)
+      if (rs.markupField && markups.length && e.buttons === 0) {
+        const m = markupAt3D(e.clientX, e.clientY);
+        setActive3D(m ? markups.indexOf(m) : -1);
+        cv.threeD.style.cursor = m ? "grab" : "default";
+      }
+      return;
+    }
     const { x, y } = localXY(e), { w, h } = viewSize();
     interactor.move(x, y, w, h);
   });
+  cv.threeD.addEventListener("pointerleave", () => setActive3D(-1));   // clear ghost hover
   cv.threeD.addEventListener("wheel", (e) => {
     e.preventDefault();
     interactor.wheel(e.deltaY < 0);   // browser: deltaY<0 = scroll away = VTK MouseWheelForward = zoom in
@@ -484,6 +498,7 @@ async function main() {
     offsets: () => Object.fromEntries(planes.map((p) => [p.cell, off[p.cell]])),
     slabHalfMm: (cell: "axial" | "coronal" | "sagittal") => slabHalfMm(cell),
     zoom: (cell: "axial" | "coronal" | "sagittal") => rs.slice.zoom(cell),
+    markupActive: () => rs.markupField?.activeIndex ?? -1,   // hovered 3D glyph index (ghost full-opacity)
     // count of glyphs actually drawn on a slice at its current offset (only on-slab points)
     drawnOn: (cell: "axial" | "coronal" | "sagittal") => {
       const p = planes.find((q) => q.cell === cell)!;

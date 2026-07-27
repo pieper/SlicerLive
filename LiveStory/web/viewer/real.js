@@ -909,6 +909,8 @@ var FiducialField = class {
   n = 0;
   maxR = 0;
   // largest radius in this field (for the skip bound)
+  active = -1;
+  // hovered/active sphere index (ghost mode: it goes full opacity)
   clippable;
   ghost;
   providesSkip;
@@ -945,6 +947,14 @@ var FiducialField = class {
   }
   get count() {
     return this.n;
+  }
+  /** Hovered/active sphere (ghost mode only): it renders at full opacity while the others stay
+   *  half-visible (partially hidden inside the volume). Pass null/-1 to clear. */
+  setActive(i) {
+    this.active = i ?? -1;
+  }
+  get activeIndex() {
+    return this.active;
   }
   uniformFloats() {
     return 12 + MAX * 4 * 2;
@@ -1045,6 +1055,7 @@ fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   var best_depth = -1.0;
   var best_center = vec3<f32>(0.0);
   var best_color = vec4<f32>(0.0);
+  var best_k = -1;
   var found = false;
   for (var k = 0; k < n; k = k + 1) {
     let sp = u_material.fid${s}_spheres[k];
@@ -1053,7 +1064,7 @@ fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     // so the sphere stays a constant size on screen. Otherwise sp.w is a world radius.
     ${this.screen ? `let r = sp.w * length(u_cam.eye.xyz - sp.xyz) / max(u_cam.size.z, 1.0);` : `let r = sp.w;`}
     let depth = r - length(wp_r - sp.xyz);   // > 0 -> inside this sphere
-    if (depth > best_depth) { best_depth = depth; best_center = sp.xyz; best_color = u_material.fid${s}_colors[k]; found = true; }
+    if (depth > best_depth) { best_depth = depth; best_center = sp.xyz; best_color = u_material.fid${s}_colors[k]; best_k = k; found = true; }
   }
   if (!found || best_depth <= 0.0) { return vec4<f32>(0.0); }
 
@@ -1071,7 +1082,11 @@ fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let highlight = mix(base, u_material.fid${s}_light.rgb, 0.85);
   let lit = base * ka + base * (kd * ldotn) + highlight * (ks * pow(rdotv, sh));
   let col = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
-  let opacity = clamp(best_color.a, 0.0, 1.0);
+  // Ghost mode: a non-active glyph emits HALF opacity so the ghost compositor leaves 50% of the
+  // volume in front of it (partially hidden inside the render); the hovered one emits full (0%
+  // residual -> fully visible). Same trick the transform gizmo uses for its active handle.
+  ${this.ghost ? `let ghostScale = select(0.5, 1.0, best_k == i32(u_material.fid${s}_params2.w));` : `let ghostScale = 1.0;`}
+  let opacity = clamp(best_color.a, 0.0, 1.0) * ghostScale;
   return vec4<f32>(col * opacity, opacity);
 }`
     );
@@ -1084,6 +1099,7 @@ fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     out[off + 4] = this.kd;
     out[off + 5] = this.ks;
     out[off + 6] = this.maxR;
+    out[off + 7] = this.active;
     out[off + 8] = this.light[0];
     out[off + 9] = this.light[1];
     out[off + 10] = this.light[2];
@@ -2035,7 +2051,7 @@ async function main() {
         const dx = e.clientX - viewDrag.x, dy = e.clientY - viewDrag.y;
         const r = cv[p.cell].getBoundingClientRect();
         if (viewDrag.mode === "pan") rs.slice.panByPixels(p.orient, dx, dy, r.width, r.height);
-        else rs.slice.zoomAbout(p.orient, Math.exp(-dy * 6e-3), viewDrag.pu, viewDrag.pv, r.width, r.height);
+        else rs.slice.zoomAbout(p.orient, Math.exp(dy * 6e-3), viewDrag.pu, viewDrag.pv, r.width, r.height);
         viewDrag.x = e.clientX;
         viewDrag.y = e.clientY;
         drawPlane(p);
@@ -2166,6 +2182,14 @@ async function main() {
   cv.threeD.addEventListener("contextmenu", (e) => e.preventDefault());
   let threeDDown = null;
   let markDrag3D = null;
+  let hoverIdx3D = -1;
+  const setActive3D = (idx) => {
+    if (!rs.markupField || idx === hoverIdx3D) return;
+    hoverIdx3D = idx;
+    rs.markupField.setActive(idx);
+    rs.scene.syncUniforms();
+    draw3d();
+  };
   cv.threeD.addEventListener("pointerdown", (e) => {
     if (isDoubleClick("threeD", e)) return;
     const { x, y } = localXY(e), { h } = viewSize();
@@ -2174,6 +2198,7 @@ async function main() {
     if (grab) {
       markDrag3D = grab;
       hoverMarkup = grab;
+      setActive3D(markups.indexOf(grab));
     } else interactor.start(e.button, x, y, h, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
     cv.threeD.setPointerCapture(e.pointerId);
     hook?.logEvent("cameraStart", { action: markDrag3D ? "markupDrag" : interactor.action, x, y, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
@@ -2208,10 +2233,18 @@ async function main() {
       for (const q of planes) drawOverlay(q);
       return;
     }
-    if (interactor.action === "none") return;
+    if (interactor.action === "none") {
+      if (rs.markupField && markups.length && e.buttons === 0) {
+        const m = markupAt3D(e.clientX, e.clientY);
+        setActive3D(m ? markups.indexOf(m) : -1);
+        cv.threeD.style.cursor = m ? "grab" : "default";
+      }
+      return;
+    }
     const { x, y } = localXY(e), { w, h } = viewSize();
     interactor.move(x, y, w, h);
   });
+  cv.threeD.addEventListener("pointerleave", () => setActive3D(-1));
   cv.threeD.addEventListener("wheel", (e) => {
     e.preventDefault();
     interactor.wheel(e.deltaY < 0);
@@ -2305,6 +2338,8 @@ async function main() {
     offsets: () => Object.fromEntries(planes.map((p) => [p.cell, off[p.cell]])),
     slabHalfMm: (cell) => slabHalfMm(cell),
     zoom: (cell) => rs.slice.zoom(cell),
+    markupActive: () => rs.markupField?.activeIndex ?? -1,
+    // hovered 3D glyph index (ghost full-opacity)
     // count of glyphs actually drawn on a slice at its current offset (only on-slab points)
     drawnOn: (cell) => {
       const p = planes.find((q) => q.cell === cell);

@@ -33,6 +33,7 @@ export class FiducialField implements Field {
   private colors = new Float32Array(MAX * 4);  // (r,g,b,a)
   private n = 0;
   private maxR = 0;                     // largest radius in this field (for the skip bound)
+  private active = -1;                  // hovered/active sphere index (ghost mode: it goes full opacity)
   readonly clippable: boolean;
   readonly ghost: boolean;
   readonly providesSkip: boolean;      // off in screen-space mode (radius varies with the camera)
@@ -70,6 +71,11 @@ export class FiducialField implements Field {
   }
 
   get count(): number { return this.n; }
+
+  /** Hovered/active sphere (ghost mode only): it renders at full opacity while the others stay
+   *  half-visible (partially hidden inside the volume). Pass null/-1 to clear. */
+  setActive(i: number | null) { this.active = i ?? -1; }
+  get activeIndex(): number { return this.active; }
 
   uniformFloats(): number { return 12 + MAX * 4 * 2; } // params(4)+params2(4)+light(4) + spheres + colors
   sampleStep(): number { return 1.0; }
@@ -157,6 +163,7 @@ fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   var best_depth = -1.0;
   var best_center = vec3<f32>(0.0);
   var best_color = vec4<f32>(0.0);
+  var best_k = -1;
   var found = false;
   for (var k = 0; k < n; k = k + 1) {
     let sp = u_material.fid${s}_spheres[k];
@@ -165,7 +172,7 @@ fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     // so the sphere stays a constant size on screen. Otherwise sp.w is a world radius.
     ${this.screen ? `let r = sp.w * length(u_cam.eye.xyz - sp.xyz) / max(u_cam.size.z, 1.0);` : `let r = sp.w;`}
     let depth = r - length(wp_r - sp.xyz);   // > 0 -> inside this sphere
-    if (depth > best_depth) { best_depth = depth; best_center = sp.xyz; best_color = u_material.fid${s}_colors[k]; found = true; }
+    if (depth > best_depth) { best_depth = depth; best_center = sp.xyz; best_color = u_material.fid${s}_colors[k]; best_k = k; found = true; }
   }
   if (!found || best_depth <= 0.0) { return vec4<f32>(0.0); }
 
@@ -183,14 +190,18 @@ fn sample_field_fid${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let highlight = mix(base, u_material.fid${s}_light.rgb, 0.85);
   let lit = base * ka + base * (kd * ldotn) + highlight * (ks * pow(rdotv, sh));
   let col = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
-  let opacity = clamp(best_color.a, 0.0, 1.0);
+  // Ghost mode: a non-active glyph emits HALF opacity so the ghost compositor leaves 50% of the
+  // volume in front of it (partially hidden inside the render); the hovered one emits full (0%
+  // residual -> fully visible). Same trick the transform gizmo uses for its active handle.
+  ${this.ghost ? `let ghostScale = select(0.5, 1.0, best_k == i32(u_material.fid${s}_params2.w));` : `let ghostScale = 1.0;`}
+  let opacity = clamp(best_color.a, 0.0, 1.0) * ghostScale;
   return vec4<f32>(col * opacity, opacity);
 }`;
   }
 
   fillUniforms(out: Float32Array, off: number) {
     out[off + 0] = this.n; out[off + 1] = 1.0; out[off + 2] = this.sh; out[off + 3] = this.ka;
-    out[off + 4] = this.kd; out[off + 5] = this.ks; out[off + 6] = this.maxR;
+    out[off + 4] = this.kd; out[off + 5] = this.ks; out[off + 6] = this.maxR; out[off + 7] = this.active;
     out[off + 8] = this.light[0]; out[off + 9] = this.light[1]; out[off + 10] = this.light[2];
     out.set(this.spheres, off + 12);
     out.set(this.colors, off + 12 + MAX * 4);
