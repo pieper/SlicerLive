@@ -11,8 +11,16 @@ export interface VizControl {
   set: (on: boolean) => void;
   disabled?: () => boolean;    // e.g. no segmentation to toggle
 }
+export interface SegInfo { num: number; name: string; color: [number, number, number] }
+export interface SegmentControls {
+  list: () => SegInfo[];              // the current case's segments (re-read each time the popup opens)
+  get: (num: number) => boolean;      // is this segment visible
+  set: (num: number, on: boolean) => void;
+  enabled?: () => boolean;            // dim the whole section when there's nothing to toggle
+}
 export interface ChromeOpts {
   controls?: VizControl[];                                   // viz toggles (empty → branding only)
+  segments?: SegmentControls;                                // per-segment visibility list (swatch + toggle)
   help?: { title: string; rows: [string, string][] }[];     // override the default cheat-sheet
   onChange?: () => void;                                     // after a toggle (redraw)
   anchor?: HTMLElement;                                      // float the badge over this element's top-right corner (e.g. the 3D cell); falls back to the viewport corner when hidden/absent
@@ -117,7 +125,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
   if (opts.anchor && "ResizeObserver" in globalThis) new ResizeObserver(place).observe(opts.anchor);
 
   const pop = document.createElement("div");
-  pop.style.cssText = "position:fixed;z-index:73;min-width:190px;padding:10px 12px;border-radius:12px;" +
+  pop.style.cssText = "position:fixed;z-index:73;min-width:210px;max-width:300px;max-height:84vh;overflow-y:auto;padding:10px 12px;border-radius:12px;" +
     "color:#eaf0ff;font:13px -apple-system,system-ui,sans-serif;opacity:0;pointer-events:none;transform:translateY(-6px);" +
     "transition:opacity 120ms ease-out,transform 120ms ease-out;";
   glass(pop);
@@ -140,8 +148,54 @@ export function installChrome(opts: ChromeOpts): Chrome {
       pop.appendChild(row);
       rows.push({ c, row, sw });
     }
-  } else if (opts.about === false) {
+  } else if (opts.about === false && !opts.segments) {
     pop.textContent = "SlicerLive — WebGPU renderer";
+  }
+
+  // ---- per-segment visibility (swatch + toggle), rebuilt from the current case on each open ----
+  const segHost = document.createElement("div");
+  pop.appendChild(segHost);
+  const segRows: { num: number; sw: HTMLElement }[] = [];
+  const paintSw = (sw: HTMLElement, on: boolean) => {
+    sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
+    sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
+  };
+  function buildSegments() {
+    const S = opts.segments;
+    segRows.length = 0; segHost.innerHTML = "";
+    if (!S) return;
+    const list = S.list();
+    if (!list.length) return;
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "margin-top:6px;border-top:1px solid rgba(255,255,255,.12);padding-top:6px;" +
+      (list.length > 6 ? "max-height:210px;overflow-y:auto;" : "");
+    for (const s of list) {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 2px;cursor:pointer;";
+      const left = document.createElement("span");
+      left.style.cssText = "display:flex;align-items:center;gap:8px;min-width:0;";
+      const swatch = document.createElement("span");
+      swatch.style.cssText = `flex:0 0 auto;width:11px;height:11px;border-radius:3px;box-shadow:0 0 0 1px rgba(255,255,255,.25);background:rgb(${Math.round(s.color[0] * 255)},${Math.round(s.color[1] * 255)},${Math.round(s.color[2] * 255)})`;
+      const lab = document.createElement("span");
+      lab.textContent = s.name;
+      lab.style.cssText = "font:500 12.5px -apple-system,system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+      left.appendChild(swatch); left.appendChild(lab);
+      const sw = document.createElement("span");
+      sw.style.cssText = "width:34px;height:19px;border-radius:999px;position:relative;transition:background 120ms;flex:0 0 auto;";
+      row.appendChild(left); row.appendChild(sw);
+      row.onclick = () => { if (S.enabled && !S.enabled()) return; S.set(s.num, !S.get(s.num)); refresh(); };
+      wrap.appendChild(row);
+      segRows.push({ num: s.num, sw });
+    }
+    segHost.appendChild(wrap);
+    paintSegments();
+  }
+  function paintSegments() {
+    const S = opts.segments;
+    if (!S) return;
+    const dis = S.enabled ? !S.enabled() : false;
+    segHost.style.opacity = dis ? "0.4" : "1";
+    for (const { num, sw } of segRows) paintSw(sw, S.get(num));
   }
 
   // ---- "About SlicerLive" row (matches the legacy popup) ----
@@ -151,7 +205,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
     const aURL = opts.about?.url ?? "https://github.com/pieper/SlicerLive";
     about.textContent = aLabel;
     about.style.cssText = "cursor:pointer;border-radius:9px;padding:9px 8px 3px;margin-top:4px;" +
-      (controls.length ? "border-top:1px solid rgba(255,255,255,.12);" : "") +
+      (controls.length || opts.segments ? "border-top:1px solid rgba(255,255,255,.12);" : "") +
       "font:600 13px -apple-system,system-ui,sans-serif;color:#9fe9ff;";
     about.onmouseenter = () => { about.style.background = "rgba(255,255,255,.07)"; };
     about.onmouseleave = () => { about.style.background = "transparent"; };
@@ -167,10 +221,13 @@ export function installChrome(opts: ChromeOpts): Chrome {
       sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
       sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
     }
+    paintSegments();
   }
   refresh();
 
   const show = () => {
+    buildSegments();                            // fresh per-case segment list each open
+    refresh();
     const b = logo.getBoundingClientRect();     // anchor the popup just below the badge
     pop.style.top = Math.round(b.bottom + 6) + "px";
     pop.style.right = Math.round(window.innerWidth - b.right) + "px";

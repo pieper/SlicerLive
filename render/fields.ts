@@ -214,6 +214,7 @@ export interface SegmentFieldOpts {
   shade?: [number, number, number, number]; // ka,kd,ks,shin — slicer_wgpu SegmentField default 0.20/0.85/0.30/32
   bandMm?: number;                       // iso-shell half-thickness (mm); slicer_wgpu default = 1 voxel
   sampleStepMm?: number;
+  clippable?: boolean;                   // let ROI clip planes crop this segment (default true)
 }
 
 /** A single segment rendered exactly as slicer_wgpu's SegmentField in its DEFAULT
@@ -234,6 +235,7 @@ export interface SegmentFieldOpts {
 export class SegmentField implements Field {
   readonly kind = "seg";
   readonly bindingCount = 1;             // smoothed-presence texture (sampler shared)
+  readonly clippable: boolean;
   private tex: GPUTexture;
   private p2t: Mat4;
   private box: [Vec3, Vec3];
@@ -263,6 +265,7 @@ export class SegmentField implements Field {
     this.bandMm = opts.bandMm ?? voxelMm;
     // slicer_wgpu SegmentField.sample_step_mm = max(0.5*voxel, 0.1)
     this.stepMm = opts.sampleStepMm ?? Math.max(0.5 * voxelMm, 0.1);
+    this.clippable = opts.clippable ?? true;
   }
 
   uniformFloats() { return 28; }        // mat4(16) + color(4) + shade(4) + params(4)
@@ -343,6 +346,7 @@ export interface RGBAFieldOpts {
   ijkToRAS?: ArrayLike<number>;          // real rotated/anisotropic geometry (aligns with an ImageField)
   opacityUnitDistance?: number;
   shade?: [number, number, number, number];
+  clippable?: boolean;                   // let ROI clip planes crop this volume (default true)
 }
 
 /** A pre-baked rgba16float volume (color + smoothed presence-alpha), e.g. the
@@ -350,6 +354,7 @@ export interface RGBAFieldOpts {
 export class RGBAVolumeField implements Field {
   readonly kind = "rgba";
   readonly bindingCount = 1;            // baked rgba texture (sampler shared)
+  readonly clippable: boolean;
   private tex: GPUTexture;
   private p2t: Mat4;
   private shade: [number, number, number, number];
@@ -371,6 +376,7 @@ export class RGBAVolumeField implements Field {
     }
     this.shade = opts.shade ?? [0.30, 0.75, 0.45, 24];
     this.unit = opts.opacityUnitDistance ?? this.stepMm;
+    this.clippable = opts.clippable ?? true;
   }
 
   uniformFloats() { return 24; }        // mat4(16) + params(4) + shade(4)

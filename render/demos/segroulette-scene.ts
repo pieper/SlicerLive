@@ -4,11 +4,16 @@
 // band-shell (the step-derived isosurface of a Gaussian-smoothed presence field) —
 // the WebGPU-native replacement for the vtk.js surface models. The MPR planes show
 // windowed grayscale + a colored segmentation overlay.
+//
+// Three independent, toggleable things share one rebuild(): the background modality VR,
+// the segmentation (with per-segment visibility), and a volume-only ROI crop box that
+// crops the VR but NOT the segmentation (the seg fields are marked clippable:false).
 import type { Gpu } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { SliceRenderer } from "../slice-renderer.ts";
 import { ImageField, RGBAVolumeField, SegmentField, type Field } from "../fields.ts";
 import { bakeColorizeRGBA, bakeSegmentPresence } from "../bake.ts";
+import { createRoiWidget, type RoiWidget } from "./roi-widget.ts";
 
 // WebGPU guarantees only 16 sampled textures per shader stage, and each SegmentField binds one 3D
 // texture. Past this many segments we can't give each its own iso field, so the 3D view switches to
@@ -56,9 +61,21 @@ export interface SegrouletteScene {
   segments: { num: number; name: string; color: [number, number, number]; voxels: number }[];
   mode: "iso" | "colorized" | "volume";   // how the 3D view renders the segmentation
   hasSeg: boolean;                         // whether there's a segmentation layer to toggle
-  /** Toggle the two independent 3D layers (background modality VR + segmentation). Rebuilds the
-   *  scene with the visible subset; caller re-renders. Never leaves the 3D view empty. */
+  /** Toggle the two independent 3D layers (background modality VR + segmentation). */
   setLayers(showVolume: boolean, showSeg: boolean): void;
+  /** Per-segment visibility (3D + slice overlay). Rebakes the colorized overlay/field and, in iso
+   *  mode, rebuilds the scene with the visible subset. Caller redraws slices afterwards. */
+  setSegmentVisible(num: number, visible: boolean): void;
+  isSegmentVisible(num: number): boolean;
+  // Volume-only ROI crop (Slicer's independent enable + visibility). The box crops the VR but NOT
+  // the segmentation. `roi` is the draggable widget; enable applies the clip, visible shows the box.
+  roi: RoiWidget;
+  setRoiEnabled(on: boolean): void;
+  setRoiVisible(on: boolean): void;
+  roiEnabled(): boolean;
+  roiVisible(): boolean;
+  /** Re-apply the clip planes from the current box (after a handle drag) without a rebuild. */
+  reclip(): void;
 }
 
 /** Build the renderable scene (3D VR + segmentation iso + MPR) from an idc_tools load. */
@@ -73,7 +90,8 @@ export function buildSegrouletteScene(
   const data = ct.vol instanceof Float32Array ? ct.vol : Float32Array.from(ct.vol);
   const clim: [number, number] = [ct.lev - ct.win / 2, ct.lev + ct.win / 2];
 
-  // The source volume: modality-appropriate VR (also the raw scalar the MPR window/levels).
+  // The source volume: modality-appropriate VR (also the raw scalar the MPR window/levels). This is
+  // the ONLY clippable field — the ROI crop spares the segmentation (seg fields are clippable:false).
   const volumeField = new ImageField(dev, data, dims, [1, 1, 1], modalityLUT(ct.modality), {
     clim, ijkToRAS: ct.ijkToRAS, shade: [0.25, 0.7, 0.45, 20],
   });
@@ -94,48 +112,97 @@ export function buildSegrouletteScene(
     }
   }
 
+  // Per-segment visibility: nums in `hidden` render nowhere. Baking uses a palette whose hidden
+  // entries have alpha 0 (drops them from the colorized overlay + 3D field); iso mode also filters
+  // the SegmentField subset at rebuild.
+  const hidden = new Set<number>();
+  const visPalette = (): Float32Array => {
+    const p = palette.slice();
+    for (const n of hidden) if (n < 256) p[n * 4 + 3] = 0;
+    return p;
+  };
+
   // The colorized volume (one texture) drives BOTH the MPR overlay and the many-segment 3D fallback.
-  const colorizeTex = seg ? bakeColorizeRGBA(dev, seg.lab, dims, palette, 1.5) : undefined;
+  let colorTex = seg ? bakeColorizeRGBA(dev, seg.lab, dims, visPalette(), 1.5) : undefined;
 
   // The SEGMENTATION layer, independent of the background volume: per-segment iso shells when few
   // (crisp, the demo's identity), else ONE colorized RGBAVolumeField (all segments, one binding) so
-  // we never blow the 16-texture limit.
+  // we never blow the 16-texture limit. Seg fields are clippable:false so the ROI crops only the VR.
   const useIso = segments.length > 0 && segments.length <= MAX_ISO_SEGMENTS;
   let mode: "iso" | "colorized" | "volume" = "volume";
-  let segLayer: Field[] = [];
+  const isoByNum = new Map<number, SegmentField>();
+  let colorizedField: RGBAVolumeField | undefined;
   if (useIso) {
-    segLayer = segments.map((s) => {
+    for (const s of segments) {
       const mask = new Uint8Array(dims[0] * dims[1] * dims[2]);
       for (let i = 0; i < seg!.lab.length; i++) if (seg!.lab[i] === s.num) mask[i] = 1;
       const tex = bakeSegmentPresence(dev, mask, dims, 1.5);
-      return new SegmentField(tex, dims, [1, 1, 1], { color: s.color, opacity: 1, ijkToRAS: ct.ijkToRAS });
-    });
+      isoByNum.set(s.num, new SegmentField(tex, dims, [1, 1, 1], { color: s.color, opacity: 1, ijkToRAS: ct.ijkToRAS, clippable: false }));
+    }
     mode = "iso";
-  } else if (colorizeTex) {
-    segLayer = [new RGBAVolumeField(colorizeTex, dims, [1, 1, 1], { ijkToRAS: ct.ijkToRAS, shade: [0.3, 0.78, 0.5, 28] })];
+  } else if (colorTex) {
+    colorizedField = new RGBAVolumeField(colorTex, dims, [1, 1, 1], { ijkToRAS: ct.ijkToRAS, shade: [0.3, 0.78, 0.5, 28], clippable: false });
     mode = "colorized";
   }
+  const hasSeg = isoByNum.size > 0 || !!colorizedField;
 
   const scene = new SceneRenderer(gpu, format);
-  // Two independent layers: background modality VR + segmentation. Rebuild picks the visible subset.
-  // (build() creates the uniform buffer, so setBackground must follow it — and re-apply per rebuild.)
-  const setLayers = (showVolume: boolean, showSeg: boolean) => {
+  const [rasLo, rasHi] = volumeField.aabb();
+  const roi = createRoiWidget(rasLo, rasHi, { coverage: 0.35 });
+
+  // Central state + rebuild. build() creates the uniform buffer (so setBackground/clip must FOLLOW
+  // it) and re-packs the shader, so every visibility/crop change funnels through here.
+  let showVolume = true, showSeg = hasSeg;
+  let roiEnabled = false, roiVisible = false;
+  const currentSegFields = (): Field[] => {
+    if (mode === "iso") return segments.filter((s) => !hidden.has(s.num)).map((s) => isoByNum.get(s.num)!);
+    return colorizedField ? [colorizedField] : [];
+  };
+  const rebuild = () => {
     const f: Field[] = [];
     if (showVolume) f.push(volumeField);
-    if (showSeg) f.push(...segLayer);
-    scene.build(f);   // may be empty → blank 3D (both layers off is a valid state)
+    if (showSeg) f.push(...currentSegFields());
+    if (roiVisible) { f.push(roi.box, roi.handles); }
+    scene.build(f);                                    // may be empty → blank 3D (a valid state)
     scene.setBackground(0.05, 0.06, 0.09);
+    if (roiEnabled) scene.setClipBox(roi.lo(), roi.hi()); else scene.clearClip();
   };
-  setLayers(true, segLayer.length > 0);          // default: VR context + segmentation both on
+  rebuild();
+
+  // Re-bake the colorized texture from the visible-segment palette; feeds the slice overlay and,
+  // in colorized mode, the 3D field. Cheap enough for an occasional toggle.
+  const rebakeColorized = () => {
+    if (!seg) return;
+    const nt = bakeColorizeRGBA(dev, seg.lab, dims, visPalette(), 1.5);
+    const old = colorTex;
+    colorTex = nt;
+    slice.setTextures(volumeField.volumeTexture(), colorTex);
+    colorizedField?.setTexture(colorTex, false);   // swap in place; rebuild() refreshes the bind group
+    old?.destroy();                                 // one owner destroys the retired texture
+  };
 
   const slice = new SliceRenderer(gpu, format);
-  const [rasLo, rasHi] = volumeField.aabb();
   slice.setVolume(volumeField.patientToTexture(), rasLo, rasHi);
-  slice.setTextures(volumeField.volumeTexture(), colorizeTex);
+  slice.setTextures(volumeField.volumeTexture(), colorTex);
   slice.setWindowLevel(ct.win, ct.lev);
   slice.setOverlayOpacity(seg ? 0.5 : 0);
 
   const center: Vec3 = [(rasLo[0] + rasHi[0]) / 2, (rasLo[1] + rasHi[1]) / 2, (rasLo[2] + rasHi[2]) / 2];
   const radius = Math.hypot(rasHi[0] - rasLo[0], rasHi[1] - rasLo[1], rasHi[2] - rasLo[2]) / 2;
-  return { scene, slice, center, radius, rasLo, rasHi, ijkToRAS: ct.ijkToRAS, dims, win: ct.win, lev: ct.lev, segments, mode, hasSeg: segLayer.length > 0, setLayers };
+  return {
+    scene, slice, center, radius, rasLo, rasHi, ijkToRAS: ct.ijkToRAS, dims, win: ct.win, lev: ct.lev,
+    segments, mode, hasSeg, roi,
+    setLayers(sv, ss) { showVolume = sv; showSeg = ss; rebuild(); },
+    setSegmentVisible(num, visible) {
+      if (visible) hidden.delete(num); else hidden.add(num);
+      rebakeColorized();     // slices + colorized 3D field reflect the change
+      rebuild();             // refresh the 3D bind group (iso subset / swapped colorized texture)
+    },
+    isSegmentVisible: (num) => !hidden.has(num),
+    setRoiEnabled(on) { roiEnabled = on; rebuild(); },
+    setRoiVisible(on) { roiVisible = on; rebuild(); },
+    roiEnabled: () => roiEnabled,
+    roiVisible: () => roiVisible,
+    reclip() { if (roiEnabled) scene.setClipBox(roi.lo(), roi.hi()); else scene.clearClip(); scene.syncUniforms(); },
+  };
 }

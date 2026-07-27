@@ -12,6 +12,8 @@ import { type Crosshair4up, mountCrosshair } from "./crosshair.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachSliceControls } from "./slice-control.ts";
 import { attachDoubleClick, attachViewGrid } from "./view-grid.ts";
+import { attachWidgetControls } from "./widget-control.ts";
+import type { Box, HandleMeta } from "./roi-widget.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
 import { installIdcInfo } from "./idc-info.ts";
 import { createMosaic } from "./mosaic.ts";
@@ -98,18 +100,34 @@ async function main() {
   const grid = attachViewGrid(document.getElementById("grid")!, names, resize);
   attachDoubleClick(cv.threeD, () => grid.toggleMax("threeD"));
 
-  // Shared chrome: SlicerLive logo popup with the two independent 3D layer toggles (modality volume
-  // render + segmentation) + the "?" help cheat-sheet. Layer state persists across spins.
+  // Shared chrome: SlicerLive logo popup with the independent 3D layer toggles (modality volume
+  // render + segmentation), per-segment visibility, the volume-only ROI crop, and the "?" help
+  // cheat-sheet. All state persists across spins.
   const layers = { volume: true, seg: true };
   let sliceOutline = false;   // slice overlay: fill (default) vs outline — a session preference
+  // ROI crop (VOLUME ONLY): Slicer's independent enable + visibility, both off by default. The first
+  // time crop is enabled this session, also reveal the box (Slicer's "enable turns it on" behaviour).
+  let roiEnabled = false, roiVisible = false, roiFirstEnable = true;
   const applyLayers = () => { rs?.setLayers(layers.volume, layers.seg); draw3d(); xhair?.redraw(); };
   const redrawSlices = () => { for (const p of planes) drawSlice(p); xhair?.redraw(); };
+  const applyRoi = () => { rs?.setRoiEnabled(roiEnabled); rs?.setRoiVisible(roiVisible); draw3d(); xhair?.redraw(); };
   const controls: VizControl[] = [
     { label: "Volume render", get: () => layers.volume, set: (on) => { layers.volume = on; applyLayers(); } },
     { label: "Segmentation", get: () => layers.seg, set: (on) => { layers.seg = on; applyLayers(); }, disabled: () => !(rs?.hasSeg) },
     { label: "Slice outline", get: () => sliceOutline, set: (on) => { sliceOutline = on; rs?.slice.setOverlayOutline(on); redrawSlices(); }, disabled: () => !(rs?.hasSeg) },
+    { label: "Crop volume", get: () => roiEnabled, set: (on) => { roiEnabled = on; if (on && roiFirstEnable) { roiVisible = true; roiFirstEnable = false; } applyRoi(); }, disabled: () => !layers.volume },
+    { label: "Show ROI box", get: () => roiVisible, set: (on) => { roiVisible = on; rs?.setRoiVisible(on); draw3d(); xhair?.redraw(); } },
   ];
-  const chrome = installChrome({ controls, anchor: cv.threeD.parentElement ?? undefined });
+  const chrome = installChrome({
+    controls,
+    anchor: cv.threeD.parentElement ?? undefined,
+    segments: {
+      list: () => (rs?.segments ?? []).map((s) => ({ num: s.num, name: s.name, color: s.color })),
+      get: (num) => rs?.isSegmentVisible(num) ?? true,
+      set: (num, on) => { rs?.setSegmentVisible(num, on); redrawSlices(); draw3d(); xhair?.redraw(); },
+      enabled: () => !!(rs?.hasSeg) && (layers.seg || layers.volume),
+    },
+  });
 
   // IDC download mosaic (slice thumbnails fill in as the DICOM streams) + the "Details" dialog
   // (citation / license / OHIF + IDC-portal links / full segment list).
@@ -166,7 +184,9 @@ async function main() {
       const framed = framedCamera(rs.center, rs.radius);   // Slicer-default framing for this case
       camera.position = framed.position; camera.focalPoint = framed.focalPoint;
       camera.viewUp = framed.viewUp; camera.viewAngle = framed.viewAngle;
-      layers.volume = true; layers.seg = rs.hasSeg; rs.slice.setOverlayOutline(sliceOutline); chrome.refresh();   // reset toggles / re-apply outline pref per case
+      layers.volume = true; layers.seg = rs.hasSeg; rs.slice.setOverlayOutline(sliceOutline);
+      rs.setRoiEnabled(roiEnabled); rs.setRoiVisible(roiVisible);   // carry the crop state into the new case
+      chrome.refresh();   // reset toggles / re-apply outline pref per case
       showMeta(res.entry, rs);
       const d3 = document.querySelector(".lab.d3");
       if (d3) d3.textContent = rs.mode === "colorized" ? "3D · colorized volume" : rs.mode === "iso" ? "3D · SegmentField iso" : "3D · volume";
@@ -197,6 +217,27 @@ async function main() {
       hooks: { onDoubleClick: () => { grid.toggleMax(p.cell); return true; } },
     });
   }
+  // ROI crop widget drag: grab a face/corner/centre handle to resize/move the box; the drag re-crops
+  // the volume live (reclip = setClipBox + syncUniforms, no rebuild). Capture-phase, so grabbing a
+  // handle stops the gesture from reaching the camera; empty space bubbles through to orbit. Handles
+  // are only offered when the box is visible.
+  let roiBox0: Box | null = null;
+  attachWidgetControls(cv.threeD, camera, {
+    getHandles: () => (rs && rs.roiVisible())
+      ? rs.roi.handleList().map((h) => ({ id: h.id, world: h.world, data: h.data, cursor: h.cursor }))
+      : [],
+    getSize: () => ({ w: cv.threeD.width, h: cv.threeD.height }),
+    onDragStart: () => { roiBox0 = rs!.roi.snapshot(); },
+    onDrag: (h, world) => {
+      if (!rs || !roiBox0) return;
+      const d: Vec3 = [world[0] - h.world[0], world[1] - h.world[1], world[2] - h.world[2]];
+      rs.roi.applyDrag(h.data as HandleMeta, roiBox0, d);
+      rs.reclip();                       // re-crop + upload box/handle/clip in one syncUniforms
+      draw3d(); xhair?.redraw();
+    },
+    onHover: (h) => { rs?.roi.setHover(h ? h.id : null); rs?.scene.syncUniforms(); draw3d(); },
+    onChange: () => { draw3d(); },
+  });
   // 3D trackball = the SHARED Slicer-faithful camera controls (identical direction + feel as every
   // other demo): left=rotate, shift/middle=pan, right=zoom, wheel=dolly. Shift+move (no button)
   // falls through to the crosshair pick (mountCrosshair), since a pick needs no drag.
@@ -225,6 +266,10 @@ async function main() {
     hasSeg: () => rs?.hasSeg ?? false,
     setLayers: (v: boolean, s: boolean) => { rs?.setLayers(v, s); draw3d(); xhair?.redraw(); },
     setOutline: (on: boolean) => { rs?.slice.setOverlayOutline(on); for (const p of planes) drawSlice(p); },
+    segVis: (num: number) => rs?.isSegmentVisible(num) ?? null,
+    setSegVis: (num: number, on: boolean) => { rs?.setSegmentVisible(num, on); for (const p of planes) drawSlice(p); draw3d(); },
+    roi: () => rs ? { enabled: rs.roiEnabled(), visible: rs.roiVisible(), lo: rs.roi.lo(), hi: rs.roi.hi(), handles: rs.roi.handleList().length } : null,
+    setRoi: (en: boolean, vis: boolean) => { roiEnabled = en; roiVisible = vis; if (en) roiFirstEnable = false; rs?.setRoiEnabled(en); rs?.setRoiVisible(vis); draw3d(); },
   };
 
   status("SlicerLive SEGRoulette — click Spin to load a random IDC segmentation");
