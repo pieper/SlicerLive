@@ -23,7 +23,7 @@ struct U {
   origin : vec4<f32>,    // RAS of the plane center (for the current scrub offset)
   uvec : vec4<f32>,      // RAS vector spanning the view width  (isotropic mm)
   vvec : vec4<f32>,      // RAS vector spanning the view height (isotropic mm)
-  params : vec4<f32>,    // win, lev, overlayOpacity, _
+  params : vec4<f32>,    // win, lev, overlayOpacity, outlineMode(0/1)
   size : vec4<f32>,      // sizeX, sizeY, _, _
 };
 @group(0) @binding(0) var<uniform> u : U;
@@ -42,6 +42,11 @@ fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92; let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
   return select(lo, hi, c > vec3<f32>(0.04045));
 }
+fn ov_at(ras : vec3<f32>) -> vec4<f32> {   // overlay at a RAS point (0 outside the volume)
+  let t = (u.p2t * vec4<f32>(ras, 1.0)).xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
+  return textureSampleLevel(t_overlay, s_lin, t, 0.0);
+}
 @fragment
 fn fs_main(v : V) -> @location(0) vec4<f32> {
   let uv = v.position.xy / u.size.xy;                 // [0,1], y down
@@ -54,7 +59,16 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
   let g = clamp((val - (u.params.y - win * 0.5)) / win, 0.0, 1.0);
   var col = vec3<f32>(g);
   let ov = textureSampleLevel(t_overlay, s_lin, tex, 0.0);
-  col = mix(col, ov.rgb, clamp(ov.a * u.params.z, 0.0, 1.0));
+  var ovA = clamp(ov.a * u.params.z, 0.0, 1.0);
+  if (u.params.w > 0.5) {   // OUTLINE mode: keep the overlay only at segment boundaries (screen-space)
+    let du = u.uvec.xyz / u.size.x * 1.5;   // ~1.5 px right, in RAS
+    let dv = u.vvec.xyz / u.size.y * 1.5;   // ~1.5 px up
+    let n0 = ov_at(ras + du); let n1 = ov_at(ras - du); let n2 = ov_at(ras + dv); let n3 = ov_at(ras - dv);
+    let e = max(max(distance(n0.rgb, ov.rgb) + abs(n0.a - ov.a), distance(n1.rgb, ov.rgb) + abs(n1.a - ov.a)),
+                max(distance(n2.rgb, ov.rgb) + abs(n2.a - ov.a), distance(n3.rgb, ov.rgb) + abs(n3.a - ov.a)));
+    ovA = ovA * clamp((e - 0.03) * 12.0, 0.0, 1.0);   // 0 in the interior, full at a colour/label edge
+  }
+  col = mix(col, ov.rgb, ovA);
   return vec4<f32>(srgb2physical(col), 1.0);
 }
 `;
@@ -194,6 +208,8 @@ export class SliceRenderer {
   }
   setWindowLevel(win: number, lev: number) { this.u[28] = win; this.u[29] = lev; }
   setOverlayOpacity(o: number) { this.u[30] = o; }
+  /** Overlay draw mode: false = FILL (solid coloured regions), true = OUTLINE (segment boundaries only). */
+  setOverlayOutline(on: boolean) { this.u[31] = on ? 1 : 0; }
 
   /** Physical size (mm) of the square view for the current plane (isotropic, letterboxed).
    *  Matches Slicer's FitSliceToBackground: the field of view is exactly the volume's

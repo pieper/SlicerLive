@@ -101,10 +101,13 @@ async function main() {
   // Shared chrome: SlicerLive logo popup with the two independent 3D layer toggles (modality volume
   // render + segmentation) + the "?" help cheat-sheet. Layer state persists across spins.
   const layers = { volume: true, seg: true };
+  let sliceOutline = false;   // slice overlay: fill (default) vs outline — a session preference
   const applyLayers = () => { rs?.setLayers(layers.volume, layers.seg); draw3d(); xhair?.redraw(); };
+  const redrawSlices = () => { for (const p of planes) drawSlice(p); xhair?.redraw(); };
   const controls: VizControl[] = [
     { label: "Volume render", get: () => layers.volume, set: (on) => { layers.volume = on; applyLayers(); } },
     { label: "Segmentation", get: () => layers.seg, set: (on) => { layers.seg = on; applyLayers(); }, disabled: () => !(rs?.hasSeg) },
+    { label: "Slice outline", get: () => sliceOutline, set: (on) => { sliceOutline = on; rs?.slice.setOverlayOutline(on); redrawSlices(); }, disabled: () => !(rs?.hasSeg) },
   ];
   const chrome = installChrome({ controls });
 
@@ -163,7 +166,7 @@ async function main() {
       const framed = framedCamera(rs.center, rs.radius);   // Slicer-default framing for this case
       camera.position = framed.position; camera.focalPoint = framed.focalPoint;
       camera.viewUp = framed.viewUp; camera.viewAngle = framed.viewAngle;
-      layers.volume = true; layers.seg = rs.hasSeg; chrome.refresh();   // reset 3D layer toggles per case
+      layers.volume = true; layers.seg = rs.hasSeg; rs.slice.setOverlayOutline(sliceOutline); chrome.refresh();   // reset toggles / re-apply outline pref per case
       showMeta(res.entry, rs);
       const d3 = document.querySelector(".lab.d3");
       if (d3) d3.textContent = rs.mode === "colorized" ? "3D · colorized volume" : rs.mode === "iso" ? "3D · SegmentField iso" : "3D · volume";
@@ -221,6 +224,7 @@ async function main() {
     sliceZoom: (o: "axial" | "coronal" | "sagittal") => rs?.slice.zoom(o) ?? 1,
     hasSeg: () => rs?.hasSeg ?? false,
     setLayers: (v: boolean, s: boolean) => { rs?.setLayers(v, s); draw3d(); xhair?.redraw(); },
+    setOutline: (on: boolean) => { rs?.slice.setOverlayOutline(on); for (const p of planes) drawSlice(p); },
   };
 
   status("SlicerLive SEGRoulette — click Spin to load a random IDC segmentation");
