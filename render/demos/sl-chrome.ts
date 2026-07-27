@@ -15,6 +15,8 @@ export interface ChromeOpts {
   controls?: VizControl[];                                   // viz toggles (empty → branding only)
   help?: { title: string; rows: [string, string][] }[];     // override the default cheat-sheet
   onChange?: () => void;                                     // after a toggle (redraw)
+  anchor?: HTMLElement;                                      // float the badge over this element's top-right corner (e.g. the 3D cell); falls back to the viewport corner when hidden/absent
+  about?: { label?: string; url?: string } | false;         // "About" row at the popup bottom (default: About SlicerLive → repo); false to omit
 }
 export interface Chrome { refresh(): void }
 
@@ -79,17 +81,43 @@ export function installChrome(opts: ChromeOpts): Chrome {
   function escClose(e: KeyboardEvent) { if (e.key === "Escape") closeHelp(); }
   function closeHelp() { if (helpEl) { helpEl.remove(); helpEl = null; document.removeEventListener("keydown", escClose, true); } }
 
-  // ---- SlicerLive logo mark (top-right, the hover target) + viz-controls popup ----
-  const logo = document.createElement("img");
-  logo.src = SL_LOGO;
-  logo.alt = "SlicerLive";
+  // ---- SlicerLive logo BADGE (dark rounded mark + "SlicerLive" wordmark), floated over the corner
+  // of the 3D view (opts.anchor) like the legacy demo — readable, and the hover target for the popup.
+  const logo = document.createElement("div");
   logo.title = "SlicerLive — visualization";
-  logo.style.cssText = "position:fixed;top:7px;right:12px;z-index:74;cursor:pointer;user-select:none;height:36px;width:auto;" +
-    "filter:drop-shadow(0 2px 6px rgba(0,0,0,.5));transition:transform 120ms ease-out;";
+  logo.style.cssText = "position:fixed;z-index:74;cursor:pointer;user-select:none;display:flex;flex-direction:column;" +
+    "align-items:center;gap:4px;padding:7px 12px 6px;border-radius:14px;background:#121826;" +
+    "border:1px solid rgba(255,255,255,.12);box-shadow:0 10px 30px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06);" +
+    "transition:transform 120ms ease-out;";
+  const mark = document.createElement("img");
+  mark.src = SL_LOGO; mark.alt = "SlicerLive";
+  mark.style.cssText = "height:40px;width:auto;display:block;filter:drop-shadow(0 0 5px rgba(255,200,80,.5));";
+  const word = document.createElement("div");
+  word.innerHTML = 'Slicer<b style="color:#ffd34d">Live</b>';
+  word.style.cssText = "font:800 12px/1 -apple-system,system-ui,sans-serif;letter-spacing:.5px;color:#eef7ff;" +
+    "text-shadow:0 0 14px rgba(255,210,90,.4);";
+  logo.appendChild(mark); logo.appendChild(word);
   document.body.appendChild(logo);
 
+  // Keep the badge pinned to the anchor's (3D cell) top-right corner; fall back to the viewport corner
+  // when the anchor is hidden (another view maximized) or absent.
+  const place = () => {
+    const a = opts.anchor;
+    const r = a && a.getClientRects().length ? a.getBoundingClientRect() : null;
+    if (r && r.width > 2 && r.height > 2) {
+      logo.style.top = Math.round(r.top + 8) + "px";
+      logo.style.right = Math.round(window.innerWidth - r.right + 8) + "px";
+    } else {
+      logo.style.top = "10px"; logo.style.right = "12px";
+    }
+  };
+  place();
+  requestAnimationFrame(place);
+  globalThis.addEventListener("resize", place);
+  if (opts.anchor && "ResizeObserver" in globalThis) new ResizeObserver(place).observe(opts.anchor);
+
   const pop = document.createElement("div");
-  pop.style.cssText = "position:fixed;top:42px;right:12px;z-index:73;min-width:180px;padding:10px 12px;border-radius:12px;" +
+  pop.style.cssText = "position:fixed;z-index:73;min-width:190px;padding:10px 12px;border-radius:12px;" +
     "color:#eaf0ff;font:13px -apple-system,system-ui,sans-serif;opacity:0;pointer-events:none;transform:translateY(-6px);" +
     "transition:opacity 120ms ease-out,transform 120ms ease-out;";
   glass(pop);
@@ -112,8 +140,23 @@ export function installChrome(opts: ChromeOpts): Chrome {
       pop.appendChild(row);
       rows.push({ c, row, sw });
     }
-  } else {
+  } else if (opts.about === false) {
     pop.textContent = "SlicerLive — WebGPU renderer";
+  }
+
+  // ---- "About SlicerLive" row (matches the legacy popup) ----
+  if (opts.about !== false) {
+    const about = document.createElement("div");
+    const aLabel = opts.about?.label ?? "About SlicerLive";
+    const aURL = opts.about?.url ?? "https://github.com/pieper/SlicerLive";
+    about.textContent = aLabel;
+    about.style.cssText = "cursor:pointer;border-radius:9px;padding:9px 8px 3px;margin-top:4px;" +
+      (controls.length ? "border-top:1px solid rgba(255,255,255,.12);" : "") +
+      "font:600 13px -apple-system,system-ui,sans-serif;color:#9fe9ff;";
+    about.onmouseenter = () => { about.style.background = "rgba(255,255,255,.07)"; };
+    about.onmouseleave = () => { about.style.background = "transparent"; };
+    about.onclick = (e) => { e.stopPropagation(); globalThis.open(aURL, "_blank", "noopener"); };
+    pop.appendChild(about);
   }
 
   function refresh() {
@@ -127,7 +170,12 @@ export function installChrome(opts: ChromeOpts): Chrome {
   }
   refresh();
 
-  const show = () => { pop.style.opacity = "1"; pop.style.pointerEvents = "auto"; pop.style.transform = "translateY(0)"; };
+  const show = () => {
+    const b = logo.getBoundingClientRect();     // anchor the popup just below the badge
+    pop.style.top = Math.round(b.bottom + 6) + "px";
+    pop.style.right = Math.round(window.innerWidth - b.right) + "px";
+    pop.style.opacity = "1"; pop.style.pointerEvents = "auto"; pop.style.transform = "translateY(0)";
+  };
   const hide = () => { pop.style.opacity = "0"; pop.style.pointerEvents = "none"; pop.style.transform = "translateY(-6px)"; };
   let pinned = false;
   logo.onmouseenter = () => { logo.style.transform = "scale(1.08)"; show(); };

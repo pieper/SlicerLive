@@ -677,7 +677,7 @@ struct U {
   origin : vec4<f32>,    // RAS of the plane center (for the current scrub offset)
   uvec : vec4<f32>,      // RAS vector spanning the view width  (isotropic mm)
   vvec : vec4<f32>,      // RAS vector spanning the view height (isotropic mm)
-  params : vec4<f32>,    // win, lev, overlayOpacity, _
+  params : vec4<f32>,    // win, lev, overlayOpacity, outlineMode(0/1)
   size : vec4<f32>,      // sizeX, sizeY, _, _
 };
 @group(0) @binding(0) var<uniform> u : U;
@@ -696,6 +696,11 @@ fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92; let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
   return select(lo, hi, c > vec3<f32>(0.04045));
 }
+fn ov_at(ras : vec3<f32>) -> vec4<f32> {   // overlay at a RAS point (0 outside the volume)
+  let t = (u.p2t * vec4<f32>(ras, 1.0)).xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
+  return textureSampleLevel(t_overlay, s_lin, t, 0.0);
+}
 @fragment
 fn fs_main(v : V) -> @location(0) vec4<f32> {
   let uv = v.position.xy / u.size.xy;                 // [0,1], y down
@@ -708,7 +713,16 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
   let g = clamp((val - (u.params.y - win * 0.5)) / win, 0.0, 1.0);
   var col = vec3<f32>(g);
   let ov = textureSampleLevel(t_overlay, s_lin, tex, 0.0);
-  col = mix(col, ov.rgb, clamp(ov.a * u.params.z, 0.0, 1.0));
+  var ovA = clamp(ov.a * u.params.z, 0.0, 1.0);
+  if (u.params.w > 0.5) {   // OUTLINE mode: keep the overlay only at segment boundaries (screen-space)
+    let du = u.uvec.xyz / u.size.x * 1.5;   // ~1.5 px right, in RAS
+    let dv = u.vvec.xyz / u.size.y * 1.5;   // ~1.5 px up
+    let n0 = ov_at(ras + du); let n1 = ov_at(ras - du); let n2 = ov_at(ras + dv); let n3 = ov_at(ras - dv);
+    let e = max(max(distance(n0.rgb, ov.rgb) + abs(n0.a - ov.a), distance(n1.rgb, ov.rgb) + abs(n1.a - ov.a)),
+                max(distance(n2.rgb, ov.rgb) + abs(n2.a - ov.a), distance(n3.rgb, ov.rgb) + abs(n3.a - ov.a)));
+    ovA = ovA * clamp((e - 0.03) * 12.0, 0.0, 1.0);   // 0 in the interior, full at a colour/label edge
+  }
+  col = mix(col, ov.rgb, ovA);
   return vec4<f32>(srgb2physical(col), 1.0);
 }
 `
@@ -827,6 +841,10 @@ var SliceRenderer = class {
   }
   setOverlayOpacity(o) {
     this.u[30] = o;
+  }
+  /** Overlay draw mode: false = FILL (solid coloured regions), true = OUTLINE (segment boundaries only). */
+  setOverlayOutline(on) {
+    this.u[31] = on ? 1 : 0;
   }
   /** Physical size (mm) of the square view for the current plane (isotropic, letterboxed).
    *  Matches Slicer's FitSliceToBackground: the field of view is exactly the volume's
@@ -2226,14 +2244,36 @@ function installChrome(opts) {
       document.removeEventListener("keydown", escClose, true);
     }
   }
-  const logo = document.createElement("img");
-  logo.src = SL_LOGO;
-  logo.alt = "SlicerLive";
+  const logo = document.createElement("div");
   logo.title = "SlicerLive \u2014 visualization";
-  logo.style.cssText = "position:fixed;top:7px;right:12px;z-index:74;cursor:pointer;user-select:none;height:36px;width:auto;filter:drop-shadow(0 2px 6px rgba(0,0,0,.5));transition:transform 120ms ease-out;";
+  logo.style.cssText = "position:fixed;z-index:74;cursor:pointer;user-select:none;display:flex;flex-direction:column;align-items:center;gap:4px;padding:7px 12px 6px;border-radius:14px;background:#121826;border:1px solid rgba(255,255,255,.12);box-shadow:0 10px 30px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06);transition:transform 120ms ease-out;";
+  const mark = document.createElement("img");
+  mark.src = SL_LOGO;
+  mark.alt = "SlicerLive";
+  mark.style.cssText = "height:40px;width:auto;display:block;filter:drop-shadow(0 0 5px rgba(255,200,80,.5));";
+  const word = document.createElement("div");
+  word.innerHTML = 'Slicer<b style="color:#ffd34d">Live</b>';
+  word.style.cssText = "font:800 12px/1 -apple-system,system-ui,sans-serif;letter-spacing:.5px;color:#eef7ff;text-shadow:0 0 14px rgba(255,210,90,.4);";
+  logo.appendChild(mark);
+  logo.appendChild(word);
   document.body.appendChild(logo);
+  const place = () => {
+    const a = opts.anchor;
+    const r = a && a.getClientRects().length ? a.getBoundingClientRect() : null;
+    if (r && r.width > 2 && r.height > 2) {
+      logo.style.top = Math.round(r.top + 8) + "px";
+      logo.style.right = Math.round(window.innerWidth - r.right + 8) + "px";
+    } else {
+      logo.style.top = "10px";
+      logo.style.right = "12px";
+    }
+  };
+  place();
+  requestAnimationFrame(place);
+  globalThis.addEventListener("resize", place);
+  if (opts.anchor && "ResizeObserver" in globalThis) new ResizeObserver(place).observe(opts.anchor);
   const pop = document.createElement("div");
-  pop.style.cssText = "position:fixed;top:42px;right:12px;z-index:73;min-width:180px;padding:10px 12px;border-radius:12px;color:#eaf0ff;font:13px -apple-system,system-ui,sans-serif;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 120ms ease-out,transform 120ms ease-out;";
+  pop.style.cssText = "position:fixed;z-index:73;min-width:190px;padding:10px 12px;border-radius:12px;color:#eaf0ff;font:13px -apple-system,system-ui,sans-serif;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 120ms ease-out,transform 120ms ease-out;";
   glass(pop);
   document.body.appendChild(pop);
   const rows = [];
@@ -2260,8 +2300,26 @@ function installChrome(opts) {
       pop.appendChild(row);
       rows.push({ c, row, sw });
     }
-  } else {
+  } else if (opts.about === false) {
     pop.textContent = "SlicerLive \u2014 WebGPU renderer";
+  }
+  if (opts.about !== false) {
+    const about = document.createElement("div");
+    const aLabel = opts.about?.label ?? "About SlicerLive";
+    const aURL = opts.about?.url ?? "https://github.com/pieper/SlicerLive";
+    about.textContent = aLabel;
+    about.style.cssText = "cursor:pointer;border-radius:9px;padding:9px 8px 3px;margin-top:4px;" + (controls.length ? "border-top:1px solid rgba(255,255,255,.12);" : "") + "font:600 13px -apple-system,system-ui,sans-serif;color:#9fe9ff;";
+    about.onmouseenter = () => {
+      about.style.background = "rgba(255,255,255,.07)";
+    };
+    about.onmouseleave = () => {
+      about.style.background = "transparent";
+    };
+    about.onclick = (e) => {
+      e.stopPropagation();
+      globalThis.open(aURL, "_blank", "noopener");
+    };
+    pop.appendChild(about);
   }
   function refresh() {
     for (const { c, row, sw } of rows) {
@@ -2274,6 +2332,9 @@ function installChrome(opts) {
   }
   refresh();
   const show = () => {
+    const b = logo.getBoundingClientRect();
+    pop.style.top = Math.round(b.bottom + 6) + "px";
+    pop.style.right = Math.round(window.innerWidth - b.right) + "px";
     pop.style.opacity = "1";
     pop.style.pointerEvents = "auto";
     pop.style.transform = "translateY(0)";
@@ -2486,7 +2547,7 @@ async function main() {
       drawAll();
     } }
   ];
-  installChrome({ controls: chromeControls });
+  installChrome({ controls: chromeControls, anchor: cv.threeD.parentElement ?? void 0 });
   let focusedCell = null;
   for (const p of planes) {
     attachSliceControls(cv[p.cell], {

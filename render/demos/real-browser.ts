@@ -207,7 +207,7 @@ async function main() {
   const chromeControls: VizControl[] = [
     { label: "Crosshair", get: () => crosshair.visible, set: (on) => { crosshair.toggle(on); drawAll(); } },
   ];
-  installChrome({ controls: chromeControls });
+  installChrome({ controls: chromeControls, anchor: cv.threeD.parentElement ?? undefined });
 
   // Slice-view stepping — Slicer's vtkMRMLSliceIntersectionWidget semantics:
   // wheel fwd / f / Right / Up = increment by the volume spacing along the slice normal;

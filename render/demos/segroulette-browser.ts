@@ -109,7 +109,7 @@ async function main() {
     { label: "Segmentation", get: () => layers.seg, set: (on) => { layers.seg = on; applyLayers(); }, disabled: () => !(rs?.hasSeg) },
     { label: "Slice outline", get: () => sliceOutline, set: (on) => { sliceOutline = on; rs?.slice.setOverlayOutline(on); redrawSlices(); }, disabled: () => !(rs?.hasSeg) },
   ];
-  const chrome = installChrome({ controls });
+  const chrome = installChrome({ controls, anchor: cv.threeD.parentElement ?? undefined });
 
   // IDC download mosaic (slice thumbnails fill in as the DICOM streams) + the "Details" dialog
   // (citation / license / OHIF + IDC-portal links / full segment list).
