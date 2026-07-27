@@ -3,6 +3,7 @@
 // (top-left) that opens a glass cheat-sheet of the mouse/trackpad/keyboard bindings. Ported from the
 // legacy help-overlay.js so the WebGPU demos feel like the old vtk.js ones. Self-contained DOM — no
 // render deps; each demo calls installChrome({...}) from its entry.
+import { SL_LOGO } from "./sl-logo.ts";
 
 export interface VizControl {
   label: string;
@@ -78,12 +79,13 @@ export function installChrome(opts: ChromeOpts): Chrome {
   function escClose(e: KeyboardEvent) { if (e.key === "Escape") closeHelp(); }
   function closeHelp() { if (helpEl) { helpEl.remove(); helpEl = null; document.removeEventListener("keydown", escClose, true); } }
 
-  // ---- SlicerLive logo mark (top-right) + viz-controls popup ----
-  const logo = document.createElement("div");
-  logo.textContent = "SlicerLive";
-  logo.style.cssText = "position:fixed;top:11px;right:12px;z-index:74;cursor:pointer;user-select:none;" +
-    "padding:4px 10px;border-radius:8px;font:700 12px -apple-system,system-ui,sans-serif;letter-spacing:.2px;" +
-    "color:#04121c;background:linear-gradient(180deg,#9fe9ff,#54c6f0);box-shadow:0 4px 14px rgba(0,0,0,.4);";
+  // ---- SlicerLive logo mark (top-right, the hover target) + viz-controls popup ----
+  const logo = document.createElement("img");
+  logo.src = SL_LOGO;
+  logo.alt = "SlicerLive";
+  logo.title = "SlicerLive — visualization";
+  logo.style.cssText = "position:fixed;top:7px;right:12px;z-index:74;cursor:pointer;user-select:none;height:36px;width:auto;" +
+    "filter:drop-shadow(0 2px 6px rgba(0,0,0,.5));transition:transform 120ms ease-out;";
   document.body.appendChild(logo);
 
   const pop = document.createElement("div");
@@ -128,9 +130,9 @@ export function installChrome(opts: ChromeOpts): Chrome {
   const show = () => { pop.style.opacity = "1"; pop.style.pointerEvents = "auto"; pop.style.transform = "translateY(0)"; };
   const hide = () => { pop.style.opacity = "0"; pop.style.pointerEvents = "none"; pop.style.transform = "translateY(-6px)"; };
   let pinned = false;
-  logo.onmouseenter = () => show();
+  logo.onmouseenter = () => { logo.style.transform = "scale(1.08)"; show(); };
   logo.onclick = () => { pinned = !pinned; pinned ? show() : hide(); };
-  logo.onmouseleave = () => { if (!pinned) setTimeout(() => { if (!pop.matches(":hover") && !pinned) hide(); }, 120); };
+  logo.onmouseleave = () => { logo.style.transform = "scale(1)"; if (!pinned) setTimeout(() => { if (!pop.matches(":hover") && !pinned) hide(); }, 120); };
   pop.onmouseleave = () => { if (!pinned) hide(); };
 
   return { refresh };

@@ -123,7 +123,7 @@ export function buildSegrouletteScene(
     const f: Field[] = [];
     if (showVolume) f.push(volumeField);
     if (showSeg) f.push(...segLayer);
-    scene.build(f.length ? f : [volumeField]);   // never empty
+    scene.build(f);   // may be empty → blank 3D (both layers off is a valid state)
     scene.setBackground(0.05, 0.06, 0.09);
   };
   setLayers(true, segLayer.length > 0);          // default: VR context + segmentation both on
