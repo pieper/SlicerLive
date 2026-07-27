@@ -11,6 +11,7 @@ import { buildSegrouletteScene, type SegrouletteScene } from "./segroulette-scen
 import { type Crosshair4up, mountCrosshair } from "./crosshair.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachSliceControls } from "./slice-control.ts";
+import { attachDoubleClick, attachViewGrid } from "./view-grid.ts";
 import { loadManifest, loadSeries, spinRandom } from "../vendor/idc_tools/index.js";
 import type { LoadResult, RouletteManifest, SeriesEntry } from "../vendor/idc_tools/types.js";
 import type { Vec3 } from "../mat4.ts";
@@ -85,22 +86,24 @@ async function main() {
 
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
-    for (const n of names) { cv[n].width = Math.floor(cv[n].clientWidth * dpr); cv[n].height = Math.floor(cv[n].clientHeight * dpr); }
+    for (const n of names) { cv[n].width = Math.floor(cv[n].clientWidth * dpr); cv[n].height = Math.floor(cv[n].clientHeight * dpr); }   // hidden (maximized-away) cell -> 0, skipped by draw*
     drawAll();
   };
   globalThis.addEventListener("resize", resize);
+  // shared double-click-to-maximize (view-grid): slice cells via attachSliceControls onDoubleClick,
+  // the 3D cell via attachDoubleClick. Full-page 2x2 like the real demo.
+  const grid = attachViewGrid(document.getElementById("grid")!, names, resize);
+  attachDoubleClick(cv.threeD, () => grid.toggleMax("threeD"));
 
-  // metadata panel
+  // Compact single-line metadata in the thin header (full segment list -> info dialog, later).
   const showMeta = (entry: SeriesEntry | undefined, sc: SegrouletteScene) => {
     const info = el("info");
     if (!info) return;
-    const segs = sc.segments.map((s) =>
-      `<span class="chip" style="border-color:rgb(${s.color.map((c) => Math.round(c * 255)).join(",")})">${s.name}</span>`).join(" ");
+    const n = sc.segments.length;
     info.innerHTML =
-      `<div class="col">${entry?.col ?? ""} <span class="mod">${entry?.m ?? ""}</span></div>` +
-      `<div class="sd">${entry?.sd ?? "segmentation"}</div>` +
-      `<div class="segs">${segs || "<i>no segments</i>"}</div>` +
-      (entry?.lic ? `<div class="lic">${entry.lic}</div>` : "");
+      `<span class="col">${entry?.col ?? "IDC"}</span><span class="mod">${entry?.m ?? ""}</span>` +
+      `<span class="sd">${entry?.sd ?? "segmentation"}</span>` +
+      `<span class="n">· ${n} segment${n === 1 ? "" : "s"}${entry?.lic ? " · " + entry.lic : ""}</span>`;
   };
 
   const spinBtn = el("spin") as HTMLButtonElement;
@@ -155,6 +158,7 @@ async function main() {
       getSlice: () => rs!.slice,
       step: (fwd) => { if (sliceIx) off[p.cell] = sliceIx.wheel(p.orient, off[p.cell], fwd); },
       redraw: () => { drawSlice(p); xhair?.redraw(); },
+      hooks: { onDoubleClick: () => { grid.toggleMax(p.cell); return true; } },
     });
   }
   // 3D trackball = the SHARED Slicer-faithful camera controls (identical direction + feel as every
