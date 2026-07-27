@@ -2013,6 +2013,288 @@ function attachSlicePick(canvas, slice, cfg, state, onJump) {
   });
 }
 
+// render/demos/slice-control.ts
+function attachSliceControls(canvas, cfg) {
+  const SCROLL_PX = cfg.scrollPx ?? 7;
+  const h = cfg.hooks ?? {};
+  const uv = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height, w: r.width, h: r.height };
+  };
+  let lastDown = 0, lastX = 0, lastY = 0;
+  let view = null;
+  let scroll = null;
+  let grabbed = null;
+  const onContext = (e) => e.preventDefault();
+  const onWheel = (e) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      const { u, v, w, h: hh } = uv(e);
+      cfg.getSlice().zoomAbout(cfg.orient, Math.exp(-e.deltaY * 15e-4), u, v, w, hh);
+      cfg.redraw();
+      h.onZoom?.();
+      return;
+    }
+    cfg.step(e.deltaY < 0);
+    cfg.redraw();
+    h.onScroll?.(e.deltaY < 0);
+  };
+  const onDown = (e) => {
+    if (e.button === 0) {
+      const now = e.timeStamp, dbl = now - lastDown < 350 && Math.hypot(e.clientX - lastX, e.clientY - lastY) < 6;
+      lastDown = dbl ? 0 : now;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (dbl && h.onDoubleClick?.()) {
+        e.preventDefault();
+        return;
+      }
+    }
+    const wantPan = e.button === 1 || e.button === 0 && e.shiftKey;
+    const wantZoom = e.button === 2;
+    if (wantPan || wantZoom) {
+      e.preventDefault();
+      const { u: u2, v: v2 } = uv(e);
+      view = { mode: wantZoom ? "zoom" : "pan", x: e.clientX, y: e.clientY, pu: u2, pv: v2 };
+      canvas.style.cursor = wantZoom ? "ns-resize" : "grabbing";
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const { u, v, w, h: hh } = uv(e);
+    if (h.onLeftGrab?.(u, v, w, hh)) {
+      grabbed = { moved: 0 };
+    } else scroll = { x: e.clientX, y: e.clientY, acc: 0 };
+    canvas.setPointerCapture(e.pointerId);
+  };
+  const onMove = (e) => {
+    if (view) {
+      const dx = e.clientX - view.x, dy = e.clientY - view.y;
+      const r = canvas.getBoundingClientRect();
+      if (view.mode === "pan") cfg.getSlice().panByPixels(cfg.orient, dx, dy, r.width, r.height);
+      else cfg.getSlice().zoomAbout(cfg.orient, Math.exp(dy * 6e-3), view.pu, view.pv, r.width, r.height);
+      view.x = e.clientX;
+      view.y = e.clientY;
+      cfg.redraw();
+      return;
+    }
+    if (grabbed) {
+      grabbed.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
+      const { u, v, w, h: hh } = uv(e);
+      h.onLeftDrag?.(u, v, w, hh);
+      return;
+    }
+    if (scroll) {
+      scroll.acc += e.clientX - scroll.x - (e.clientY - scroll.y);
+      scroll.x = e.clientX;
+      scroll.y = e.clientY;
+      while (Math.abs(scroll.acc) >= SCROLL_PX) {
+        const f = scroll.acc > 0;
+        cfg.step(f);
+        scroll.acc -= f ? SCROLL_PX : -SCROLL_PX;
+      }
+      cfg.redraw();
+      return;
+    }
+    if (e.buttons === 0 && h.onHover) {
+      const { u, v, w, h: hh } = uv(e);
+      h.onHover(u, v, w, hh);
+    }
+  };
+  const onUp = (e) => {
+    try {
+      canvas.releasePointerCapture(e.pointerId);
+    } catch {
+    }
+    if (view) {
+      view = null;
+      canvas.style.cursor = "default";
+      return;
+    }
+    if (grabbed) {
+      const m = grabbed.moved;
+      grabbed = null;
+      h.onLeftDrop?.(m);
+      return;
+    }
+    scroll = null;
+  };
+  canvas.addEventListener("contextmenu", onContext);
+  canvas.addEventListener("wheel", onWheel, { passive: false });
+  canvas.addEventListener("pointerdown", onDown);
+  canvas.addEventListener("pointermove", onMove);
+  canvas.addEventListener("pointerup", onUp);
+  canvas.addEventListener("pointercancel", onUp);
+  return {
+    resetView() {
+      cfg.getSlice().resetView(cfg.orient);
+      cfg.redraw();
+    },
+    detach() {
+      canvas.removeEventListener("contextmenu", onContext);
+      canvas.removeEventListener("wheel", onWheel);
+      canvas.removeEventListener("pointerdown", onDown);
+      canvas.removeEventListener("pointermove", onMove);
+      canvas.removeEventListener("pointerup", onUp);
+      canvas.removeEventListener("pointercancel", onUp);
+    }
+  };
+}
+
+// render/demos/view-grid.ts
+function attachViewGrid(grid, cells, onResize) {
+  let maxed = null;
+  const cellDiv = (cell) => grid.querySelector(`.cell[data-cell="${cell}"]`);
+  return {
+    toggleMax(cell) {
+      maxed = maxed === cell ? null : cell;
+      for (const n of cells) cellDiv(n).classList.toggle("max", n === maxed);
+      grid.classList.toggle("has-max", maxed !== null);
+      requestAnimationFrame(onResize);
+    },
+    isMax(cell) {
+      return maxed === cell;
+    },
+    maxCell: () => maxed
+  };
+}
+
+// render/demos/sl-chrome.ts
+var DEFAULT_HELP = [
+  { title: "3D view", rows: [
+    ["Left-drag", "Rotate"],
+    ["Right-drag", "Zoom"],
+    ["Middle / Shift+Left-drag", "Pan"],
+    ["Wheel / two-finger", "Zoom (dolly)"],
+    ["Double-click", "Maximize / restore"],
+    ["Shift + move", "Pick \u2192 jump slices to the point"]
+  ] },
+  { title: "Slice views", rows: [
+    ["Wheel / Left-drag", "Scroll through slices"],
+    ["Right-drag / \u2318-wheel", "Zoom this slice"],
+    ["Middle / Shift+Left-drag", "Pan"],
+    ["Double-click", "Maximize / restore"],
+    ["R", "Reset pan/zoom"],
+    ["Shift + move", "Jump the other views to the point under the cursor"]
+  ] }
+];
+function glass(el2, extra = "") {
+  el2.style.cssText += ";background:linear-gradient(135deg,rgba(58,64,88,.55),rgba(20,24,38,.66));backdrop-filter:blur(20px) saturate(1.6);-webkit-backdrop-filter:blur(20px) saturate(1.6);border:1px solid rgba(255,255,255,.2);box-shadow:0 18px 50px rgba(0,0,0,.55);" + extra;
+}
+function installChrome(opts) {
+  const controls = opts.controls ?? [];
+  const help = opts.help ?? DEFAULT_HELP;
+  const helpBtn = document.createElement("button");
+  helpBtn.textContent = "?";
+  helpBtn.title = "Controls & key bindings";
+  helpBtn.style.cssText = "position:fixed;top:12px;left:12px;z-index:74;width:32px;height:32px;padding:0;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:#cfe6ff;font:700 15px -apple-system,system-ui,sans-serif;";
+  glass(helpBtn);
+  helpBtn.onclick = openHelp;
+  document.body.appendChild(helpBtn);
+  let helpEl = null;
+  function openHelp() {
+    if (helpEl) return;
+    helpEl = document.createElement("div");
+    helpEl.style.cssText = "position:fixed;inset:0;z-index:96;display:flex;align-items:center;justify-content:center;background:rgba(6,8,14,.55);font:13px/1.5 -apple-system,system-ui,sans-serif;color:#e8eeff;";
+    helpEl.addEventListener("mousedown", (e) => {
+      if (e.target === helpEl) closeHelp();
+    });
+    const panel = document.createElement("div");
+    panel.style.cssText = "max-width:min(640px,92vw);max-height:86vh;overflow-y:auto;padding:22px 26px;border-radius:16px;color:#eaf0ff;";
+    glass(panel);
+    panel.innerHTML = `<div style="font:800 20px -apple-system,system-ui,sans-serif;margin-bottom:4px">SlicerLive \u2014 controls</div>`;
+    for (const sec of help) {
+      const rows2 = sec.rows.map(([k, d]) => `<div style="font:600 12px ui-monospace,Menlo,monospace;color:#fff5d6;white-space:nowrap">${k}</div><div style="color:rgba(232,238,255,.85)">${d}</div>`).join("");
+      panel.innerHTML += `<div style="margin-top:14px;padding:12px 14px;border-radius:10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)"><div style="font:700 11px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#9fe9ff;margin-bottom:9px">${sec.title}</div><div style="display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;align-items:baseline">${rows2}</div></div>`;
+    }
+    panel.innerHTML += `<div style="margin-top:16px;font-size:12px;color:rgba(232,238,255,.55)">Press <b style="color:#fff5d6">esc</b> or click outside to dismiss.</div>`;
+    helpEl.appendChild(panel);
+    document.body.appendChild(helpEl);
+    document.addEventListener("keydown", escClose, true);
+  }
+  function escClose(e) {
+    if (e.key === "Escape") closeHelp();
+  }
+  function closeHelp() {
+    if (helpEl) {
+      helpEl.remove();
+      helpEl = null;
+      document.removeEventListener("keydown", escClose, true);
+    }
+  }
+  const logo = document.createElement("div");
+  logo.textContent = "SlicerLive";
+  logo.style.cssText = "position:fixed;top:11px;right:12px;z-index:74;cursor:pointer;user-select:none;padding:4px 10px;border-radius:8px;font:700 12px -apple-system,system-ui,sans-serif;letter-spacing:.2px;color:#04121c;background:linear-gradient(180deg,#9fe9ff,#54c6f0);box-shadow:0 4px 14px rgba(0,0,0,.4);";
+  document.body.appendChild(logo);
+  const pop = document.createElement("div");
+  pop.style.cssText = "position:fixed;top:42px;right:12px;z-index:73;min-width:180px;padding:10px 12px;border-radius:12px;color:#eaf0ff;font:13px -apple-system,system-ui,sans-serif;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 120ms ease-out,transform 120ms ease-out;";
+  glass(pop);
+  document.body.appendChild(pop);
+  const rows = [];
+  if (controls.length) {
+    const head = document.createElement("div");
+    head.textContent = "Visualization";
+    head.style.cssText = "font:700 10px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#9fe9ff;margin:0 0 8px;";
+    pop.appendChild(head);
+    for (const c of controls) {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:14px;padding:5px 0;cursor:pointer;";
+      const lab = document.createElement("span");
+      lab.textContent = c.label;
+      const sw = document.createElement("span");
+      sw.style.cssText = "width:34px;height:19px;border-radius:999px;position:relative;transition:background 120ms;flex:0 0 auto;";
+      row.appendChild(lab);
+      row.appendChild(sw);
+      row.onclick = () => {
+        if (c.disabled?.()) return;
+        c.set(!c.get());
+        opts.onChange?.();
+        refresh();
+      };
+      pop.appendChild(row);
+      rows.push({ c, row, sw });
+    }
+  } else {
+    pop.textContent = "SlicerLive \u2014 WebGPU renderer";
+  }
+  function refresh() {
+    for (const { c, row, sw } of rows) {
+      const on = c.get(), dis = c.disabled?.() ?? false;
+      row.style.opacity = dis ? "0.4" : "1";
+      row.style.cursor = dis ? "default" : "pointer";
+      sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
+      sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
+    }
+  }
+  refresh();
+  const show = () => {
+    pop.style.opacity = "1";
+    pop.style.pointerEvents = "auto";
+    pop.style.transform = "translateY(0)";
+  };
+  const hide = () => {
+    pop.style.opacity = "0";
+    pop.style.pointerEvents = "none";
+    pop.style.transform = "translateY(-6px)";
+  };
+  let pinned = false;
+  logo.onmouseenter = () => show();
+  logo.onclick = () => {
+    pinned = !pinned;
+    pinned ? show() : hide();
+  };
+  logo.onmouseleave = () => {
+    if (!pinned) setTimeout(() => {
+      if (!pop.matches(":hover") && !pinned) hide();
+    }, 120);
+  };
+  pop.onmouseleave = () => {
+    if (!pinned) hide();
+  };
+  return { refresh };
+}
+
 // render/demos/real-browser.ts
 var status = (msg, err = false) => {
   const el2 = document.getElementById("status");
@@ -2177,147 +2459,82 @@ async function main() {
     drawAll();
   };
   globalThis.addEventListener("resize", resize);
-  const grid = document.getElementById("grid");
-  const cellDiv = (cell) => grid.querySelector(`.cell[data-cell="${cell}"]`);
-  let maxCell = null;
-  const toggleMax = (cell) => {
-    maxCell = maxCell === cell ? null : cell;
-    for (const n of names) cellDiv(n).classList.toggle("max", n === maxCell);
-    grid.classList.toggle("has-max", maxCell !== null);
-    requestAnimationFrame(resize);
-  };
-  let lastDown = null;
-  const isDoubleClick = (cell, e) => {
-    const dbl = !!lastDown && lastDown.cell === cell && e.timeStamp - lastDown.t < 350 && Math.hypot(e.clientX - lastDown.x, e.clientY - lastDown.y) < 6;
-    lastDown = dbl ? null : { t: e.timeStamp, x: e.clientX, y: e.clientY, cell };
+  const grid = attachViewGrid(document.getElementById("grid"), names, () => resize());
+  let last3D = null;
+  const isDoubleClick3D = (e) => {
+    const dbl = !!last3D && e.timeStamp - last3D.t < 350 && Math.hypot(e.clientX - last3D.x, e.clientY - last3D.y) < 6;
+    last3D = dbl ? null : { t: e.timeStamp, x: e.clientX, y: e.clientY };
     if (dbl) {
       e.preventDefault();
       e.stopPropagation();
-      toggleMax(cell);
+      grid.toggleMax("threeD");
     }
     return dbl;
   };
+  const chromeControls = [
+    { label: "Crosshair", get: () => crosshair.visible, set: (on) => {
+      crosshair.toggle(on);
+      drawAll();
+    } }
+  ];
+  installChrome({ controls: chromeControls });
   let focusedCell = null;
-  const SCROLL_PX = 7;
-  let sliceDrag = null;
-  let markDrag = null;
-  let viewDrag = null;
-  const cellUV = (cell, e) => {
-    const r = cv[cell].getBoundingClientRect();
-    return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height, w: r.width, h: r.height };
-  };
   for (const p of planes) {
-    cv[p.cell].addEventListener("contextmenu", (e) => e.preventDefault());
-    cv[p.cell].addEventListener("wheel", (e) => {
-      e.preventDefault();
-      if (e.ctrlKey || e.metaKey) {
-        const { u, v, w, h } = cellUV(p.cell, e);
-        rs.slice.zoomAbout(p.orient, Math.exp(-e.deltaY * 15e-4), u, v, w, h);
-        drawPlane(p);
-        hook?.logEvent("sliceZoom", { cell: p.cell, via: "wheel", zoom: rs.slice.zoom(p.orient) });
-        return;
-      }
-      off[p.cell] = sliceIx.wheel(p.orient, off[p.cell], e.deltaY < 0);
-      drawPlane(p);
-      hook?.logEvent("sliceStep", { cell: p.cell, via: "wheel", forward: e.deltaY < 0, offsetMm: offset01ToMm(p.orient, off[p.cell], rasLo0, rasHi0) });
-    }, { passive: false });
-    cv[p.cell].addEventListener("pointerdown", (e) => {
-      if (e.button === 0 && isDoubleClick(p.cell, e)) return;
-      const wantPan = e.button === 1 || e.button === 0 && e.shiftKey;
-      const wantZoom = e.button === 2;
-      if (wantPan || wantZoom) {
-        e.preventDefault();
-        const { u: u2, v: v2 } = cellUV(p.cell, e);
-        viewDrag = { cell: p.cell, orient: p.orient, mode: wantZoom ? "zoom" : "pan", x: e.clientX, y: e.clientY, pu: u2, pv: v2 };
-        cv[p.cell].style.cursor = wantZoom ? "ns-resize" : "grabbing";
-        cv[p.cell].setPointerCapture(e.pointerId);
-        return;
-      }
-      if (e.button !== 0) return;
-      e.preventDefault();
-      const { u, v, w, h } = cellUV(p.cell, e);
-      const grab = markups.length ? markupAtSlice(p, u, v, w, h) : null;
-      if (grab) {
-        draggingMarkup = grab;
-        hoverMarkup = grab;
-        markDrag = { cell: p.cell, moved: 0 };
-        cv[p.cell].style.cursor = "grabbing";
-        drawOverlay(p);
-      } else {
-        sliceDrag = { cell: p.cell, orient: p.orient, x: e.clientX, y: e.clientY, acc: 0, moved: 0 };
-      }
-      cv[p.cell].setPointerCapture(e.pointerId);
-    });
-    cv[p.cell].addEventListener("pointermove", (e) => {
-      if (viewDrag && viewDrag.cell === p.cell) {
-        const dx = e.clientX - viewDrag.x, dy = e.clientY - viewDrag.y;
-        const r = cv[p.cell].getBoundingClientRect();
-        if (viewDrag.mode === "pan") rs.slice.panByPixels(p.orient, dx, dy, r.width, r.height);
-        else rs.slice.zoomAbout(p.orient, Math.exp(dy * 6e-3), viewDrag.pu, viewDrag.pv, r.width, r.height);
-        viewDrag.x = e.clientX;
-        viewDrag.y = e.clientY;
-        drawPlane(p);
-        return;
-      }
-      if (draggingMarkup && markDrag?.cell === p.cell) {
-        markDrag.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
-        const { u, v, w, h } = cellUV(p.cell, e);
-        draggingMarkup.ras = rs.slice.viewToRas(p.orient, off[p.cell], u, v, w / h);
-        for (const q of planes) drawOverlay(q);
-        refreshMarkups3D();
-        return;
-      }
-      if (sliceDrag && sliceDrag.cell === p.cell) {
-        sliceDrag.moved += Math.abs(e.clientX - sliceDrag.x) + Math.abs(e.clientY - sliceDrag.y);
-        sliceDrag.acc += e.clientX - sliceDrag.x - (e.clientY - sliceDrag.y);
-        sliceDrag.x = e.clientX;
-        sliceDrag.y = e.clientY;
-        while (Math.abs(sliceDrag.acc) >= SCROLL_PX) {
-          const fwd = sliceDrag.acc > 0;
-          off[p.cell] = sliceIx.wheel(p.orient, off[p.cell], fwd);
-          sliceDrag.acc -= fwd ? SCROLL_PX : -SCROLL_PX;
-        }
-        drawPlane(p);
-        return;
-      }
-      if (e.buttons === 0 && markups.length) {
-        const { u, v, w, h } = cellUV(p.cell, e);
-        const m = markupAtSlice(p, u, v, w, h);
-        if (m !== hoverMarkup) {
+    attachSliceControls(cv[p.cell], {
+      orient: p.orient,
+      getSlice: () => rs.slice,
+      step: (fwd) => {
+        off[p.cell] = sliceIx.wheel(p.orient, off[p.cell], fwd);
+      },
+      // Slicer voxel step
+      redraw: () => drawPlane(p),
+      hooks: {
+        onDoubleClick: () => {
+          grid.toggleMax(p.cell);
+          return true;
+        },
+        onLeftGrab: (u, v, w, h) => {
+          if (!markups.length) return false;
+          const m = markupAtSlice(p, u, v, w, h);
+          if (!m) return false;
+          draggingMarkup = m;
           hoverMarkup = m;
-          cv[p.cell].style.cursor = m ? "grab" : "default";
+          cv[p.cell].style.cursor = "grabbing";
           drawOverlay(p);
-        }
+          return true;
+        },
+        onLeftDrag: (u, v, w, h) => {
+          if (!draggingMarkup) return;
+          draggingMarkup.ras = rs.slice.viewToRas(p.orient, off[p.cell], u, v, w / h);
+          for (const q of planes) drawOverlay(q);
+          refreshMarkups3D();
+        },
+        onLeftDrop: (movedPx) => {
+          const m = draggingMarkup;
+          if (!m) return;
+          draggingMarkup = null;
+          cv[p.cell].style.cursor = "grab";
+          if (movedPx < 5) {
+            jumpAll(m.ras);
+            hook?.logEvent("markupJump", { from: p.cell, ras: m.ras, label: m.label });
+          } else {
+            hook?.logEvent("markupMove", { cell: p.cell, ras: m.ras, label: m.label });
+            for (const q of planes) drawOverlay(q);
+          }
+        },
+        onHover: (u, v, w, h) => {
+          if (!markups.length) return;
+          const m = markupAtSlice(p, u, v, w, h);
+          if (m !== hoverMarkup) {
+            hoverMarkup = m;
+            cv[p.cell].style.cursor = m ? "grab" : "default";
+            drawOverlay(p);
+          }
+        },
+        onScroll: (fwd) => hook?.logEvent("sliceStep", { cell: p.cell, forward: fwd, offsetMm: offset01ToMm(p.orient, off[p.cell], rasLo0, rasHi0) }),
+        onZoom: () => hook?.logEvent("sliceZoom", { cell: p.cell, zoom: rs.slice.zoom(p.orient) })
       }
     });
-    const endDrag = (e) => {
-      try {
-        cv[p.cell].releasePointerCapture(e.pointerId);
-      } catch {
-      }
-      if (viewDrag?.cell === p.cell) {
-        viewDrag = null;
-        cv[p.cell].style.cursor = "default";
-        return;
-      }
-      if (draggingMarkup && markDrag?.cell === p.cell) {
-        const wasClick = markDrag.moved < 5, m = draggingMarkup;
-        draggingMarkup = null;
-        markDrag = null;
-        cv[p.cell].style.cursor = "grab";
-        if (wasClick) {
-          jumpAll(m.ras);
-          hook?.logEvent("markupJump", { from: p.cell, ras: m.ras, label: m.label });
-        } else {
-          hook?.logEvent("markupMove", { cell: p.cell, ras: m.ras, label: m.label });
-          for (const q of planes) drawOverlay(q);
-        }
-        return;
-      }
-      if (sliceDrag?.cell === p.cell) sliceDrag = null;
-    };
-    cv[p.cell].addEventListener("pointerup", endDrag);
-    cv[p.cell].addEventListener("pointercancel", endDrag);
     cv[p.cell].addEventListener("pointerenter", () => {
       focusedCell = p.cell;
     });
@@ -2393,7 +2610,7 @@ async function main() {
     draw3d();
   };
   cv.threeD.addEventListener("pointerdown", (e) => {
-    if (isDoubleClick("threeD", e)) return;
+    if (isDoubleClick3D(e)) return;
     const { x, y } = localXY(e), { h } = viewSize();
     threeDDown = { x: e.clientX, y: e.clientY, moved: 0 };
     const grab = e.button === 0 ? markupAt3D(e.clientX, e.clientY) : null;

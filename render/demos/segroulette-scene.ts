@@ -18,15 +18,26 @@ const MAX_ISO_SEGMENTS = 12;
 import type { Vec3 } from "../mat4.ts";
 import type { CTVolume, SegLabelmap } from "../vendor/idc_tools/types.js";
 
-/** Grayscale ramp with a soft opacity foot — a plain window/level VR for an arbitrary
- *  source volume. Kept translucent so the colored segmentation shells read on top. */
-function grayLUT(): Uint8Array {
+/** Modality-appropriate volume-render transfer function: grayscale with a bone-weighted opacity
+ *  ramp for CT/MR, hot-metal (black→red→orange→yellow→white) for PET. Kept translucent so it reads
+ *  as anatomical CONTEXT behind the colored segmentation — it's an independent, toggleable layer. */
+function modalityLUT(modality: string | undefined, maxAlpha = 0.42): Uint8Array {
   const lut = new Uint8Array(256 * 4);
+  const m = (modality ?? "CT").toUpperCase();
   for (let i = 0; i < 256; i++) {
     const t = i / 255;
-    const g = Math.round(t * 255);
-    lut[i * 4] = lut[i * 4 + 1] = lut[i * 4 + 2] = g;
-    lut[i * 4 + 3] = Math.round(Math.max(0, Math.min(1, (t - 0.35) / 0.65)) * 130); // soft, faint foot
+    let r: number, g: number, b: number, a: number;
+    if (m === "PET" || m === "PT") {
+      r = Math.min(1, t * 3);
+      g = Math.min(1, Math.max(0, t * 3 - 1));
+      b = Math.min(1, Math.max(0, t * 3 - 2));
+      a = Math.max(0, (t - 0.25) / 0.75) * 0.9;            // hot uptake reads opaque
+    } else {
+      r = g = b = t;                                        // grayscale
+      let aa = Math.max(0, (t - 0.42) / 0.58); aa *= aa;    // emphasize the high (bone) end
+      a = Math.min(maxAlpha, aa);
+    }
+    lut[i * 4] = Math.round(r * 255); lut[i * 4 + 1] = Math.round(g * 255); lut[i * 4 + 2] = Math.round(b * 255); lut[i * 4 + 3] = Math.round(a * 255);
   }
   return lut;
 }
@@ -44,6 +55,10 @@ export interface SegrouletteScene {
   lev: number;
   segments: { num: number; name: string; color: [number, number, number]; voxels: number }[];
   mode: "iso" | "colorized" | "volume";   // how the 3D view renders the segmentation
+  hasSeg: boolean;                         // whether there's a segmentation layer to toggle
+  /** Toggle the two independent 3D layers (background modality VR + segmentation). Rebuilds the
+   *  scene with the visible subset; caller re-renders. Never leaves the 3D view empty. */
+  setLayers(showVolume: boolean, showSeg: boolean): void;
 }
 
 /** Build the renderable scene (3D VR + segmentation iso + MPR) from an idc_tools load. */
@@ -58,7 +73,8 @@ export function buildSegrouletteScene(
   const data = ct.vol instanceof Float32Array ? ct.vol : Float32Array.from(ct.vol);
   const clim: [number, number] = [ct.lev - ct.win / 2, ct.lev + ct.win / 2];
 
-  const ctField = new ImageField(dev, data, dims, [1, 1, 1], grayLUT(), {
+  // The source volume: modality-appropriate VR (also the raw scalar the MPR window/levels).
+  const volumeField = new ImageField(dev, data, dims, [1, 1, 1], modalityLUT(ct.modality), {
     clim, ijkToRAS: ct.ijkToRAS, shade: [0.25, 0.7, 0.45, 20],
   });
 
@@ -81,13 +97,14 @@ export function buildSegrouletteScene(
   // The colorized volume (one texture) drives BOTH the MPR overlay and the many-segment 3D fallback.
   const colorizeTex = seg ? bakeColorizeRGBA(dev, seg.lab, dims, palette, 1.5) : undefined;
 
-  // 3D composition: per-segment iso shells when few (crisp, the demo's identity), else the single
-  // colorized RGBAVolumeField (all segments, one binding) so we never blow the 16-texture limit.
+  // The SEGMENTATION layer, independent of the background volume: per-segment iso shells when few
+  // (crisp, the demo's identity), else ONE colorized RGBAVolumeField (all segments, one binding) so
+  // we never blow the 16-texture limit.
   const useIso = segments.length > 0 && segments.length <= MAX_ISO_SEGMENTS;
   let mode: "iso" | "colorized" | "volume" = "volume";
-  let fields3d: Field[];
+  let segLayer: Field[] = [];
   if (useIso) {
-    fields3d = segments.map((s) => {
+    segLayer = segments.map((s) => {
       const mask = new Uint8Array(dims[0] * dims[1] * dims[2]);
       for (let i = 0; i < seg!.lab.length; i++) if (seg!.lab[i] === s.num) mask[i] = 1;
       const tex = bakeSegmentPresence(dev, mask, dims, 1.5);
@@ -95,25 +112,30 @@ export function buildSegrouletteScene(
     });
     mode = "iso";
   } else if (colorizeTex) {
-    fields3d = [new RGBAVolumeField(colorizeTex, dims, [1, 1, 1], { ijkToRAS: ct.ijkToRAS, shade: [0.3, 0.78, 0.5, 28] })];
+    segLayer = [new RGBAVolumeField(colorizeTex, dims, [1, 1, 1], { ijkToRAS: ct.ijkToRAS, shade: [0.3, 0.78, 0.5, 28] })];
     mode = "colorized";
-  } else {
-    fields3d = [ctField];   // no segmentation at all → source VR so the view isn't empty
-    mode = "volume";
   }
 
   const scene = new SceneRenderer(gpu, format);
-  scene.build(fields3d);
-  scene.setBackground(0.05, 0.06, 0.09);
+  // Two independent layers: background modality VR + segmentation. Rebuild picks the visible subset.
+  // (build() creates the uniform buffer, so setBackground must follow it — and re-apply per rebuild.)
+  const setLayers = (showVolume: boolean, showSeg: boolean) => {
+    const f: Field[] = [];
+    if (showVolume) f.push(volumeField);
+    if (showSeg) f.push(...segLayer);
+    scene.build(f.length ? f : [volumeField]);   // never empty
+    scene.setBackground(0.05, 0.06, 0.09);
+  };
+  setLayers(true, segLayer.length > 0);          // default: VR context + segmentation both on
 
   const slice = new SliceRenderer(gpu, format);
-  const [rasLo, rasHi] = ctField.aabb();
-  slice.setVolume(ctField.patientToTexture(), rasLo, rasHi);
-  slice.setTextures(ctField.volumeTexture(), colorizeTex);
+  const [rasLo, rasHi] = volumeField.aabb();
+  slice.setVolume(volumeField.patientToTexture(), rasLo, rasHi);
+  slice.setTextures(volumeField.volumeTexture(), colorizeTex);
   slice.setWindowLevel(ct.win, ct.lev);
   slice.setOverlayOpacity(seg ? 0.5 : 0);
 
   const center: Vec3 = [(rasLo[0] + rasHi[0]) / 2, (rasLo[1] + rasHi[1]) / 2, (rasLo[2] + rasHi[2]) / 2];
   const radius = Math.hypot(rasHi[0] - rasLo[0], rasHi[1] - rasLo[1], rasHi[2] - rasLo[2]) / 2;
-  return { scene, slice, center, radius, rasLo, rasHi, ijkToRAS: ct.ijkToRAS, dims, win: ct.win, lev: ct.lev, segments, mode };
+  return { scene, slice, center, radius, rasLo, rasHi, ijkToRAS: ct.ijkToRAS, dims, win: ct.win, lev: ct.lev, segments, mode, hasSeg: segLayer.length > 0, setLayers };
 }

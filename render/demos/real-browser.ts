@@ -14,6 +14,7 @@ import { installIntrospection } from "../introspect.ts";
 import { attachScenePick, attachSlicePick, createCrosshair, drawCross, rasToScreen3D } from "./crosshair.ts";
 import { attachSliceControls } from "./slice-control.ts";
 import { attachViewGrid } from "./view-grid.ts";
+import { installChrome, type VizControl } from "./sl-chrome.ts";
 
 const status = (msg: string, err = false) => {
   const el = document.getElementById("status");
@@ -200,6 +201,13 @@ async function main() {
     if (dbl) { e.preventDefault(); e.stopPropagation(); grid.toggleMax("threeD"); }
     return dbl;
   };
+
+  // Shared chrome: SlicerLive logo popup + "?" help cheat-sheet (on every demo). Real's one viz
+  // control toggles the crosshair.
+  const chromeControls: VizControl[] = [
+    { label: "Crosshair", get: () => crosshair.visible, set: (on) => { crosshair.toggle(on); drawAll(); } },
+  ];
+  installChrome({ controls: chromeControls });
 
   // Slice-view stepping — Slicer's vtkMRMLSliceIntersectionWidget semantics:
   // wheel fwd / f / Right / Up = increment by the volume spacing along the slice normal;

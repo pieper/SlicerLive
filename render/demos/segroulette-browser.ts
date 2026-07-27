@@ -12,7 +12,10 @@ import { type Crosshair4up, mountCrosshair } from "./crosshair.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachSliceControls } from "./slice-control.ts";
 import { attachDoubleClick, attachViewGrid } from "./view-grid.ts";
-import { loadManifest, loadSeries, spinRandom } from "../vendor/idc_tools/index.js";
+import { installChrome, type VizControl } from "./sl-chrome.ts";
+import { installIdcInfo } from "./idc-info.ts";
+import { createMosaic } from "./mosaic.ts";
+import { loadManifest, loadSeries, ohifViewerURL, spinRandom } from "../vendor/idc_tools/index.js";
 import type { LoadResult, RouletteManifest, SeriesEntry } from "../vendor/idc_tools/types.js";
 import type { Vec3 } from "../mat4.ts";
 
@@ -95,6 +98,26 @@ async function main() {
   const grid = attachViewGrid(document.getElementById("grid")!, names, resize);
   attachDoubleClick(cv.threeD, () => grid.toggleMax("threeD"));
 
+  // Shared chrome: SlicerLive logo popup with the two independent 3D layer toggles (modality volume
+  // render + segmentation) + the "?" help cheat-sheet. Layer state persists across spins.
+  const layers = { volume: true, seg: true };
+  const applyLayers = () => { rs?.setLayers(layers.volume, layers.seg); draw3d(); xhair?.redraw(); };
+  const controls: VizControl[] = [
+    { label: "Volume render", get: () => layers.volume, set: (on) => { layers.volume = on; applyLayers(); } },
+    { label: "Segmentation", get: () => layers.seg, set: (on) => { layers.seg = on; applyLayers(); }, disabled: () => !(rs?.hasSeg) },
+  ];
+  const chrome = installChrome({ controls });
+
+  // IDC download mosaic (slice thumbnails fill in as the DICOM streams) + the "Details" dialog
+  // (citation / license / OHIF + IDC-portal links / full segment list).
+  const mosaic = createMosaic(document.querySelector("main")!);
+  let lastEntry: (SeriesEntry & Record<string, unknown>) | undefined;
+  installIdcInfo(el("details-host"), {
+    getEntry: () => lastEntry,
+    getSegments: () => rs?.segments ?? [],
+    ohifURL: ohifViewerURL,
+  });
+
   // Compact single-line metadata in the thin header (full segment list -> info dialog, later).
   const showMeta = (entry: SeriesEntry | undefined, sc: SegrouletteScene) => {
     const info = el("info");
@@ -107,7 +130,12 @@ async function main() {
   };
 
   const spinBtn = el("spin") as HTMLButtonElement;
-  const onProgress = (p: { msg: string; frac?: number }) => status(`${p.msg}${p.frac ? ` — ${Math.round(p.frac * 100)}%` : ""}`);
+  // Load handlers: status text + the download mosaic (per-slice thumbnails as they stream in).
+  const handlers = {
+    onProgress: (p: { msg: string; frac?: number }) => { status(`${p.msg}${p.frac ? ` — ${Math.round(p.frac * 100)}%` : ""}`); mosaic.status(p.msg); },
+    onSliceCount: (n: number) => mosaic.setCount(n),
+    onThumb: (n: number, w: number, h: number, rgba: ArrayBuffer) => mosaic.thumb(n, w, h, rgba),
+  };
 
   // ?s= loads one specific SEG (looked up in the manifest); ?col= narrows the random pool; else all.
   async function pickAndLoad(): Promise<LoadResult> {
@@ -115,16 +143,18 @@ async function main() {
       cachedManifest ??= await loadManifest(MANIFEST);
       const entry = cachedManifest.rows.find((e) => e.s === SEG_PARAM || (e.s ?? "").startsWith(SEG_PARAM));
       if (!entry) throw new Error(`SEG series "${SEG_PARAM}" not found in the manifest`);
-      return loadSeries(entry, { onProgress });
+      return loadSeries(entry, handlers);
     }
-    return spinRandom({ onProgress }, { manifestUrl: MANIFEST, filter: COL_PARAM ? (e) => e.col === COL_PARAM : undefined });
+    return spinRandom(handlers, { manifestUrl: MANIFEST, filter: COL_PARAM ? (e) => e.col === COL_PARAM : undefined });
   }
 
   async function spin() {
     spinBtn.disabled = true;
+    mosaic.reset();
     status(SEG_PARAM ? "loading the requested SEG series…" : COL_PARAM ? `spinning within ${COL_PARAM}…` : "spinning… picking a random IDC series");
     try {
       const res: LoadResult = await pickAndLoad();
+      lastEntry = res.entry as (SeriesEntry & Record<string, unknown>) | undefined;
       status("baking segmentation iso shells…");
       rs = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
       // frame: slices at the Slicer default voxel-centre plane; camera fit to the volume
@@ -133,13 +163,16 @@ async function main() {
       const framed = framedCamera(rs.center, rs.radius);   // Slicer-default framing for this case
       camera.position = framed.position; camera.focalPoint = framed.focalPoint;
       camera.viewUp = framed.viewUp; camera.viewAngle = framed.viewAngle;
+      layers.volume = true; layers.seg = rs.hasSeg; chrome.refresh();   // reset 3D layer toggles per case
       showMeta(res.entry, rs);
       const d3 = document.querySelector(".lab.d3");
       if (d3) d3.textContent = rs.mode === "colorized" ? "3D · colorized volume" : rs.mode === "iso" ? "3D · SegmentField iso" : "3D · volume";
       resize();
+      mosaic.done();   // scene is up → fade out the download mosaic
       const modeNote = rs.mode === "colorized" ? ` (colorized — too many for per-segment iso)` : "";
       status(`${res.entry?.col ?? "IDC"} · ${res.entry?.m ?? ""} · ${rs.segments.length} segment${rs.segments.length === 1 ? "" : "s"}${modeNote} · scroll a slice, drag 3D to orbit · Spin for another`);
     } catch (e) {
+      mosaic.status("load failed — try Spin again"); mosaic.done();
       status("load failed: " + ((e as Error)?.message ?? e) + " — try Spin again", true);
     } finally {
       spinBtn.disabled = false;
@@ -186,6 +219,8 @@ async function main() {
     mode: () => rs?.mode ?? null,
     params: () => ({ s: SEG_PARAM, col: COL_PARAM }),
     sliceZoom: (o: "axial" | "coronal" | "sagittal") => rs?.slice.zoom(o) ?? 1,
+    hasSeg: () => rs?.hasSeg ?? false,
+    setLayers: (v: boolean, s: boolean) => { rs?.setLayers(v, s); draw3d(); xhair?.redraw(); },
   };
 
   status("SlicerLive SEGRoulette — click Spin to load a random IDC segmentation");
