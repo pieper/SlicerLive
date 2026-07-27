@@ -670,6 +670,15 @@ var SliceRenderer = class {
   rasHi = [1, 1, 1];
   orient = "axial";
   offset01 = 0.5;
+  // Per-orientation pan (mm along the plane's uDir/vDir) + zoom (1 = fitted). Slicer-style
+  // slice navigation: pan translates the in-plane view centre, zoom scales the field of view.
+  viewState = {
+    axial: { panU: 0, panV: 0, zoom: 1 },
+    coronal: { panU: 0, panV: 0, zoom: 1 },
+    sagittal: { panU: 0, panV: 0, zoom: 1 }
+  };
+  cX = [0, 0, 0];
+  // in-plane centre of the LAST rendered frame (for viewToTex picking)
   constructor(gpu, format = DEFAULT_FORMAT2) {
     this.dev = gpu.device;
     this.format = format;
@@ -749,16 +758,54 @@ var SliceRenderer = class {
     this.orient = prev;
     return s;
   }
-  /** Plane center in RAS for the current scrub offset. */
-  planeCenter() {
-    const b = BASES[this.orient];
-    const c = [
-      (this.rasLo[0] + this.rasHi[0]) / 2,
-      (this.rasLo[1] + this.rasHi[1]) / 2,
-      (this.rasLo[2] + this.rasHi[2]) / 2
-    ];
-    c[b.nAxis] = this.rasLo[b.nAxis] + this.offset01 * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
-    return c;
+  /** Fitted (zoom=1) in-plane extent for an orientation. */
+  baseSpan(orient) {
+    const b = BASES[orient];
+    return Math.max(this.rasHi[b.uAxis] - this.rasLo[b.uAxis], this.rasHi[b.vAxis] - this.rasLo[b.vAxis]);
+  }
+  /** The complete in-plane view frame for an orientation at a given viewport aspect, folding
+   *  in pan (mm along uDir/vDir) + zoom. Single source of truth shared by drawInto, rasToView,
+   *  viewToRas — so the rendered image and the markup projection stay pixel-aligned under
+   *  pan/zoom. Returns the plane centre `c` (RAS, incl. scrub offset + pan) and the half-... no:
+   *  uS/vS are the FULL in-plane extents mapped across the viewport width/height. */
+  frameFor(orient, offset01, aspectWH) {
+    const b = BASES[orient];
+    const vs = this.viewState[orient];
+    const span = this.baseSpan(orient) / vs.zoom;
+    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
+    const c = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    c[b.nAxis] = this.rasLo[b.nAxis] + Math.max(0, Math.min(1, offset01)) * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    c[0] += b.uDir[0] * vs.panU + b.vDir[0] * vs.panV;
+    c[1] += b.uDir[1] * vs.panU + b.vDir[1] * vs.panV;
+    c[2] += b.uDir[2] * vs.panU + b.vDir[2] * vs.panV;
+    return { b, c, uS, vS };
+  }
+  /** Zoom factor for an orientation (1 = fitted). */
+  zoom(orient) {
+    return this.viewState[orient].zoom;
+  }
+  /** Pan the in-plane view by a pixel delta (drag): the anatomy under the cursor follows it. */
+  panByPixels(orient, dxPx, dyPx, w, h) {
+    const span = this.baseSpan(orient) / this.viewState[orient].zoom;
+    const uS = span * Math.max(1, w / h), vS = span * Math.max(1, h / w);
+    this.viewState[orient].panU -= dxPx / w * uS;
+    this.viewState[orient].panV += dyPx / h * vS;
+  }
+  /** Zoom by `factor` (>1 zooms in) about a pivot (u,v in [0,1]); the pivot point stays fixed. */
+  zoomAbout(orient, factor, pu, pv, w, h) {
+    const vs = this.viewState[orient];
+    const base = this.baseSpan(orient);
+    const spanOld = base / vs.zoom;
+    const z = Math.max(0.2, Math.min(50, vs.zoom * factor));
+    const spanNew = base / z;
+    const au = Math.max(1, w / h), av = Math.max(1, h / w);
+    vs.panU += (pu - 0.5) * (spanOld - spanNew) * au;
+    vs.panV += (0.5 - pv) * (spanOld - spanNew) * av;
+    vs.zoom = z;
+  }
+  /** Reset pan/zoom for an orientation to the fitted view. */
+  resetView(orient) {
+    this.viewState[orient] = { panU: 0, panV: 0, zoom: 1 };
   }
   /** Map a view (u,v) in [0,1] (y down) to normalized texture coords for the current
    *  plane — for click picking. Returns the tex coord; the caller converts to IJK via
@@ -767,7 +814,7 @@ var SliceRenderer = class {
     const b = BASES[this.orient];
     const uS = this.uSpanMm || this.viewSpanMm();
     const vS = this.vSpanMm || this.viewSpanMm();
-    const c = this.planeCenter();
+    const c = this.cX;
     const ras = [
       c[0] + b.uDir[0] * (u - 0.5) * uS + b.vDir[0] * (0.5 - v) * vS,
       c[1] + b.uDir[1] * (u - 0.5) * uS + b.vDir[1] * (0.5 - v) * vS,
@@ -780,27 +827,17 @@ var SliceRenderer = class {
    *  point to the plane along its normal. Inverse of viewToTex; used to place 2D markup
    *  glyphs and hit-test clicks on them. */
   rasToView(orient, offset01, ras, aspectWH) {
-    const b = BASES[orient];
-    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis], vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
-    const span = Math.max(uExt, vExt);
-    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
-    const c = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
-    c[b.nAxis] = this.rasLo[b.nAxis] + offset01 * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    const { b, c, uS, vS } = this.frameFor(orient, offset01, aspectWH);
     const d = [ras[0] - c[0], ras[1] - c[1], ras[2] - c[2]];
     const u = 0.5 + (d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2]) / uS;
     const v = 0.5 - (d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2]) / vS;
     return { u, v, distMm: d[b.nAxis] };
   }
   /** Map a view (u,v in [0,1], y down) on a plane back to a RAS point ON that plane —
-   *  the exact inverse of rasToView (same aspect convention). Used to drag a 2D markup:
+   *  the exact inverse of rasToView (same pan/zoom/aspect). Used to drag a 2D markup:
    *  the point lands on the current slice (its out-of-plane coord becomes the plane offset). */
   viewToRas(orient, offset01, u, v, aspectWH) {
-    const b = BASES[orient];
-    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis], vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
-    const span = Math.max(uExt, vExt);
-    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
-    const c = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
-    c[b.nAxis] = this.rasLo[b.nAxis] + offset01 * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    const { b, c, uS, vS } = this.frameFor(orient, offset01, aspectWH);
     const du = (u - 0.5) * uS, dv = (0.5 - v) * vS;
     return [
       c[0] + b.uDir[0] * du + b.vDir[0] * dv,
@@ -809,13 +846,10 @@ var SliceRenderer = class {
     ];
   }
   drawInto(view, w, h) {
-    const b = BASES[this.orient];
-    const span = this.viewSpanMm();
-    const uS = span * Math.max(1, w / h);
-    const vS = span * Math.max(1, h / w);
+    const { b, c, uS, vS } = this.frameFor(this.orient, this.offset01, w / h);
     this.uSpanMm = uS;
     this.vSpanMm = vS;
-    const c = this.planeCenter();
+    this.cX = c;
     this.u.set(this.p2t, 0);
     this.u[16] = c[0];
     this.u[17] = c[1];
@@ -1949,19 +1983,38 @@ async function main() {
   const SCROLL_PX = 7;
   let sliceDrag = null;
   let markDrag = null;
+  let viewDrag = null;
   const cellUV = (cell, e) => {
     const r = cv[cell].getBoundingClientRect();
     return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height, w: r.width, h: r.height };
   };
   for (const p of planes) {
+    cv[p.cell].addEventListener("contextmenu", (e) => e.preventDefault());
     cv[p.cell].addEventListener("wheel", (e) => {
       e.preventDefault();
+      if (e.ctrlKey || e.metaKey) {
+        const { u, v, w, h } = cellUV(p.cell, e);
+        rs.slice.zoomAbout(p.orient, Math.exp(-e.deltaY * 15e-4), u, v, w, h);
+        drawPlane(p);
+        hook?.logEvent("sliceZoom", { cell: p.cell, via: "wheel", zoom: rs.slice.zoom(p.orient) });
+        return;
+      }
       off[p.cell] = sliceIx.wheel(p.orient, off[p.cell], e.deltaY < 0);
       drawPlane(p);
       hook?.logEvent("sliceStep", { cell: p.cell, via: "wheel", forward: e.deltaY < 0, offsetMm: offset01ToMm(p.orient, off[p.cell], rasLo0, rasHi0) });
     }, { passive: false });
     cv[p.cell].addEventListener("pointerdown", (e) => {
-      if (isDoubleClick(p.cell, e)) return;
+      if (e.button === 0 && isDoubleClick(p.cell, e)) return;
+      const wantPan = e.button === 1 || e.button === 0 && e.shiftKey;
+      const wantZoom = e.button === 2;
+      if (wantPan || wantZoom) {
+        e.preventDefault();
+        const { u: u2, v: v2 } = cellUV(p.cell, e);
+        viewDrag = { cell: p.cell, orient: p.orient, mode: wantZoom ? "zoom" : "pan", x: e.clientX, y: e.clientY, pu: u2, pv: v2 };
+        cv[p.cell].style.cursor = wantZoom ? "ns-resize" : "grabbing";
+        cv[p.cell].setPointerCapture(e.pointerId);
+        return;
+      }
       if (e.button !== 0) return;
       e.preventDefault();
       const { u, v, w, h } = cellUV(p.cell, e);
@@ -1978,6 +2031,16 @@ async function main() {
       cv[p.cell].setPointerCapture(e.pointerId);
     });
     cv[p.cell].addEventListener("pointermove", (e) => {
+      if (viewDrag && viewDrag.cell === p.cell) {
+        const dx = e.clientX - viewDrag.x, dy = e.clientY - viewDrag.y;
+        const r = cv[p.cell].getBoundingClientRect();
+        if (viewDrag.mode === "pan") rs.slice.panByPixels(p.orient, dx, dy, r.width, r.height);
+        else rs.slice.zoomAbout(p.orient, Math.exp(-dy * 6e-3), viewDrag.pu, viewDrag.pv, r.width, r.height);
+        viewDrag.x = e.clientX;
+        viewDrag.y = e.clientY;
+        drawPlane(p);
+        return;
+      }
       if (draggingMarkup && markDrag?.cell === p.cell) {
         markDrag.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
         const { u, v, w, h } = cellUV(p.cell, e);
@@ -2014,6 +2077,11 @@ async function main() {
         cv[p.cell].releasePointerCapture(e.pointerId);
       } catch {
       }
+      if (viewDrag?.cell === p.cell) {
+        viewDrag = null;
+        cv[p.cell].style.cursor = "default";
+        return;
+      }
       if (draggingMarkup && markDrag?.cell === p.cell) {
         const wasClick = markDrag.moved < 5, m = draggingMarkup;
         draggingMarkup = null;
@@ -2040,9 +2108,17 @@ async function main() {
     });
   }
   globalThis.addEventListener("keydown", (e) => {
-    if (!focusedCell || !SliceInteractor.isStepKey(e.key)) return;
+    if (!focusedCell) return;
     const p = planes.find((q) => q.cell === focusedCell);
     if (!p) return;
+    if (e.key === "r" || e.key === "R") {
+      e.preventDefault();
+      rs.slice.resetView(p.orient);
+      drawPlane(p);
+      hook?.logEvent("sliceResetView", { cell: p.cell });
+      return;
+    }
+    if (!SliceInteractor.isStepKey(e.key)) return;
     e.preventDefault();
     off[p.cell] = sliceIx.key(p.orient, off[p.cell], e.key);
     drawPlane(p);
@@ -2228,6 +2304,7 @@ async function main() {
     markups: () => markups.map((m) => ({ ras: m.ras, label: m.label })),
     offsets: () => Object.fromEntries(planes.map((p) => [p.cell, off[p.cell]])),
     slabHalfMm: (cell) => slabHalfMm(cell),
+    zoom: (cell) => rs.slice.zoom(cell),
     // count of glyphs actually drawn on a slice at its current offset (only on-slab points)
     drawnOn: (cell) => {
       const p = planes.find((q) => q.cell === cell);

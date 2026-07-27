@@ -129,6 +129,14 @@ export class SliceRenderer {
   private rasHi: Vec3 = [1, 1, 1];
   private orient: Orientation = "axial";
   private offset01 = 0.5;
+  // Per-orientation pan (mm along the plane's uDir/vDir) + zoom (1 = fitted). Slicer-style
+  // slice navigation: pan translates the in-plane view centre, zoom scales the field of view.
+  private viewState: Record<Orientation, { panU: number; panV: number; zoom: number }> = {
+    axial: { panU: 0, panV: 0, zoom: 1 },
+    coronal: { panU: 0, panV: 0, zoom: 1 },
+    sagittal: { panU: 0, panV: 0, zoom: 1 },
+  };
+  private cX: Vec3 = [0, 0, 0];   // in-plane centre of the LAST rendered frame (for viewToTex picking)
 
   constructor(gpu: Gpu, format: GPUTextureFormat = DEFAULT_FORMAT) {
     this.dev = gpu.device;
@@ -209,26 +217,65 @@ export class SliceRenderer {
     return s;
   }
 
-  /** Plane center in RAS for the current scrub offset. */
-  private planeCenter(): Vec3 {
-    const b = BASES[this.orient];
-    const c: Vec3 = [
-      (this.rasLo[0] + this.rasHi[0]) / 2,
-      (this.rasLo[1] + this.rasHi[1]) / 2,
-      (this.rasLo[2] + this.rasHi[2]) / 2,
-    ];
-    c[b.nAxis] = this.rasLo[b.nAxis] + this.offset01 * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
-    return c;
+  /** Fitted (zoom=1) in-plane extent for an orientation. */
+  private baseSpan(orient: Orientation): number {
+    const b = BASES[orient];
+    return Math.max(this.rasHi[b.uAxis] - this.rasLo[b.uAxis], this.rasHi[b.vAxis] - this.rasLo[b.vAxis]);
   }
+
+  /** The complete in-plane view frame for an orientation at a given viewport aspect, folding
+   *  in pan (mm along uDir/vDir) + zoom. Single source of truth shared by drawInto, rasToView,
+   *  viewToRas — so the rendered image and the markup projection stay pixel-aligned under
+   *  pan/zoom. Returns the plane centre `c` (RAS, incl. scrub offset + pan) and the half-... no:
+   *  uS/vS are the FULL in-plane extents mapped across the viewport width/height. */
+  private frameFor(orient: Orientation, offset01: number, aspectWH: number): { b: typeof BASES[Orientation]; c: Vec3; uS: number; vS: number } {
+    const b = BASES[orient];
+    const vs = this.viewState[orient];
+    const span = this.baseSpan(orient) / vs.zoom;
+    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
+    const c: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    c[b.nAxis] = this.rasLo[b.nAxis] + Math.max(0, Math.min(1, offset01)) * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    c[0] += b.uDir[0] * vs.panU + b.vDir[0] * vs.panV;
+    c[1] += b.uDir[1] * vs.panU + b.vDir[1] * vs.panV;
+    c[2] += b.uDir[2] * vs.panU + b.vDir[2] * vs.panV;
+    return { b, c, uS, vS };
+  }
+
+  /** Zoom factor for an orientation (1 = fitted). */
+  zoom(orient: Orientation): number { return this.viewState[orient].zoom; }
+
+  /** Pan the in-plane view by a pixel delta (drag): the anatomy under the cursor follows it. */
+  panByPixels(orient: Orientation, dxPx: number, dyPx: number, w: number, h: number) {
+    const span = this.baseSpan(orient) / this.viewState[orient].zoom;
+    const uS = span * Math.max(1, w / h), vS = span * Math.max(1, h / w);
+    this.viewState[orient].panU -= (dxPx / w) * uS;   // drag right -> centre moves left -> image follows
+    this.viewState[orient].panV += (dyPx / h) * vS;   // drag down  -> centre moves up   -> image follows
+  }
+
+  /** Zoom by `factor` (>1 zooms in) about a pivot (u,v in [0,1]); the pivot point stays fixed. */
+  zoomAbout(orient: Orientation, factor: number, pu: number, pv: number, w: number, h: number) {
+    const vs = this.viewState[orient];
+    const base = this.baseSpan(orient);
+    const spanOld = base / vs.zoom;
+    const z = Math.max(0.2, Math.min(50, vs.zoom * factor));
+    const spanNew = base / z;
+    const au = Math.max(1, w / h), av = Math.max(1, h / w);
+    vs.panU += (pu - 0.5) * (spanOld - spanNew) * au;   // keep the pivot's RAS point under the cursor
+    vs.panV += (0.5 - pv) * (spanOld - spanNew) * av;
+    vs.zoom = z;
+  }
+
+  /** Reset pan/zoom for an orientation to the fitted view. */
+  resetView(orient: Orientation) { this.viewState[orient] = { panU: 0, panV: 0, zoom: 1 }; }
 
   /** Map a view (u,v) in [0,1] (y down) to normalized texture coords for the current
    *  plane — for click picking. Returns the tex coord; the caller converts to IJK via
    *  ijk = tex*dims - 0.5. Anisotropy/rotation are handled by the same p2t the shader uses. */
   viewToTex(u: number, v: number): Vec3 {
     const b = BASES[this.orient];
-    const uS = this.uSpanMm || this.viewSpanMm();   // match the last render's aspect
+    const uS = this.uSpanMm || this.viewSpanMm();   // match the last render's aspect + zoom
     const vS = this.vSpanMm || this.viewSpanMm();
-    const c = this.planeCenter();
+    const c = this.cX;                              // last render's centre (incl. pan + scrub offset)
     const ras: Vec3 = [
       c[0] + b.uDir[0] * (u - 0.5) * uS + b.vDir[0] * (0.5 - v) * vS,
       c[1] + b.uDir[1] * (u - 0.5) * uS + b.vDir[1] * (0.5 - v) * vS,
@@ -242,12 +289,7 @@ export class SliceRenderer {
    *  point to the plane along its normal. Inverse of viewToTex; used to place 2D markup
    *  glyphs and hit-test clicks on them. */
   rasToView(orient: Orientation, offset01: number, ras: Vec3, aspectWH: number): { u: number; v: number; distMm: number } {
-    const b = BASES[orient];
-    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis], vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
-    const span = Math.max(uExt, vExt);
-    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
-    const c: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
-    c[b.nAxis] = this.rasLo[b.nAxis] + offset01 * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    const { b, c, uS, vS } = this.frameFor(orient, offset01, aspectWH);
     const d: Vec3 = [ras[0] - c[0], ras[1] - c[1], ras[2] - c[2]];
     const u = 0.5 + (d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2]) / uS;
     const v = 0.5 - (d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2]) / vS;
@@ -255,15 +297,10 @@ export class SliceRenderer {
   }
 
   /** Map a view (u,v in [0,1], y down) on a plane back to a RAS point ON that plane —
-   *  the exact inverse of rasToView (same aspect convention). Used to drag a 2D markup:
+   *  the exact inverse of rasToView (same pan/zoom/aspect). Used to drag a 2D markup:
    *  the point lands on the current slice (its out-of-plane coord becomes the plane offset). */
   viewToRas(orient: Orientation, offset01: number, u: number, v: number, aspectWH: number): Vec3 {
-    const b = BASES[orient];
-    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis], vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
-    const span = Math.max(uExt, vExt);
-    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
-    const c: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
-    c[b.nAxis] = this.rasLo[b.nAxis] + offset01 * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    const { b, c, uS, vS } = this.frameFor(orient, offset01, aspectWH);
     const du = (u - 0.5) * uS, dv = (0.5 - v) * vS;
     return [
       c[0] + b.uDir[0] * du + b.vDir[0] * dv,
@@ -273,15 +310,11 @@ export class SliceRenderer {
   }
 
   private drawInto(view: GPUTextureView, w: number, h: number) {
-    const b = BASES[this.orient];
-    const span = this.viewSpanMm();
-    // Aspect-correct so pixels are ISOTROPIC on a non-square viewport: the fitted `span`
-    // fills the SMALLER dimension, the larger dimension shows more (letterbox). Square
-    // viewports (w==h) get uS==vS==span — identical to before, so square demos are unchanged.
-    const uS = span * Math.max(1, w / h);
-    const vS = span * Math.max(1, h / w);
-    this.uSpanMm = uS; this.vSpanMm = vS;
-    const c = this.planeCenter();
+    // Aspect-correct so pixels are ISOTROPIC on a non-square viewport: the fitted span fills
+    // the SMALLER dimension, the larger dimension shows more (letterbox). Pan/zoom fold in via
+    // frameFor. Square viewports at zoom=1 with no pan reproduce the original fitted view exactly.
+    const { b, c, uS, vS } = this.frameFor(this.orient, this.offset01, w / h);
+    this.uSpanMm = uS; this.vSpanMm = vS; this.cX = c;
     this.u.set(this.p2t, 0);                                                                  // p2t   [0..15]
     this.u[16] = c[0]; this.u[17] = c[1]; this.u[18] = c[2]; this.u[19] = 0;                   // origin[16..19]
     this.u[20] = b.uDir[0] * uS; this.u[21] = b.uDir[1] * uS; this.u[22] = b.uDir[2] * uS; this.u[23] = 0; // uvec [20..23]

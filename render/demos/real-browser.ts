@@ -199,19 +199,40 @@ async function main() {
   // in-plane, onto this slice; a tiny move = click = jump-all). Otherwise it falls through to
   // slice scroll. A moved markup re-appears/disappears across the other slices as it crosses them.
   let markDrag: { cell: "axial" | "coronal" | "sagittal"; moved: number } | null = null;
+  // Slicer-style view navigation: middle-drag (or shift+left-drag) PANS, right-drag ZOOMS
+  // (drag up = in), ctrl/⌘+wheel zooms about the cursor. Left-drag stays slice scroll.
+  let viewDrag: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal"; mode: "pan" | "zoom"; x: number; y: number; pu: number; pv: number } | null = null;
   const cellUV = (cell: string, e: PointerEvent) => {
     const r = cv[cell].getBoundingClientRect();
     return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height, w: r.width, h: r.height };
   };
   for (const p of planes) {
+    cv[p.cell].addEventListener("contextmenu", (e) => e.preventDefault());   // right-drag = zoom
     cv[p.cell].addEventListener("wheel", (e) => {
       e.preventDefault();
+      if (e.ctrlKey || e.metaKey) {                        // ctrl/⌘ + wheel = zoom about the cursor
+        const { u, v, w, h } = cellUV(p.cell, e);
+        rs.slice.zoomAbout(p.orient, Math.exp(-e.deltaY * 0.0015), u, v, w, h);
+        drawPlane(p);
+        hook?.logEvent("sliceZoom", { cell: p.cell, via: "wheel", zoom: rs.slice.zoom(p.orient) });
+        return;
+      }
       off[p.cell] = sliceIx.wheel(p.orient, off[p.cell], e.deltaY < 0);   // deltaY<0 = MouseWheelForward
       drawPlane(p);
       hook?.logEvent("sliceStep", { cell: p.cell, via: "wheel", forward: e.deltaY < 0, offsetMm: offset01ToMm(p.orient, off[p.cell], rasLo0, rasHi0) });
     }, { passive: false });
     cv[p.cell].addEventListener("pointerdown", (e) => {
-      if (isDoubleClick(p.cell, e)) return;                // double-click -> maximize/restore
+      if (e.button === 0 && isDoubleClick(p.cell, e)) return;   // double-click left -> maximize/restore
+      const wantPan = e.button === 1 || (e.button === 0 && e.shiftKey);
+      const wantZoom = e.button === 2;
+      if (wantPan || wantZoom) {                           // pan / zoom the view
+        e.preventDefault();
+        const { u, v } = cellUV(p.cell, e);
+        viewDrag = { cell: p.cell, orient: p.orient, mode: wantZoom ? "zoom" : "pan", x: e.clientX, y: e.clientY, pu: u, pv: v };
+        cv[p.cell].style.cursor = wantZoom ? "ns-resize" : "grabbing";
+        cv[p.cell].setPointerCapture(e.pointerId);
+        return;
+      }
       if (e.button !== 0) return;                          // left = move a markup, else scroll
       e.preventDefault();
       const { u, v, w, h } = cellUV(p.cell, e);
@@ -225,6 +246,15 @@ async function main() {
       cv[p.cell].setPointerCapture(e.pointerId);
     });
     cv[p.cell].addEventListener("pointermove", (e) => {
+      if (viewDrag && viewDrag.cell === p.cell) {          // pan / zoom drag
+        const dx = e.clientX - viewDrag.x, dy = e.clientY - viewDrag.y;
+        const r = cv[p.cell].getBoundingClientRect();
+        if (viewDrag.mode === "pan") rs.slice.panByPixels(p.orient, dx, dy, r.width, r.height);
+        else rs.slice.zoomAbout(p.orient, Math.exp(-dy * 0.006), viewDrag.pu, viewDrag.pv, r.width, r.height);
+        viewDrag.x = e.clientX; viewDrag.y = e.clientY;
+        drawPlane(p);
+        return;
+      }
       if (draggingMarkup && markDrag?.cell === p.cell) {   // move the grabbed point onto this slice
         markDrag.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
         const { u, v, w, h } = cellUV(p.cell, e);
@@ -253,6 +283,7 @@ async function main() {
     });
     const endDrag = (e: PointerEvent) => {
       try { cv[p.cell].releasePointerCapture(e.pointerId); } catch { /* already released */ }
+      if (viewDrag?.cell === p.cell) { viewDrag = null; cv[p.cell].style.cursor = "default"; return; }
       if (draggingMarkup && markDrag?.cell === p.cell) {   // finish a markup grab
         const wasClick = markDrag.moved < 5, m = draggingMarkup;
         draggingMarkup = null; markDrag = null; cv[p.cell].style.cursor = "grab";
@@ -269,9 +300,16 @@ async function main() {
     cv[p.cell].addEventListener("pointerleave", () => { if (focusedCell === p.cell) focusedCell = null; });
   }
   globalThis.addEventListener("keydown", (e) => {
-    if (!focusedCell || !SliceInteractor.isStepKey(e.key)) return;
+    if (!focusedCell) return;
     const p = planes.find((q) => q.cell === focusedCell);
     if (!p) return;
+    if (e.key === "r" || e.key === "R") {                 // reset pan/zoom of the focused slice
+      e.preventDefault();
+      rs.slice.resetView(p.orient); drawPlane(p);
+      hook?.logEvent("sliceResetView", { cell: p.cell });
+      return;
+    }
+    if (!SliceInteractor.isStepKey(e.key)) return;
     e.preventDefault();
     off[p.cell] = sliceIx.key(p.orient, off[p.cell], e.key);
     drawPlane(p);
@@ -445,6 +483,7 @@ async function main() {
     markups: () => markups.map((m) => ({ ras: m.ras, label: m.label })),
     offsets: () => Object.fromEntries(planes.map((p) => [p.cell, off[p.cell]])),
     slabHalfMm: (cell: "axial" | "coronal" | "sagittal") => slabHalfMm(cell),
+    zoom: (cell: "axial" | "coronal" | "sagittal") => rs.slice.zoom(cell),
     // count of glyphs actually drawn on a slice at its current offset (only on-slab points)
     drawnOn: (cell: "axial" | "coronal" | "sagittal") => {
       const p = planes.find((q) => q.cell === cell)!;
