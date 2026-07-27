@@ -8,6 +8,7 @@ import { initDevice } from "../device.ts";
 import { slicerDefaultOffset01 } from "../slice-renderer.ts";
 import { buildSegrouletteScene, type SegrouletteScene } from "./segroulette-scene.ts";
 import { type Crosshair4up, mountCrosshair } from "./crosshair.ts";
+import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { spinRandom } from "../vendor/idc_tools/index.js";
 import type { LoadResult, SeriesEntry } from "../vendor/idc_tools/types.js";
 import type { Vec3 } from "../mat4.ts";
@@ -43,13 +44,9 @@ async function main() {
 
   let rs: SegrouletteScene | null = null;
   const off: Record<string, number> = { axial: 0.5, coronal: 0.5, sagittal: 0.5 };
-  let az = 0.6, elev = 0.32, dist = 500;
-
-  const eye = (): Vec3 => [
-    rs!.center[0] + dist * Math.cos(elev) * Math.sin(az),
-    rs!.center[1] - dist * Math.cos(elev) * Math.cos(az),
-    rs!.center[2] + dist * Math.sin(elev),
-  ];
+  // Shared Slicer-faithful 3D camera (framedCamera + attachCameraControls), same as every other
+  // demo — so the trackball direction and feel are identical everywhere. Reframed on each spin.
+  const camera = framedCamera([0, 0, 0], 100);
   const drawSlice = (p: { cell: "axial" | "coronal" | "sagittal"; orient: "axial" | "coronal" | "sagittal" }) => {
     if (!rs || !cv[p.cell].width) return;
     rs.slice.setPlane(p.orient, off[p.cell]);
@@ -57,7 +54,7 @@ async function main() {
   };
   const draw3d = () => {
     if (!rs || !cv.threeD.width) return;
-    rs.scene.setCamera(eye(), rs.center, [0, 0, 1], 28, cv.threeD.width, cv.threeD.height);
+    rs.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, cv.threeD.width, cv.threeD.height);
     rs.scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
   };
   let xhair: Crosshair4up | null = null;
@@ -108,7 +105,9 @@ async function main() {
       rs = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
       // frame: slices at the Slicer default voxel-centre plane; camera fit to the volume
       for (const p of planes) off[p.cell] = slicerDefaultOffset01(p.orient, rs.dims, rs.ijkToRAS, rs.rasLo, rs.rasHi);
-      dist = rs.radius * 2.7;
+      const framed = framedCamera(rs.center, rs.radius);   // Slicer-default framing for this case
+      camera.position = framed.position; camera.focalPoint = framed.focalPoint;
+      camera.viewUp = framed.viewUp; camera.viewAngle = framed.viewAngle;
       showMeta(res.entry, rs);
       resize();
       status(`${res.entry?.col ?? "IDC"} · ${res.entry?.m ?? ""} · ${rs.segments.length} segment${rs.segments.length === 1 ? "" : "s"} · scroll a slice, drag 3D to orbit · Spin for another`);
@@ -128,21 +127,16 @@ async function main() {
       drawSlice(p); xhair?.redraw();
     }, { passive: false });
   }
-  let dragging = false, lx = 0, ly = 0;
-  cv.threeD.addEventListener("pointerdown", (e) => { if (e.shiftKey) return; dragging = true; lx = e.clientX; ly = e.clientY; cv.threeD.setPointerCapture(e.pointerId); });
-  cv.threeD.addEventListener("pointerup", (e) => { dragging = false; try { cv.threeD.releasePointerCapture(e.pointerId); } catch { /* */ } });
-  cv.threeD.addEventListener("pointermove", (e) => {
-    if (!dragging) return;
-    az += (e.clientX - lx) * 0.008; elev = Math.max(-1.4, Math.min(1.4, elev - (e.clientY - ly) * 0.008));
-    lx = e.clientX; ly = e.clientY; draw3d(); xhair?.redraw();
-  });
-  cv.threeD.addEventListener("wheel", (e) => { e.preventDefault(); dist = Math.max(rs ? rs.radius : 50, Math.min(4000, dist * (e.deltaY > 0 ? 1.08 : 0.93))); draw3d(); xhair?.redraw(); }, { passive: false });
+  // 3D trackball = the SHARED Slicer-faithful camera controls (identical direction + feel as every
+  // other demo): left=rotate, shift/middle=pan, right=zoom, wheel=dolly. Shift+move (no button)
+  // falls through to the crosshair pick (mountCrosshair), since a pick needs no drag.
+  attachCameraControls(cv.threeD, camera, { onChange: () => { draw3d(); xhair?.redraw(); } });
 
   xhair = mountCrosshair({
     cells: { axial: cv.axial, coronal: cv.coronal, sagittal: cv.sagittal, threeD: cv.threeD },
     getScene: () => rs!.scene,
     getSlice: () => rs!.slice,
-    getCamera: () => ({ position: eye(), focalPoint: rs!.center, viewUp: [0, 0, 1], viewAngle: 28 }),
+    getCamera: () => camera,
     getOffset: (o) => off[o],
     onJump: jumpAll,
   });
@@ -154,6 +148,7 @@ async function main() {
     center: () => rs?.center ?? null,
     crosshair: () => xhair?.state.ras ?? null,
     pick3D: (u: number, v: number) => rs?.scene.pick(u, v) ?? null,
+    camera: () => ({ position: [...camera.position], focalPoint: [...camera.focalPoint], viewUp: [...camera.viewUp] }),
   };
 
   status("SlicerLive SEGRoulette — click Spin to load a random IDC segmentation");
