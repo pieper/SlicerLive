@@ -97,3 +97,79 @@ export function attachSlicePick(
     onJump(ras);
   });
 }
+
+export interface Crosshair4up {
+  state: CrosshairState;
+  redraw(): void;   // reproject + redraw the crosshair on every overlay — call after any view render
+}
+
+/** One-call crosshair for a standard MPR 4-up: creates a transparent overlay over each of the
+ *  four cells, wires SHIFT+move pick (slices via viewToRas, 3D via SceneRenderer.pick), and draws
+ *  the crosshair in every view. The demo supplies its current camera + slice offsets + a jump
+ *  callback, and calls `redraw()` after it renders (so the crosshair tracks orbit/scroll). This is
+ *  the DRY entry point every MPR demo shares — the feature lives here, not in each browser. */
+export function mountCrosshair(cfg: {
+  cells: Record<"axial" | "coronal" | "sagittal" | "threeD", HTMLCanvasElement>;
+  // Getters (not values) so the mount survives a demo rebuilding its scene/slice — e.g. SEGRoulette
+  // spinning a new case keeps the same canvases + crosshair while swapping the renderers underneath.
+  getScene: () => SceneRenderer;
+  getSlice: () => SliceRenderer;
+  getCamera: () => { position: Vec3; focalPoint: Vec3; viewUp: Vec3; viewAngle: number };
+  getOffset: (orient: Orientation) => number;
+  onJump: (ras: Vec3) => void;
+  visible?: boolean;
+}): Crosshair4up {
+  const state = createCrosshair(cfg.visible ?? true);
+  const slices = ["axial", "coronal", "sagittal"] as const;
+  const all = [...slices, "threeD"] as const;
+  const ctx: Record<string, { c: HTMLCanvasElement; g: CanvasRenderingContext2D }> = {};
+  for (const cell of all) {
+    const o = document.createElement("canvas");
+    o.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;border-radius:6px;background:transparent;";
+    cfg.cells[cell].parentElement!.appendChild(o);
+    ctx[cell] = { c: o, g: o.getContext("2d")! };
+  }
+  const redraw = () => {
+    const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
+    for (const cell of all) {
+      const { c, g } = ctx[cell];
+      const w = cfg.cells[cell].clientWidth, h = cfg.cells[cell].clientHeight;
+      if (!w || !h) continue;
+      if (c.width !== Math.floor(w * dpr)) { c.width = Math.floor(w * dpr); c.height = Math.floor(h * dpr); }
+      g.setTransform(c.width / w, 0, 0, c.height / h, 0, 0);
+      g.clearRect(0, 0, w, h);
+      if (!state.visible || !state.ras) continue;
+      if (cell === "threeD") {
+        const s = rasToScreen3D(cfg.getCamera(), state.ras, w, h);
+        if (s) drawCross(g, s.x * w, s.y * h);
+      } else {
+        const pr = cfg.getSlice().rasToView(cell, cfg.getOffset(cell), state.ras, w / h);
+        if (pr.u >= 0 && pr.u <= 1 && pr.v >= 0 && pr.v <= 1) drawCross(g, pr.u * w, pr.v * h);
+      }
+    }
+  };
+  state.onChange(redraw);
+  // 3D shift-move → pick (in-flight-guarded); slice shift-move → viewToRas. Both jump + set state.
+  let inFlight = false, queued: { u: number; v: number } | null = null;
+  const pick3d = async (u: number, v: number) => {
+    inFlight = true;
+    const ras = await cfg.getScene().pick(u, v);
+    inFlight = false;
+    if (ras) { state.set(ras); cfg.onJump(ras); }
+    if (queued) { const q = queued; queued = null; pick3d(q.u, q.v); }
+  };
+  cfg.cells.threeD.addEventListener("pointermove", (e) => {
+    if (!isShiftHover(e)) return;
+    const { u, v } = uvOf(cfg.cells.threeD, e);
+    if (inFlight) queued = { u, v }; else pick3d(u, v);
+  });
+  for (const cell of slices) {
+    cfg.cells[cell].addEventListener("pointermove", (e) => {
+      if (!isShiftHover(e)) return;
+      const { u, v, aspect } = uvOf(cfg.cells[cell], e);
+      const ras = cfg.getSlice().viewToRas(cell, cfg.getOffset(cell), u, v, aspect);
+      state.set(ras); cfg.onJump(ras);
+    });
+  }
+  return { state, redraw };
+}

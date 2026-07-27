@@ -7,6 +7,7 @@
 import { initDevice } from "../device.ts";
 import { slicerDefaultOffset01 } from "../slice-renderer.ts";
 import { buildSegrouletteScene, type SegrouletteScene } from "./segroulette-scene.ts";
+import { type Crosshair4up, mountCrosshair } from "./crosshair.ts";
 import { spinRandom } from "../vendor/idc_tools/index.js";
 import type { LoadResult, SeriesEntry } from "../vendor/idc_tools/types.js";
 import type { Vec3 } from "../mat4.ts";
@@ -59,7 +60,20 @@ async function main() {
     rs.scene.setCamera(eye(), rs.center, [0, 0, 1], 28, cv.threeD.width, cv.threeD.height);
     rs.scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
   };
-  const drawAll = () => { for (const p of planes) drawSlice(p); draw3d(); };
+  let xhair: Crosshair4up | null = null;
+  const drawAll = () => { for (const p of planes) drawSlice(p); draw3d(); xhair?.redraw(); };
+
+  // SHARED shift-move crosshair pick — same one-call mount every MPR demo uses. Getters keep it
+  // valid across a spin (the scene/slice are rebuilt underneath while the canvases persist).
+  const nAxisOf: Record<string, 0 | 1 | 2> = { axial: 2, coronal: 1, sagittal: 0 };
+  const jumpAll = (ras: Vec3) => {
+    if (!rs) return;
+    for (const p of planes) {
+      const a = nAxisOf[p.orient];
+      off[p.cell] = Math.max(0, Math.min(1, (ras[a] - rs.rasLo[a]) / (rs.rasHi[a] - rs.rasLo[a])));
+    }
+    drawAll();
+  };
 
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -111,24 +125,35 @@ async function main() {
     cv[p.cell].addEventListener("wheel", (e) => {
       e.preventDefault();
       off[p.cell] = Math.max(0, Math.min(1, off[p.cell] + (e.deltaY > 0 ? 0.015 : -0.015)));
-      drawSlice(p);
+      drawSlice(p); xhair?.redraw();
     }, { passive: false });
   }
   let dragging = false, lx = 0, ly = 0;
-  cv.threeD.addEventListener("pointerdown", (e) => { dragging = true; lx = e.clientX; ly = e.clientY; cv.threeD.setPointerCapture(e.pointerId); });
+  cv.threeD.addEventListener("pointerdown", (e) => { if (e.shiftKey) return; dragging = true; lx = e.clientX; ly = e.clientY; cv.threeD.setPointerCapture(e.pointerId); });
   cv.threeD.addEventListener("pointerup", (e) => { dragging = false; try { cv.threeD.releasePointerCapture(e.pointerId); } catch { /* */ } });
   cv.threeD.addEventListener("pointermove", (e) => {
     if (!dragging) return;
     az += (e.clientX - lx) * 0.008; elev = Math.max(-1.4, Math.min(1.4, elev - (e.clientY - ly) * 0.008));
-    lx = e.clientX; ly = e.clientY; draw3d();
+    lx = e.clientX; ly = e.clientY; draw3d(); xhair?.redraw();
   });
-  cv.threeD.addEventListener("wheel", (e) => { e.preventDefault(); dist = Math.max(rs ? rs.radius : 50, Math.min(4000, dist * (e.deltaY > 0 ? 1.08 : 0.93))); draw3d(); }, { passive: false });
+  cv.threeD.addEventListener("wheel", (e) => { e.preventDefault(); dist = Math.max(rs ? rs.radius : 50, Math.min(4000, dist * (e.deltaY > 0 ? 1.08 : 0.93))); draw3d(); xhair?.redraw(); }, { passive: false });
+
+  xhair = mountCrosshair({
+    cells: { axial: cv.axial, coronal: cv.coronal, sagittal: cv.sagittal, threeD: cv.threeD },
+    getScene: () => rs!.scene,
+    getSlice: () => rs!.slice,
+    getCamera: () => ({ position: eye(), focalPoint: rs!.center, viewUp: [0, 0, 1], viewAngle: 28 }),
+    getOffset: (o) => off[o],
+    onJump: jumpAll,
+  });
 
   // introspection for automated tests
   (globalThis as unknown as { __segDbg: unknown }).__segDbg = {
     ready: () => !!rs,
     segments: () => rs?.segments ?? [],
     center: () => rs?.center ?? null,
+    crosshair: () => xhair?.state.ras ?? null,
+    pick3D: (u: number, v: number) => rs?.scene.pick(u, v) ?? null,
   };
 
   status("SlicerLive SEGRoulette — click Spin to load a random IDC segmentation");
