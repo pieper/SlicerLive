@@ -14,6 +14,7 @@ import { installIntrospection } from "../introspect.ts";
 import { attachScenePick, attachSlicePick, createCrosshair, drawCross, rasToScreen3D } from "./crosshair.ts";
 import { attachSliceControls } from "./slice-control.ts";
 import { attachViewGrid } from "./view-grid.ts";
+import { mountAdaptive3d } from "./accum-loop.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
 
 const status = (msg: string, err = false) => {
@@ -170,13 +171,20 @@ async function main() {
     rs.slice.renderToView(cx[p.cell].getCurrentTexture().createView({ format: srgb }), cv[p.cell].width, cv[p.cell].height);
     drawOverlay(p);   // markup glyphs on top
   };
-  const draw3d = () => {
-    if (!shown("threeD")) return;
-    rs.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, cv.threeD.width, cv.threeD.height);
-    rs.scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
-    draw3dOverlay();   // crosshair on top
-  };
-  const drawAll = () => { for (const p of planes) drawPlane(p); draw3d(); status(`${rs.sv.name} · real ${rs.sv.dims.join("×")} · left-drag a slice to scroll · double-click to maximize · drag 3D to orbit`); };
+  // Adaptive 3D (budget × temporal AA) via the shared driver: orbiting is budget-scaled + coalesced,
+  // settling converges to a supersampled AA image; onFrame redraws the crosshair overlay on top.
+  // `draw3d` (kick) for continuous interaction, `draw3dNow` (sync native) for full refreshes/tests.
+  const a3d = mountAdaptive3d({
+    scene: () => rs?.scene ?? null,
+    view: () => cx.threeD.getCurrentTexture().createView({ format: srgb }),
+    size: () => ({ w: shown("threeD") ? cv.threeD.width : 0, h: cv.threeD.height }),
+    setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
+    gpu,
+    onFrame: () => draw3dOverlay(),
+  });
+  const draw3d = () => a3d.draw();
+  const draw3dNow = () => a3d.renderSettled(true);
+  const drawAll = () => { for (const p of planes) drawPlane(p); draw3dNow(); status(`${rs.sv.name} · real ${rs.sv.dims.join("×")} · left-drag a slice to scroll · double-click to maximize · drag 3D to orbit`); };
 
   // Cells now fill the page (non-square). Size the drawing buffer to each canvas's actual
   // client rect; a hidden (maximized-away) cell reports 0 and is left at 0 so we skip it.
@@ -392,7 +400,7 @@ async function main() {
       if (p.focalPoint) camera.focalPoint = [...p.focalPoint] as Vec3;
       if (p.viewUp) camera.viewUp = [...p.viewUp] as Vec3;
       if (p.viewAngle !== undefined) camera.viewAngle = p.viewAngle;
-      draw3d();
+      draw3dNow();
     },
     getPlanes: () => {
       const out: Record<string, { orient: string; offset01: number; offsetMm: number; rasMm: number; spanMm: number; spacing: number; bounds: [number, number] }> = {};

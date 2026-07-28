@@ -186,6 +186,50 @@ var SceneRenderer = class _SceneRenderer {
   pickTarget;
   // 1x1 rgba32float (wp.xyz, hit)
   pickReadBuf;
+  // PRODUCER→RECONSTRUCTOR seam (docs/UNIFIED-RENDERING-PLAN.md M1). The ray-march writes the
+  // premultiplied composited sample into `traceTex` (rgba32float, lossless); `resolvePipeline`
+  // composites it over the background into the output view. 1:1 for now (byte-identical); the
+  // resolve pass is where spatial upsample + temporal accumulation (time-averaged AA) will live.
+  resolvePipeline;
+  resolveBind;
+  resolveBgBuf;
+  traceTex;
+  traceView;
+  traceW = 0;
+  traceH = 0;
+  // TEMPORAL ACCUMULATION (M2a, docs/UNIFIED-RENDERING-PLAN.md §3). When the view is still, each
+  // frame jitters the CAMERA sub-pixel (Halton, via a clip-space translation of invVP — the shader
+  // is untouched, so a non-jittered frame is byte-identical) and the Reconstructor folds it into a
+  // running mean, converging to a supersampled, time-averaged-AA image. Ping-pong accum + running n.
+  baseInvVP = new Float32Array(16);
+  // last setCamera invVP (unjittered)
+  focalPx = 1;
+  // last setCamera focal (view→pixels); used to keep screen-space handles view-sized under low-res trace
+  accumPipeline;
+  // MRT: trace + prev-accum -> new-accum + presented view
+  accumBind = [void 0, void 0];
+  accumUniformBuf;
+  // (bg.rgb, blend)
+  accumTex = [void 0, void 0];
+  accumView = [void 0, void 0];
+  accumPing = 0;
+  accumN = 0;
+  // RESOLUTION-SCALED reconstruction (M2b): while interacting, trace at a fraction of the view
+  // (BudgetController) and Catmull-Rom UPSAMPLE the low-res trace to the view — the client-superres
+  // ported from the Python spike. A settled view renders native + accumulates instead.
+  superresPipeline;
+  superresBind;
+  superresBuf;
+  // (traceW, traceH, viewW, viewH)
+  // The moving/upscale path traces into its OWN low-res target so it never resizes/destroys the
+  // full-size traceTex the accumulation bind groups reference (that sharing caused destroyed-texture
+  // submits + MRT attachment-size mismatches → 3D flicker/blank during interaction).
+  lowTex;
+  lowView;
+  lowW = 0;
+  lowH = 0;
+  accumW = 0;
+  accumH = 0;
   /** Emit a default AABB-distance skip for fields that don't supply their own bound.
    *
    *  OFF because it MEASURED AS A NET LOSS (render/test/profile-boxskip.ts, 448², M-series):
@@ -212,6 +256,303 @@ var SceneRenderer = class _SceneRenderer {
     this.canTime = gpu.features.has("timestamp-query");
     this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
     this.camBuf = this.dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.resolveBgBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const rmod = this.dev.createShaderModule({ code: this.resolveWgsl() });
+    this.resolvePipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: rmod, entryPoint: "vs_resolve" },
+      fragment: { module: rmod, entryPoint: "fs_resolve", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
+    });
+    this.accumUniformBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const amod = this.dev.createShaderModule({ code: this.accumWgsl() });
+    this.accumPipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: amod, entryPoint: "vs_resolve" },
+      fragment: { module: amod, entryPoint: "fs_accum", targets: [{ format: "rgba32float" }, { format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
+    });
+    this.superresBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const smod = this.dev.createShaderModule({ code: this.superresWgsl() });
+    this.superresPipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: smod, entryPoint: "vs_resolve" },
+      fragment: { module: smod, entryPoint: "fs_superres", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
+    });
+  }
+  /** RECONSTRUCTOR (upsampling): Catmull-Rom (bicubic, 9 bilinear taps) reconstruction of the
+   *  low-res premultiplied trace, composited over the background — the client-superres from the
+   *  Python spike (435b28d), on WebGPU. Slight edge sharpening from the negative lobes; premultiplied
+   *  so the alpha reconstructs correctly. Used only when the trace is smaller than the view. */
+  superresWgsl() {
+    return (
+      /* wgsl */
+      `
+@group(0) @binding(0) var t_trace : texture_2d<f32>;
+@group(0) @binding(1) var s_lin : sampler;
+@group(0) @binding(2) var<uniform> u_sr : vec4<f32>;   // (traceW, traceH, viewW, viewH)
+@group(0) @binding(3) var<uniform> u_bg : vec4<f32>;
+fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
+  let lo = c / 12.92;
+  let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+  return select(lo, hi, c > vec3<f32>(0.04045));
+}
+// Catmull-Rom via 9 bilinear taps (Sigg/Hadwiger form).
+fn cr(uv : vec2<f32>, texSize : vec2<f32>) -> vec4<f32> {
+  let sp = uv * texSize;
+  let tp1 = floor(sp - 0.5) + 0.5;
+  let f = sp - tp1;
+  let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+  let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+  let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+  let w3 = f * f * (-0.5 + 0.5 * f);
+  let w12 = w1 + w2;
+  let off12 = w2 / w12;
+  let inv = 1.0 / texSize;
+  let p0 = (tp1 - 1.0) * inv;
+  let p3 = (tp1 + 2.0) * inv;
+  let p12 = (tp1 + off12) * inv;
+  var r = vec4<f32>(0.0);
+  r += textureSampleLevel(t_trace, s_lin, vec2<f32>(p0.x,  p0.y),  0.0) * (w0.x  * w0.y);
+  r += textureSampleLevel(t_trace, s_lin, vec2<f32>(p12.x, p0.y),  0.0) * (w12.x * w0.y);
+  r += textureSampleLevel(t_trace, s_lin, vec2<f32>(p3.x,  p0.y),  0.0) * (w3.x  * w0.y);
+  r += textureSampleLevel(t_trace, s_lin, vec2<f32>(p0.x,  p12.y), 0.0) * (w0.x  * w12.y);
+  r += textureSampleLevel(t_trace, s_lin, vec2<f32>(p12.x, p12.y), 0.0) * (w12.x * w12.y);
+  r += textureSampleLevel(t_trace, s_lin, vec2<f32>(p3.x,  p12.y), 0.0) * (w3.x  * w12.y);
+  r += textureSampleLevel(t_trace, s_lin, vec2<f32>(p0.x,  p3.y),  0.0) * (w0.x  * w3.y);
+  r += textureSampleLevel(t_trace, s_lin, vec2<f32>(p12.x, p3.y),  0.0) * (w12.x * w3.y);
+  r += textureSampleLevel(t_trace, s_lin, vec2<f32>(p3.x,  p3.y),  0.0) * (w3.x  * w3.y);
+  return r;
+}
+struct RV { @builtin(position) position : vec4<f32> };
+@vertex
+fn vs_resolve(@builtin(vertex_index) vi : u32) -> RV {
+  let x = select(-1.0, 3.0, vi == 1u);
+  let y = select(-1.0, 3.0, vi == 2u);
+  var o : RV; o.position = vec4<f32>(x, y, 0.0, 1.0); return o;
+}
+@fragment
+fn fs_superres(v : RV) -> @location(0) vec4<f32> {
+  let uv = v.position.xy / u_sr.zw;
+  let s = cr(uv, u_sr.xy);
+  let a = clamp(s.a, 0.0, 1.0);
+  let bg = srgb2physical(u_bg.rgb);
+  return vec4<f32>(mix(bg, s.rgb, a), 1.0);
+}`
+    );
+  }
+  /** Accumulating RECONSTRUCTOR: fold this frame's traced sample into the running mean (blend =
+   *  1/n; blend=1 on reset → mean=this frame) and present it over the background. MRT so one pass
+   *  updates the accumulation texture AND the swap-chain view. Frame N jitters the ray sub-pixel,
+   *  so the mean over N frames is a supersampled, time-averaged-AA image (still camera). */
+  accumWgsl() {
+    return (
+      /* wgsl */
+      `
+@group(0) @binding(0) var t_trace : texture_2d<f32>;
+@group(0) @binding(1) var t_accum : texture_2d<f32>;
+@group(0) @binding(2) var<uniform> u_ra : vec4<f32>;   // (bg.r, bg.g, bg.b, blend)
+fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
+  let lo = c / 12.92;
+  let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+  return select(lo, hi, c > vec3<f32>(0.04045));
+}
+struct RV { @builtin(position) position : vec4<f32> };
+@vertex
+fn vs_resolve(@builtin(vertex_index) vi : u32) -> RV {
+  let x = select(-1.0, 3.0, vi == 1u);
+  let y = select(-1.0, 3.0, vi == 2u);
+  var o : RV; o.position = vec4<f32>(x, y, 0.0, 1.0); return o;
+}
+struct FO { @location(0) accum : vec4<f32>, @location(1) present : vec4<f32> };
+@fragment
+fn fs_accum(v : RV) -> FO {
+  let p = vec2<i32>(v.position.xy);
+  let cur = textureLoad(t_trace, p, 0);
+  let prev = textureLoad(t_accum, p, 0);
+  let acc = mix(prev, cur, u_ra.w);        // blend=1 on reset -> acc = cur
+  let bg = srgb2physical(u_ra.rgb);
+  var o : FO;
+  o.accum = acc;
+  o.present = vec4<f32>(mix(bg, acc.rgb, acc.a), 1.0);
+  return o;
+}`
+    );
+  }
+  /** RECONSTRUCTOR (M1: identity resolve). Composites the traced premultiplied sample over the
+   *  background — the exact `mix(bg, rgb, a)` the fused fs_main used. `textureLoad` at integer
+   *  coords is a 1:1 fetch (no filtering), so the output is byte-identical to the fused path.
+   *  M2 replaces this with a spatial-upsample + temporal-accumulate resolve. */
+  resolveWgsl() {
+    return (
+      /* wgsl */
+      `
+@group(0) @binding(0) var t_trace : texture_2d<f32>;
+@group(0) @binding(1) var<uniform> u_bg : vec4<f32>;
+fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
+  let lo = c / 12.92;
+  let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+  return select(lo, hi, c > vec3<f32>(0.04045));
+}
+struct RV { @builtin(position) position : vec4<f32> };
+@vertex
+fn vs_resolve(@builtin(vertex_index) vi : u32) -> RV {
+  let x = select(-1.0, 3.0, vi == 1u);
+  let y = select(-1.0, 3.0, vi == 2u);
+  var o : RV; o.position = vec4<f32>(x, y, 0.0, 1.0); return o;
+}
+@fragment
+fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
+  let s = textureLoad(t_trace, vec2<i32>(v.position.xy), 0);
+  let bg = srgb2physical(u_bg.rgb);
+  return vec4<f32>(mix(bg, s.rgb, s.a), 1.0);
+}`
+    );
+  }
+  /** (Re)allocate the trace target + resolve bind group when the view size changes. */
+  ensureTrace(width, height) {
+    if (this.traceTex && this.traceW === width && this.traceH === height) return;
+    this.traceTex?.destroy();
+    this.traceTex = this.dev.createTexture({
+      size: [width, height],
+      format: "rgba32float",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+    });
+    this.traceView = this.traceTex.createView();
+    this.traceW = width;
+    this.traceH = height;
+    this.resolveBind = this.dev.createBindGroup({
+      layout: this.resolvePipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: this.traceView }, { binding: 1, resource: { buffer: this.resolveBgBuf } }]
+    });
+  }
+  /** (Re)allocate the low-res trace target + superres bind group when the moving render size changes.
+   *  Separate from traceTex so a moving frame never disturbs the accumulation textures. */
+  ensureLow(width, height) {
+    if (this.lowTex && this.lowW === width && this.lowH === height) return;
+    this.lowTex?.destroy();
+    this.lowTex = this.dev.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    this.lowView = this.lowTex.createView();
+    this.lowW = width;
+    this.lowH = height;
+    this.superresBind = this.dev.createBindGroup({
+      layout: this.superresPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.lowView },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: { buffer: this.superresBuf } },
+        { binding: 3, resource: { buffer: this.resolveBgBuf } }
+      ]
+    });
+  }
+  /** Adaptive (moving-frame) render: trace at `renderW×renderH` and Catmull-Rom upsample to the
+   *  `viewW×viewH` output. The caller MUST have set the camera size to renderW×renderH (so the
+   *  low-res rays fill the same frustum). Single frame, no accumulation — use while interacting;
+   *  switch to renderAccum when the view settles. */
+  renderUpscaled(view, renderW, renderH, viewW, viewH) {
+    this.ensureLow(renderW, renderH);
+    this.flush();
+    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([this.focalPx * (viewH / renderH)]));
+    this.dev.queue.writeBuffer(this.superresBuf, 0, new Float32Array([renderW, renderH, viewW, viewH]));
+    const enc = this.dev.createCommandEncoder();
+    const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.lowView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    tp.setPipeline(this.pipeline);
+    tp.setBindGroup(0, this.bind);
+    tp.draw(3);
+    tp.end();
+    const sp = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    sp.setPipeline(this.superresPipeline);
+    sp.setBindGroup(0, this.superresBind);
+    sp.draw(3);
+    sp.end();
+    this.dev.queue.submit([enc.finish()]);
+  }
+  /** Encode trace (producer) + resolve (reconstructor) into `enc`, output to `outView`. */
+  encodeFrame(enc, outView) {
+    const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.traceView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    tp.setPipeline(this.pipeline);
+    tp.setBindGroup(0, this.bind);
+    tp.draw(3);
+    tp.end();
+    const rp = enc.beginRenderPass({ colorAttachments: [{ view: outView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    rp.setPipeline(this.resolvePipeline);
+    rp.setBindGroup(0, this.resolveBind);
+    rp.draw(3);
+    rp.end();
+  }
+  /** (Re)allocate the ping-pong accumulation targets + their bind groups on a size change. Tracks its
+   *  OWN size and always rebuilds accumBind against the current traceView (which ensureTrace, called
+   *  first in renderAccum, has just refreshed) — so the bind never dangles on a destroyed trace. */
+  ensureAccum(width, height) {
+    if (this.accumTex[0] && this.accumW === width && this.accumH === height) return;
+    this.accumW = width;
+    this.accumH = height;
+    for (let k = 0; k < 2; k++) {
+      this.accumTex[k]?.destroy();
+      this.accumTex[k] = this.dev.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+      this.accumView[k] = this.accumTex[k].createView();
+    }
+    for (let k = 0; k < 2; k++) {
+      this.accumBind[k] = this.dev.createBindGroup({
+        layout: this.accumPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: this.traceView },
+          { binding: 1, resource: this.accumView[k] },
+          { binding: 2, resource: { buffer: this.accumUniformBuf } }
+        ]
+      });
+    }
+    this.accumN = 0;
+    this.accumPing = 0;
+  }
+  /** Reset temporal accumulation — call when the view changes (camera move, scene edit, resize). */
+  resetAccumulation() {
+    this.accumN = 0;
+  }
+  /** Frames accumulated since the last reset (0 before the first accumulated frame). */
+  accumCount() {
+    return this.accumN;
+  }
+  /** Accumulating render: trace this frame (sub-pixel jittered) and fold it into the running mean,
+   *  presenting the mean over the background. `reset` (or a view change) restarts the mean at this
+   *  frame (n=1, no jitter — byte-identical to renderToView). Call repeatedly while the view is
+   *  still to converge to a supersampled, time-averaged-AA image. */
+  renderAccum(view, width, height, reset) {
+    this.ensureTrace(width, height);
+    this.ensureAccum(width, height);
+    if (reset) this.accumN = 0;
+    this.accumN += 1;
+    const n = this.accumN;
+    if (n > 1) {
+      const jx = _SceneRenderer.halton(n, 2) - 0.5, jy = _SceneRenderer.halton(n, 3) - 0.5;
+      const T = new Float32Array(16);
+      T[0] = T[5] = T[10] = T[15] = 1;
+      T[12] = 2 * jx / width;
+      T[13] = -2 * jy / height;
+      this.dev.queue.writeBuffer(this.camBuf, 0, multiply(this.baseInvVP, T));
+    } else {
+      this.dev.queue.writeBuffer(this.camBuf, 0, this.baseInvVP);
+    }
+    this.flush();
+    this.dev.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array([this.mat[12], this.mat[13], this.mat[14], 1 / n]));
+    const prev = this.accumPing, next = 1 - this.accumPing;
+    const enc = this.dev.createCommandEncoder();
+    const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.traceView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    tp.setPipeline(this.pipeline);
+    tp.setBindGroup(0, this.bind);
+    tp.draw(3);
+    tp.end();
+    const ap = enc.beginRenderPass({ colorAttachments: [
+      { view: this.accumView[next], loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } },
+      { view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }
+    ] });
+    ap.setPipeline(this.accumPipeline);
+    ap.setBindGroup(0, this.accumBind[prev]);
+    ap.draw(3);
+    ap.end();
+    this.dev.queue.submit([enc.finish()]);
+    this.accumPing = next;
   }
   /** (Re)build the pipeline for a set of fields. */
   build(fields) {
@@ -233,7 +574,7 @@ var SceneRenderer = class _SceneRenderer {
     this.pipeline = this.dev.createRenderPipeline({
       layout: "auto",
       vertex: { module, entryPoint: "vs_main" },
-      fragment: { module, entryPoint: "fs_main", targets: [{ format: this.format }] },
+      fragment: { module, entryPoint: "fs_trace", targets: [{ format: "rgba32float" }] },
       primitive: { topology: "triangle-list", cullMode: "none" }
     });
     this.pickPipeline = this.dev.createRenderPipeline({
@@ -350,14 +691,19 @@ fn ndc_to_world(ndc : vec4<f32>) -> vec3<f32> { let w = u_cam.inv_view_proj * nd
 fn ign(p : vec2<f32>) -> f32 { return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715)))); }
 ${fns}
 
+// PRODUCER (fs_trace): march the ray and return the composited PREMULTIPLIED sample
+// (integrated.rgb, integrated.a) BEFORE the background composite \u2014 a "traced pixel". The
+// Reconstructor (fs_resolve / reconstructor.ts) composites it over the background. Splitting
+// trace from assemble is the seam the unified local/remote pipeline turns on (see
+// docs/UNIFIED-RENDERING-PLAN.md); the background composite is identical to the fused path, so
+// output is byte-identical at full density. An empty slab returns transparent (0) \u2192 resolve = bg.
 @fragment
-fn fs_main(v : Varyings) -> @location(0) vec4<f32> {
+fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
   let size = u_cam.size.xy;
   let ndc_x = (v.position.x / size.x) * 2.0 - 1.0;
   let ndc_y = 1.0 - (v.position.y / size.y) * 2.0;
   let ro = ndc_to_world(vec4<f32>(ndc_x, ndc_y, 0.0, 1.0));
   let rd = normalize(ndc_to_world(vec4<f32>(ndc_x, ndc_y, 1.0, 1.0)) - ro);
-  let bg = srgb2physical(u_material.bg.rgb);
 
   let inv = vec3<f32>(1.0) / rd;
   let tb = (u_material.bmin.xyz - ro) * inv;
@@ -365,12 +711,12 @@ fn fs_main(v : Varyings) -> @location(0) vec4<f32> {
   let tmn = min(tt, tb); let tmx = max(tt, tb);
   var t_near = max(max(tmn.x, tmn.y), tmn.z);
   var t_far  = min(min(tmx.x, tmx.y), tmx.z);
-  if (t_far <= t_near || t_far <= 0.0) { return vec4<f32>(bg, 1.0); }
+  if (t_far <= t_near || t_far <= 0.0) { return vec4<f32>(0.0); }
 
   let step = max(u_material.scene.x, 1e-3);
   t_near = max(t_near + step, 0.0);
   t_far  = t_far - step;
-  if (t_far <= t_near) { return vec4<f32>(bg, 1.0); }
+  if (t_far <= t_near) { return vec4<f32>(0.0); }
   let seed = ign(v.position.xy);
   var t = t_near;
   var integrated = vec4<f32>(0.0);
@@ -383,7 +729,7 @@ fn fs_main(v : Varyings) -> @location(0) vec4<f32> {
 ${skipInit}
   loop {
     if (t >= t_far || safety >= 5000${hasGhost ? "" : " || integrated.a >= 0.99"}) { break; }
-    let js = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5; // per-(pixel,sample) jitter
+    let js = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5; // per-(pixel,sample) jitter \u2014 frame-invariant; temporal AA rides on the sub-pixel NDC jitter (frame.xy), which is exact identity at 0
     let wp = ro + rd * (t + js * step);
     var sum = vec4<f32>(0.0);
     var all_defer = true;        // every field guarantees emptiness here -> we may leap
@@ -415,7 +761,7 @@ ${ghostDispatch}
     let fA = integrated.a * residual;
     integrated = vec4<f32>(integrated.rgb * residual + (1.0 - fA) * g_col * ga, fA + (1.0 - fA) * ga);
   }
-  return vec4<f32>(mix(bg, integrated.rgb, integrated.a), 1.0);
+  return integrated;   // premultiplied (rgb, a); resolve composites over the background
 }
 
 // PICK: trace the cursor ray (pick_cursor NDC) through the SAME field compositing and return the
@@ -468,6 +814,16 @@ ${pickDispatch}
   }
   setSampleStep(step) {
     this.mat[8] = step;
+  }
+  /** Van der Corput / Halton radical inverse in `base`. */
+  static halton(i, base) {
+    let f = 1, r = 0;
+    while (i > 0) {
+      f /= base;
+      r += f * (i % base);
+      i = Math.floor(i / base);
+    }
+    return r;
   }
   /** Set up to 8 clip planes (nx,ny,nz,offset), inward-normal, keep-side `dot(wp,n)+offset>=0`.
    *  Written into the uniform tail — a Tier-A update the next flush() uploads; no rebuild. */
@@ -554,8 +910,10 @@ ${pickDispatch}
     const view = lookAt(eye, center, up);
     const proj = perspectiveZO(fovyDeg * Math.PI / 180, width / height, 1, 1e5);
     const invVP = invert(multiply(proj, view));
+    this.baseInvVP = invVP;
     const cam = new Float32Array(24);
     cam.set(invVP, 0);
+    this.focalPx = height / 2 / Math.tan(fovyDeg * Math.PI / 360);
     cam[16] = width;
     cam[17] = height;
     cam[18] = height / 2 / Math.tan(fovyDeg * Math.PI / 360);
@@ -594,13 +952,11 @@ ${pickDispatch}
     return r[3] > 0.5 ? [r[0], r[1], r[2]] : null;
   }
   renderToView(view, width, height) {
+    this.ensureTrace(width, height);
     this.flush();
+    this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
-    pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bind);
-    pass.draw(3);
-    pass.end();
+    this.encodeFrame(enc, view);
     this.dev.queue.submit([enc.finish()]);
   }
   /** Exact GPU time of the ray-march pass (median ms over `iters`), via timestamp-query.
@@ -610,7 +966,7 @@ ${pickDispatch}
   async timePass(width, height, iters = 40) {
     if (!this.canTime) return NaN;
     this.flush();
-    const target = this.dev.createTexture({ size: [width, height], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    const target = this.dev.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT });
     const view = target.createView();
     const qs = this.dev.createQuerySet({ type: "timestamp", count: 2 });
     const resolve = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
@@ -644,14 +1000,12 @@ ${pickDispatch}
     return samples[samples.length >> 1];
   }
   async renderToRGBA(width, height) {
+    this.ensureTrace(width, height);
     this.flush();
+    this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
     const target = this.dev.createTexture({ size: [width, height], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
-    pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bind);
-    pass.draw(3);
-    pass.end();
+    this.encodeFrame(enc, target.createView());
     const bpr = Math.ceil(width * 4 / 256) * 256;
     const buf = this.dev.createBuffer({ size: bpr * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     enc.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: height }, [width, height]);
@@ -2178,6 +2532,99 @@ function attachViewGrid(grid, cells, onResize) {
   };
 }
 
+// render/budget-controller.ts
+var BudgetController = class {
+  budgetPx;
+  targetMs;
+  minPx;
+  maxPx;
+  constructor(opts = {}) {
+    this.targetMs = opts.targetMs ?? 16;
+    this.minPx = opts.minPx ?? 15e4;
+    this.maxPx = opts.maxPx ?? 8e6;
+    this.budgetPx = opts.startPx ?? 12e5;
+  }
+  /** Nudge the budget toward hitting targetMs. Multiplicative, clamped per step (0.8–1.25×) so the
+   *  loop is stable, and bounded to [minPx, maxPx]. Faster-than-target grows it; slower shrinks it. */
+  update(measuredMs) {
+    if (!(measuredMs > 0) || !Number.isFinite(measuredMs)) return;
+    const adj = Math.max(0.6, Math.min(1.2, this.targetMs / measuredMs));
+    this.budgetPx = Math.max(this.minPx, Math.min(this.maxPx, this.budgetPx * adj));
+  }
+  /** Resolution scale for a `w×h` view: sqrt(budget / area), clamped to [0.25, 1]. 1 when the view
+   *  already fits the budget (small window); a fraction for a big/retina window under load. */
+  scale(w, h) {
+    const area = Math.max(1, w * h);
+    return Math.max(0.25, Math.min(1, Math.sqrt(this.budgetPx / area)));
+  }
+};
+
+// render/demos/accum-loop.ts
+function mountAdaptiveLoop(opts) {
+  const target = opts.target ?? 32;
+  const idleGap = opts.idleGapMs ?? 100;
+  let raf = 0;
+  let lastKick = -1e12;
+  let wasMoving = false;
+  const tick = () => {
+    if (performance.now() - lastKick < idleGap) {
+      opts.renderMoving();
+      wasMoving = true;
+      raf = requestAnimationFrame(tick);
+    } else if (wasMoving) {
+      wasMoving = false;
+      opts.renderSettled(true);
+      raf = requestAnimationFrame(tick);
+    } else if (opts.count() < target) {
+      opts.renderSettled(false);
+      raf = requestAnimationFrame(tick);
+    } else {
+      raf = 0;
+    }
+  };
+  return {
+    kick() {
+      lastKick = performance.now();
+      if (!raf) raf = requestAnimationFrame(tick);
+    },
+    stop() {
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+    }
+  };
+}
+function mountAdaptive3d(opts) {
+  const budget = new BudgetController({ targetMs: opts.targetMs ?? 16 });
+  const renderMoving = () => {
+    const sc = opts.scene();
+    if (!sc) return;
+    const { w: vw, h: vh } = opts.size();
+    if (!vw || !vh) return;
+    const s = budget.scale(vw, vh), t0 = performance.now();
+    if (s > 0.98) {
+      opts.setCamera(sc, vw, vh);
+      sc.renderToView(opts.view(), vw, vh);
+    } else {
+      const rw = Math.max(16, Math.round(vw * s)), rh = Math.max(16, Math.round(vh * s));
+      opts.setCamera(sc, rw, rh);
+      sc.renderUpscaled(opts.view(), rw, rh, vw, vh);
+    }
+    opts.gpu.device.queue.onSubmittedWorkDone().then(() => budget.update(performance.now() - t0));
+    opts.onFrame?.();
+  };
+  const renderSettled = (reset) => {
+    const sc = opts.scene();
+    if (!sc) return;
+    const { w: vw, h: vh } = opts.size();
+    if (!vw || !vh) return;
+    opts.setCamera(sc, vw, vh);
+    sc.renderAccum(opts.view(), vw, vh, reset);
+    opts.onFrame?.();
+  };
+  const loop = mountAdaptiveLoop({ renderMoving, renderSettled, count: () => opts.scene()?.accumCount() ?? 1e9, target: opts.target ?? 24 });
+  return { draw: () => loop.kick(), budget, renderSettled, renderMoving, loop };
+}
+
 // render/demos/sl-logo.ts
 var SL_LOGO = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADkAAAA8CAIAAABTt4VhAAAABGdBTUEAALGPC/xhBQAAACBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAARGVYSWZNTQAqAAAACAABh2kABAAAAAEAAAAaAAAAAAADoAEAAwAAAAEAAQAAoAIABAAAAAEAAAA5oAMABAAAAAEAAAA8AAAAAH9xBdAAAAHLaVRYdFhNTDpjb20uYWRvYmUueG1wAAAAAAA8eDp4bXBtZXRhIHhtbG5zOng9ImFkb2JlOm5zOm1ldGEvIiB4OnhtcHRrPSJYTVAgQ29yZSA2LjAuMCI+CiAgIDxyZGY6UkRGIHhtbG5zOnJkZj0iaHR0cDovL3d3dy53My5vcmcvMTk5OS8wMi8yMi1yZGYtc3ludGF4LW5zIyI+CiAgICAgIDxyZGY6RGVzY3JpcHRpb24gcmRmOmFib3V0PSIiCiAgICAgICAgICAgIHhtbG5zOmV4aWY9Imh0dHA6Ly9ucy5hZG9iZS5jb20vZXhpZi8xLjAvIj4KICAgICAgICAgPGV4aWY6Q29sb3JTcGFjZT4xPC9leGlmOkNvbG9yU3BhY2U+CiAgICAgICAgIDxleGlmOlBpeGVsWERpbWVuc2lvbj41MDA8L2V4aWY6UGl4ZWxYRGltZW5zaW9uPgogICAgICAgICA8ZXhpZjpQaXhlbFlEaW1lbnNpb24+NTIwPC9leGlmOlBpeGVsWURpbWVuc2lvbj4KICAgICAgPC9yZGY6RGVzY3JpcHRpb24+CiAgIDwvcmRmOlJERj4KPC94OnhtcG1ldGE+ConTBbQAABmbSURBVGgFjZpZkB3XWcd7775919k1o2VGsjZLthw5sR3HiZ3EGMcJJqRIXKmiqAKTByh4yEN4pQJFUVBUUUWRQIViCVQZQ0IWJyGLYyeyY8lYkrXYlmxJtnbNSLPeO3fpvZvfd/pKOOSFnjt97+0+fc7//L/1fOfqjbFZjaPItCLVNU3Xdc3gj3fd0DTP1bZtsD/5yNwnfvmef/23Z1860VlY1dJcM7lrFAYnXePEWeMD/ci/HEWha3mRa0XOvzrzIS+0jAtylbci40XDnNZyq5B3+aQ+FwXf5UKhGZZhWHzmX/qnZ66XAGV0EHNNF0zcWm/3gl77Pfu2Hzv9qmvrZloYprQBpMnEmJl6VB4qDzUEGPJc5yNnBTTPcs3IDb5lZVPOQDZkPvBCe8Ys6FDgCgAQ8cctdegWX9QMNMWQ3FT3ChCYhuHYuu9oFUczbbtSqTiW5jl6bOiWyWRBWWItcUuHJVohhpdg5SVEpvDFma8pf0ZKC0CkhW7qaUY/Q7jyCA8K3BK6dKJkLV0LrxyCT+YgQKESoUKbY2sNX9805e3fv3V6Zvrgy6fTwrRNgGoiFUvOMiU4pj0Pqlmq7mVIAXoTIoCyTLCm4ABcljNKyoBZgexuwlWS5aKSP9wpphU+JXWwCtsykCioUG+YcGwAqOrokyPW3u2jO7ZtPvDcz469di0rTMfKhVRLGticBavBiw+i63QFCvQyK7IsFzqBqFAmqZamWmxqZponCUgYi3ENmYGhw7Rp6Ggw3YhGiB4Ig5kisTxZdF8OUZJiWgIUtmxT8z1jy7R//727PN+bv97pBaDQKq6JyoLSsQ3bpmGexPFgEIVRVuhukhZx1KfNxFijWa8oA9IS5J4VcWrESR4lehzroQ7jJqwqmoZwmd5NuAgEFRGzM0WPwSiHJQrB7ORrYSFNaBV11BxL91297pueYw36Sa8fMgfXFi4rHmLPozBY6iS5XhuZ2rVtz50zs7tWFuePHzmQDHrdOFq9tLBhJKj6HijLl/AK9gLNoU+hLBTicAoiVdFoU3g1DQQCHmYzhDtEClbhVb1MET0odT5Ylu7aYDJqnul7rikM5r4nU6FBp7PeT5wNs+/7yKOP7L7j3ompGdetHD/83Ksv/3Dj3I5N2/ZkSfzakefnz70wmsSmLXqH5on+pdpqR69WR5rNeoG0tVzBzZRkFVxRAww2x2UoZcALiVqWhA5tCxC4J+hSQDXXQsrwao6P1sbGm1EQjTTsRi1N1vpLq9nc3k/c/9FP37bzTsdx0ixlBudOHzl04JmK39i8dXeep8y56lc/+Uj1yc94k2OmIOUwtYtXsy9/NT56yvBdA8srncWQXTUXYVcwgga4eDOQivaXWnATq5iUbg2lbyBoDz9q6J313oWzp2a3TG/dMnH2/Fm/Pvdrv/q597z/Y7phpmmSxBEeYNDvvnH8hTgJ53bthSrRe8ZCmUTxbzoHdRHDgA68XsUBKxDQRkg1IiEO/kTaelrgK7RM/IVosKalQ5sd+iycAGqk44ag0zEN18FhQbTWWY+uXl3ZvHlza2LLvQ+9d27/b/mtqTCK0SnBhEaZ1qV3Xl9cuDQ6MeN5Xs51y0jiJEtjaFOjCIKhGBGdobmOgdWimhIsS5UFtD60+JhOgYswMoQsuqsCgIx2k1elqaipY4kBebZZcXXQOo7tN0ZTb+vcPR/d6t7WG6QAJSLghiQiaXo86IE1yZKZiRlINU1z+frFs68fXJ4/v2cy0XVXoSn1TXiDaSSmdAAlEF4hEEPiM7qqJUDSY2YmpmakWY4Ry6RktrewltI3DczfdUwClecaWOv6enDqfDFz9z3TznbbKUZsK0n0fpAPgiwU3TLnb1xaWbpWq7dc16O7teX5tcV3PvLoY1E4qAZfL4qB2I2SrRouJ3zg8iouvIrPQimEUZErnyEPt4CvykRHyRW4esuzacRYDon7OFSxJ/ChADhI39GhMNEmP3zP79rNfaud0HW1mm/7vm1ZZCD0h/YXN+bfjsLe2Mw2IKVxtL5y5Y79+x9+/LOHnvuOvohzgkZDghMHUcATh0LnjSrxBJUTKXO2yBJkSim806ucxR4JXzxLhCs1SOUugMWr2ZBqa+KqHMNz9SxLB2nr8c/+4W17HgjCSCZO+EmwpxS4vm+iBmvd3tryVRwyvBI/1teut1r1Pe+5x/ereZaeOBEvXFz3wIoQcax60etrb17Q1oP2wmqfuBDTYZrzgZ5rPtruaY6oiWp9k10BXuqy4pX7+CxIdS3TJVNxUZK0EzoPfvzJ/fc9HEdRSTxqJGZuGJ5XQI/j6v2ri0Fv1a/WLNfN8QvR+ty22Y2z2wiuzP6iN3O8vrPwHMlfoAatNIJG5dIHvcHeCQ/CEDSEM4eXLnXPDiIbZw5nkkVIWig3RBUM8gc5iiGvotigRJMwUkvPuqG2bc/DDz76RBbH0pz4LpqihClaispIgOl3FopsUG+Mo4W9oOs41syW2Ypfy1S8d2cn6w9s11pVBgcrfMXX2yNZ8IFs9Vd2jyghy2VMi4zg+uWImKOyR5UIKE1QMaSARzmwfvUmgUB4BautR3Hm1Gcf/dTv2KaJJgBxeICaQ0IGc8NEsjxYdu3cqzfwROGgU6/7k9ObyvboH27HSBMjlsjKRZI3DFsX3sRuJAcT8oj2wiVai99FUXISXFEaU/EDzMyIlXUKr5JJig64eCvUpcjDzH3woU/PbNyaJJHcEnzqrKByIgA6tuO6ccUJm3XH8v2E/DMNmiMbGiPjknGopJ1YYNEvmi6iFIQSGjF5rnBwFlqV9SvLxk74qlIG8a44LeWARYgKhdIBZoEQbVtSliQuWlO33/fAY6jfLaDSNYcaIsvzGOJtLDcZHXEnJ0YCw0n7oWXmrdaI79eAypggkexWnhF0opsEMz5zCZZ5Q4cFrjQRazElmDFJ1g5K19Rgco9Qp8RS6gCXeRbp83ysVR64/+P15ojEz5v4pEFJreqBcXECg07btu2JDdNrfbfbbaPojdaIaVpERnlOVji6acmbkrp8BRj4FVbVtUxAeVjSZfFl3MQ0WMYRI5iaoAY3CiZTHtqW+FchlVy42tpy5/4PlqSqptJM/hVKnpJE2zFJSRcXFhbnr3jNyVartrhwuVpx6s0WvnBImcTzXB9E0IJJih5wI4iZZZDlnVDWh6Wp4h9CyOSruGwWaASFgvQQrKaZu5iWUI/DLW2LSQC2yJPc2rHzfSPjk2kSl6SWQAWq4hVxMkuiKylpd319ZbU9WZ30G0TiXDfdarXO9IczxFhPX/BefQ3wspCB21zDGvtB9JSWffOtNqsGXBLZCfq9FqS91Dh1LeGSePG8kNVOWmRJNDPVwI5Up6XPktgrXk0za7vuuLfksRzy3Wexk5JlIY/0fhCEKZGtbpnVipnpVsX3S6wwQYcP+v5DFaeJvDB55TDnw/Qn9vrohPPAhqr4VyaWSch85uyN7+n3J9uf0L0max8UDF1OoqBz8K9M85Kon5LqMHcRdSh0vzG1acuOoZ9St8EmpArJqJaIgyhgu5bGiiWLmF6sXECrUclNslkyFdoOHYFvGWOm07JsoRQiioKgUo3MlmfN1ByqA9JpVtiG1nQM26gWjUnDHUO8KmTpWhSYdsVhTNFeOYb+lXmTK05MztWbo9K1Okq0fBS46ookYg7GwUFCnRFmcDFREFarrlUBlXjIUglKr4W7vPmwqBy30CLOQjQdStMyoaYVOs01EpZyYkyZxBXzEBnSLU1RJtqxuGFQc3JqzrJthWp4EogKpuKXWUg7wYGqa6lKGomvdsWvVKo+CaGotaiKWBiwRBDDLyIXeYmHEMg3LUA6lkvyJy+aq2/DrwRUMSVuqFvyJnqu22OSg0qj4fG/n4YXUPwwTHECzN7QEvxUrVaR2JiReOJJBGt5CAABd2tkASfHrSvDccoH1GU1NN/LS9KQ8IFPHnYpa0NhVqAaOJ3RoQzVLG+OerOtij2ie6ziqR74BqtcX1KTrNdZa7gteJWkQ/5wF3AqVRmxMrnAY+I+cbi2wdIDkUv+hYWxbqe2wEx1y9UdT5IDmuZ4vIwuZHbclWOYuzAEKyjL86tiBD9/DKel3mAK7mRMwxyfmjKN0PEtsvc4iuM4AR/kpcyFSJknl/udF9LYN230RkJmXqxEydlB75pmkWSSnIiNyAKwOL7Y6xanU/1bpldP44wkETWPozBpXzWmUbYh2GF9QKYoM8Dkfh4rEEuUcl+0EHsKw0TLY6cyMrXZ0e1We2WZp8AjKk9BRtfOvXFw8dLr1p73XW9M4JqUKLgpvmYaq8yKC8AU+QCKa8X4Lv0xLeuszL/6ysENm2+vtybgLnGTE2a/34soTMEBT9/yWaKzjDaEpqgVkDIH8VZIDNqk2GHiWQvKLL2FS426Pr5lDgJcqjSS0kjKeePiievvHLrvQ4/ddd/jlo0X+/8eT/3T3/Qi8/HPfmF60w4MqdNZ+os/+tyNS0dTTRZtgFG8ok64NVYPqaTV7z5KW+EMXRWP9IJUTWOmcaK3O2EU9OqTA782Um00yGXo4ezJFxbePrT37kd33vUI0/p5Gb27Y/l8a6iV5cWn/+XLL7/44mOf/nxrbJqKjunYF8+9QegOo6TAMynNHPIKGkJs0O8qQx12Kpyq/jAP0sVqxSYwBv00UdXJdjdei1ZGZ5Zbo5Ou6wRZeubYs5fPHNl3z8d27HsYoP8X2rvAlbdYEF25eO6F57934NnvVurTTzz5x5u37SFvwEMlUfSz5/8TlSNxG6gUGomXWLmLx4w7ndVbc72FV9hXwxC4Cd/EbHISPAERK+xH/V7YGNHwyldePxDl9fse/Mzu/R8dPvsLb7KG6/dWlheuXDh37MiLb7/5xura+uTMzo/9+hd27n2/5bhpmmH6eN/vf+Pvz711bPfeexcuHhksD8qewKroE+1NVxav/qLU5Iq4IQ5RVgk5fCUl1Vg1gJ5ZZzguM1tyLXdt6cLRF//DIzEo9F4/CPphf9Drddc7a8urK0urq8u9bjfLdNcf2bxt/4Mf/4ONc7vrzQkaU2vCXBzHW19f/vbTXzr002c+9RufX1ldWb58WHyvHGWuTRop4SFbWrgYRQF1PLFYoVo1UWeUAd+eoKpizuIzSFVt03I9CjTR2NSWOz/4uUsXrl5552wQDlzPxpGtrQUR9RMWO07Nr8/M7b5rb3OiOTJVq4+7fs0yHeaZMt2c3M9iqb+6ev3oS99//vtPkcz+9u//6Z3v+/A//90XWYxJ3FJcyRpGOJPVRb66fLmzsjQ+NSOZGYe6BUrJUVItCDIUXRZtgtv0XIoItu/lKIBR3bYJf7u9CMKM+hDuhFwPhVHec9jT0HOJ78JdMeFcSsx53qb48darJw8/f/bNo65Xf+jRJ/bd+0u2V11dW1ycP2+TwKG2Uk26WX+FRqiO+8uXLp6enNlS5vYKrYyEL4yoUElEKXMOKrVEV+qGPVOLdWdbWjTJvOjBccRiw1A6EHCCWcQjCwDeSfuLPA7D9fby5fNvXDh3kvPq8oLr1bbffu9v/t6fTc/uYr3e6barGMDFc8H6jaZyeqUeqhhLB7laCxWDM6+/8t77HhGANw+GZGIyttIKhsQtoDPNVi1OSAoW29f+e3F+vjD8xti0ZXuF7iQpNdqAtJoENwwHfTx6t9NpL62t3GivLGDBlML9amty4233fOiTc9vvGp3cjDJQGFnrLKIUCM51/TOvHzGLLhESfRSKWLnwzovp08IysitvH1+8fmVyw2ZSXlFZhCXuTJIcnpGgwEVZ8+Tj03d4mzY6btFbu9bvzK+tXO8utyyTOnFg2NVOp3vt2o3lVVwFqYBrOnXPH5mcnt2x9wOt8U0jY9ONkSnLcoT5HJRtJJ5mlBbFjhyn0mu3z5896lmUupwsT2jG6EP/SrxOMqlZ9/sLJw7/5LFPPYlh3mRWJsOBDIENXFJB1vJ16m3eBPO2/F07Rx+MQtZJGRlsGW4lj9H1KMolHstiFb8xrKmI92DXQ9bDIV0TQQZBT+wAz6oGoueXD/xX0L4yUiWDkS07IbKMXTRgiRPH8Gy6ZnTy8A+Xb8xLxULZ1q0zzQBKRbJeNeuUBWydZVkah6QrttRxkiSFVOmExdAgZM+jIPay6QDZOG9CTSqvME0jkAkAgaCHYRhFAyVYIY99tCgIjr/8o4odwoOsO8rSnYgWHVAuE3dEVkEFrr924eBPvknapSYpHap/xavUxIlh7MwZJETRgGIcvBSsbLnITEoIfOBiGGe8sPVG1W7WbCr6koiJTqlD+pUKX7/fRlmHjGhaqzV++KUfri+dpWIJnoikSykAzcHKWfwLtZxQseLb6YlXvvvOmZOGI/p062AMSV/YaWQhiRQpEMtOFUU3yZfQH1Y4Mj56b4s7QsvDMO8PWD9mTJyCISUItQ12q0ut11sP40BZj5Baq43cmL/yyoFv1NyYmgFABSteTh0q4ZUcSVZ5Ucw9IamIrv/gm18ZdNfF5ktNUApAzYtKVlamw2p3hnSaxXGMULAJxVwUp1yxHanQYZOULHv9dL1LcCiASw9lGMJIB2G/P+iINxbBivRd2/3Bt/6hCOc9147TIkyKNFELXigo2AesNGCDujtLRlkhienIxsby4rVeP96z736ZklqUU0RyqAQVuYxH7FA1lSQpgohqIrVO2aBDXlEoO29MybJMqKI+gvvHHhgFr0xn3MXpxkm01l6KE2xfgJqmPT624dnvPvXmkWdGG7INisaTkYdJ3h0Amlaa6QrWguE9h5xWvBQ4bJvNwezi+TOGVdu+e7/Ka6U2g7PDpFlmIWmaAQIRR5iK4BDRE6mQGhMAEFegFj5lvU9YZheO9QpyyrU4zVbXrkdxKEFMgFoT45uOHPzxT7/3ldFabJpOEOZBDFCknVNgpQrBIbzyRq4MtaiMLFCGBkSMjt86fdL1R+e23yHkiPdTBVqEyxLANJKsYGsTKExa7dBiK6JIYmFlqUq1pBn4FLOF45DkZ+vd1W6/SxtaWqY9ObHp5JEXv/P0X7a8vuu4gzgbwGgEnVS9tUEsEZ7JgrWupIMHkDgr61v546AiDd3hqZNHTNvfumMfRsxq3WP3EDnGFIVAruOk8ASIFs8AkTCK3mPWokvskNEglRK7BCOokHNGjTlNCWokLoXr+ePjmw7/7EfffurPW26v4ntBlPdDfEheGg8SCGMtUT84oLTRQDo4UwSICig75g0Sh3AdMzx14tCg179t936/wu6shFz2iOGVFxIX7TQpMuP+hWlWOGgtD7MWR4OhmMb0BotR0o8Ga6aZsCcFmkp1vOK1fvTMvz737b8eq8aViofoYTTAG7JMQpdSIlQepSiSToQ3SW1QUoa3JGoIQNEEtIvOuY8qOw4VoGvnjyxdfWvL3M6xiQ0sNMFHLsuM8BuJ1AYk9SmnihcTy0abdKKlbEHCaxhHvd7aoL8G0bJB7lT8+vTywo2n//FPXnv561OjFiuzQYToxVIxgIiAi4hwv5kWZ7htYdF0PIp7yJPtJrDKv1CreEXp1FeUwZoac2v6dbe47Pq+4UzabgW9plofBPzOQsIg6QNPUs5gomxpQy2Mor4sw5Kk224v9QckImatRuVzynUqLz//79/46hc7i6fZ8kUwfYCK6DPUFKBRIls00g/7c9K/xAHTFl5BhxMQrCVQSBGgwjH2rrEqvG1z8yMPbB+pJm+/9tzlc8ebo2N+fTLOXbIIqcLIIbMkHFDEQMmIt0EYkDpFYcd1igqa6I3Um1PY55VzR8+f/Nq5Y1/TsoFhV9BONvewejRVRD8EmknPKHqBDFmMCLhhIAUT9Eh1RPZZuYFtmypjlqIIKQ6lYAzjjdOXmq1GEZ+7dvJvTx8eC/VtzZm7JzbuqtZHTEruLAIkjJLni4sypHLokZJ7ZKNG3Lv89qGDPz519Plg/Z27947duXv62BsLK71gEGb9EHsHJT6ESSIWAYqgZLtPORmhQWEVOsXJqAqwxjCSg0MwgsV95ZEsHSRqtdfDziC3K/xew/XMYKX9+pm3f3r24pcKZ3JseufG2Z2bNs7Obtk4MTWJ3SyvdLu4pc5K0LlSs1Y3TmYLl86cOXk6ilEff2E5uWtfa9NMcHUxxAGHsUhfWZIAJXxgDzg6ASq5tRKZYBWogrrMqWnEFoTQCjPiYwyP3/1QHPDddifIdWdhJUqj0NuzwXKrptWfnHD6Qbdz7dDyxQOnjGJqrHrnHXOMcfy1CzdW+mQwjZp51+7JPVPbalvclZWpMxf764MMZ7yy1t26ZfzM+dVrSxFJotgov+CQX5ugoyVQngaoYJMDXNiWsl+UUwK/cgMKPcahdkqoDGyc9G/fMbGy2tMN+613VtbWIxxts1ltd5P5ZRwlqy/X8/x6vdqoOfxEhh9GIFam6VaqFZ+9V61R9xr1yko7WGCnMciIi9UK6YE9PjFyfam/uBqhCfAqQCVvk7CnGBUmyTJLOpW+ivsTtkHK5gKCV7RK9i8Pi96I11xY6jdHmgQ9FoBhInkJ/bIOG4TMCh0lcuqUDVHTMNWYxlovgS1+4sGPdAjoCzfW6brZ9NZ6HeTeaLZOnLpG4Z4opVyp+GxxxIpU8EqchE2BJaRygFW+wKksp8TqpZEUd9SeDe+o/Hova/eSxbVwEGu3bZs69tolSi8EQ5vapMCVWEWyQneu50IDsJbbUW+QkyslhD629Ayj0+1R8JmbHcWD9np9KphBbBw7cXWxk+EH3g1UlgiCRSmrAqpg6/8DnlUhNsYFwKsAAAAASUVORK5CYII=";
 
@@ -2562,15 +3009,19 @@ async function main() {
     rs.slice.renderToView(cx[p.cell].getCurrentTexture().createView({ format: srgb }), cv[p.cell].width, cv[p.cell].height);
     drawOverlay(p);
   };
-  const draw3d = () => {
-    if (!shown("threeD")) return;
-    rs.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, cv.threeD.width, cv.threeD.height);
-    rs.scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
-    draw3dOverlay();
-  };
+  const a3d = mountAdaptive3d({
+    scene: () => rs?.scene ?? null,
+    view: () => cx.threeD.getCurrentTexture().createView({ format: srgb }),
+    size: () => ({ w: shown("threeD") ? cv.threeD.width : 0, h: cv.threeD.height }),
+    setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
+    gpu,
+    onFrame: () => draw3dOverlay()
+  });
+  const draw3d = () => a3d.draw();
+  const draw3dNow = () => a3d.renderSettled(true);
   const drawAll = () => {
     for (const p of planes) drawPlane(p);
-    draw3d();
+    draw3dNow();
     status(`${rs.sv.name} \xB7 real ${rs.sv.dims.join("\xD7")} \xB7 left-drag a slice to scroll \xB7 double-click to maximize \xB7 drag 3D to orbit`);
   };
   const resize = () => {
@@ -2811,7 +3262,7 @@ async function main() {
       if (p.focalPoint) camera.focalPoint = [...p.focalPoint];
       if (p.viewUp) camera.viewUp = [...p.viewUp];
       if (p.viewAngle !== void 0) camera.viewAngle = p.viewAngle;
-      draw3d();
+      draw3dNow();
     },
     getPlanes: () => {
       const out = {};

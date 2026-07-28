@@ -6,6 +6,7 @@ import { initDevice } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { SliceRenderer } from "../slice-renderer.ts";
 import { buildFourUpScene } from "./fourup-scene.ts";
+import { mountAdaptive3d } from "./accum-loop.ts";
 import { orbitEye } from "./sphere-scene.ts";
 
 const status = (msg: string, err = false) => {
@@ -47,11 +48,18 @@ async function main() {
     slice.setPlane(n, off[n]);
     slice.renderToView(cx[n].getCurrentTexture().createView({ format: srgb }), cv[n].width, cv[n].height);
   };
-  const draw3d = () => {
-    scene.setCamera(orbitEye(az, elev, dist), [0, 0, 0], [0, 0, 1], 28, cv.threeD.width, cv.threeD.height);
-    scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
-  };
-  const drawAll = () => { drawSlice("axial"); drawSlice("coronal"); drawSlice("sagittal"); draw3d(); status("4-up · 3 MPR + 3D ColorizeVolume · scroll a slice to scrub, drag 3D to orbit"); };
+  // Adaptive 3D (budget × temporal AA) via the shared driver: orbiting the 3D view is budget-scaled
+  // + coalesced, settling converges to a supersampled AA image. Slices are cheap 2D, on-demand.
+  const a3d = mountAdaptive3d({
+    scene: () => scene,
+    view: () => cx.threeD.getCurrentTexture().createView({ format: srgb }),
+    size: () => ({ w: cv.threeD.width, h: cv.threeD.height }),
+    setCamera: (s, w, h) => s.setCamera(orbitEye(az, elev, dist), [0, 0, 0], [0, 0, 1], 28, w, h),
+    gpu,
+  });
+  const draw3d = () => a3d.draw();
+  const draw3dNow = () => a3d.renderSettled(true);
+  const drawAll = () => { drawSlice("axial"); drawSlice("coronal"); drawSlice("sagittal"); draw3dNow(); status("4-up · 3 MPR + 3D ColorizeVolume · scroll a slice to scrub, drag 3D to orbit"); };
 
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);

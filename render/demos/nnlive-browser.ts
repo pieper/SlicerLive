@@ -17,6 +17,7 @@ import { FiducialField, type Sphere } from "../fiducial-field.ts";
 import { bakeColorizeRGBA } from "../bake.ts";
 import { loadSceneVolumeField } from "../scene-volume.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
+import { mountAdaptive3d } from "./accum-loop.ts";
 import { applyRowMajor, type Vec3 } from "../mat4.ts";
 import { FaithfulSegmenter } from "../faithful-segmenter.ts";
 
@@ -85,11 +86,19 @@ async function main() {
     slice.setPlane(p.orient, off[p.cell]);
     slice.renderToView(cx[p.cell].getCurrentTexture().createView({ format: srgb }), cv[p.cell].width, cv[p.cell].height);
   };
-  const draw3d = () => {
-    scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, cv.threeD.width, cv.threeD.height);
-    scene.renderToView(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height);
-  };
-  const drawAll = () => { for (const p of planes) drawPlane(p); draw3d(); };
+  // Adaptive 3D (budget × temporal AA) via the shared driver: orbiting is budget-scaled + coalesced,
+  // settling converges to a supersampled AA image. `draw3d` (kick) for interaction; `draw3dNow`
+  // (sync native) for full refreshes so a fresh mask/scene shows immediately.
+  const a3d = mountAdaptive3d({
+    scene: () => scene,
+    view: () => cx.threeD.getCurrentTexture().createView({ format: srgb }),
+    size: () => ({ w: cv.threeD.width, h: cv.threeD.height }),
+    setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
+    gpu,
+  });
+  const draw3d = () => a3d.draw();
+  const draw3dNow = () => a3d.renderSettled(true);
+  const drawAll = () => { for (const p of planes) drawPlane(p); draw3dNow(); };
 
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);

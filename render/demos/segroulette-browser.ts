@@ -14,8 +14,7 @@ import { attachSliceControls } from "./slice-control.ts";
 import { attachDoubleClick, attachViewGrid } from "./view-grid.ts";
 import { attachWidgetControls } from "./widget-control.ts";
 import type { Box, HandleMeta } from "./roi-widget.ts";
-import { mountAdaptiveLoop } from "./accum-loop.ts";
-import { BudgetController } from "../budget-controller.ts";
+import { mountAdaptive3d } from "./accum-loop.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
 import { installIdcInfo } from "./idc-info.ts";
 import { createMosaic } from "./mosaic.ts";
@@ -71,28 +70,20 @@ async function main() {
     rs.slice.setPlane(p.orient, off[p.cell]);
     rs.slice.renderToView(cx[p.cell].getCurrentTexture().createView({ format: srgb }), cv[p.cell].width, cv[p.cell].height);
   };
-  // Adaptive 3D rendering (budget × temporal AA) — this is the heavy view (colorized 77-segment
-  // volumes). While orbiting, render budget-scaled low-res frames (Catmull-Rom upsampled) to stay at
-  // display rate; when the view settles, render native and converge to a supersampled, AA image. The
-  // slices are cheap 2D and render on-demand unchanged. `draw3d()` kicks the loop.
-  const budget3d = new BudgetController({ targetMs: 16 });
-  const view3d = () => cx.threeD.getCurrentTexture().createView({ format: srgb });
-  const set3dCam = (w: number, h: number) => rs!.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
-  const render3dMoving = () => {
-    if (!rs || !cv.threeD.width) return;
-    const vw = cv.threeD.width, vh = cv.threeD.height, s = budget3d.scale(vw, vh), t0 = performance.now();
-    if (s > 0.98) { set3dCam(vw, vh); rs.scene.renderToView(view3d(), vw, vh); }
-    else { const rw = Math.max(16, Math.round(vw * s)), rh = Math.max(16, Math.round(vh * s)); set3dCam(rw, rh); rs.scene.renderUpscaled(view3d(), rw, rh, vw, vh); }
-    gpu.device.queue.onSubmittedWorkDone().then(() => budget3d.update(performance.now() - t0));
-  };
-  const render3dSettled = (reset: boolean) => {
-    if (!rs || !cv.threeD.width) return;
-    set3dCam(cv.threeD.width, cv.threeD.height);
-    rs.scene.renderAccum(view3d(), cv.threeD.width, cv.threeD.height, reset);
-  };
-  const loop3d = mountAdaptiveLoop({ renderMoving: render3dMoving, renderSettled: render3dSettled, count: () => rs ? rs.scene.accumCount() : 999, target: 24 });
-  const draw3d = () => loop3d.kick();
+  // Adaptive 3D rendering (budget × temporal AA), via the shared mountAdaptive3d — the heavy view
+  // (colorized 77-segment volumes). Orbiting renders budget-scaled low-res Catmull-Rom-upsampled
+  // frames (coalesced to display rate); settling converges to a supersampled AA image. Slices are
+  // cheap 2D, on-demand. `draw3d()` kicks the loop; onFrame keeps the crosshair overlay in sync.
   let xhair: Crosshair4up | null = null;
+  const a3d = mountAdaptive3d({
+    scene: () => rs?.scene ?? null,
+    view: () => cx.threeD.getCurrentTexture().createView({ format: srgb }),
+    size: () => ({ w: cv.threeD.width, h: cv.threeD.height }),
+    setCamera: (sc, w, h) => sc.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
+    gpu,
+    onFrame: () => xhair?.redraw(),
+  });
+  const draw3d = () => a3d.draw();
   const drawAll = () => { for (const p of planes) drawSlice(p); draw3d(); xhair?.redraw(); };
 
   // SHARED shift-move crosshair pick — same one-call mount every MPR demo uses. Getters keep it
@@ -285,8 +276,8 @@ async function main() {
     setLayers: (v: boolean, s: boolean) => { rs?.setLayers(v, s); draw3d(); xhair?.redraw(); },
     setOutline: (on: boolean) => { rs?.slice.setOverlayOutline(on); for (const p of planes) drawSlice(p); },
     accum: () => rs?.scene.accumCount() ?? -1,
-    scale3d: () => budget3d.scale(cv.threeD.width, cv.threeD.height),
-    converge3d: (n: number) => { render3dSettled(true); for (let i = 1; i < n; i++) render3dSettled(false); return rs?.scene.accumCount() ?? -1; },
+    scale3d: () => a3d.budget.scale(cv.threeD.width, cv.threeD.height),
+    converge3d: (n: number) => { a3d.renderSettled(true); for (let i = 1; i < n; i++) a3d.renderSettled(false); return rs?.scene.accumCount() ?? -1; },
     segVis: (num: number) => rs?.isSegmentVisible(num) ?? null,
     setSegVis: (num: number, on: boolean) => { rs?.setSegmentVisible(num, on); for (const p of planes) drawSlice(p); draw3d(); },
     roi: () => rs ? { enabled: rs.roiEnabled(), visible: rs.roiVisible(), lo: rs.roi.lo(), hi: rs.roi.hi(), handles: rs.roi.handleList().length } : null,

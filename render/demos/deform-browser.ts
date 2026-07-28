@@ -7,6 +7,7 @@ import { SceneRenderer } from "../scene-renderer.ts";
 import { buildDeformScene } from "./deform-scene.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachWidgetControls, type Handle } from "./widget-control.ts";
+import { mountAdaptive3d } from "./accum-loop.ts";
 import { installIntrospection } from "../introspect.ts";
 import type { Vec3 } from "../mat4.ts";
 
@@ -37,17 +38,22 @@ async function main() {
   const { center, radius } = sc.sv;
   const camera = framedCamera(center as Vec3, radius, 3.5);
   let msg = "drag a magenta pin to deform · drag empty space to rotate";
-  const draw = () => {
-    const w = canvas.width, h = canvas.height;
-    scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
-    const t0 = performance.now();
-    scene.renderToView(ctx.getCurrentTexture().createView({ format: srgb }), w, h);
-    status(`${sc.sv.name} · TPS landmark deform · gain ${sc.warp.gain.toFixed(2)} · ${(performance.now() - t0).toFixed(0)} ms/frame · ${msg}`);
-  };
+  // Adaptive rendering (budget × temporal AA) via the shared driver. `draw` (interaction) kicks the
+  // coalesced loop; `drawNow` is a synchronous native render for the initial frame + test harnesses.
+  const a3d = mountAdaptive3d({
+    scene: () => scene,
+    view: () => ctx.getCurrentTexture().createView({ format: srgb }),
+    size: () => ({ w: canvas.width, h: canvas.height }),
+    setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
+    gpu,
+    onFrame: () => status(`${sc.sv.name} · TPS landmark deform · gain ${sc.warp.gain.toFixed(2)} · ${msg}`),
+  });
+  const draw = () => a3d.draw();
+  const drawNow = () => a3d.renderSettled(true);
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
     const size = Math.min(720, Math.floor(canvas.clientWidth * dpr));
-    canvas.width = size; canvas.height = size; draw();
+    canvas.width = size; canvas.height = size; drawNow();
   };
   globalThis.addEventListener("resize", resize);
 
@@ -76,9 +82,9 @@ async function main() {
 
   installIntrospection({
     getCamera: () => ({ azimuth: 0, elevation: 0, distance: camera.distance, position: [...camera.position] as Vec3, focalPoint: [...camera.focalPoint] as Vec3, viewUp: [...camera.viewUp] as Vec3, viewAngle: camera.viewAngle }),
-    setCamera: (p) => { if (p.position) camera.position = [...p.position] as Vec3; if (p.focalPoint) camera.focalPoint = [...p.focalPoint] as Vec3; if (p.viewUp) camera.viewUp = [...p.viewUp] as Vec3; draw(); },
+    setCamera: (p) => { if (p.position) camera.position = [...p.position] as Vec3; if (p.focalPoint) camera.focalPoint = [...p.focalPoint] as Vec3; if (p.viewUp) camera.viewUp = [...p.viewUp] as Vec3; drawNow(); },
     extra: () => ({ gain: sc.warp.gain }),
-    render: () => draw(),
+    render: () => drawNow(),
   });
 
   // Debug hook for the on-screen drag harness: current targets + camera + canvas rect, so

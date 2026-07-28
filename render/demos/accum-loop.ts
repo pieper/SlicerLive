@@ -1,3 +1,7 @@
+import type { SceneRenderer } from "../scene-renderer.ts";
+import type { Gpu } from "../device.ts";
+import { BudgetController } from "../budget-controller.ts";
+
 // Shared idle-convergence driver for temporal AA (docs/UNIFIED-RENDERING-PLAN.md M2). While the
 // view is still, keep re-rendering with sub-pixel camera jitter so SceneRenderer.renderAccum folds
 // each frame into a running mean → a supersampled, time-averaged-AA image. Any interaction calls
@@ -44,31 +48,76 @@ export function mountAdaptiveLoop(opts: {
   renderSettled: (reset: boolean) => void;  // one native accumulated frame
   count: () => number;                  // scene.accumCount()
   target?: number;                      // convergence target (default 32)
-  idleGapMs?: number;                   // settle this long after the last kick (default 90)
+  idleGapMs?: number;                   // consider the view "settled" this long after the last kick (default 100)
 }): AccumLoop {
   const target = opts.target ?? 32;
-  const idleGap = opts.idleGapMs ?? 90;
-  let settleRaf = 0;
-  let idleTimer: ReturnType<typeof setTimeout> | 0 = 0;
-  const stopSettle = () => { if (settleRaf) cancelAnimationFrame(settleRaf); settleRaf = 0; };
-  const settleTick = () => {
-    settleRaf = 0;
-    if (opts.count() >= target) return;
-    opts.renderSettled(false);
-    settleRaf = requestAnimationFrame(settleTick);
-  };
-  const startSettle = () => {
-    idleTimer = 0;
-    opts.renderSettled(true);             // fresh native frame, then converge
-    if (!settleRaf) settleRaf = requestAnimationFrame(settleTick);
+  const idleGap = opts.idleGapMs ?? 100;
+  // rAF-COALESCED: a burst of kick()s (a pointermove storm can fire faster than the display) only
+  // updates `lastKick`; the rAF tick renders AT MOST ONCE PER FRAME. This is the fix for "feels slow"
+  // on a heavy scene — synchronous render-per-event saturated the main thread. While interacting we
+  // render budget-scaled moving frames; once kicks stop for idleGap we render native and converge.
+  let raf = 0;
+  let lastKick = -1e12;
+  let wasMoving = false;
+  const tick = () => {
+    if (performance.now() - lastKick < idleGap) {
+      opts.renderMoving();                // coalesced: latest state, once per frame
+      wasMoving = true;
+      raf = requestAnimationFrame(tick);
+    } else if (wasMoving) {
+      wasMoving = false;
+      opts.renderSettled(true);           // just settled: fresh native frame, then converge
+      raf = requestAnimationFrame(tick);
+    } else if (opts.count() < target) {
+      opts.renderSettled(false);          // keep converging
+      raf = requestAnimationFrame(tick);
+    } else {
+      raf = 0;                            // converged: idle until the next kick
+    }
   };
   return {
-    kick() {
-      stopSettle();
-      if (idleTimer) clearTimeout(idleTimer);
-      opts.renderMoving();                // immediate low-res frame — display-rate under load
-      idleTimer = setTimeout(startSettle, idleGap);
-    },
-    stop() { stopSettle(); if (idleTimer) clearTimeout(idleTimer); idleTimer = 0; },
+    kick() { lastKick = performance.now(); if (!raf) raf = requestAnimationFrame(tick); },
+    stop() { if (raf) cancelAnimationFrame(raf); raf = 0; },
   };
+}
+
+// One-call adaptive 3D driver: wires a BudgetController + the moving/settled render pair + the
+// coalesced loop for a demo's 3D view, so every demo gets budget-scaled interaction + temporal AA
+// from a single call (DRY). Getters (scene/view/size) keep it valid across a scene rebuild. Returns
+// `draw()` (call on any interaction/redraw) plus the pieces for optional debug hooks.
+export interface Adaptive3d {
+  draw(): void;                                  // kick the loop (interaction or redraw)
+  budget: BudgetController;
+  renderSettled(reset: boolean): void;           // native accumulate (for debug converge)
+  renderMoving(): void;                           // one budget-scaled frame (for debug)
+  loop: AccumLoop;
+}
+export function mountAdaptive3d(opts: {
+  scene: () => SceneRenderer | null;             // getter (survives scene rebuilds)
+  view: () => GPUTextureView;                     // swap-chain view to present into
+  size: () => { w: number; h: number };          // 3D canvas drawing-buffer size
+  setCamera: (sc: SceneRenderer, w: number, h: number) => void;
+  gpu: Gpu;
+  target?: number;                                // AA convergence target (default 24)
+  targetMs?: number;                              // budget frame-time target (default 16)
+  onFrame?: () => void;                           // after each 3D frame (e.g. redraw a crosshair overlay)
+}): Adaptive3d {
+  const budget = new BudgetController({ targetMs: opts.targetMs ?? 16 });
+  const renderMoving = () => {
+    const sc = opts.scene(); if (!sc) return;
+    const { w: vw, h: vh } = opts.size(); if (!vw || !vh) return;
+    const s = budget.scale(vw, vh), t0 = performance.now();
+    if (s > 0.98) { opts.setCamera(sc, vw, vh); sc.renderToView(opts.view(), vw, vh); }
+    else { const rw = Math.max(16, Math.round(vw * s)), rh = Math.max(16, Math.round(vh * s)); opts.setCamera(sc, rw, rh); sc.renderUpscaled(opts.view(), rw, rh, vw, vh); }
+    opts.gpu.device.queue.onSubmittedWorkDone().then(() => budget.update(performance.now() - t0));
+    opts.onFrame?.();
+  };
+  const renderSettled = (reset: boolean) => {
+    const sc = opts.scene(); if (!sc) return;
+    const { w: vw, h: vh } = opts.size(); if (!vw || !vh) return;
+    opts.setCamera(sc, vw, vh); sc.renderAccum(opts.view(), vw, vh, reset);
+    opts.onFrame?.();
+  };
+  const loop = mountAdaptiveLoop({ renderMoving, renderSettled, count: () => opts.scene()?.accumCount() ?? 1e9, target: opts.target ?? 24 });
+  return { draw: () => loop.kick(), budget, renderSettled, renderMoving, loop };
 }

@@ -30,7 +30,9 @@ export class BudgetController {
    *  loop is stable, and bounded to [minPx, maxPx]. Faster-than-target grows it; slower shrinks it. */
   update(measuredMs: number): void {
     if (!(measuredMs > 0) || !Number.isFinite(measuredMs)) return;
-    const adj = Math.max(0.8, Math.min(1.25, this.targetMs / measuredMs));
+    // Asymmetric: shrink faster than we grow, so a heavy scene drops to an interactive resolution
+    // within a few frames (engagement latency), then eases back up gently when there's headroom.
+    const adj = Math.max(0.6, Math.min(1.2, this.targetMs / measuredMs));
     this.budgetPx = Math.max(this.minPx, Math.min(this.maxPx, this.budgetPx * adj));
   }
 
