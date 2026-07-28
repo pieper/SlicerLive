@@ -8,8 +8,7 @@ import { SceneRenderer } from "../scene-renderer.ts";
 import { buildRoiScene, type Box, type HandleMeta } from "./roi-scene.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachWidgetControls, type Handle } from "./widget-control.ts";
-import { mountAdaptiveLoop } from "./accum-loop.ts";
-import { BudgetController } from "../budget-controller.ts";
+import { mountAdaptive3d } from "./accum-loop.ts";
 import { installIntrospection } from "../introspect.ts";
 import type { Vec3 } from "../mat4.ts";
 
@@ -42,37 +41,24 @@ async function main() {
 
   const camera = framedCamera(roi.sv.center as Vec3, roi.sv.radius, 2.8);
   let msg = "drag a handle to crop · drag empty space to rotate";
-  // Adaptive rendering (budget × temporal AA): while interacting, render budget-scaled low-res
-  // frames (Catmull-Rom upsampled) sized to keep the GPU near the target ms; when the view settles,
-  // render native and converge to a supersampled, time-averaged-AA image. `kick` = one moving frame
-  // + arm the settle; the human always sees display-rate, then it sharpens at rest.
-  const budget = new BudgetController({ targetMs: 16 });
-  const view = () => ctx.getCurrentTexture().createView({ format: srgb });
-  const setCam = (w: number, h: number) => scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
-  const renderMoving = () => {
-    const vw = canvas.width, vh = canvas.height;
-    const s = budget.scale(vw, vh);
-    const t0 = performance.now();
-    if (s > 0.98) { setCam(vw, vh); scene.renderToView(view(), vw, vh); }   // full-res is affordable
-    else {
-      const rw = Math.max(16, Math.round(vw * s)), rh = Math.max(16, Math.round(vh * s));
-      setCam(rw, rh); scene.renderUpscaled(view(), rw, rh, vw, vh);
-    }
-    gpu.device.queue.onSubmittedWorkDone().then(() => budget.update(performance.now() - t0));
-    status(`${roi.sv.name} · ROI crop · ${(s * 100) | 0}% res · ${msg}`);
-  };
-  const renderSettled = (reset: boolean) => {
-    const vw = canvas.width, vh = canvas.height;
-    setCam(vw, vh);
-    scene.renderAccum(view(), vw, vh, reset);
-    status(`${roi.sv.name} · ROI crop · converging n=${scene.accumCount()} · ${msg}`);
-  };
-  const loop = mountAdaptiveLoop({ renderMoving, renderSettled, count: () => scene.accumCount(), target: 32 });
-  const draw = () => loop.kick();
+  // Adaptive rendering (budget × temporal AA) via the shared, GPU-paced mountAdaptive3d: interacting
+  // renders budget-scaled low-res Catmull-Rom-upsampled frames (first frame immediate, no backlog),
+  // settling converges to a supersampled AA image. `draw` (kick) for interaction, `drawNow` (sync)
+  // for the initial frame + tests.
+  const a3d = mountAdaptive3d({
+    scene: () => scene,
+    view: () => ctx.getCurrentTexture().createView({ format: srgb }),
+    size: () => ({ w: canvas.width, h: canvas.height }),
+    setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
+    gpu,
+    onFrame: () => status(`${roi.sv.name} · ROI crop · ${msg}`),
+  });
+  const draw = () => a3d.draw();
+  const drawNow = () => a3d.renderSettled(true);
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
     const size = Math.min(720, Math.floor(canvas.clientWidth * dpr));
-    canvas.width = size; canvas.height = size; draw();
+    canvas.width = size; canvas.height = size; drawNow();
   };
   globalThis.addEventListener("resize", resize);
 
@@ -96,9 +82,9 @@ async function main() {
 
   installIntrospection({
     getCamera: () => ({ azimuth: 0, elevation: 0, distance: camera.distance, position: [...camera.position] as Vec3, focalPoint: [...camera.focalPoint] as Vec3, viewUp: [...camera.viewUp] as Vec3, viewAngle: camera.viewAngle }),
-    setCamera: (p) => { if (p.position) camera.position = [...p.position] as Vec3; if (p.focalPoint) camera.focalPoint = [...p.focalPoint] as Vec3; if (p.viewUp) camera.viewUp = [...p.viewUp] as Vec3; draw(); },
+    setCamera: (p) => { if (p.position) camera.position = [...p.position] as Vec3; if (p.focalPoint) camera.focalPoint = [...p.focalPoint] as Vec3; if (p.viewUp) camera.viewUp = [...p.viewUp] as Vec3; drawNow(); },
     extra: () => ({ center: roi.snapshot().center, half: roi.snapshot().half }),
-    render: () => draw(),
+    render: () => drawNow(),
   });
 
   // Debug hook for the on-screen drag harness: handles (world) + camera + canvas rect + box.
@@ -113,11 +99,11 @@ async function main() {
       };
     },
     accumCount: () => scene.accumCount(),
-    scale: () => budget.scale(canvas.width, canvas.height),
-    budgetPx: () => budget.budgetPx,
-    setBudgetPx: (px: number) => { budget.budgetPx = px; },
-    renderMovingN: (n: number) => { for (let i = 0; i < n; i++) renderMoving(); },
-    converge: (n: number) => { renderSettled(true); for (let i = 1; i < n; i++) renderSettled(false); return scene.accumCount(); },
+    scale: () => a3d.budget.scale(canvas.width, canvas.height),
+    budgetPx: () => a3d.budget.budgetPx,
+    setBudgetPx: (px: number) => { a3d.budget.budgetPx = px; },
+    renderMovingN: (n: number) => { for (let i = 0; i < n; i++) a3d.renderMoving(); },
+    converge: (n: number) => { a3d.renderSettled(true); for (let i = 1; i < n; i++) a3d.renderSettled(false); return scene.accumCount(); },
   };
   resize();
 }

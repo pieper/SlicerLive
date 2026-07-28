@@ -131,6 +131,17 @@ export function installChrome(opts: ChromeOpts): Chrome {
   glass(pop);
   document.body.appendChild(pop);
 
+  // Toggle responsiveness (user report): a change can be heavy (re-bake + scene rebuild), and running
+  // it synchronously in the click handler froze even the checkbox until the render finished. Instead:
+  // paint the switch optimistically, then run the change AFTER the browser has painted (double-rAF =
+  // one frame to show the flipped switch, then do the work) — so the UI is instant and the render
+  // enters the adaptive/progressive path (draw3d = kick) instead of blocking.
+  const paintSw = (sw: HTMLElement, on: boolean) => {
+    sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
+    sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
+  };
+  const afterPaint = (fn: () => void) => requestAnimationFrame(() => requestAnimationFrame(fn));
+
   const rows: { c: VizControl; row: HTMLElement; sw: HTMLElement }[] = [];
   if (controls.length) {
     const head = document.createElement("div");
@@ -144,7 +155,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
       const sw = document.createElement("span");   // toggle pill
       sw.style.cssText = "width:34px;height:19px;border-radius:999px;position:relative;transition:background 120ms;flex:0 0 auto;";
       row.appendChild(lab); row.appendChild(sw);
-      row.onclick = () => { if (c.disabled?.()) return; c.set(!c.get()); opts.onChange?.(); refresh(); };
+      row.onclick = () => { if (c.disabled?.()) return; const next = !c.get(); paintSw(sw, next); afterPaint(() => { c.set(next); opts.onChange?.(); refresh(); }); };
       pop.appendChild(row);
       rows.push({ c, row, sw });
     }
@@ -156,10 +167,6 @@ export function installChrome(opts: ChromeOpts): Chrome {
   const segHost = document.createElement("div");
   pop.appendChild(segHost);
   const segRows: { num: number; sw: HTMLElement }[] = [];
-  const paintSw = (sw: HTMLElement, on: boolean) => {
-    sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
-    sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
-  };
   function buildSegments() {
     const S = opts.segments;
     segRows.length = 0; segHost.innerHTML = "";
@@ -183,7 +190,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
       const sw = document.createElement("span");
       sw.style.cssText = "width:34px;height:19px;border-radius:999px;position:relative;transition:background 120ms;flex:0 0 auto;";
       row.appendChild(left); row.appendChild(sw);
-      row.onclick = () => { if (S.enabled && !S.enabled()) return; S.set(s.num, !S.get(s.num)); refresh(); };
+      row.onclick = () => { if (S.enabled && !S.enabled()) return; const next = !S.get(s.num); paintSw(sw, next); afterPaint(() => { S.set(s.num, next); refresh(); }); };
       wrap.appendChild(row);
       segRows.push({ num: s.num, sw });
     }

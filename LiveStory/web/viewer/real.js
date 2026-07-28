@@ -2562,34 +2562,41 @@ var BudgetController = class {
 // render/demos/accum-loop.ts
 function mountAdaptiveLoop(opts) {
   const target = opts.target ?? 32;
-  const idleGap = opts.idleGapMs ?? 100;
-  let raf = 0;
-  let lastKick = -1e12;
-  let wasMoving = false;
-  const tick = () => {
+  const idleGap = opts.idleGapMs ?? 120;
+  const raf = () => new Promise((r) => requestAnimationFrame(() => r()));
+  const sync = opts.sync ?? (() => Promise.resolve());
+  let running = false, stopped = false, lastKick = -1e12, wasMoving = false;
+  const step = () => {
     if (performance.now() - lastKick < idleGap) {
       opts.renderMoving();
       wasMoving = true;
-      raf = requestAnimationFrame(tick);
-    } else if (wasMoving) {
+      return true;
+    }
+    if (wasMoving) {
       wasMoving = false;
       opts.renderSettled(true);
-      raf = requestAnimationFrame(tick);
-    } else if (opts.count() < target) {
-      opts.renderSettled(false);
-      raf = requestAnimationFrame(tick);
-    } else {
-      raf = 0;
+      return true;
     }
+    if (opts.count() < target) {
+      opts.renderSettled(false);
+      return true;
+    }
+    return false;
+  };
+  const run = async () => {
+    running = true;
+    stopped = false;
+    while (!stopped && step()) await Promise.all([sync(), raf()]);
+    running = false;
   };
   return {
     kick() {
       lastKick = performance.now();
-      if (!raf) raf = requestAnimationFrame(tick);
+      if (!running) run();
     },
+    // run() renders the 1st frame synchronously
     stop() {
-      if (raf) cancelAnimationFrame(raf);
-      raf = 0;
+      stopped = true;
     }
   };
 }
@@ -2621,7 +2628,14 @@ function mountAdaptive3d(opts) {
     sc.renderAccum(opts.view(), vw, vh, reset);
     opts.onFrame?.();
   };
-  const loop = mountAdaptiveLoop({ renderMoving, renderSettled, count: () => opts.scene()?.accumCount() ?? 1e9, target: opts.target ?? 24 });
+  const loop = mountAdaptiveLoop({
+    renderMoving,
+    renderSettled,
+    count: () => opts.scene()?.accumCount() ?? 1e9,
+    target: opts.target ?? 24,
+    sync: () => opts.gpu.device.queue.onSubmittedWorkDone()
+    // GPU-paced: no backlog, input preempts
+  });
   return { draw: () => loop.kick(), budget, renderSettled, renderMoving, loop };
 }
 
@@ -2723,6 +2737,11 @@ function installChrome(opts) {
   pop.style.cssText = "position:fixed;z-index:73;min-width:210px;max-width:300px;max-height:84vh;overflow-y:auto;padding:10px 12px;border-radius:12px;color:#eaf0ff;font:13px -apple-system,system-ui,sans-serif;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 120ms ease-out,transform 120ms ease-out;";
   glass(pop);
   document.body.appendChild(pop);
+  const paintSw = (sw, on) => {
+    sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
+    sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
+  };
+  const afterPaint = (fn) => requestAnimationFrame(() => requestAnimationFrame(fn));
   const rows = [];
   if (controls.length) {
     const head = document.createElement("div");
@@ -2740,9 +2759,13 @@ function installChrome(opts) {
       row.appendChild(sw);
       row.onclick = () => {
         if (c.disabled?.()) return;
-        c.set(!c.get());
-        opts.onChange?.();
-        refresh();
+        const next = !c.get();
+        paintSw(sw, next);
+        afterPaint(() => {
+          c.set(next);
+          opts.onChange?.();
+          refresh();
+        });
       };
       pop.appendChild(row);
       rows.push({ c, row, sw });
@@ -2753,10 +2776,6 @@ function installChrome(opts) {
   const segHost = document.createElement("div");
   pop.appendChild(segHost);
   const segRows = [];
-  const paintSw = (sw, on) => {
-    sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
-    sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
-  };
   function buildSegments() {
     const S = opts.segments;
     segRows.length = 0;
@@ -2784,8 +2803,12 @@ function installChrome(opts) {
       row.appendChild(sw);
       row.onclick = () => {
         if (S.enabled && !S.enabled()) return;
-        S.set(s.num, !S.get(s.num));
-        refresh();
+        const next = !S.get(s.num);
+        paintSw(sw, next);
+        afterPaint(() => {
+          S.set(s.num, next);
+          refresh();
+        });
       };
       wrap.appendChild(row);
       segRows.push({ num: s.num, sw });

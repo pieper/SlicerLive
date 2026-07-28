@@ -48,36 +48,34 @@ export function mountAdaptiveLoop(opts: {
   renderSettled: (reset: boolean) => void;  // one native accumulated frame
   count: () => number;                  // scene.accumCount()
   target?: number;                      // convergence target (default 32)
-  idleGapMs?: number;                   // consider the view "settled" this long after the last kick (default 100)
+  idleGapMs?: number;                   // consider the view "settled" this long after the last kick (default 120)
+  sync?: () => Promise<unknown>;        // await after each frame — pass queue.onSubmittedWorkDone for GPU pacing
 }): AccumLoop {
   const target = opts.target ?? 32;
-  const idleGap = opts.idleGapMs ?? 100;
-  // rAF-COALESCED: a burst of kick()s (a pointermove storm can fire faster than the display) only
-  // updates `lastKick`; the rAF tick renders AT MOST ONCE PER FRAME. This is the fix for "feels slow"
-  // on a heavy scene — synchronous render-per-event saturated the main thread. While interacting we
-  // render budget-scaled moving frames; once kicks stop for idleGap we render native and converge.
-  let raf = 0;
-  let lastKick = -1e12;
-  let wasMoving = false;
-  const tick = () => {
-    if (performance.now() - lastKick < idleGap) {
-      opts.renderMoving();                // coalesced: latest state, once per frame
-      wasMoving = true;
-      raf = requestAnimationFrame(tick);
-    } else if (wasMoving) {
-      wasMoving = false;
-      opts.renderSettled(true);           // just settled: fresh native frame, then converge
-      raf = requestAnimationFrame(tick);
-    } else if (opts.count() < target) {
-      opts.renderSettled(false);          // keep converging
-      raf = requestAnimationFrame(tick);
-    } else {
-      raf = 0;                            // converged: idle until the next kick
-    }
+  const idleGap = opts.idleGapMs ?? 120;
+  // GPU-PACED async loop (ported from the Python spike's producer). The first frame after a kick
+  // renders SYNCHRONOUSLY (immediate response — no rAF wait), then each subsequent frame awaits the
+  // GPU (opts.sync = onSubmittedWorkDone) so we NEVER submit faster than the GPU drains. That kills
+  // the backlog that made the first drag frame appear a second late (moving frames were queued behind
+  // a pile of full-res settle frames). Awaiting also yields to input, so a new kick preempts within
+  // one GPU frame. A rAF is awaited too, capping cadence at display rate for light scenes.
+  const raf = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+  const sync = opts.sync ?? (() => Promise.resolve());
+  let running = false, stopped = false, lastKick = -1e12, wasMoving = false;
+  const step = () => {
+    if (performance.now() - lastKick < idleGap) { opts.renderMoving(); wasMoving = true; return true; }
+    if (wasMoving) { wasMoving = false; opts.renderSettled(true); return true; }
+    if (opts.count() < target) { opts.renderSettled(false); return true; }
+    return false;                          // converged + idle
+  };
+  const run = async () => {
+    running = true; stopped = false;
+    while (!stopped && step()) await Promise.all([sync(), raf()]);
+    running = false;
   };
   return {
-    kick() { lastKick = performance.now(); if (!raf) raf = requestAnimationFrame(tick); },
-    stop() { if (raf) cancelAnimationFrame(raf); raf = 0; },
+    kick() { lastKick = performance.now(); if (!running) run(); },   // run() renders the 1st frame synchronously
+    stop() { stopped = true; },
   };
 }
 
@@ -118,6 +116,11 @@ export function mountAdaptive3d(opts: {
     opts.setCamera(sc, vw, vh); sc.renderAccum(opts.view(), vw, vh, reset);
     opts.onFrame?.();
   };
-  const loop = mountAdaptiveLoop({ renderMoving, renderSettled, count: () => opts.scene()?.accumCount() ?? 1e9, target: opts.target ?? 24 });
+  const loop = mountAdaptiveLoop({
+    renderMoving, renderSettled,
+    count: () => opts.scene()?.accumCount() ?? 1e9,
+    target: opts.target ?? 24,
+    sync: () => opts.gpu.device.queue.onSubmittedWorkDone(),   // GPU-paced: no backlog, input preempts
+  });
   return { draw: () => loop.kick(), budget, renderSettled, renderMoving, loop };
 }
