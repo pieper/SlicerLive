@@ -30,6 +30,17 @@ export class SceneRenderer {
   private pickOff = 0;                 // mat[] offset of the pick_cursor uniform (NDC)
   private pickTarget?: GPUTexture;     // 1x1 rgba32float (wp.xyz, hit)
   private pickReadBuf?: GPUBuffer;
+  // PRODUCER→RECONSTRUCTOR seam (docs/UNIFIED-RENDERING-PLAN.md M1). The ray-march writes the
+  // premultiplied composited sample into `traceTex` (rgba32float, lossless); `resolvePipeline`
+  // composites it over the background into the output view. 1:1 for now (byte-identical); the
+  // resolve pass is where spatial upsample + temporal accumulation (time-averaged AA) will live.
+  private resolvePipeline!: GPURenderPipeline;
+  private resolveBind?: GPUBindGroup;
+  private resolveBgBuf: GPUBuffer;
+  private traceTex?: GPUTexture;
+  private traceView?: GPUTextureView;
+  private traceW = 0;
+  private traceH = 0;
 
   /** Emit a default AABB-distance skip for fields that don't supply their own bound.
    *
@@ -59,6 +70,68 @@ export class SceneRenderer {
     this.canTime = gpu.features.has("timestamp-query");
     this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
     this.camBuf = this.dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); // invVP(64)+size(16)+eye(16)
+    // The Reconstructor pipeline is field-independent, so build it ONCE here (unlike the trace
+    // pipeline, which is rebuilt per field set). Its bind group (trace texture) is (re)made per size.
+    this.resolveBgBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const rmod = this.dev.createShaderModule({ code: this.resolveWgsl() });
+    this.resolvePipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: rmod, entryPoint: "vs_resolve" },
+      fragment: { module: rmod, entryPoint: "fs_resolve", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+    });
+  }
+
+  /** RECONSTRUCTOR (M1: identity resolve). Composites the traced premultiplied sample over the
+   *  background — the exact `mix(bg, rgb, a)` the fused fs_main used. `textureLoad` at integer
+   *  coords is a 1:1 fetch (no filtering), so the output is byte-identical to the fused path.
+   *  M2 replaces this with a spatial-upsample + temporal-accumulate resolve. */
+  private resolveWgsl(): string {
+    return /* wgsl */ `
+@group(0) @binding(0) var t_trace : texture_2d<f32>;
+@group(0) @binding(1) var<uniform> u_bg : vec4<f32>;
+fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
+  let lo = c / 12.92;
+  let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+  return select(lo, hi, c > vec3<f32>(0.04045));
+}
+struct RV { @builtin(position) position : vec4<f32> };
+@vertex
+fn vs_resolve(@builtin(vertex_index) vi : u32) -> RV {
+  let x = select(-1.0, 3.0, vi == 1u);
+  let y = select(-1.0, 3.0, vi == 2u);
+  var o : RV; o.position = vec4<f32>(x, y, 0.0, 1.0); return o;
+}
+@fragment
+fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
+  let s = textureLoad(t_trace, vec2<i32>(v.position.xy), 0);
+  let bg = srgb2physical(u_bg.rgb);
+  return vec4<f32>(mix(bg, s.rgb, s.a), 1.0);
+}`;
+  }
+
+  /** (Re)allocate the trace target + resolve bind group when the view size changes. */
+  private ensureTrace(width: number, height: number) {
+    if (this.traceTex && this.traceW === width && this.traceH === height) return;
+    this.traceTex?.destroy();
+    this.traceTex = this.dev.createTexture({
+      size: [width, height], format: "rgba32float",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.traceView = this.traceTex.createView();
+    this.traceW = width; this.traceH = height;
+    this.resolveBind = this.dev.createBindGroup({
+      layout: this.resolvePipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: this.traceView }, { binding: 1, resource: { buffer: this.resolveBgBuf } }],
+    });
+  }
+
+  /** Encode trace (producer) + resolve (reconstructor) into `enc`, output to `outView`. */
+  private encodeFrame(enc: GPUCommandEncoder, outView: GPUTextureView) {
+    const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.traceView!, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    tp.setPipeline(this.pipeline); tp.setBindGroup(0, this.bind); tp.draw(3); tp.end();
+    const rp = enc.beginRenderPass({ colorAttachments: [{ view: outView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    rp.setPipeline(this.resolvePipeline); rp.setBindGroup(0, this.resolveBind!); rp.draw(3); rp.end();
   }
 
   /** (Re)build the pipeline for a set of fields. */
@@ -78,10 +151,12 @@ export class SceneRenderer {
     this.mat = new Float32Array(uoff + CLIP_FLOATS + 4);
     this.matBuf = this.dev.createBuffer({ size: (uoff + CLIP_FLOATS + 4) * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const module = this.dev.createShaderModule({ code: this.wgsl() });
+    // The main pipeline is now the PRODUCER: it writes the traced sample to an rgba32float target
+    // (not the swap-chain format); the resolve pipeline composites over the background.
     this.pipeline = this.dev.createRenderPipeline({
       layout: "auto",
       vertex: { module, entryPoint: "vs_main" },
-      fragment: { module, entryPoint: "fs_main", targets: [{ format: this.format }] },
+      fragment: { module, entryPoint: "fs_trace", targets: [{ format: "rgba32float" }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
     });
     // A second pipeline off the SAME module for the pick trace (outputs world position, not colour).
@@ -245,14 +320,19 @@ fn ndc_to_world(ndc : vec4<f32>) -> vec3<f32> { let w = u_cam.inv_view_proj * nd
 fn ign(p : vec2<f32>) -> f32 { return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715)))); }
 ${fns}
 
+// PRODUCER (fs_trace): march the ray and return the composited PREMULTIPLIED sample
+// (integrated.rgb, integrated.a) BEFORE the background composite — a "traced pixel". The
+// Reconstructor (fs_resolve / reconstructor.ts) composites it over the background. Splitting
+// trace from assemble is the seam the unified local/remote pipeline turns on (see
+// docs/UNIFIED-RENDERING-PLAN.md); the background composite is identical to the fused path, so
+// output is byte-identical at full density. An empty slab returns transparent (0) → resolve = bg.
 @fragment
-fn fs_main(v : Varyings) -> @location(0) vec4<f32> {
+fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
   let size = u_cam.size.xy;
   let ndc_x = (v.position.x / size.x) * 2.0 - 1.0;
   let ndc_y = 1.0 - (v.position.y / size.y) * 2.0;
   let ro = ndc_to_world(vec4<f32>(ndc_x, ndc_y, 0.0, 1.0));
   let rd = normalize(ndc_to_world(vec4<f32>(ndc_x, ndc_y, 1.0, 1.0)) - ro);
-  let bg = srgb2physical(u_material.bg.rgb);
 
   let inv = vec3<f32>(1.0) / rd;
   let tb = (u_material.bmin.xyz - ro) * inv;
@@ -260,12 +340,12 @@ fn fs_main(v : Varyings) -> @location(0) vec4<f32> {
   let tmn = min(tt, tb); let tmx = max(tt, tb);
   var t_near = max(max(tmn.x, tmn.y), tmn.z);
   var t_far  = min(min(tmx.x, tmx.y), tmx.z);
-  if (t_far <= t_near || t_far <= 0.0) { return vec4<f32>(bg, 1.0); }
+  if (t_far <= t_near || t_far <= 0.0) { return vec4<f32>(0.0); }
 
   let step = max(u_material.scene.x, 1e-3);
   t_near = max(t_near + step, 0.0);
   t_far  = t_far - step;
-  if (t_far <= t_near) { return vec4<f32>(bg, 1.0); }
+  if (t_far <= t_near) { return vec4<f32>(0.0); }
   let seed = ign(v.position.xy);
   var t = t_near;
   var integrated = vec4<f32>(0.0);
@@ -310,7 +390,7 @@ ${ghostDispatch}
     let fA = integrated.a * residual;
     integrated = vec4<f32>(integrated.rgb * residual + (1.0 - fA) * g_col * ga, fA + (1.0 - fA) * ga);
   }
-  return vec4<f32>(mix(bg, integrated.rgb, integrated.a), 1.0);
+  return integrated;   // premultiplied (rgb, a); resolve composites over the background
 }
 
 // PICK: trace the cursor ray (pick_cursor NDC) through the SAME field compositing and return the
@@ -471,10 +551,11 @@ ${pickDispatch}
   }
 
   renderToView(view: GPUTextureView, width: number, height: number) {
+    this.ensureTrace(width, height);
     this.flush();
+    this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));   // bg for the resolve composite
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
-    pass.setPipeline(this.pipeline); pass.setBindGroup(0, this.bind); pass.draw(3); pass.end();
+    this.encodeFrame(enc, view);
     this.dev.queue.submit([enc.finish()]);
   }
 
@@ -485,7 +566,9 @@ ${pickDispatch}
   async timePass(width: number, height: number, iters = 40): Promise<number> {
     if (!this.canTime) return NaN;
     this.flush();
-    const target = this.dev.createTexture({ size: [width, height], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    // Time only the PRODUCER (ray-march) pass — the expensive part and the budget primitive; the
+    // resolve pass is trivial. Target matches the trace pipeline's rgba32float output.
+    const target = this.dev.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT });
     const view = target.createView();
     const qs = this.dev.createQuerySet({ type: "timestamp", count: 2 });
     const resolve = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
@@ -514,11 +597,12 @@ ${pickDispatch}
   }
 
   async renderToRGBA(width: number, height: number): Promise<Uint8Array> {
+    this.ensureTrace(width, height);
     this.flush();
+    this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
     const target = this.dev.createTexture({ size: [width, height], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
-    pass.setPipeline(this.pipeline); pass.setBindGroup(0, this.bind); pass.draw(3); pass.end();
+    this.encodeFrame(enc, target.createView());
     const bpr = Math.ceil((width * 4) / 256) * 256;
     const buf = this.dev.createBuffer({ size: bpr * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     enc.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: height }, [width, height]);
