@@ -1,7 +1,11 @@
-# mrson + LiveScene — a schema'd, Slicer-independent scene format with incremental updates
+# mrson + LiveScene — a schema'd, platform-neutral scene format with incremental updates
 
 Status: **architecture planning (2026-07-28).** Not built. Formalizes and extends what already exists —
-does not replace it.
+does not replace it. **Decision (2026-07-28, resolves §7.4):** mrson is a **platform-neutral
+medical-reality model in its own right** that *draws on decades of MRML* but **strips the 3D-Slicer-
+specific cruft** — not "MRML-as-JSON." It targets the use cases that previously relied on in-memory
+Slicer/VTK C++ semantics or OpenIGTLink abstractions, and it carries DICOM forward **losslessly** while
+treating DICOM as an **import/export/archival** boundary, never a runtime constraint (see §1a).
 
 > **Goal (verbatim intent).** Standardize the JSON scene representation. Keep **LiveScene** as the
 > SlicerLive protocol brand, and introduce **mrson** — *Medical Reality Scripted Object Notation* — a
@@ -59,6 +63,74 @@ The **"scripted"** in the name is load-bearing: mrson is not only a static docum
 updates) — the two faces of the CQRS/event-sourcing fork the corpus flagged ([`MRML-COUCH-DESIGN.md`](MRML-COUCH-DESIGN.md)
 §6b/§10.3). See §3.
 
+## 1a. Design commitment — a neutral medical-reality model (not MRML-as-JSON)
+
+mrson takes the lead as its own standard. It keeps what decades of MRML got *right* (a
+reference-linked graph of typed objects, RAS world space, separation of data from display, a live
+scene others observe) and drops what is Slicer/VTK-implementation cruft (`vtkMRML…` class names as the
+type; the display-node explosion; layout/singleton conventions; storage-node bookkeeping; node-ID
+formats). The test for every field: *is this a fact about the medical reality, or an artifact of one
+program's C++ object graph?* Only the former survives.
+
+**Neutral typing.** An object's `type` is a **neutral noun**, not a class name:
+
+| mrson `type` | subsumes (MRML / OpenIGTLink / DICOM) |
+|---|---|
+| `image` | Scalar/Vector/DiffusionVolume · IGTL `IMAGE`/`NDARRAY`/`IMGMETA` · DICOM image/multiframe/enhanced |
+| `transform` | Linear/BSpline/Grid/Thin-plate transforms · IGTL `TRANSFORM`/`POSITION`/`QTDATA` · DICOM Spatial Registration / Frame-of-Reference |
+| `mesh` | Model · IGTL `POLYDATA` · DICOM Surface / encapsulated geometry |
+| `segmentation` | Segmentation (labelmap + closed surfaces + terminology) · DICOM SEG / RTSTRUCT |
+| `markup` (`kind`: point\|line\|curve\|plane\|roi\|angle) | Markups · IGTL `POINT` · DICOM presentation-state annotations / SR-linked measurements |
+| `field` (transfer function / colormap / VOI) | VolumeProperty + Color nodes + display · DICOM VOI-LUT / Presentation State / Palette |
+| `camera`·`view`·`slice`·`layout` | Camera/View/Slice/Layout nodes · DICOM Hanging Protocol (loosely) |
+| `stream` | *(new — the realtime face)* IGTL `TDATA`/`TRACKINGDATA`/`SENSOR`/live `IMAGE` |
+| `text`·`status`·`command` | Text/Table nodes · IGTL `STRING`/`STATUS`/`COMMAND` |
+| `subject`·`study`·`series` | Subject-hierarchy folders · DICOM Patient/Study/Series |
+
+**Neutral envelope** (extends §2's record): `{ id, type, name?, frame?, refs?, attrs, blobs?, dicom?, source? }`.
+- `type` is neutral; `attrs` is schema'd per type (not per vtk class).
+- `frame` names the **frame of reference** the object lives in; mrson tracks frames + the `transform`s
+  between them explicitly (a DICOM Frame-of-Reference UID becomes a named frame). World is **RAS**.
+- `dicom?` / `source?` — lossless carry-forward + provenance (below). Runtime never reads them.
+
+**Subsuming in-memory Slicer/VTK C++ semantics.** What the C++ object graph gave you — a live scene of
+reference-linked nodes, displayable managers reacting to node changes, a modified-event bus, transform
+hierarchies composed to world — mrson provides *as data + protocol*: the node graph is the mrson
+document; the modified-event bus is the **op stream** (§3); the displayable-manager reaction is a
+`place` applying ops (`onNodeUpdate`/`onNodeRemove`); transform composition is `frame`→`frame`
+`transform`s resolved to world. So a process that used to embed Slicer to hold a scene can instead hold
+an mrson scene (in memory, or in the shared-memory arena, §5) — no C++, no VTK, no Qt.
+
+**Subsuming OpenIGTLink.** IGTLink is a realtime *message* protocol (a `TRANSFORM` at 60 Hz, an
+`IMAGE`, `TDATA`). mrson's `stream` objects + the op channel (patch ops at rate, Lamport-versioned,
+drop-to-latest — §3) **are** that realtime channel, but stateful and schema'd rather than a bare
+message. Mapping: IGTL `TRANSFORM`→`transform` patch op; `TDATA`/`QTDATA`→a `stream` of transform
+patches; live `IMAGE`→`image` sample op (new hash per frame); `POINT`→`markup`; `POLYDATA`→`mesh`;
+`STRING`/`STATUS`→`text`/`status`; `COMMAND`→`cmd` op; `CAPABILITY`→the participant contract's
+capability set. **LiveScene-over-WS with mrson ops is the successor transport;** an IGTL bridge stays as
+an interop/import path (the `source:"igtl"` boundary), the same status DICOM gets.
+
+**DICOM stance — a boundary, not a runtime.**
+- **Lossless carry-forward.** On import, an object keeps a `dicom` bag of its source attributes
+  (`{ sopClassUID, frameOfReferenceUID, uids:{patient,study,series,instance}, tags:{…} }`) — enough to
+  **round-trip back to DICOM byte-for-byte** where required (archival, clinical hand-off). Runtime uses
+  mrson's own clean fields; the bag is inert metadata.
+- **Use DICOM conventions where they're good and not limiting.** Coded terminology (segment names,
+  anatomy, units) uses DICOM/SNOMED code tuples `{scheme, value, meaning}`; the Patient/Study/Series
+  hierarchy maps to `subject`/`study`/`series` grouping objects; Frame-of-Reference UIDs seed mrson
+  `frame`s so spatial relationships survive.
+- **Reject DICOM where it limits research/expressiveness/performance.** Runtime space is **RAS**, not
+  DICOM **LPS** (the LPS↔RAS map lives only at the import/export boundary, consistent with the
+  non-negotiable coordinate discipline — no flips at runtime); bulk pixels are **content-addressed
+  chunked arrays** (zarr/hash, streamable, dedup'd, GPU-ready), not DICOM transfer syntaxes/tag soup;
+  the object model is open (arbitrary `attrs`, new `type`s, a `stream` concept DICOM has no equivalent
+  for), not the fixed IOD lattice. DICOM is how data *arrives and is archived*, never how it *runs*.
+
+**Provenance is first-class.** `source: { from: "dicom"|"mrml"|"igtl"|"native", … }` records where an
+object entered mrson, so any boundary (DICOM export, IGTL bridge, Slicer round-trip) can reconstruct
+faithfully and so research edits are traceable. This is what lets mrson be *lossless across* formats
+without being *constrained by* any of them.
+
 ## 2. The mrson document (materialized state)
 
 A JSON-Schema'd formalization of the current format, reconciling its three known inconsistencies.
@@ -67,9 +139,13 @@ A JSON-Schema'd formalization of the current format, reconciling its three known
 (`blobBase` resolves relative to the document, not the page). A bare `{<id>:Node}` map stays accepted
 for back-compat.
 
-**Node record.** `{ id, class, name?, refs?, attrs, blobs? }`
-- `class` — the MRML class name verbatim (`vtkMRMLScalarVolumeNode`, …). It is the schema discriminator.
-- `refs` — the graph edges, **always arrays of node-id strings keyed by MRML reference role**
+**Node record.** `{ id, type, name?, frame?, refs?, attrs, blobs?, dicom?, source? }` (the §1a neutral
+envelope).
+- `type` — the **neutral** discriminator (`image`, `transform`, `mesh`, … — §1a), not a `vtkMRML…`
+  class. The original MRML class (when the object came from Slicer) is carried in `source`, not used at
+  runtime. *(Transitional: the shipped scenes still key on `class`; the P1 schema accepts both and the
+  P2 exporter emits neutral `type` + `source.mrmlClass`.)*
+- `refs` — the graph edges, **always arrays of node-id strings keyed by a neutral role**
   (`"display":[…]`, `"volumeProperty":[…]`, `"transform":[…]`, `"referenceImageGeometryRef":[…]`), even
   for a single target. Reconstructed generically from MRML's own reference roles → faithful even where
   per-class `attrs` are shallow.
@@ -126,7 +202,8 @@ live sync use one delta model.
 
 ## 4. Schema coverage — the node set (union of serializer + shipped scenes + displayer survey)
 
-One schema file per class (or one file, `oneOf` on `class`). Minimal covering set:
+One schema per **neutral `type`** (`oneOf` on `type`, §1a); the class names below are the MRML sources
+each neutral type absorbs. Minimal covering set:
 
 - **Data:** `ScalarVolume` (`zarr|blob` + `dims` + `comps` + `ijkToRAS`), `Segmentation`
   (`segments[{id,name,color,mesh{points,polys,normals}}]` + `labelmap` blob + geometry refs), `Model`
@@ -160,9 +237,9 @@ One schema file per class (or one file, `oneOf` on `class`). Minimal covering se
   shipped scenes. Validate every existing `live/scenes/*.json` and `legacy/scenes/*.json` against it;
   fix the `blobs` list→map + zarr/hash inconsistencies in the format, add a `mrson` version field.
   (No behavior change — the loader already parses this; the schema just pins it.)
-- **P2 — Widen + version the Slicer exporter.** `serialize.py` covers the full node set again
-  (Model/Segmentation/View/SliceComposite/Transform/ColorTable) and stamps `mrson` + Lamport `v` per
-  node. Validate its output against P1's schema in CI.
+- **P2 — Widen + neutralize + version the Slicer exporter.** `serialize.py` covers the full node set
+  again (Model/Segmentation/View/SliceComposite/Transform/ColorTable), emits **neutral `type`** +
+  `source.mrmlClass` (§1a), and stamps `mrson` + Lamport `v` per node. Validate against P1's schema in CI.
 - **P3 — mrson ops.** Define the op record (§3) + a tiny apply/patch library shared by TS + Python;
   re-express a `.story.json` page as an op-set; make the WS hot-channel carry mrson ops (it already
   carries deltas — formalize the payload). Lease + drop-to-latest + echo-suppression reused.
@@ -170,19 +247,31 @@ One schema file per class (or one file, `oneOf` on `class`). Minimal covering se
   with two local processes (renderer + a module) sharing one mrson scene without copying the volume.
 - **P5 — content-address volume chunks** (the one data-model change), enabling dedup/delta/SHM for
   volumes uniformly.
+- **P6 — boundary adapters.** DICOM import (→ `image`/`segmentation`/`markup` + lossless `dicom` bag +
+  `frame` from Frame-of-Reference) and export (mrson → DICOM round-trip); an OpenIGTLink bridge
+  (`stream`/`transform`/`image` ↔ IGTL messages). These prove "boundary, not runtime" (§1a) and let
+  mrson interoperate without adopting either format's constraints.
 
-## 7. Open decisions (yours to call)
+## 7. Decisions
 
-1. **Name push:** ship `mrson` as a public, versioned, Slicer-independent spec (own repo/schema URL), or
-   keep it internal to SlicerLive? (Recommendation: public spec, since non-Slicer adoption is the point.)
-2. **Op log as source of truth (CQRS)** per-closure opt-in vs never — affects undo/redo + replay
-   (§3). Recommendation: opt-in, hub keeps it.
-3. **Content-addressing volumes now (P5) or later** — it's the one real change to the on-disk data model.
-4. **mrson identity vs MRML:** stay a faithful 1:1 MRML mirror (class names verbatim), or allow
-   Slicer-independent abstractions (e.g. a neutral `Volume`/`TransferFunction` vocabulary) with an
-   MRML↔mrson mapping table? (Faithful-mirror is simpler and reversible; a neutral vocabulary is more
-   "not-Slicer-specific" but needs a bidirectional mapping.) This is the deepest fork — it decides
-   whether mrson is "MRML-as-JSON" or "a new medical-scene standard that MRML happens to map onto."
+**Resolved (2026-07-28):**
+- **Neutral standard, not MRML-mirror** (was the deepest fork) — mrson is its own platform-neutral model
+  (§1a); MRML / OpenIGTLink / DICOM are *sources it maps to/from*, not its identity.
+- **Public spec** — mrson ships as a public, versioned, Slicer-independent specification (own schema
+  URL / repo). Slicer (via LiveStory) becomes *one producer* of mrson, not its definition.
+- **DICOM = boundary, RAS runtime** — lossless carry-forward + DICOM conventions where non-limiting;
+  DICOM never constrains runtime space / performance / expressiveness (§1a).
+
+**Still open (yours to call):**
+1. **Op log as source of truth (CQRS)** per-closure opt-in vs never — affects undo/redo + replay (§3).
+   Recommendation: opt-in, hub keeps it.
+2. **Content-addressing volumes now (P5) or later** — the one real change to the on-disk data model.
+3. **Neutral vocabulary depth (per type):** how far to abstract from MRML naming — e.g. is a transfer
+   function a `field` appearance, a first-class `transferFunction`, or both? A per-type pass naming
+   things by the *medical reality*, keeping the MRML/DICOM/IGTL mapping tables lossless. (Now a
+   *vocabulary* task, no longer an *identity* fork.)
+4. **Governance:** versioning + extension policy (reserved vs vendor `x-` fields) so others can adopt —
+   sketch with P1.
 
 ## 8. References
 - `docs/ARCHITECTURE.md` §2 (LiveScene two-channel protocol), §5 (authority/lease/Lamport), §6
