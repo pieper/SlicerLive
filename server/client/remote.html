@@ -19,6 +19,8 @@
   #gpu { width: min(80vmin, 720px); height: min(80vmin, 720px); border-radius: 8px; background: #000; touch-action: none; cursor: grab; }
   #gpu:active { cursor: grabbing; }
   #status { position: fixed; bottom: 6px; left: 10px; font-size: 11px; color: #9fb3d0; font-family: ui-monospace, monospace; pointer-events: none; text-shadow: 0 0 3px #000; }
+  #mode { margin-top: 8px; font: 600 12px -apple-system, system-ui, sans-serif; color: #04121c; cursor: pointer;
+    background: linear-gradient(180deg, #9fe9ff, #54c6f0); border: 0; border-radius: 7px; padding: 6px 13px; }
 </style>
 </head>
 <body>
@@ -27,8 +29,9 @@
   <p class="sub">The <b>same</b> TS/WebGPU renderer, running headless in a Deno process, streaming traced
     samples over a WebSocket. This page just sends its camera and <b>reconstructs</b> the samples
     (Catmull-Rom upsample + background composite) — the identical Reconstructor the local demos use.
-    Drag to orbit. Start the server with
-    <code>deno run --unstable-webgpu --allow-net --allow-read --allow-env server/live-renderer.ts</code>.</p>
+    Drag to orbit. <b>Toggle</b> the same scene between your local GPU and the remote renderer. Start the
+    server with <code>deno run --unstable-webgpu --allow-net --allow-read --allow-env server/live-renderer.ts</code>.</p>
+  <button id="mode">Rendering: Remote (Deno)</button>
 </header>
 <main><canvas id="gpu"></canvas></main>
 <div id="status">connecting…</div>

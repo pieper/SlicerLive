@@ -173,6 +173,37 @@ and feeds the same budget.
 - **Deno + Vulkan on a headless GPU box / Modal** — reuse `vulkan_probe.py`'s ICD recipe; Deno
   wgpu offscreen has no surface (fine — we readback).
 
+## 9a. Status (2026-07-28) — M1–M4 done + deployed, M5 started
+
+- **M1–M2 (local):** Producer/Reconstructor split (byte-identical), temporal AA (camera-jitter),
+  GPU-ms BudgetController + Catmull-Rom `renderUpscaled`, GPU-paced coalesced `mountAdaptive3d`
+  wired into every gallery demo. Deployed. (Fixes along the way: separate low-res trace target,
+  view-sized handle focal, accumulation resets on camera-change/rebuild, optimistic menu toggles.)
+- **M3 (remote):** `server/live-renderer.ts` — the SAME TS renderer headless under Deno streaming
+  traced rgba8 SAMPLES over WS; `render/reconstructor.ts` reconstructs them with the same
+  Catmull-Rom + bg composite. Verified round-trip. Localhost only (kept out of the public gallery).
+- **M4:** server renders a REAL volume (CTACardio via `loadSceneVolumeField`); **transport-aware
+  budget** (ack-based credit, one frame in flight, budget measures end-to-end render+transport);
+  **per-view RenderMode toggle** (Local ↔ Remote, same scene, shared camera).
+- **M5 rung 1 (done):** gzip sample compression (`CompressionStream`, ~3× on the CT VR; header flag,
+  `COMPRESS=1` default). Budget stays bandwidth-aware because the ack timing includes the bytes cost.
+
+## 9b. M5 remaining rungs (the "optimize later" work)
+
+- **Sample-stream compression beyond gzip:** delta-encode across the stride lattice / across time,
+  then entropy-code; or a small vision-net/autoencoder tuned to the sparse premultiplied-sample
+  pattern. gzip is the placeholder.
+- **H.264 fallback transport (dense frames):** spawn an ffmpeg sidecar on the server (`Deno.Command`),
+  pipe rgba frames in, emit Annex-B H.264 with SPS/PPS per IDR; client decodes via WebCodecs
+  `VideoDecoder` (`avc1.*`). The BudgetController selects transport mode (samples vs H.264) the way the
+  Python spike chose video-vs-image — samples for sparse/progressive, H.264 when the frame is dense and
+  bandwidth-bound. (Deno has no PyNvVideoCodec/WebCodecs-encode, hence the sidecar.)
+- **Temporal reprojection:** while waiting for the next server frame, reproject the last one by the
+  camera delta in the Reconstructor (the next superres rung after Catmull-Rom).
+- **Per-session isolation + deploy:** one renderer/scene per WS connection (the server currently shares
+  one); then a GPU box / vast.ai / a Modal port (reuse `tools/modal_spike/vulkan_probe.py`'s ICD recipe
+  for a Deno+Vulkan image). Public `RenderMode=Remote` in the gallery once a hosted server exists.
+
 ## 10. References
 
 - `render/scene-renderer.ts` — `fs_main`/`fs_pick`/`renderToView`/`renderToRGBA`/`timePass`/
