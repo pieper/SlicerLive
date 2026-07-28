@@ -41,6 +41,18 @@ export class SceneRenderer {
   private traceView?: GPUTextureView;
   private traceW = 0;
   private traceH = 0;
+  // TEMPORAL ACCUMULATION (M2a, docs/UNIFIED-RENDERING-PLAN.md §3). When the view is still, each
+  // frame jitters the CAMERA sub-pixel (Halton, via a clip-space translation of invVP — the shader
+  // is untouched, so a non-jittered frame is byte-identical) and the Reconstructor folds it into a
+  // running mean, converging to a supersampled, time-averaged-AA image. Ping-pong accum + running n.
+  private baseInvVP: Mat4 = new Float32Array(16) as unknown as Mat4;   // last setCamera invVP (unjittered)
+  private accumPipeline!: GPURenderPipeline;   // MRT: trace + prev-accum -> new-accum + presented view
+  private accumBind: (GPUBindGroup | undefined)[] = [undefined, undefined];
+  private accumUniformBuf: GPUBuffer;   // (bg.rgb, blend)
+  private accumTex: (GPUTexture | undefined)[] = [undefined, undefined];
+  private accumView: (GPUTextureView | undefined)[] = [undefined, undefined];
+  private accumPing = 0;
+  private accumN = 0;
 
   /** Emit a default AABB-distance skip for fields that don't supply their own bound.
    *
@@ -80,6 +92,51 @@ export class SceneRenderer {
       fragment: { module: rmod, entryPoint: "fs_resolve", targets: [{ format: this.format }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
     });
+    // Accumulating reconstructor (MRT): writes the new running-mean sample AND the presented view.
+    this.accumUniformBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const amod = this.dev.createShaderModule({ code: this.accumWgsl() });
+    this.accumPipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: amod, entryPoint: "vs_resolve" },
+      fragment: { module: amod, entryPoint: "fs_accum", targets: [{ format: "rgba32float" }, { format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+    });
+  }
+
+  /** Accumulating RECONSTRUCTOR: fold this frame's traced sample into the running mean (blend =
+   *  1/n; blend=1 on reset → mean=this frame) and present it over the background. MRT so one pass
+   *  updates the accumulation texture AND the swap-chain view. Frame N jitters the ray sub-pixel,
+   *  so the mean over N frames is a supersampled, time-averaged-AA image (still camera). */
+  private accumWgsl(): string {
+    return /* wgsl */ `
+@group(0) @binding(0) var t_trace : texture_2d<f32>;
+@group(0) @binding(1) var t_accum : texture_2d<f32>;
+@group(0) @binding(2) var<uniform> u_ra : vec4<f32>;   // (bg.r, bg.g, bg.b, blend)
+fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
+  let lo = c / 12.92;
+  let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+  return select(lo, hi, c > vec3<f32>(0.04045));
+}
+struct RV { @builtin(position) position : vec4<f32> };
+@vertex
+fn vs_resolve(@builtin(vertex_index) vi : u32) -> RV {
+  let x = select(-1.0, 3.0, vi == 1u);
+  let y = select(-1.0, 3.0, vi == 2u);
+  var o : RV; o.position = vec4<f32>(x, y, 0.0, 1.0); return o;
+}
+struct FO { @location(0) accum : vec4<f32>, @location(1) present : vec4<f32> };
+@fragment
+fn fs_accum(v : RV) -> FO {
+  let p = vec2<i32>(v.position.xy);
+  let cur = textureLoad(t_trace, p, 0);
+  let prev = textureLoad(t_accum, p, 0);
+  let acc = mix(prev, cur, u_ra.w);        // blend=1 on reset -> acc = cur
+  let bg = srgb2physical(u_ra.rgb);
+  var o : FO;
+  o.accum = acc;
+  o.present = vec4<f32>(mix(bg, acc.rgb, acc.a), 1.0);
+  return o;
+}`;
   }
 
   /** RECONSTRUCTOR (M1: identity resolve). Composites the traced premultiplied sample over the
@@ -132,6 +189,69 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     tp.setPipeline(this.pipeline); tp.setBindGroup(0, this.bind); tp.draw(3); tp.end();
     const rp = enc.beginRenderPass({ colorAttachments: [{ view: outView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
     rp.setPipeline(this.resolvePipeline); rp.setBindGroup(0, this.resolveBind!); rp.draw(3); rp.end();
+  }
+
+  /** (Re)allocate the ping-pong accumulation targets + their bind groups on a size change. */
+  private ensureAccum(width: number, height: number) {
+    if (this.accumTex[0] && this.traceW === width && this.traceH === height) return;
+    for (let k = 0; k < 2; k++) {
+      this.accumTex[k]?.destroy();
+      this.accumTex[k] = this.dev.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+      this.accumView[k] = this.accumTex[k]!.createView();
+    }
+    // accumBind[k] reads accum[k] as the previous mean (and the current trace); output goes to accum[1-k].
+    for (let k = 0; k < 2; k++) {
+      this.accumBind[k] = this.dev.createBindGroup({
+        layout: this.accumPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: this.traceView! },
+          { binding: 1, resource: this.accumView[k]! },
+          { binding: 2, resource: { buffer: this.accumUniformBuf } },
+        ],
+      });
+    }
+    this.accumN = 0; this.accumPing = 0;
+  }
+
+  /** Reset temporal accumulation — call when the view changes (camera move, scene edit, resize). */
+  resetAccumulation() { this.accumN = 0; }
+  /** Frames accumulated since the last reset (0 before the first accumulated frame). */
+  accumCount(): number { return this.accumN; }
+
+  /** Accumulating render: trace this frame (sub-pixel jittered) and fold it into the running mean,
+   *  presenting the mean over the background. `reset` (or a view change) restarts the mean at this
+   *  frame (n=1, no jitter — byte-identical to renderToView). Call repeatedly while the view is
+   *  still to converge to a supersampled, time-averaged-AA image. */
+  renderAccum(view: GPUTextureView, width: number, height: number, reset: boolean) {
+    this.ensureTrace(width, height);
+    this.ensureAccum(width, height);
+    if (reset) this.accumN = 0;
+    this.accumN += 1;
+    const n = this.accumN;
+    // Sub-pixel camera jitter (Halton), applied as a clip-space translation of the stored invVP —
+    // the SHADER is untouched, so frame 1 (no jitter) is byte-identical to renderToView. Δndc from a
+    // ±0.5px offset: (2·jx/w, −2·jy/h) (y flips in ndc). world = invVP·(ndc+Δ) = (invVP·T)·ndc.
+    if (n > 1) {
+      const jx = SceneRenderer.halton(n, 2) - 0.5, jy = SceneRenderer.halton(n, 3) - 0.5;
+      const T = new Float32Array(16); T[0] = T[5] = T[10] = T[15] = 1;
+      T[12] = (2 * jx) / width; T[13] = (-2 * jy) / height;
+      this.dev.queue.writeBuffer(this.camBuf, 0, multiply(this.baseInvVP, T as unknown as Mat4) as unknown as Float32Array);
+    } else {
+      this.dev.queue.writeBuffer(this.camBuf, 0, this.baseInvVP as unknown as Float32Array);   // exact base
+    }
+    this.flush();
+    this.dev.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array([this.mat[12], this.mat[13], this.mat[14], 1 / n]));
+    const prev = this.accumPing, next = 1 - this.accumPing;
+    const enc = this.dev.createCommandEncoder();
+    const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.traceView!, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    tp.setPipeline(this.pipeline); tp.setBindGroup(0, this.bind); tp.draw(3); tp.end();
+    const ap = enc.beginRenderPass({ colorAttachments: [
+      { view: this.accumView[next]!, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } },
+      { view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } },
+    ] });
+    ap.setPipeline(this.accumPipeline); ap.setBindGroup(0, this.accumBind[prev]!); ap.draw(3); ap.end();
+    this.dev.queue.submit([enc.finish()]);
+    this.accumPing = next;
   }
 
   /** (Re)build the pipeline for a set of fields. */
@@ -358,7 +478,7 @@ fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
 ${skipInit}
   loop {
     if (t >= t_far || safety >= 5000${hasGhost ? "" : " || integrated.a >= 0.99"}) { break; }
-    let js = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5; // per-(pixel,sample) jitter
+    let js = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5; // per-(pixel,sample) jitter — frame-invariant; temporal AA rides on the sub-pixel NDC jitter (frame.xy), which is exact identity at 0
     let wp = ro + rd * (t + js * step);
     var sum = vec4<f32>(0.0);
     var all_defer = true;        // every field guarantees emptiness here -> we may leap
@@ -437,6 +557,12 @@ ${pickDispatch}
 
   setBackground(r: number, g: number, b: number) { this.mat[12] = r; this.mat[13] = g; this.mat[14] = b; this.mat[15] = 1; }
   setSampleStep(step: number) { this.mat[8] = step; }
+  /** Van der Corput / Halton radical inverse in `base`. */
+  private static halton(i: number, base: number): number {
+    let f = 1, r = 0;
+    while (i > 0) { f /= base; r += f * (i % base); i = Math.floor(i / base); }
+    return r;
+  }
 
   /** Set up to 8 clip planes (nx,ny,nz,offset), inward-normal, keep-side `dot(wp,n)+offset>=0`.
    *  Written into the uniform tail — a Tier-A update the next flush() uploads; no rebuild. */
@@ -515,6 +641,7 @@ ${pickDispatch}
     const view = lookAt(eye, center, up);
     const proj = perspectiveZO((fovyDeg * Math.PI) / 180, width / height, 1, 100000);
     const invVP: Mat4 = invert(multiply(proj, view));
+    this.baseInvVP = invVP;   // stored un-jittered, for the temporal-AA camera jitter in renderAccum
     const cam = new Float32Array(24);
     cam.set(invVP, 0);
     // size = (w, h, focal_px, _); focal_px = pixels per world unit at unit depth, so a sphere

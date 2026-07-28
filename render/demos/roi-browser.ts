@@ -8,6 +8,7 @@ import { SceneRenderer } from "../scene-renderer.ts";
 import { buildRoiScene, type Box, type HandleMeta } from "./roi-scene.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachWidgetControls, type Handle } from "./widget-control.ts";
+import { mountAccumLoop } from "./accum-loop.ts";
 import { installIntrospection } from "../introspect.ts";
 import type { Vec3 } from "../mat4.ts";
 
@@ -38,13 +39,17 @@ async function main() {
 
   const camera = framedCamera(roi.sv.center as Vec3, roi.sv.radius, 2.8);
   let msg = "drag a handle to crop · drag empty space to rotate";
-  const draw = () => {
+  // Temporal AA: render one jittered sample per frame and converge while idle (accum-loop). `kick`
+  // (any interaction) shows a fresh frame immediately, then sharpens over ~half a second at rest.
+  const drawOnce = (reset: boolean) => {
     const w = canvas.width, h = canvas.height;
     scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
     const t0 = performance.now();
-    scene.renderToView(ctx.getCurrentTexture().createView({ format: srgb }), w, h);
-    status(`${roi.sv.name} · ROI crop · ${(performance.now() - t0).toFixed(0)} ms/frame · ${msg}`);
+    scene.renderAccum(ctx.getCurrentTexture().createView({ format: srgb }), w, h, reset);
+    status(`${roi.sv.name} · ROI crop · ${(performance.now() - t0).toFixed(0)} ms · n=${scene.accumCount()} · ${msg}`);
   };
+  const loop = mountAccumLoop({ drawOnce, count: () => scene.accumCount(), target: 32 });
+  const draw = () => loop.kick();
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
     const size = Math.min(720, Math.floor(canvas.clientWidth * dpr));
@@ -88,6 +93,8 @@ async function main() {
         box: roi.snapshot(),
       };
     },
+    accumCount: () => scene.accumCount(),
+    converge: (n: number) => { for (let i = 0; i < n; i++) drawOnce(false); return scene.accumCount(); },
   };
   resize();
 }
