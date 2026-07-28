@@ -8,7 +8,8 @@ import { SceneRenderer } from "../scene-renderer.ts";
 import { buildRoiScene, type Box, type HandleMeta } from "./roi-scene.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachWidgetControls, type Handle } from "./widget-control.ts";
-import { mountAccumLoop } from "./accum-loop.ts";
+import { mountAdaptiveLoop } from "./accum-loop.ts";
+import { BudgetController } from "../budget-controller.ts";
 import { installIntrospection } from "../introspect.ts";
 import type { Vec3 } from "../mat4.ts";
 
@@ -39,16 +40,32 @@ async function main() {
 
   const camera = framedCamera(roi.sv.center as Vec3, roi.sv.radius, 2.8);
   let msg = "drag a handle to crop · drag empty space to rotate";
-  // Temporal AA: render one jittered sample per frame and converge while idle (accum-loop). `kick`
-  // (any interaction) shows a fresh frame immediately, then sharpens over ~half a second at rest.
-  const drawOnce = (reset: boolean) => {
-    const w = canvas.width, h = canvas.height;
-    scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
+  // Adaptive rendering (budget × temporal AA): while interacting, render budget-scaled low-res
+  // frames (Catmull-Rom upsampled) sized to keep the GPU near the target ms; when the view settles,
+  // render native and converge to a supersampled, time-averaged-AA image. `kick` = one moving frame
+  // + arm the settle; the human always sees display-rate, then it sharpens at rest.
+  const budget = new BudgetController({ targetMs: 16 });
+  const view = () => ctx.getCurrentTexture().createView({ format: srgb });
+  const setCam = (w: number, h: number) => scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
+  const renderMoving = () => {
+    const vw = canvas.width, vh = canvas.height;
+    const s = budget.scale(vw, vh);
     const t0 = performance.now();
-    scene.renderAccum(ctx.getCurrentTexture().createView({ format: srgb }), w, h, reset);
-    status(`${roi.sv.name} · ROI crop · ${(performance.now() - t0).toFixed(0)} ms · n=${scene.accumCount()} · ${msg}`);
+    if (s > 0.98) { setCam(vw, vh); scene.renderToView(view(), vw, vh); }   // full-res is affordable
+    else {
+      const rw = Math.max(16, Math.round(vw * s)), rh = Math.max(16, Math.round(vh * s));
+      setCam(rw, rh); scene.renderUpscaled(view(), rw, rh, vw, vh);
+    }
+    gpu.device.queue.onSubmittedWorkDone().then(() => budget.update(performance.now() - t0));
+    status(`${roi.sv.name} · ROI crop · ${(s * 100) | 0}% res · ${msg}`);
   };
-  const loop = mountAccumLoop({ drawOnce, count: () => scene.accumCount(), target: 32 });
+  const renderSettled = (reset: boolean) => {
+    const vw = canvas.width, vh = canvas.height;
+    setCam(vw, vh);
+    scene.renderAccum(view(), vw, vh, reset);
+    status(`${roi.sv.name} · ROI crop · converging n=${scene.accumCount()} · ${msg}`);
+  };
+  const loop = mountAdaptiveLoop({ renderMoving, renderSettled, count: () => scene.accumCount(), target: 32 });
   const draw = () => loop.kick();
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -94,7 +111,11 @@ async function main() {
       };
     },
     accumCount: () => scene.accumCount(),
-    converge: (n: number) => { for (let i = 0; i < n; i++) drawOnce(false); return scene.accumCount(); },
+    scale: () => budget.scale(canvas.width, canvas.height),
+    budgetPx: () => budget.budgetPx,
+    setBudgetPx: (px: number) => { budget.budgetPx = px; },
+    renderMovingN: (n: number) => { for (let i = 0; i < n; i++) renderMoving(); },
+    converge: (n: number) => { renderSettled(true); for (let i = 1; i < n; i++) renderSettled(false); return scene.accumCount(); },
   };
   resize();
 }
