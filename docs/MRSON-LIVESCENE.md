@@ -5,7 +5,8 @@ does not replace it. **Decision (2026-07-28, resolves §7.4):** mrson is a **pla
 medical-reality model in its own right** that *draws on decades of MRML* but **strips the 3D-Slicer-
 specific cruft** — not "MRML-as-JSON." It targets the use cases that previously relied on in-memory
 Slicer/VTK C++ semantics or OpenIGTLink abstractions, and it carries DICOM forward **losslessly** while
-treating DICOM as an **import/export/archival** boundary, never a runtime constraint (see §1a).
+treating DICOM as an **import/export/archival** boundary — the **MRCOM** binding (*Medical Reality
+Communications*, §1b) that rides VNA/DIMSE/dicomWeb — never a runtime constraint (see §1a).
 
 > **Goal (verbatim intent).** Standardize the JSON scene representation. Keep **LiveScene** as the
 > SlicerLive protocol brand, and introduce **mrson** — *Medical Reality Scripted Object Notation* — a
@@ -131,6 +132,49 @@ object entered mrson, so any boundary (DICOM export, IGTL bridge, Slicer round-t
 faithfully and so research edits are traceable. This is what lets mrson be *lossless across* formats
 without being *constrained by* any of them.
 
+## 1b. MRCOM — the DICOM binding (Medical Reality Communications)
+
+The DICOM boundary of §1a gets a name and a design: **MRCOM** = *Medical Reality Communications* — the
+DICOM-facing binding of mrson, deliberately parallel to DICOM (*Digital Imaging and Communications in
+Medicine*). Where mrson/LiveScene is the research/runtime world, **MRCOM is how Medical Reality rides the
+entire installed base of medical-imaging infrastructure** — no new archives, networks, or web services
+to deploy. It has two parts:
+
+**(1) The directly-mappable subset (`profile: "dicom"`).** The subset of mrson `type`s + `attrs` with
+exact DICOM IOD equivalents, which round-trip losslessly (with the §1a `dicom` bag):
+
+| mrson | DICOM IOD |
+|---|---|
+| `image` | CT/MR/PET/US, Enhanced/Multiframe, Secondary Capture |
+| `segmentation` | Segmentation (SEG), RT Structure Set |
+| `mesh` | Surface Segmentation / Encapsulated 3D (STL/OBJ) |
+| `markup` (measurements/annotations) | SR (TID 1500 measurements), Presentation State (GSPS) |
+| `field` (window/level, VOI, palette) | VOI-LUT, Presentation State, Palette Color LUT |
+| `transform` | Spatial Registration / Deformable Registration |
+| `frame` | Frame-of-Reference UID |
+| `subject`/`study`/`series` | Patient / Study / Series |
+
+**(2) Coercion of the extra metadata.** mrson is more expressive than any IOD (arbitrary `attrs`, `stream`,
+neutral vocabulary, research fields). MRCOM carries the surplus in DICOM-legal containers so nothing is
+lost and plain DICOM systems still work — **graceful degradation**:
+- structured extras → a **registered MRCOM private block** (private creator + odd-group tags);
+- the **whole mrson closure** → an **encapsulated companion instance** (mrson JSON as an encapsulated
+  document, referencing the standard instances it accompanies). A DICOM-only viewer sees the mappable
+  subset; an **MRCOM-aware reader pulls the companion and reconstitutes full-fidelity mrson.**
+
+**Reusing the three DICOM transports (no new plumbing):**
+- **VNA** — MRCOM objects are just DICOM instances, so any Vendor-Neutral Archive stores/retrieves them
+  (including the encapsulated mrson companion) — long-term archival for free.
+- **DIMSE** — C-STORE / C-FIND / C-MOVE / C-GET over existing PACS networks move MRCOM objects.
+- **dicomWeb** — STOW-RS (store) / QIDO-RS (query) / WADO-RS (retrieve). This is the natural fit for the
+  web-native stack: dicomWeb is HTTP+JSON, alongside the content-addressed bucket channel; a SlicerLive
+  place can pull an existing study straight from a dicomWeb server and lift it into mrson at the edge.
+
+**Where MRCOM sits.** It is one **transport binding** of the format (§5), the DICOM-infrastructure
+binding — peer to HTTP-bucket, WS-hot-channel, SHM, and p2p. Directionally: **mrson/LiveScene for
+research + interaction + realtime; MRCOM for import, clinical hand-off, and archival.** DICOM (via
+MRCOM) is how content *enters and is stored*; it never dictates how content *runs* (§1a). MRCOM is P6.
+
 ## 2. The mrson document (materialized state)
 
 A JSON-Schema'd formalization of the current format, reconciling its three known inconsistencies.
@@ -223,13 +267,14 @@ each neutral type absorbs. Minimal covering set:
 - **Story layer** (separate `*.story.mrson`, not MRML-node-shaped): ordered `pages[]`, each a labeled
   op-set + narrative — see §3.
 
-## 5. The three roles = three bindings of one format
+## 5. The roles = transport bindings of one format
 
 | role | today | with mrson |
 |---|---|---|
 | **Slicer export (LiveStory)** | `serialize.py` re-emits the whole scene, one-shot | MRML → mrson **document** on export; MRML node observers → mrson **ops** for live push. Widen to the full node set; fix `blobs` map + content-address volume chunks. |
 | **Network sync** (Slicer↔SL, SL↔SL) | HTTP bucket (cold, ✅) + WS hot-channel (deltas, ✅) | Both carry mrson: HTTP serves the document + `blob?hash=`; WS carries mrson ops. Same authority model. SL↔SL is symmetric — both are LiveScene places mirroring the same closure. |
 | **Shared memory** (cooperating processes) | ❌ | mrson node-state in a **seqlock'd region** (read-version → read → re-read-version, retry on change); blobs in a mapped **hash arena** (write-once-by-hash → readers of `abc` never block a writer producing `def` — no locks on the big volume, ever). The WebServer owns the arena + GC + is the SHM→HTTP/WS bridge for browsers (which can't map SHM). This is the substrate for **loop impedance-matching + parallelization**: each Tier-A/B/C loop (interaction architecture §4) reads/writes the same mrson state at its own rate, coupled only through it — the same discipline `SceneRenderer.syncUniforms` already realizes locally (mrson node-state variable → GPU uniform, `ARCHITECTURE-2026-07-24.md §7`). |
+| **DICOM infrastructure — MRCOM** (§1b) | ❌ | The DICOM binding: mappable subset ↔ IODs + extra metadata coerced into a private block / encapsulated mrson companion, riding **VNA** (archive), **DIMSE** (PACS network), **dicomWeb** (STOW/QIDO/WADO). For import, clinical hand-off, archival — *not* the runtime path. |
 
 ## 6. Phasing (small, verifiable steps)
 
@@ -247,10 +292,11 @@ each neutral type absorbs. Minimal covering set:
   with two local processes (renderer + a module) sharing one mrson scene without copying the volume.
 - **P5 — content-address volume chunks** (the one data-model change), enabling dedup/delta/SHM for
   volumes uniformly.
-- **P6 — boundary adapters.** DICOM import (→ `image`/`segmentation`/`markup` + lossless `dicom` bag +
-  `frame` from Frame-of-Reference) and export (mrson → DICOM round-trip); an OpenIGTLink bridge
-  (`stream`/`transform`/`image` ↔ IGTL messages). These prove "boundary, not runtime" (§1a) and let
-  mrson interoperate without adopting either format's constraints.
+- **P6 — boundary adapters: MRCOM + IGTL.** **MRCOM** (§1b): the DICOM-mappable subset round-trip +
+  extra-metadata coercion (private block + encapsulated mrson companion), tested over dicomWeb
+  (STOW/QIDO/WADO) first — pull an existing study into mrson and store an mrson-carrying study back.
+  Plus an OpenIGTLink bridge (`stream`/`transform`/`image` ↔ IGTL). These prove "boundary, not runtime"
+  (§1a) and let mrson ride the installed base without adopting either format's constraints.
 
 ## 7. Decisions
 
