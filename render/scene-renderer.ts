@@ -46,6 +46,7 @@ export class SceneRenderer {
   // is untouched, so a non-jittered frame is byte-identical) and the Reconstructor folds it into a
   // running mean, converging to a supersampled, time-averaged-AA image. Ping-pong accum + running n.
   private baseInvVP: Mat4 = new Float32Array(16) as unknown as Mat4;   // last setCamera invVP (unjittered)
+  private focalPx = 1;                  // last setCamera focal (view→pixels); used to keep screen-space handles view-sized under low-res trace
   private accumPipeline!: GPURenderPipeline;   // MRT: trace + prev-accum -> new-accum + presented view
   private accumBind: (GPUBindGroup | undefined)[] = [undefined, undefined];
   private accumUniformBuf: GPUBuffer;   // (bg.rgb, blend)
@@ -292,7 +293,10 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
   renderUpscaled(view: GPUTextureView, renderW: number, renderH: number, viewW: number, viewH: number) {
     this.ensureLow(renderW, renderH);   // own low-res target (never touches traceTex / accum)
     this.flush();
-    this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
+    // Screen-space handles (FiducialField) size from u_cam.size.z (focal). setCamera(renderW,renderH)
+    // set it from the LOW-res height, which would make handles grow ~1/scale after upsampling. Rewrite
+    // it to the VIEW focal so they stay a constant on-screen size (rays/frustum are unchanged).
+    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([this.focalPx * (viewH / renderH)]));
     this.dev.queue.writeBuffer(this.superresBuf, 0, new Float32Array([renderW, renderH, viewW, viewH]));
     const enc = this.dev.createCommandEncoder();
     const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.lowView!, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
@@ -766,6 +770,7 @@ ${pickDispatch}
     this.baseInvVP = invVP;   // stored un-jittered, for the temporal-AA camera jitter in renderAccum
     const cam = new Float32Array(24);
     cam.set(invVP, 0);
+    this.focalPx = (height / 2) / Math.tan((fovyDeg * Math.PI) / 360);   // for the renderUpscaled screen-space fix
     // size = (w, h, focal_px, _); focal_px = pixels per world unit at unit depth, so a sphere
     // at distance d has projected radius r*focal_px/d — used for screen-constant handle sizing.
     cam[16] = width; cam[17] = height; cam[18] = (height / 2) / Math.tan((fovyDeg * Math.PI) / 360);
