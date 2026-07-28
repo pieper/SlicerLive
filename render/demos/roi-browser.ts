@@ -25,6 +25,8 @@ async function main() {
   if (!(navigator as unknown as { gpu?: unknown }).gpu) { status("WebGPU not available — try Chrome/Edge 113+ or Safari 18+.", true); return; }
   status("initializing WebGPU…");
   const gpu = await initDevice();
+  (globalThis as unknown as { __gpuErr: string[] }).__gpuErr = [];
+  gpu.device.addEventListener("uncapturederror", (e) => (globalThis as unknown as { __gpuErr: string[] }).__gpuErr.push(String((e as GPUUncapturedErrorEvent).error?.message ?? (e as GPUUncapturedErrorEvent).error)));
   const ctx = canvas.getContext("webgpu") as GPUCanvasContext;
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
