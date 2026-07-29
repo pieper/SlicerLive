@@ -19,10 +19,10 @@ interface Node {
 }
 interface SceneWrapper { blobBase?: string; nodes?: Record<string, Node> }
 
-type TF = number[][]; // color: [s,r,g,b][]; opacity: [s,a][]
+export type TF = number[][]; // color: [s,r,g,b][]; opacity: [s,a][]
 
 /** Piecewise-linear interpolation of a transfer function (sorted by first column) at scalar s. */
-function interpTF(tf: TF, s: number, comps: number): number[] {
+export function interpTF(tf: TF, s: number, comps: number): number[] {
   if (!tf.length) return new Array(comps).fill(0);
   if (s <= tf[0][0]) return tf[0].slice(1, 1 + comps);
   const last = tf[tf.length - 1];
@@ -38,7 +38,7 @@ function interpTF(tf: TF, s: number, comps: number): number[] {
 }
 
 /** Build a 256-entry rgba8 LUT sampling color+opacity TFs across [lo,hi]. */
-function lutFromTransferFunctions(colorTF: TF, opacityTF: TF, clim: [number, number]): Uint8Array {
+export function lutFromTransferFunctions(colorTF: TF, opacityTF: TF, clim: [number, number]): Uint8Array {
   const lut = new Uint8Array(256 * 4);
   for (let i = 0; i < 256; i++) {
     const s = clim[0] + (i / 255) * (clim[1] - clim[0]);
@@ -53,7 +53,7 @@ function lutFromTransferFunctions(colorTF: TF, opacityTF: TF, clim: [number, num
 }
 
 /** Grayscale ramp with a linear opacity foot from window/level (fallback when no VolumeProperty). */
-function lutFromWindowLevel(): Uint8Array {
+export function lutFromWindowLevel(): Uint8Array {
   const lut = new Uint8Array(256 * 4);
   for (let i = 0; i < 256; i++) {
     const t = i / 255;
