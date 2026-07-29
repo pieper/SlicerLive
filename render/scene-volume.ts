@@ -6,6 +6,7 @@
 
 import { ImageField } from "./fields.ts";
 import { fetchZarrVolume, type ZarrDesc } from "./zarr.ts";
+import { adaptMrsonScene, isMrsonScene } from "./mrson.ts";
 import type { Vec3 } from "./mat4.ts";
 
 interface Node {
@@ -113,7 +114,9 @@ export async function loadSceneVolumeField(
   opts: LoadOpts = {},
 ): Promise<SceneVolume> {
   const raw = await (await fetch(sceneUrl)).json() as SceneWrapper | Record<string, Node>;
-  const wrapper = (raw as SceneWrapper).nodes ? raw as SceneWrapper : { nodes: raw as Record<string, Node> };
+  // mrson scenes (neutral `type`-keyed nodes) are adapted to the legacy class-keyed shape.
+  const adapted = isMrsonScene(raw) ? adaptMrsonScene(raw) as unknown as SceneWrapper : raw;
+  const wrapper = (adapted as SceneWrapper).nodes ? adapted as SceneWrapper : { nodes: adapted as Record<string, Node> };
   const nodes = wrapper.nodes!;
   // Resolve blobBase RELATIVE TO THE SCENE FILE (not the page): a portable export can
   // ship `"blobBase":"blobs/"` next to scene.json and be served from any path. Absolute
