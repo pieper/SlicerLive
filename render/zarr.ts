@@ -5,13 +5,14 @@
 // separately in the scene json (attrs.ijkToRAS), not in the zarr.
 
 export interface ZarrDesc {
-  dir: string;                 // e.g. "vtkMRMLScalarVolumeNode1.zarr"
-  dataset: string;             // e.g. "0"
+  dir?: string;                // legacy positional layout: "<id>.zarr"
+  dataset?: string;            // legacy: "0"
   shape: [number, number, number];   // (nz, ny, nx)  C-order
   chunks: [number, number, number];  // (cz, cy, cx)
   chunkGrid: [number, number, number]; // (ncz, ncy, ncx)
   dtype: string;               // e.g. "<i2"
   bytes?: number;
+  chunkHashes?: Record<string, string>; // "k.j.i" -> content hash; chunk fetched at blobBase + hash
 }
 
 type TypedArrayCtor =
@@ -45,7 +46,12 @@ export async function fetchZarrVolume(
 ): Promise<ZarrVolume> {
   const Ctor = ZDT[z.dtype] ?? Int16Array;
   const [nz, ny, nx] = z.shape, [cz, cy, cx] = z.chunks, [ncz, ncy, ncx] = z.chunkGrid;
-  const base = blobBase + z.dir + "/" + z.dataset + "/";
+  // Content-addressed chunks (chunkHashes: "k.j.i" -> hash, fetched flat at blobBase+hash) or
+  // the legacy positional layout (blobBase + dir/dataset/k.j.i).
+  const hashes = z.chunkHashes;
+  const posBase = blobBase + z.dir + "/" + z.dataset + "/";
+  const chunkUrl = (kk: number, jj: number, ii: number) =>
+    hashes ? blobBase + hashes[kk + "." + jj + "." + ii] : posBase + kk + "." + jj + "." + ii;
   const out = new Float32Array(nz * ny * nx);
   let lo = Infinity, hi = -Infinity;
 
@@ -56,7 +62,7 @@ export async function fetchZarrVolume(
   const worker = async () => {
     while (idx < jobs.length) {
       const [kk, jj, ii] = jobs[idx++];
-      const gz = await (await fetch(base + kk + "." + jj + "." + ii)).arrayBuffer();
+      const gz = await (await fetch(chunkUrl(kk, jj, ii))).arrayBuffer();
       onBytes?.(gz.byteLength);
       const chunk = new Ctor(await inflateDeflate(gz));   // (cz,cy,cx) C-order, padded to full chunk shape
       const z0 = kk * cz, y0 = jj * cy, x0 = ii * cx;

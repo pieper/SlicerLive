@@ -14,6 +14,7 @@ This is a fresh, dependency-free reimplementation of the retired mrml_sync.py
 serializer that publish.py used to call — it lives inside the LiveStory module so
 the module is self-sufficient. Runs INSIDE Slicer (needs `slicer`, `vtk`, numpy).
 """
+import hashlib
 import json
 import math
 import os
@@ -69,12 +70,13 @@ def _write_zarr(volumeNode, node_id, blobdir):
     grid = [int(math.ceil(shape[d] / chunks[d])) for d in range(3)]
     cz, cy, cx = chunks
 
-    zdir = f"{node_id}.zarr"
-    dataset = "0"
-    base = os.path.join(blobdir, zdir, dataset)
-    os.makedirs(base, exist_ok=True)
+    os.makedirs(blobdir, exist_ok=True)
 
+    # Content-addressed chunk store: each compressed chunk is named by the sha256 of its
+    # bytes and written flat under blobdir (deduped across chunks and volumes), so a chunk
+    # can never be mistaken for different data. The manifest maps grid coords -> hash.
     total = 0
+    chunk_hashes = {}
     for kk in range(grid[0]):
         for jj in range(grid[1]):
             for ii in range(grid[2]):
@@ -85,14 +87,17 @@ def _write_zarr(volumeNode, node_id, blobdir):
                     sub = padded
                 raw = np.ascontiguousarray(sub).tobytes()
                 comp = zlib.compress(raw, 6)               # zlib-wrapped deflate == DecompressionStream("deflate")
-                with open(os.path.join(base, f"{kk}.{jj}.{ii}"), "wb") as f:
-                    f.write(comp)
-                total += len(comp)
+                h = "sha256-" + hashlib.sha256(comp).hexdigest()
+                dest = os.path.join(blobdir, h)
+                if not os.path.exists(dest):               # dedup: write each unique chunk once
+                    with open(dest, "wb") as f:
+                        f.write(comp)
+                    total += len(comp)
+                chunk_hashes[f"{kk}.{jj}.{ii}"] = h
 
     return {
-        "dir": zdir, "dataset": dataset,
         "shape": shape, "chunks": chunks, "chunkGrid": grid,
-        "dtype": dt, "bytes": total,
+        "dtype": dt, "bytes": total, "chunkHashes": chunk_hashes,
     }
 
 
