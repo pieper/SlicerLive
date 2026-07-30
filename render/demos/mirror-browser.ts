@@ -55,14 +55,19 @@ async function main() {
     a3d.draw();
   });
 
-  // Volume-rendering manager: (re)build the scene when the volume/TF arrives or changes.
-  const volDM = new VolumeRenderingDisplayableManager(gpu.device, (m: VolumeMeta) => {
-    const s = new SceneRenderer(gpu, srgb);
-    s.build([m.field]);
-    scene = s;
-    status(`mirroring ${m.name} · ${m.dims.join("×")}`);
-    a3d.draw();
-  });
+  // Volume-rendering manager: build the SceneRenderer ONCE when the volume arrives; TF/window-
+  // level changes re-LUT the field in place (onLutChanged) — no renderer rebuild, no flashing.
+  const volDM = new VolumeRenderingDisplayableManager(
+    gpu.device,
+    (m: VolumeMeta) => {
+      const s = new SceneRenderer(gpu, srgb);
+      s.build([m.field]);
+      scene = s;
+      status(`mirroring ${m.name} · ${m.dims.join("×")}`);
+      a3d.draw();
+    },
+    () => a3d.draw(), // onLutChanged: LUT updated in place, just redraw
+  );
 
   const live = new LiveScene(wsUrl, httpBase, [camDM, volDM]);
   status("connecting to Slicer live channel…");

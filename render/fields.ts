@@ -80,6 +80,7 @@ export class ImageField implements Field {
   readonly bindingCount = 2;             // volume (3d) + lut (2d)
   private volTex: GPUTexture;
   private lutTex: GPUTexture;
+  private dev: GPUDevice;
   private p2t: Mat4;
   private clim: [number, number];
   private shade: [number, number, number, number];
@@ -105,6 +106,13 @@ export class ImageField implements Field {
     this.clim = opts.clim;
     this.shade = opts.shade ?? [0.35, 0.75, 0.35, 20];
     this.unit = opts.opacityUnitDistance ?? this.stepMm;
+    this.dev = dev;
+  }
+
+  /** Replace the 256-entry rgba8 color/opacity LUT in place (no texture/bind-group churn).
+   *  The bind group holds a stable view of lutTex, so the next render uses the new LUT. */
+  setLUT(lut: Uint8Array) {
+    this.dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
   }
 
   private origP2t?: Mat4;                // sampling matrix + box at identity, for setWorldTransform

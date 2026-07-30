@@ -9,7 +9,7 @@
 
 import { ImageField } from "./fields.ts";
 import { fetchZarrVolume, type ZarrDesc, type ZarrVolume } from "./zarr.ts";
-import { lutFromTransferFunctions, lutFromWindowLevel } from "./scene-volume.ts";
+import { lutFromTransferFunctions } from "./scene-volume.ts";
 import type { MrsonNode } from "./mrson.ts";
 
 export interface DisplayableManager {
@@ -107,19 +107,25 @@ export interface VolumeMeta {
   range: [number, number]; center: [number, number, number]; radius: number; name: string;
 }
 
-/** Mirrors a volume-rendered image: builds an ImageField from the streamed image node
- *  (fetching content-addressed zarr chunks over HTTP) and re-LUTs live when the transfer
- *  function or window/level changes — no volume re-fetch. */
+/** Mirrors a volume-rendered image: builds the ImageField ONCE (fetching content-addressed
+ *  zarr chunks over HTTP), then re-LUTs IN PLACE when the transfer function or window/level
+ *  changes — no field/renderer recreation, so no texture churn or black flashes. `clim` is
+ *  the fixed data range and the transfer function is sampled across it (matching Slicer's
+ *  direct value->TF mapping). onVolume fires once; onLutChanged fires on each TF change. */
 export class VolumeRenderingDisplayableManager implements DisplayableManager {
   interestedTypes = ["image", "volumeRenderingDisplay", "scalarVolumeDisplay", "transferFunction"];
   private image?: MrsonNode;
   private tf?: MrsonNode;
   private scalarDisp?: MrsonNode;
   private zv?: ZarrVolume;
+  private field?: ImageField;
+  private built = false;
+  private blobBaseHref = "";
 
   constructor(
     private dev: GPUDevice,
     private onVolume: (m: VolumeMeta) => void,
+    private onLutChanged?: () => void,
     private onBytes?: (n: number) => void,
   ) {}
 
@@ -128,36 +134,50 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     if (node.type === "image") { if (!this.image) this.image = node; }  // lock onto the first volume
     else if (node.type === "transferFunction") this.tf = node;
     else if (node.type === "scalarVolumeDisplay") this.scalarDisp = node;
-    await this.rebuild();
+    if (!this.built) await this.buildOnce();
+    else if (node.type === "transferFunction" || node.type === "scalarVolumeDisplay") this.updateLUT();
   }
   onEvent() {/* TF/display changes arrive as NodeAdded upserts, handled above */}
 
-  private buildLUT(range: [number, number]): { lut: Uint8Array; clim: [number, number]; shade: [number, number, number, number] } {
+  // 256-entry rgba8 LUT sampled across the DATA RANGE (clim is fixed to that range).
+  private buildLUT(range: [number, number]): Uint8Array {
     const cs = this.tf?.colorStops as { value: number; rgba: number[] }[] | undefined;
     const os = this.tf?.scalarOpacity as { value: number; opacity: number }[] | undefined;
     if (cs?.length && os?.length) {
       const colorTF = cs.map((s) => [s.value, s.rgba[0], s.rgba[1], s.rgba[2]]);
       const opac = os.map((s) => [s.value, s.opacity]);
-      const clim: [number, number] = [colorTF[0][0], colorTF[colorTF.length - 1][0]];
-      return { lut: lutFromTransferFunctions(colorTF, opac, clim), clim, shade: this.tf?.shade ? [0.25, 0.75, 0.5, 24] : [1, 0, 0, 1] };
+      return lutFromTransferFunctions(colorTF, opac, range);   // sample TF across the data range
     }
+    // window/level grayscale, positioned within the data range
     const win = (this.scalarDisp?.window as number) ?? (range[1] - range[0]);
     const lev = (this.scalarDisp?.level as number) ?? (range[0] + range[1]) / 2;
-    return { lut: lutFromWindowLevel(), clim: [lev - win / 2, lev + win / 2], shade: [0.25, 0.75, 0.5, 24] };
+    const lo = lev - win / 2, hi = lev + win / 2;
+    const lut = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      const v = range[0] + (i / 255) * (range[1] - range[0]);
+      const g = Math.max(0, Math.min(1, (v - lo) / Math.max(hi - lo, 1e-6)));
+      lut[i * 4] = lut[i * 4 + 1] = lut[i * 4 + 2] = Math.round(g * 255);
+      lut[i * 4 + 3] = Math.round(Math.max(0, Math.min(1, (g - 0.15) / 0.85)) * 200);
+    }
+    return lut;
   }
 
-  private async rebuild(): Promise<void> {
-    if (!this.image?.zarr) return;
+  private async buildOnce(): Promise<void> {
+    if (this.built || !this.image?.zarr) return;
     if (!this.zv) this.zv = await fetchZarrVolume(this.blobBaseHref, this.image.zarr as ZarrDesc, this.onBytes);
-    const { lut, clim, shade } = this.buildLUT(this.zv.range);
+    const shade: [number, number, number, number] = this.tf?.shade ? [0.25, 0.75, 0.5, 24] : [0.25, 0.75, 0.5, 24];
     const ijkToRAS = this.image.ijkToRAS as number[];
-    const field = new ImageField(this.dev, this.zv.data, this.zv.dims, [1, 1, 1], lut, { clim, ijkToRAS, shade });
-    const [lo, hi] = field.aabb();
+    this.field = new ImageField(this.dev, this.zv.data, this.zv.dims, [1, 1, 1], this.buildLUT(this.zv.range), { clim: this.zv.range, ijkToRAS, shade });
+    this.built = true;
+    const [lo, hi] = this.field.aabb();
     const center: [number, number, number] = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
     const radius = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2;
-    this.onVolume({ field, dims: this.zv.dims, ijkToRAS, range: this.zv.range, center, radius, name: this.image.name ?? "volume" });
+    this.onVolume({ field: this.field, dims: this.zv.dims, ijkToRAS, range: this.zv.range, center, radius, name: this.image.name ?? "volume" });
   }
 
-  // set by LiveScene right before the first onNodeAdded via a tiny shim
-  blobBaseHref = "";
+  private updateLUT(): void {
+    if (!this.field || !this.zv) return;
+    this.field.setLUT(this.buildLUT(this.zv.range));   // in place — no rebuild
+    this.onLutChanged?.();
+  }
 }
