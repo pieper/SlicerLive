@@ -212,9 +212,12 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
   private image?: MrsonNode;
   private tf?: MrsonNode;
   private scalarDisp?: MrsonNode;
+  private vrDisplayId?: string;
+  private vrVisible = false;      // is a volume-rendering display ON in Slicer?
   private zv?: ZarrVolume;
   private field?: ImageField;
-  private built = false;
+  private shown = false;          // is the field currently in the scene?
+  private building = false;
   private blobBaseHref = "";
   private view?: MirrorView;
 
@@ -223,20 +226,34 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
   async onNodeAdded(node: MrsonNode, scene: LiveScene): Promise<void> {
     this.blobBaseHref = scene.blobBase();
     this.view = scene.view;
-    if (node.type === "image") { if (!this.image) this.image = node; }  // lock onto the first volume
-    else if (node.type === "transferFunction") this.tf = node;
-    else if (node.type === "scalarVolumeDisplay") this.scalarDisp = node;
-    if (!this.built) await this.buildOnce();
-    else if (node.type === "transferFunction" || node.type === "scalarVolumeDisplay") this.updateLUT();
+    if (node.type === "image") { if (!this.image) this.image = node; }   // lock onto the first volume
+    else if (node.type === "volumeRenderingDisplay") { this.vrDisplayId = node.id; this.vrVisible = !!node.visible; }
+    else if (node.type === "transferFunction") { this.tf = node; if (this.shown) this.updateLUT(); }
+    else if (node.type === "scalarVolumeDisplay") { this.scalarDisp = node; if (this.shown) this.updateLUT(); }
+    await this.sync(scene);
   }
-  onEvent() {/* TF/display changes arrive as NodeAdded upserts, handled above */}
-  onNodeRemoved(id: string, scene: LiveScene) { if (id === this.image?.id) this.reset(scene); }
+  onEvent() {/* changes arrive as NodeAdded upserts, handled above */}
+  onNodeRemoved(id: string, scene: LiveScene) {
+    if (id === this.image?.id) { this.reset(scene); return; }
+    if (id === this.vrDisplayId) { this.vrVisible = false; this.vrDisplayId = undefined; void this.sync(scene); }
+  }
   onSceneClosed(scene: LiveScene) { this.reset(scene); }
   private reset(scene: LiveScene) {
-    this.built = false;
     this.image = this.tf = this.scalarDisp = undefined;
     this.zv = this.field = undefined;
+    this.vrVisible = false;
+    this.vrDisplayId = undefined;
+    this.shown = false;
     scene.view?.removeField("volume");
+  }
+
+  /** Show the volume iff Slicer has a VISIBLE volume-rendering display for it — matching
+   *  Slicer's own timing: loading a volume does NOT render it in 3D until VR is enabled. */
+  private async sync(scene: LiveScene): Promise<void> {
+    const want = !!(this.image?.zarr && this.vrVisible);
+    if (want && !this.field && !this.building) await this.build(scene);
+    else if (want && this.field && !this.shown) { scene.view?.setField("volume", this.field); this.shown = true; }
+    else if (!want && this.shown) { scene.view?.removeField("volume"); this.shown = false; }
   }
 
   // 256-entry rgba8 LUT sampled across the DATA RANGE (clim is fixed to that range).
@@ -262,14 +279,16 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     return lut;
   }
 
-  private async buildOnce(): Promise<void> {
-    if (this.built || !this.image?.zarr) return;
+  private async build(scene: LiveScene): Promise<void> {
+    if (!this.image?.zarr) return;
+    this.building = true;
     if (!this.zv) this.zv = await fetchZarrVolume(this.blobBaseHref, this.image.zarr as ZarrDesc, this.onBytes);
     const shade: [number, number, number, number] = [0.25, 0.75, 0.5, 24];
     const ijkToRAS = this.image.ijkToRAS as number[];
     this.field = new ImageField(this.dev, this.zv.data, this.zv.dims, [1, 1, 1], this.buildLUT(this.zv.range), { clim: this.zv.range, ijkToRAS, shade });
-    this.built = true;
-    this.view?.setField("volume", this.field);   // coarse -> rebuild the field list once
+    this.building = false;
+    scene.view?.setField("volume", this.field);
+    this.shown = true;
   }
 
   private updateLUT(): void {
