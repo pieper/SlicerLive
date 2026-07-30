@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SlicerLive — live mirror</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; background: #05060a; }
+  #view { width: 100vw; height: 100vh; display: block; touch-action: none; }
+  #status { position: fixed; top: 8px; left: 12px; font: 12px -apple-system, system-ui, sans-serif;
+            color: #9fb3d0; opacity: .85; pointer-events: none; }
+</style>
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div id="status">loading…</div>
+  <script type="module" src="mirror.js"></script>
+</body>
+</html>
