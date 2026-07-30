@@ -69,6 +69,61 @@ def _live_state():
     return {"mrson": 0, "state": True, "nodes": nodes}
 
 
+# ---- op application (SlicerLive -> Slicer) ---------------------------------
+
+def _apply_op(op):
+    """Apply one mrson op to the MRML scene. Returns True if it did something."""
+    kind = op.get("op")
+    nid = op.get("id")
+    node = slicer.mrmlScene.GetNodeByID(nid) if nid else None
+    if kind == "del":
+        if node is not None:
+            slicer.mrmlScene.RemoveNode(node)
+            return True
+        return False
+    if kind == "patch":
+        return _apply_patch(node, op.get("path", ""), op.get("value"))
+    if kind == "cmd":
+        return _apply_cmd(node, op.get("cmd"), op.get("args") or {})
+    return False   # 'put' (create/replace whole node) not yet implemented
+
+
+def _apply_patch(node, path, value):
+    """patch a single property. path is a URI-fragment JSON pointer, e.g. '#/position'."""
+    if node is None:
+        return False
+    key = [p for p in path.lstrip("#").strip("/").split("/") if p]
+    k0 = key[0] if key else ""
+    cls = node.GetClassName()
+    if "CameraNode" in cls:
+        if k0 == "position": node.SetPosition(*value)
+        elif k0 == "focalPoint": node.SetFocalPoint(*value)
+        elif k0 == "viewUp": node.SetViewUp(*value)
+        elif k0 == "viewAngle": node.GetCamera().SetViewAngle(value)
+        else: return False
+        node.Modified()
+        return True
+    if cls == "vtkMRMLScalarVolumeDisplayNode":
+        if k0 == "window": node.SetWindow(float(value))
+        elif k0 == "level": node.SetLevel(float(value))
+        else: return False
+        return True
+    if "DisplayNode" in cls and k0 in ("visible", "visibility"):
+        node.SetVisibility(bool(value))
+        return True
+    return False
+
+
+def _apply_cmd(node, cmd, args):
+    if cmd == "setCameraPose" and node is not None:
+        if "position" in args: node.SetPosition(*args["position"])
+        if "focalPoint" in args: node.SetFocalPoint(*args["focalPoint"])
+        if "viewUp" in args: node.SetViewUp(*args["viewUp"])
+        node.Modified()
+        return True
+    return False
+
+
 class MrsonRequestHandler(WebServerLib.BaseRequestHandler):
     def __init__(self, logMessage=None):
         self.logMessage = logMessage or (lambda *a: None)
@@ -106,15 +161,24 @@ class MrsonRequestHandler(WebServerLib.BaseRequestHandler):
             return b"application/json", json.dumps({"error": traceback.format_exc()}).encode()
 
     def _apply_ops(self, requestBody):
-        """Phase 3: apply mrson ops (put/patch/del/cmd) to the MRML scene. Stub for now."""
+        """Phase 3: apply mrson ops (patch/cmd/del) to the MRML scene — SlicerLive drives Slicer."""
         try:
             ops = json.loads(requestBody or b"[]")
         except (json.JSONDecodeError, ValueError) as e:
             return b"application/json", json.dumps({"error": f"parse: {e}"}).encode()
         if isinstance(ops, dict):
             ops = [ops]
-        # TODO(phase3): dispatch put/patch/del/cmd -> MRML mutations.
-        return b"application/json", json.dumps({"ok": True, "received": len(ops), "applied": 0}).encode()
+        applied, errors = 0, []
+        for op in ops:
+            try:
+                if _apply_op(op):
+                    applied += 1
+            except Exception as e:  # noqa: BLE001
+                errors.append(str(e))
+        if applied:
+            markDirty()
+            slicer.app.processEvents()
+        return b"application/json", json.dumps({"ok": not errors, "received": len(ops), "applied": applied, "errors": errors}).encode()
 
 
 def startMrsonServer(port=2131, logMessage=None):

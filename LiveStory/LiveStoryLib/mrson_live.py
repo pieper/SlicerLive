@@ -224,6 +224,7 @@ class _WSClient:
 
     # -- observer callbacks (main thread) --
     def _onNodeModified(self, caller, _event):
+        HS.markDirty()          # keep the HTTP snapshot fresh for the next reload/subscribe
         self.send(_node_event(caller))
 
     @vtk.calldata_type(vtk.VTK_OBJECT)
