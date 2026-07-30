@@ -70,6 +70,13 @@ def _display_node(dn):
         if vpn is not None:
             node["refs"]["transferFunction"] = [vpn.GetID()]
             tf = (vpn.GetID(), _transfer_function_node(vpn))
+        try:                                    # crop state (SlicerLive crops only when enabled)
+            node["cropEnabled"] = bool(dn.GetCroppingEnabled())
+            rid = dn.GetROINodeID()
+            if rid:
+                node["refs"]["roi"] = [rid]
+        except Exception:  # noqa: BLE001
+            pass
     elif cls == "vtkMRMLModelDisplayNode":
         node.update({"type": "modelDisplay", "color": _rgba(dn.GetColor()), "opacity": dn.GetOpacity(),
                      "representation": {0: "points", 1: "wireframe", 2: "surface"}.get(dn.GetRepresentation(), "surface"),

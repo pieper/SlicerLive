@@ -217,6 +217,11 @@ class _WSClient:
                 self._observeInstance(n)
         self._tags_add(scene, scene.AddObserver(slicer.vtkMRMLScene.NodeAddedEvent, self._onSceneNodeAdded))
         self._tags_add(scene, scene.AddObserver(slicer.vtkMRMLScene.NodeRemovedEvent, self._onSceneNodeRemoved))
+        self._tags_add(scene, scene.AddObserver(slicer.vtkMRMLScene.EndCloseEvent, self._onSceneClosed))
+
+    def _onSceneClosed(self, _caller, _event):
+        HS.markDirty()
+        self.send({"event": "SceneClosed", "sourceId": ""})
 
     def _observeInstance(self, node):
         self._tags_add(node, node.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onNodeModified))

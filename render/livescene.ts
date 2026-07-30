@@ -31,6 +31,7 @@ export interface DisplayableManager {
   onNodeAdded?(node: MrsonNode, scene: LiveScene): void | Promise<void>;
   onNodeRemoved?(id: string, scene: LiveScene): void;
   onEvent?(ev: Record<string, unknown>, scene: LiveScene): void | Promise<void>;
+  onSceneClosed?(scene: LiveScene): void;   // scene-level reset (Slicer EndCloseEvent)
 }
 
 export class LiveScene {
@@ -85,6 +86,9 @@ export class LiveScene {
       for (const m of this.interested(node?.type)) m.onNodeRemoved?.(id, this);
     } else if (e === "SnapshotComplete") {
       /* managers already received their snapshot nodes */
+    } else if (e === "SceneClosed") {
+      this.nodes.clear();                                 // wholesale reset (Slicer closed the scene)
+      for (const m of this.managers) m.onSceneClosed?.(this);
     } else {
       const t = this.nodes.get(ev.sourceId as string)?.type ?? (e === "CameraModified" ? "camera" : undefined);
       for (const m of this.interested(t)) await m.onEvent?.(ev, this);
@@ -147,27 +151,52 @@ export class MarkupsDisplayableManager implements DisplayableManager {
     this.field.setSpheres(this.allSpheres());
     scene.view?.redraw();
   }
+  onSceneClosed(scene: LiveScene) {
+    this.points.clear();
+    this.field = undefined;
+    scene.view?.removeField("markups");
+  }
 }
 
-/** Mirrors a Markups ROI as a volume crop: center/size -> setClipBox, which crops every
- *  clippable field (the volume). Live resizes arrive as NodeAdded upserts and just re-set the
- *  box (fine); removing the ROI clears the crop. */
+/** Mirrors a Markups ROI volume crop the way Slicer does: crop is active only when the
+ *  volume-rendering display has cropping ENABLED and references an ROI (not merely because an
+ *  ROI node exists). Tracks the VR display's crop state and the ROI geometry independently and
+ *  recomputes the clip box; toggling crop in Slicer clears/re-applies it. */
 export class RoiCropDisplayableManager implements DisplayableManager {
-  interestedTypes = ["markup"];
-  private cropId?: string;
+  interestedTypes = ["volumeRenderingDisplay", "markup"];
+  private crop: { enabled: boolean; roiId?: string } = { enabled: false };
+  private rois = new Map<string, { center: Vec3; size: Vec3 }>();
+
+  private recompute(scene: LiveScene) {
+    const r = this.crop.enabled && this.crop.roiId ? this.rois.get(this.crop.roiId) : undefined;
+    if (r) {
+      const c = r.center, s = r.size;
+      scene.view?.setClipBox(
+        [c[0] - s[0] / 2, c[1] - s[1] / 2, c[2] - s[2] / 2],
+        [c[0] + s[0] / 2, c[1] + s[1] / 2, c[2] + s[2] / 2],
+      );
+    } else {
+      scene.view?.setClipBox(null);
+    }
+  }
   onNodeAdded(node: MrsonNode, scene: LiveScene) {
-    if (node.markupType !== "roi") return;              // fiducials/lines handled by MarkupsDM
-    const c = node.center as Vec3 | undefined;
-    const s = node.size as Vec3 | undefined;
-    if (!c || !s) return;
-    this.cropId = node.id;
-    scene.view?.setClipBox(
-      [c[0] - s[0] / 2, c[1] - s[1] / 2, c[2] - s[2] / 2],
-      [c[0] + s[0] / 2, c[1] + s[1] / 2, c[2] + s[2] / 2],
-    );
+    if (node.type === "volumeRenderingDisplay") {
+      this.crop = { enabled: !!node.cropEnabled, roiId: (node.refs?.roi as string[] | undefined)?.[0] };
+      this.recompute(scene);
+    } else if (node.markupType === "roi" && node.center && node.size) {
+      this.rois.set(node.id, { center: node.center as Vec3, size: node.size as Vec3 });
+      this.recompute(scene);
+    }
   }
   onNodeRemoved(id: string, scene: LiveScene) {
-    if (id === this.cropId) { this.cropId = undefined; scene.view?.setClipBox(null); }
+    let changed = this.rois.delete(id);
+    if (this.crop.roiId === id) { this.crop.roiId = undefined; changed = true; }
+    if (changed) this.recompute(scene);
+  }
+  onSceneClosed(scene: LiveScene) {
+    this.crop = { enabled: false };
+    this.rois.clear();
+    scene.view?.setClipBox(null);
   }
 }
 
@@ -201,6 +230,14 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     else if (node.type === "transferFunction" || node.type === "scalarVolumeDisplay") this.updateLUT();
   }
   onEvent() {/* TF/display changes arrive as NodeAdded upserts, handled above */}
+  onNodeRemoved(id: string, scene: LiveScene) { if (id === this.image?.id) this.reset(scene); }
+  onSceneClosed(scene: LiveScene) { this.reset(scene); }
+  private reset(scene: LiveScene) {
+    this.built = false;
+    this.image = this.tf = this.scalarDisp = undefined;
+    this.zv = this.field = undefined;
+    scene.view?.removeField("volume");
+  }
 
   // 256-entry rgba8 LUT sampled across the DATA RANGE (clim is fixed to that range).
   private buildLUT(range: [number, number]): Uint8Array {

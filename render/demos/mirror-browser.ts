@@ -52,10 +52,23 @@ async function main() {
   });
   addEventListener("resize", () => { resize(); a3d.draw(); });
 
+  // Paint the empty background (used when the field set becomes empty, e.g. scene close).
+  const clearCanvas = () => {
+    const enc = gpu.device.createCommandEncoder();
+    const pass = enc.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView({ format: srgb }),
+        clearValue: { r: 0.02, g: 0.024, b: 0.04, a: 1 }, loadOp: "clear", storeOp: "store",
+      }],
+    });
+    pass.end();
+    gpu.device.queue.submit([enc.finish()]);
+  };
+
   // Rebuild the SceneRenderer's field list (coarse: field set changed). Clip is re-applied
-  // after build() since it lives in the scene uniform.
+  // after build() since it lives in the scene uniform. Empty -> drop the scene and clear.
   const rebuild = () => {
-    if (fields.size === 0) return;
+    if (fields.size === 0) { scene = null; clearCanvas(); return; }
     if (!scene) scene = new SceneRenderer(gpu, srgb);
     scene.build([...fields.values()]);
     if (clip) scene.setClipBox(clip.lo, clip.hi);
