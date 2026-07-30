@@ -149,6 +149,28 @@ export class MarkupsDisplayableManager implements DisplayableManager {
   }
 }
 
+/** Mirrors a Markups ROI as a volume crop: center/size -> setClipBox, which crops every
+ *  clippable field (the volume). Live resizes arrive as NodeAdded upserts and just re-set the
+ *  box (fine); removing the ROI clears the crop. */
+export class RoiCropDisplayableManager implements DisplayableManager {
+  interestedTypes = ["markup"];
+  private cropId?: string;
+  onNodeAdded(node: MrsonNode, scene: LiveScene) {
+    if (node.markupType !== "roi") return;              // fiducials/lines handled by MarkupsDM
+    const c = node.center as Vec3 | undefined;
+    const s = node.size as Vec3 | undefined;
+    if (!c || !s) return;
+    this.cropId = node.id;
+    scene.view?.setClipBox(
+      [c[0] - s[0] / 2, c[1] - s[1] / 2, c[2] - s[2] / 2],
+      [c[0] + s[0] / 2, c[1] + s[1] / 2, c[2] + s[2] / 2],
+    );
+  }
+  onNodeRemoved(id: string, scene: LiveScene) {
+    if (id === this.cropId) { this.cropId = undefined; scene.view?.setClipBox(null); }
+  }
+}
+
 // ── Volume rendering ─────────────────────────────────────────────────────────
 
 /** Mirrors a volume-rendered image: builds the ImageField ONCE (fetching content-addressed

@@ -127,11 +127,22 @@ def _markup_node(n, node_id):
     mtype = {"vtkMRMLMarkupsFiducialNode": "fiducial", "vtkMRMLMarkupsLineNode": "line",
              "vtkMRMLMarkupsCurveNode": "curve", "vtkMRMLMarkupsPlaneNode": "plane",
              "vtkMRMLMarkupsROINode": "roi"}.get(n.GetClassName(), "fiducial")
-    return {
+    node = {
         "type": "markup", "id": node_id, "name": n.GetName(), "frame": "RAS",
         "markupType": mtype, "controlPoints": pts,
         "refs": {}, "source": {"mrmlClass": n.GetClassName()},
     }
+    if n.GetClassName() == "vtkMRMLMarkupsROINode":   # ROI box (RAS): center + full size
+        c = [0.0, 0.0, 0.0]
+        n.GetCenterWorld(c)
+        s = [0.0, 0.0, 0.0]
+        try:
+            n.GetSizeWorld(s)          # fills the array (world extents)
+        except Exception:  # noqa: BLE001
+            s = list(n.GetSize())      # 0-arg return (local extents)
+        node["center"] = list(c)
+        node["size"] = list(s)
+    return node
 
 
 def _camera_node(n, node_id):
@@ -198,7 +209,7 @@ def serialize_mrson(outdir, name):
             except Exception as e:  # noqa: BLE001
                 print(f"mrson: skipped mesh {m.GetID()}: {e}")
 
-    for cls in ("vtkMRMLMarkupsFiducialNode", "vtkMRMLMarkupsLineNode", "vtkMRMLMarkupsCurveNode"):
+    for cls in ("vtkMRMLMarkupsFiducialNode", "vtkMRMLMarkupsLineNode", "vtkMRMLMarkupsCurveNode", "vtkMRMLMarkupsROINode"):
         for mk in slicer.util.getNodesByClass(cls):
             if mk.GetID() in nodes:
                 continue

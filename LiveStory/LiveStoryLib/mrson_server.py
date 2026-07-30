@@ -111,6 +111,17 @@ def _apply_patch(node, path, value):
     if "DisplayNode" in cls and k0 in ("visible", "visibility"):
         node.SetVisibility(bool(value))
         return True
+    if cls == "vtkMRMLMarkupsROINode":
+        if k0 == "center":
+            try: node.SetCenterWorld(value)
+            except Exception: node.SetCenterWorld(*value)  # noqa: BLE001
+        elif k0 == "size":
+            try: node.SetSizeWorld(value)
+            except Exception: node.SetSize(*value)  # noqa: BLE001
+        else:
+            return False
+        node.Modified()
+        return True
     return False
 
 
@@ -119,6 +130,15 @@ def _apply_cmd(node, cmd, args):
         if "position" in args: node.SetPosition(*args["position"])
         if "focalPoint" in args: node.SetFocalPoint(*args["focalPoint"])
         if "viewUp" in args: node.SetViewUp(*args["viewUp"])
+        node.Modified()
+        return True
+    if cmd == "setRoi" and node is not None:
+        if "center" in args:
+            try: node.SetCenterWorld(args["center"])
+            except Exception: node.SetCenterWorld(*args["center"])  # noqa: BLE001
+        if "size" in args:
+            try: node.SetSizeWorld(args["size"])
+            except Exception: node.SetSize(*args["size"])  # noqa: BLE001
         node.Modified()
         return True
     return False

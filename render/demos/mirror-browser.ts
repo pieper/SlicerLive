@@ -14,6 +14,7 @@ import {
   LiveScene,
   MarkupsDisplayableManager,
   type MirrorView,
+  RoiCropDisplayableManager,
   type Vec3,
   VolumeRenderingDisplayableManager,
 } from "../livescene.ts";
@@ -83,6 +84,7 @@ async function main() {
     new CameraDisplayableManager(),
     new VolumeRenderingDisplayableManager(gpu.device),
     new MarkupsDisplayableManager(),
+    new RoiCropDisplayableManager(),
   ]);
   live.view = view;
   status("connecting to Slicer live channel…");
