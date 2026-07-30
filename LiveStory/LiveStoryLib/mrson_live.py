@@ -75,6 +75,8 @@ def _node_event(node):
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": mrn}
     if t == "transferFunction":
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._transfer_function_node(node)}
+    if t == "markup":
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._markup_node(node, nid)}
     return {"event": "Modified", "sourceId": nid}
 
 
@@ -218,6 +220,9 @@ class _WSClient:
 
     def _observeInstance(self, node):
         self._tags_add(node, node.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onNodeModified))
+        # markups fire a dedicated PointModifiedEvent on control-point drags
+        if _mrson_type(node) == "markup" and hasattr(node, "PointModifiedEvent"):
+            self._tags_add(node, node.AddObserver(node.PointModifiedEvent, self._onNodeModified))
 
     def _tags_add(self, obj, tag):
         self.tags.append((obj, tag))
