@@ -7,13 +7,25 @@
 <style>
   :root { color-scheme: dark; }
   html, body { height: 100%; margin: 0; background: #05060a; }
-  #view { width: 100vw; height: 100vh; display: block; touch-action: none; }
-  #status { position: fixed; top: 8px; left: 12px; font: 12px -apple-system, system-ui, sans-serif;
-            color: #9fb3d0; opacity: .85; pointer-events: none; }
+  #grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+          gap: 2px; width: 100vw; height: 100vh; }
+  .cell { position: relative; min-width: 0; min-height: 0; }
+  .cell canvas { width: 100%; height: 100%; display: block; background: #000; touch-action: none; }
+  .cell.hidden { display: none; }
+  .cell .lab { position: absolute; top: 5px; left: 7px; font: 700 11px -apple-system, system-ui, sans-serif;
+               letter-spacing: .3px; opacity: .85; pointer-events: none; }
+  .lab.red { color: #f05a5a; } .lab.yellow { color: #f0d24a; } .lab.green { color: #5ad07a; } .lab.threeD { color: #9fb3d0; }
+  #status { position: fixed; top: 6px; left: 10px; font: 12px -apple-system, system-ui, sans-serif;
+            color: #9fb3d0; opacity: .85; pointer-events: none; z-index: 3; }
 </style>
 </head>
 <body>
-  <canvas id="view"></canvas>
+  <div id="grid">
+    <div class="cell" id="cell-red"><canvas id="c-red"></canvas><div class="lab red">R · Axial</div></div>
+    <div class="cell" id="cell-yellow"><canvas id="c-yellow"></canvas><div class="lab yellow">Y · Sagittal</div></div>
+    <div class="cell" id="cell-green"><canvas id="c-green"></canvas><div class="lab green">G · Coronal</div></div>
+    <div class="cell" id="cell-threeD"><canvas id="c-threeD"></canvas><div class="lab threeD">3D</div></div>
+  </div>
   <div id="status">loading…</div>
   <script type="module" src="mirror.js"></script>
 </body>

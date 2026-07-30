@@ -172,6 +172,19 @@ def _slice_view_node(n, node_id):
     }
 
 
+_LAYOUT_NAMES = {2: "conventional", 3: "fourUp", 4: "oneUp3D", 6: "oneUpRed", 7: "oneUpYellow",
+                 8: "oneUpGreen", 15: "dual3D", 16: "conventionalWidescreen", 30: "fourByThree"}
+
+
+def _layout_node(n, node_id):
+    arr = n.GetViewArrangement()
+    return {
+        "type": "layout", "id": node_id, "name": n.GetName(),
+        "arrangement": int(arr), "arrangementName": _LAYOUT_NAMES.get(arr, "other"),
+        "source": {"mrmlClass": n.GetClassName()},
+    }
+
+
 def _3d_view_node(n, node_id):
     node = {"type": "view", "id": node_id, "name": n.GetName(), "kind": "3d",
             "layoutName": n.GetLayoutName(), "refs": {}, "source": {"mrmlClass": n.GetClassName()}}
@@ -225,8 +238,8 @@ def serialize_mrson(outdir, name):
             except Exception as e:  # noqa: BLE001
                 print(f"mrson: skipped markup {mk.GetID()}: {e}")
 
-    simple = [("vtkMRMLCameraNode", _camera_node), ("vtkMRMLSliceNode", _slice_view_node),
-              ("vtkMRMLViewNode", _3d_view_node)]
+    simple = [("vtkMRMLLayoutNode", _layout_node), ("vtkMRMLCameraNode", _camera_node),
+              ("vtkMRMLSliceNode", _slice_view_node), ("vtkMRMLViewNode", _3d_view_node)]
     for cls, build in simple:
         for n in slicer.util.getNodesByClass(cls):
             if n.GetID() in nodes:

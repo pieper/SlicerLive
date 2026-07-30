@@ -18,12 +18,20 @@ export type Vec3 = [number, number, number];
 /** The renderer surface a displayable manager drives — the SlicerLive analogue of the view
  *  a Slicer displayable manager renders into. Managers ADD/REMOVE fields (coarse -> rebuild)
  *  and REDRAW when a field changed in place (fine), per the event-granularity rule. */
+export interface SlicePlane { orient: "axial" | "coronal" | "sagittal"; posMm: number }
+
 export interface MirrorView {
-  setField(key: string, field: Field): void;   // add or replace a field -> rebuild
+  setField(key: string, field: Field): void;   // add or replace a 3D field -> rebuild
   removeField(key: string): void;               // -> rebuild
   redraw(): void;                                // an existing field changed in place
   setCamera(c: CameraState): void;
   setClipBox(lo: Vec3 | null, hi?: Vec3): void;  // null clears the crop
+  // volume resource shared by the slice views and the 3D view
+  setVolumeField(field: ImageField | null, wl?: { win: number; lev: number }): void;
+  showVolume3D(show: boolean): void;             // include the volume in the 3D view (VR gating)
+  // slice/MPR views and layout
+  setSlicePlane(cell: string, plane: SlicePlane): void;
+  setLayout(name: string): void;
 }
 
 export interface DisplayableManager {
@@ -200,23 +208,48 @@ export class RoiCropDisplayableManager implements DisplayableManager {
   }
 }
 
+/** Mirrors the slice (MPR) views: each SliceNode's orientation + position becomes a reslice
+ *  plane in the matching cell (Red->red / Green->green / Yellow->yellow). Slice scrolls arrive
+ *  as NodeAdded upserts and just re-set the plane. */
+export class SliceDisplayableManager implements DisplayableManager {
+  interestedTypes = ["view"];
+  private static ORIENT: Record<string, "axial" | "coronal" | "sagittal"> = { Axial: "axial", Coronal: "coronal", Sagittal: "sagittal" };
+  private static CELL: Record<string, string> = { Red: "red", Green: "green", Yellow: "yellow" };
+  onNodeAdded(node: MrsonNode, scene: LiveScene) {
+    if (node.type !== "view" || node.kind !== "slice") return;
+    const orient = SliceDisplayableManager.ORIENT[node.orientation as string];
+    const cell = SliceDisplayableManager.CELL[node.layoutName as string];
+    const m = node.sliceToRAS as number[] | undefined;
+    if (!orient || !cell || !m) return;
+    const trans: Vec3 = [m[3], m[7], m[11]];   // slice origin in RAS
+    const axis = orient === "axial" ? 2 : orient === "coronal" ? 1 : 0;
+    scene.view?.setSlicePlane(cell, { orient, posMm: trans[axis] });
+  }
+}
+
+/** Mirrors the application layout (which views are shown, and how). */
+export class LayoutDisplayableManager implements DisplayableManager {
+  interestedTypes = ["layout"];
+  onNodeAdded(node: MrsonNode, scene: LiveScene) {
+    if (node.type === "layout") scene.view?.setLayout((node.arrangementName as string) ?? "fourUp");
+  }
+}
+
 // ── Volume rendering ─────────────────────────────────────────────────────────
 
-/** Mirrors a volume-rendered image: builds the ImageField ONCE (fetching content-addressed
- *  zarr chunks over HTTP) and adds it via view.setField (coarse), then re-LUTs IN PLACE on
- *  transfer-function / window-level changes and view.redraw()s (fine) — no field/renderer
- *  recreation, so no texture churn or flashing. `clim` is the fixed data range and the
- *  transfer function is sampled across it (matching Slicer's direct value->TF mapping). */
+/** Mirrors a volume: builds the ImageField when the volume LOADS (so the slice views can
+ *  reslice it immediately, matching Slicer showing slices on load) via view.setVolumeField,
+ *  and includes it in the 3D view only when a volume-rendering display is VISIBLE
+ *  (view.showVolume3D). TF changes re-LUT in place; window/level updates the slice display. */
 export class VolumeRenderingDisplayableManager implements DisplayableManager {
   interestedTypes = ["image", "volumeRenderingDisplay", "scalarVolumeDisplay", "transferFunction"];
   private image?: MrsonNode;
   private tf?: MrsonNode;
   private scalarDisp?: MrsonNode;
   private vrDisplayId?: string;
-  private vrVisible = false;      // is a volume-rendering display ON in Slicer?
+  private vrVisible = false;
   private zv?: ZarrVolume;
   private field?: ImageField;
-  private shown = false;          // is the field currently in the scene?
   private building = false;
   private blobBaseHref = "";
   private view?: MirrorView;
@@ -226,16 +259,17 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
   async onNodeAdded(node: MrsonNode, scene: LiveScene): Promise<void> {
     this.blobBaseHref = scene.blobBase();
     this.view = scene.view;
-    if (node.type === "image") { if (!this.image) this.image = node; }   // lock onto the first volume
+    if (node.type === "image") { if (!this.image) this.image = node; }
     else if (node.type === "volumeRenderingDisplay") { this.vrDisplayId = node.id; this.vrVisible = !!node.visible; }
-    else if (node.type === "transferFunction") { this.tf = node; if (this.shown) this.updateLUT(); }
-    else if (node.type === "scalarVolumeDisplay") { this.scalarDisp = node; if (this.shown) this.updateLUT(); }
-    await this.sync(scene);
+    else if (node.type === "transferFunction") { this.tf = node; this.reLUT(); }
+    else if (node.type === "scalarVolumeDisplay") { this.scalarDisp = node; this.pushVolume(); }
+    await this.ensureField();
+    this.view?.showVolume3D(!!(this.field && this.vrVisible));
   }
   onEvent() {/* changes arrive as NodeAdded upserts, handled above */}
   onNodeRemoved(id: string, scene: LiveScene) {
     if (id === this.image?.id) { this.reset(scene); return; }
-    if (id === this.vrDisplayId) { this.vrVisible = false; this.vrDisplayId = undefined; void this.sync(scene); }
+    if (id === this.vrDisplayId) { this.vrVisible = false; this.vrDisplayId = undefined; scene.view?.showVolume3D(false); }
   }
   onSceneClosed(scene: LiveScene) { this.reset(scene); }
   private reset(scene: LiveScene) {
@@ -243,17 +277,27 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     this.zv = this.field = undefined;
     this.vrVisible = false;
     this.vrDisplayId = undefined;
-    this.shown = false;
-    scene.view?.removeField("volume");
+    scene.view?.setVolumeField(null);
+    scene.view?.showVolume3D(false);
   }
 
-  /** Show the volume iff Slicer has a VISIBLE volume-rendering display for it — matching
-   *  Slicer's own timing: loading a volume does NOT render it in 3D until VR is enabled. */
-  private async sync(scene: LiveScene): Promise<void> {
-    const want = !!(this.image?.zarr && this.vrVisible);
-    if (want && !this.field && !this.building) await this.build(scene);
-    else if (want && this.field && !this.shown) { scene.view?.setField("volume", this.field); this.shown = true; }
-    else if (!want && this.shown) { scene.view?.removeField("volume"); this.shown = false; }
+  private wl(): { win: number; lev: number } {
+    const range = this.zv?.range ?? [0, 1];
+    const win = (this.scalarDisp?.window as number) ?? (range[1] - range[0]);
+    const lev = (this.scalarDisp?.level as number) ?? (range[0] + range[1]) / 2;
+    return { win, lev };
+  }
+  private pushVolume() { if (this.field) this.view?.setVolumeField(this.field, this.wl()); }
+  private reLUT() { if (this.field && this.zv) { this.field.setLUT(this.buildLUT(this.zv.range)); this.view?.redraw(); } }
+
+  private async ensureField(): Promise<void> {
+    if (this.field || this.building || !this.image?.zarr) return;
+    this.building = true;
+    if (!this.zv) this.zv = await fetchZarrVolume(this.blobBaseHref, this.image.zarr as ZarrDesc, this.onBytes);
+    const ijkToRAS = this.image.ijkToRAS as number[];
+    this.field = new ImageField(this.dev, this.zv.data, this.zv.dims, [1, 1, 1], this.buildLUT(this.zv.range), { clim: this.zv.range, ijkToRAS, shade: [0.25, 0.75, 0.5, 24] });
+    this.building = false;
+    this.view?.setVolumeField(this.field, this.wl());   // slices reslice it now; 3D uses it when VR on
   }
 
   // 256-entry rgba8 LUT sampled across the DATA RANGE (clim is fixed to that range).
@@ -277,23 +321,5 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
       lut[i * 4 + 3] = Math.round(Math.max(0, Math.min(1, (g - 0.15) / 0.85)) * 200);
     }
     return lut;
-  }
-
-  private async build(scene: LiveScene): Promise<void> {
-    if (!this.image?.zarr) return;
-    this.building = true;
-    if (!this.zv) this.zv = await fetchZarrVolume(this.blobBaseHref, this.image.zarr as ZarrDesc, this.onBytes);
-    const shade: [number, number, number, number] = [0.25, 0.75, 0.5, 24];
-    const ijkToRAS = this.image.ijkToRAS as number[];
-    this.field = new ImageField(this.dev, this.zv.data, this.zv.dims, [1, 1, 1], this.buildLUT(this.zv.range), { clim: this.zv.range, ijkToRAS, shade });
-    this.building = false;
-    scene.view?.setField("volume", this.field);
-    this.shown = true;
-  }
-
-  private updateLUT(): void {
-    if (!this.field || !this.zv) return;
-    this.field.setLUT(this.buildLUT(this.zv.range));   // in place — fine
-    this.view?.redraw();
   }
 }

@@ -46,6 +46,7 @@ _CLASS_TYPE = {
     "vtkMRMLCameraNode": "camera",
     "vtkMRMLViewNode": "view",
     "vtkMRMLSliceNode": "view",
+    "vtkMRMLLayoutNode": "layout",
 }
 
 
@@ -77,6 +78,11 @@ def _node_event(node):
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._transfer_function_node(node)}
     if t == "markup":
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._markup_node(node, nid)}
+    if t == "layout":
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._layout_node(node, nid)}
+    if t == "view":                              # slice scroll / 3d view changes
+        vn = M._slice_view_node(node, nid) if cls == "vtkMRMLSliceNode" else M._3d_view_node(node, nid)
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": vn}
     return {"event": "Modified", "sourceId": nid}
 
 
