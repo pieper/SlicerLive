@@ -16,7 +16,13 @@
                letter-spacing: .3px; opacity: .85; pointer-events: none; }
   .lab.red { color: #f05a5a; } .lab.yellow { color: #f0d24a; } .lab.green { color: #5ad07a; } .lab.threeD { color: #9fb3d0; }
   #status { position: fixed; top: 6px; left: 10px; font: 12px -apple-system, system-ui, sans-serif;
-            color: #9fb3d0; opacity: .85; pointer-events: none; z-index: 3; }
+            color: #9fb3d0; opacity: .85; z-index: 3; display: flex; align-items: center; gap: 8px; }
+  #status-text { pointer-events: none; }
+  #status-retry { font: 600 11px -apple-system, system-ui, sans-serif; color: #d6e2f2;
+            background: #1b2740; border: 1px solid #33507e; border-radius: 4px; padding: 1px 8px;
+            cursor: pointer; }
+  #status-retry:hover { background: #24365a; }
+  #status.down #status-text { color: #f0b04a; }
 </style>
 </head>
 <body>
@@ -26,7 +32,7 @@
     <div class="cell" id="cell-green"><canvas id="c-green"></canvas><div class="lab green">G · Coronal</div></div>
     <div class="cell" id="cell-threeD"><canvas id="c-threeD"></canvas><div class="lab threeD">3D</div></div>
   </div>
-  <div id="status">loading…</div>
+  <div id="status"><span id="status-text">loading…</span><button id="status-retry" hidden>Try now</button></div>
   <script type="module" src="mirror.js"></script>
 </body>
 </html>

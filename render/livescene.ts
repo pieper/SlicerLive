@@ -17,6 +17,13 @@ import type { MrsonNode } from "./mrson.ts";
 
 export type Vec3 = [number, number, number];
 
+/** Connection state for the UI feedback line. `waiting` carries the backoff countdown target
+ *  (nextRetryAt, ms epoch) and the attempt count so a demo can render "reconnecting in Ns". */
+export type LiveStatus =
+  | { state: "connecting"; attempt: number }
+  | { state: "connected" }
+  | { state: "waiting"; attempt: number; nextRetryAt: number };
+
 /** The renderer surface a displayable manager drives — the SlicerLive analogue of the view
  *  a Slicer displayable manager renders into. Managers ADD/REMOVE fields (coarse -> rebuild)
  *  and REDRAW when a field changed in place (fine), per the event-granularity rule. */
@@ -62,6 +69,17 @@ export class LiveScene {
   view?: MirrorView;                                  // the renderer surface managers drive
   private queue: Promise<void> = Promise.resolve();   // serialize event handling in arrival order
 
+  /** Connection-state feedback (set by the view). Fires on every connect/drop/retry so a demo
+   *  can show a feedback line + a "reconnect now" control. */
+  onStatus?: (s: LiveStatus) => void;
+  // Exponential backoff for event-driven reconnect (no heartbeat): on close/error, retry after
+  // base*factor^attempt ms, capped at max, until the socket re-opens (laptop-sleep resilient).
+  private backoff = { base: 1000, factor: 2, max: 30000 };
+  private attempt = 0;
+  private retryTimer?: ReturnType<typeof setTimeout>;
+  private wantClose = false;                           // true after close() -> stop auto-reconnecting
+  private firstOpen?: () => void;                       // resolves the connect() promise on first open
+
   constructor(
     public wsUrl: string,     // ws://host:2132/
     public httpBase: string,  // http://host:2131/mrson/
@@ -81,19 +99,62 @@ export class LiveScene {
     return type ? this.managers.filter((m) => m.interestedTypes.includes(type)) : [];
   }
 
+  private emit(s: LiveStatus): void { try { this.onStatus?.(s); } catch { /* UI must never break the socket */ } }
+
+  /** Open the live channel and keep it open. Resolves on the FIRST successful connect; after that,
+   *  drops (onclose/onerror — e.g. laptop sleep) trigger an autonomous exponential-backoff reconnect
+   *  that re-subscribes (the server re-sends the snapshot), so the mirror self-heals. Progress is
+   *  reported through onStatus; there is no reject — a down server just keeps retrying. */
   connect(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this.wsUrl);
-      this.ws = ws;
-      ws.onopen = () => { ws.send(JSON.stringify({ op: "subscribe", types: this.types() })); resolve(); };
-      ws.onerror = (e) => reject(e);
-      ws.onmessage = (m) => {
-        const ev = JSON.parse(m.data as string);
-        this.queue = this.queue.then(() => this.handle(ev));   // process in order, never overlapping
-      };
-    });
+    this.wantClose = false;
+    return new Promise((resolve) => { this.firstOpen = resolve; this.dial(); });
   }
-  close(): void { this.ws?.close(); }
+
+  private dial(): void {
+    if (this.wantClose) return;
+    this.emit({ state: "connecting", attempt: this.attempt });
+    let ws: WebSocket;
+    try { ws = new WebSocket(this.wsUrl); } catch { this.scheduleReconnect(); return; }
+    this.ws = ws;
+    ws.onopen = () => {
+      this.attempt = 0;                                          // reset backoff on success
+      ws.send(JSON.stringify({ op: "subscribe", types: this.types() }));
+      this.emit({ state: "connected" });
+      this.firstOpen?.(); this.firstOpen = undefined;
+    };
+    ws.onmessage = (m) => {
+      const ev = JSON.parse(m.data as string);
+      this.queue = this.queue.then(() => this.handle(ev));       // process in order, never overlapping
+    };
+    // A failed/closed socket always ends in onclose (onerror precedes it) — drive reconnect from there.
+    ws.onerror = () => { /* handled by onclose */ };
+    ws.onclose = () => {
+      if (this.ws === ws) this.ws = undefined;
+      this.scheduleReconnect();
+    };
+  }
+
+  private scheduleReconnect(): void {
+    if (this.wantClose || this.retryTimer !== undefined) return;
+    const delay = Math.min(this.backoff.max, this.backoff.base * this.backoff.factor ** this.attempt);
+    this.attempt++;
+    this.emit({ state: "waiting", attempt: this.attempt, nextRetryAt: Date.now() + delay });
+    this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.dial(); }, delay);
+  }
+
+  /** Force an immediate reconnect attempt now (the "Try now" button) — cancels the pending wait.
+   *  Does not reset the backoff, so a repeated failure resumes the same schedule. */
+  reconnectNow(): void {
+    if (this.retryTimer !== undefined) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
+    this.dial();
+  }
+
+  close(): void {
+    this.wantClose = true;
+    if (this.retryTimer !== undefined) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
+    this.ws?.close();
+    this.ws = undefined;
+  }
 
   /** POST mrson ops to Slicer (SlicerLive -> Slicer). Fire-and-forget; the change echoes back
    *  over the live channel as the corresponding node event.

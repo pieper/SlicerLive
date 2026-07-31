@@ -15,6 +15,7 @@ import {
   type CameraState,
   LayoutDisplayableManager,
   LiveScene,
+  type LiveStatus,
   MarkupsDisplayableManager,
   type MirrorView,
   RoiCropDisplayableManager,
@@ -25,7 +26,7 @@ import {
   VolumeRenderingDisplayableManager,
 } from "../livescene.ts";
 
-const status = (m: string) => { const e = document.getElementById("status"); if (e) e.textContent = m; };
+const status = (m: string) => { const e = document.getElementById("status-text"); if (e) e.textContent = m; };
 const el = (id: string) => document.getElementById(id) as HTMLCanvasElement;
 
 const CELLS = ["red", "yellow", "green", "threeD"] as const;
@@ -245,8 +246,35 @@ async function main() {
   };
   cv.threeD.addEventListener("pointerup", endDrag);
   cv.threeD.addEventListener("pointercancel", endDrag);
-  status("connecting to Slicer live channel…");
+  // Connection feedback + Gmail-style reconnect UI. LiveScene reconnects on its own (exponential
+  // backoff) after a drop (e.g. laptop sleep); here we render the state and let "Try now" force it.
+  const retryBtn = document.getElementById("status-retry") as HTMLButtonElement | null;
+  const statusBar = document.getElementById("status");
+  retryBtn?.addEventListener("click", () => live.reconnectNow());
+  let countdown: number | undefined;
+  const stopCountdown = () => { if (countdown !== undefined) { clearInterval(countdown); countdown = undefined; } };
+  const renderStatus = (s: LiveStatus) => {
+    stopCountdown();
+    if (s.state === "connected") {
+      status("mirroring Slicer");
+      statusBar?.classList.remove("down");
+      if (retryBtn) retryBtn.hidden = true;
+    } else if (s.state === "connecting") {
+      status(s.attempt > 0 ? "reconnecting…" : "connecting to Slicer live channel…");
+      statusBar?.classList.toggle("down", s.attempt > 0);
+      if (retryBtn) retryBtn.hidden = true;
+    } else {   // waiting — count down to the next automatic retry
+      statusBar?.classList.add("down");
+      if (retryBtn) retryBtn.hidden = false;
+      const tick = () => {
+        const secs = Math.max(0, Math.ceil((s.nextRetryAt - Date.now()) / 1000));
+        status(`connection lost — reconnecting in ${secs}s`);
+      };
+      tick();
+      countdown = setInterval(tick, 500) as unknown as number;
+    }
+  };
+  live.onStatus = renderStatus;
   await live.connect();
-  status("subscribed — mirroring Slicer");
 }
 main();
