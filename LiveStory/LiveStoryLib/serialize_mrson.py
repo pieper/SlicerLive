@@ -131,14 +131,34 @@ def _markup_node(n, node_id):
         p = [0.0, 0.0, 0.0]
         n.GetNthControlPointPositionWorld(i, p)
         pts.append({"label": n.GetNthControlPointLabel(i), "position": [p[0], p[1], p[2]], "selected": True})
+    import vtk
+    cls = n.GetClassName()
     mtype = {"vtkMRMLMarkupsFiducialNode": "fiducial", "vtkMRMLMarkupsLineNode": "line",
-             "vtkMRMLMarkupsCurveNode": "curve", "vtkMRMLMarkupsPlaneNode": "plane",
-             "vtkMRMLMarkupsROINode": "roi"}.get(n.GetClassName(), "fiducial")
+             "vtkMRMLMarkupsAngleNode": "angle", "vtkMRMLMarkupsCurveNode": "curve",
+             "vtkMRMLMarkupsClosedCurveNode": "closedCurve", "vtkMRMLMarkupsPlaneNode": "plane",
+             "vtkMRMLMarkupsROINode": "roi"}.get(cls, "fiducial")
     node = {
         "type": "markup", "id": node_id, "name": n.GetName(), "frame": "RAS",
         "markupType": mtype, "controlPoints": pts,
-        "refs": {}, "source": {"mrmlClass": n.GetClassName()},
+        "refs": {}, "source": {"mrmlClass": cls},
     }
+    if "Curve" in cls:                       # open/closed curve: the interpolated world polyline
+        try:
+            cp = n.GetCurvePointsWorld()
+            if cp is not None:
+                m = cp.GetNumberOfPoints()
+                step = max(1, m // 200)      # downsample to keep the segment count bounded
+                node["linePoints"] = [list(cp.GetPoint(i)) for i in range(0, m, step)]
+                node["closed"] = (cls == "vtkMRMLMarkupsClosedCurveNode")
+        except Exception:  # noqa: BLE001
+            pass
+    if cls == "vtkMRMLMarkupsPlaneNode":     # plane border: 4 world corners
+        try:
+            cor = vtk.vtkPoints()
+            n.GetPlaneCornerPointsWorld(cor)
+            node["corners"] = [list(cor.GetPoint(i)) for i in range(cor.GetNumberOfPoints())]
+        except Exception:  # noqa: BLE001
+            pass
     if n.GetClassName() == "vtkMRMLMarkupsROINode":   # ROI box (RAS): center + full size
         c = [0.0, 0.0, 0.0]
         n.GetCenterWorld(c)
@@ -149,7 +169,85 @@ def _markup_node(n, node_id):
             s = list(n.GetSize())      # 0-arg return (local extents)
         node["center"] = list(c)
         node["size"] = list(s)
+    dn = n.GetDisplayNode()
+    if dn is not None:
+        sc = dn.GetSelectedColor()     # colour of selected control points (Slicer's default markup look)
+        node["color"] = [sc[0], sc[1], sc[2], 1.0]
+        node["visible"] = bool(dn.GetVisibility())
+        node["glyphScale"] = float(dn.GetGlyphScale())
     return node
+
+
+def _segmentation_node(seg, node_id, blobdir):
+    """vtkMRMLSegmentationNode -> mrson `segmentation` node: the merged binary labelmap as a
+    content-addressed zarr blob + per-segment {labelValue, color}. Volume-based only (no surface)."""
+    import vtk
+    lm = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
+    slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(
+        seg, lm, slicer.vtkSegmentation.EXTENT_REFERENCE_GEOMETRY)
+    zarr = _zarr_desc(lm, node_id, blobdir)          # content-hashed labelmap chunks
+    arr = slicer.util.arrayFromVolume(lm)
+    m = vtk.vtkMatrix4x4()
+    lm.GetIJKToRASMatrix(m)
+    segn = seg.GetSegmentation()
+    segments = []
+    for i in range(segn.GetNumberOfSegments()):
+        sid = segn.GetNthSegmentID(i)
+        s = segn.GetSegment(sid)
+        c = s.GetColor()
+        segments.append({"id": sid, "name": s.GetName(), "labelValue": int(s.GetLabelValue()),
+                         "color": [c[0], c[1], c[2], 1.0]})
+    slicer.mrmlScene.RemoveNode(lm)
+    node = {
+        "type": "segmentation", "id": node_id, "name": seg.GetName(), "frame": "RAS",
+        "segments": segments,
+        "dims": [int(arr.shape[2]), int(arr.shape[1]), int(arr.shape[0])],
+        "ijkToRAS": [m.GetElement(r, c) for r in range(4) for c in range(4)],
+        "zarr": zarr, "refs": {}, "source": {"mrmlClass": seg.GetClassName()},
+    }
+    dn = seg.GetDisplayNode()
+    if dn is not None:
+        node["visible"] = bool(dn.GetVisibility())
+        node["opacity"] = float(dn.GetOpacity())
+        # 2D slice display: independent fill + outline visibility/opacity (Slicer's defaults
+        # are fill 0.5 + outline 1.0, both visible) — SlicerLive mirrors these per-slice.
+        node["fill2D"] = {"visible": bool(dn.GetVisibility2DFill()), "opacity": float(dn.GetOpacity2DFill())}
+        node["outline2D"] = {"visible": bool(dn.GetVisibility2DOutline()), "opacity": float(dn.GetOpacity2DOutline())}
+    return node
+
+
+def _segmentation_display_event(seg):
+    """A LIGHT display-only mrson event for a segmentation (no zarr re-export): overall
+    visibility/opacity + 2D fill/outline settings + per-segment {labelValue, color, visible}.
+    Emitted when the segmentation or its display node is modified so SlicerLive updates the
+    slice fill/outline + 3D field in place (re-baking only if a colour / segment visibility
+    actually changed). sourceId is the SEGMENTATION node id (the client keys display on it)."""
+    dn = seg.GetDisplayNode()
+    disp = {
+        "visible": True, "opacity": 1.0,
+        "fill2D": {"visible": True, "opacity": 0.5},
+        "outline2D": {"visible": True, "opacity": 1.0},
+        "segments": [],
+    }
+    if dn is not None:
+        disp["visible"] = bool(dn.GetVisibility())
+        disp["opacity"] = float(dn.GetOpacity())
+        disp["fill2D"] = {"visible": bool(dn.GetVisibility2DFill()), "opacity": float(dn.GetOpacity2DFill())}
+        disp["outline2D"] = {"visible": bool(dn.GetVisibility2DOutline()), "opacity": float(dn.GetOpacity2DOutline())}
+    segn = seg.GetSegmentation()
+    for i in range(segn.GetNumberOfSegments()):
+        sid = segn.GetNthSegmentID(i)
+        s = segn.GetSegment(sid)
+        c = s.GetColor()
+        vis = True
+        if dn is not None:
+            try:
+                vis = bool(dn.GetSegmentVisibility(sid))
+            except Exception:  # noqa: BLE001
+                vis = True
+        disp["segments"].append({"labelValue": int(s.GetLabelValue()),
+                                 "color": [c[0], c[1], c[2], 1.0], "visible": vis})
+    return {"event": "SegmentationDisplayModified", "sourceId": seg.GetID(), "display": disp}
 
 
 def _camera_node(n, node_id):
@@ -189,7 +287,9 @@ def _3d_view_node(n, node_id):
     node = {"type": "view", "id": node_id, "name": n.GetName(), "kind": "3d",
             "layoutName": n.GetLayoutName(), "refs": {}, "source": {"mrmlClass": n.GetClassName()}}
     for cam in slicer.util.getNodesByClass("vtkMRMLCameraNode"):
-        if cam.GetActiveTag() == n.GetID():
+        # match camera->view by layout name (GetActiveTag() is deprecated and, being a
+        # vtkDeprecation warning, prints to the Python console on EVERY call → main-thread repaint)
+        if cam.GetLayoutName() == n.GetLayoutName():
             node["refs"]["camera"] = [cam.GetID()]
     return node
 
@@ -229,7 +329,10 @@ def serialize_mrson(outdir, name):
             except Exception as e:  # noqa: BLE001
                 print(f"mrson: skipped mesh {m.GetID()}: {e}")
 
-    for cls in ("vtkMRMLMarkupsFiducialNode", "vtkMRMLMarkupsLineNode", "vtkMRMLMarkupsCurveNode", "vtkMRMLMarkupsROINode"):
+    # CurveNode also returns ClosedCurve (subclass); Angle + Plane are separate roots. The
+    # `id in nodes` guard below dedups any overlap.
+    for cls in ("vtkMRMLMarkupsFiducialNode", "vtkMRMLMarkupsLineNode", "vtkMRMLMarkupsAngleNode",
+                "vtkMRMLMarkupsCurveNode", "vtkMRMLMarkupsPlaneNode", "vtkMRMLMarkupsROINode"):
         for mk in slicer.util.getNodesByClass(cls):
             if mk.GetID() in nodes:
                 continue
@@ -237,6 +340,14 @@ def serialize_mrson(outdir, name):
                 _add_displayable(nodes, mk, _markup_node, mk.GetID())
             except Exception as e:  # noqa: BLE001
                 print(f"mrson: skipped markup {mk.GetID()}: {e}")
+
+    for seg in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+        if seg.GetID() in nodes:
+            continue
+        try:
+            nodes[seg.GetID()] = _segmentation_node(seg, seg.GetID(), blobdir)
+        except Exception as e:  # noqa: BLE001
+            print(f"mrson: skipped segmentation {seg.GetID()}: {e}")
 
     simple = [("vtkMRMLLayoutNode", _layout_node), ("vtkMRMLCameraNode", _camera_node),
               ("vtkMRMLSliceNode", _slice_view_node), ("vtkMRMLViewNode", _3d_view_node)]

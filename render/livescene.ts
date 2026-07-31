@@ -7,8 +7,10 @@
 //
 // Same code runs in the browser and in Deno (both have global WebSocket + fetch).
 
-import { type Field, ImageField } from "./fields.ts";
+import { type Field, ImageField, RGBAVolumeField } from "./fields.ts";
 import { FiducialField, type Sphere } from "./fiducial-field.ts";
+import { CapsuleField, type Segment as LineSegment } from "./capsule-field.ts";
+import { ColorizeBaker } from "./bake.ts";
 import { fetchZarrVolume, type ZarrDesc, type ZarrVolume } from "./zarr.ts";
 import { lutFromTransferFunctions } from "./scene-volume.ts";
 import type { MrsonNode } from "./mrson.ts";
@@ -18,7 +20,16 @@ export type Vec3 = [number, number, number];
 /** The renderer surface a displayable manager drives — the SlicerLive analogue of the view
  *  a Slicer displayable manager renders into. Managers ADD/REMOVE fields (coarse -> rebuild)
  *  and REDRAW when a field changed in place (fine), per the event-granularity rule. */
-export interface SlicePlane { orient: "axial" | "coronal" | "sagittal"; posMm: number }
+export interface SlicePlane {
+  orient: "axial" | "coronal" | "sagittal";
+  posMm: number;
+  // Slicer's in-plane navigation, mirrored: the slice centre (RAS) + field of view (mm).
+  // Present when the slice node carries them → the view matches Slicer's pan + zoom; absent →
+  // the fitted (FitSliceToBackground) view.
+  centerRAS?: number[];
+  fovX?: number;
+  fovY?: number;
+}
 
 export interface MirrorView {
   setField(key: string, field: Field): void;   // add or replace a 3D field -> rebuild
@@ -32,6 +43,9 @@ export interface MirrorView {
   // slice/MPR views and layout
   setSlicePlane(cell: string, plane: SlicePlane): void;
   setLayout(name: string): void;
+  // segmentation: a crisp labelmap overlay for the slice views (fill + boundary outline,
+  // each with its own opacity — mirrors Slicer's 2D fill/outline display settings)
+  setSegmentationOverlay(tex: GPUTexture | null, fillOpacity: number, outlineOpacity: number): void;
 }
 
 export interface DisplayableManager {
@@ -81,6 +95,28 @@ export class LiveScene {
   }
   close(): void { this.ws?.close(); }
 
+  /** POST mrson ops to Slicer (SlicerLive -> Slicer). Fire-and-forget; the change echoes back
+   *  over the live channel as the corresponding node event.
+   *
+   *  No Content-Type header on purpose: it keeps this a CORS "simple request" (fetch defaults to
+   *  text/plain), avoiding a preflight — the core WebServer's CORS only allows the `Accept` request
+   *  header, so an application/json preflight would be blocked. The server parses the body as JSON
+   *  regardless of content-type. */
+  async postOps(ops: unknown[]): Promise<void> {
+    try {
+      await fetch(new URL("ops", this.httpBase).href, { method: "POST", body: JSON.stringify(ops) });
+    } catch { /* ignore — best-effort */ }
+  }
+
+  /** Send ops over the LIVE WebSocket (the unified control channel) — preferred over postOps: one
+   *  ordered low-overhead channel, no per-op HTTP/CORS/Content-Length fragility. The server applies
+   *  and echoes the change back as a normal node event; an OpAck (with apply timing) also returns. */
+  private opTag = 0;
+  sendOps(ops: unknown[]): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ op: "applyOps", ops, tag: ++this.opTag }));
+  }
+
   private async handle(ev: Record<string, unknown>): Promise<void> {
     const e = ev.event as string;
     if (e === "NodeAdded" && ev.node) {
@@ -129,39 +165,117 @@ export class CameraDisplayableManager implements DisplayableManager {
 /** Mirrors Markups point lists (fiducials/lines/curves) as rendered glyphs. Aggregates the
  *  control points of every markup node into one FiducialField; adds it once (coarse) and
  *  updates points in place (fine) on live moves. ROI markups are handled by RoiCropDM. */
+/** A draggable control-point handle: which markup + control-point index, and its current RAS. */
+export interface MarkupHandle { id: string; index: number; ras: Vec3 }
+
 export class MarkupsDisplayableManager implements DisplayableManager {
   interestedTypes = ["markup"];
-  private points = new Map<string, Sphere[]>();  // markup id -> its glyphs
-  private field?: FiducialField;
+  private nodes = new Map<string, MrsonNode>();  // markup id -> its full node (points + geometry)
+  private field?: FiducialField;                 // control-point glyphs (all markup types)
+  private lines?: CapsuleField;                  // connectors: line/angle/curve/plane geometry
 
   private spheresFor(node: MrsonNode): Sphere[] {
     const col = (node.color as number[]) ?? [1, 0.85, 0.2, 1];
     const cps = (node.controlPoints as { position: number[] }[] | undefined) ?? [];
     return cps.map((cp) => ({ center: cp.position as Vec3, radius: 9, color: [col[0], col[1], col[2], 1] }));
   }
+  /** Per-type connector geometry: line/angle connect consecutive control points; curve/closedCurve
+   *  use Slicer's interpolated world polyline (closedCurve wraps); plane uses its 4 world corners. */
+  private segmentsFor(node: MrsonNode): LineSegment[] {
+    const t = node.markupType as string;
+    const col = (node.color as number[]) ?? [1, 0.85, 0.2, 1];
+    const c: [number, number, number, number] = [col[0], col[1], col[2], 1];
+    const cps = ((node.controlPoints as { position: number[] }[] | undefined) ?? []).map((p) => p.position as Vec3);
+    let pts: Vec3[] = [];
+    let closed = false;
+    if (t === "line" || t === "angle") pts = cps;
+    else if (t === "curve") pts = (node.linePoints as Vec3[] | undefined) ?? cps;
+    else if (t === "closedCurve") { pts = (node.linePoints as Vec3[] | undefined) ?? cps; closed = true; }
+    else if (t === "plane") { pts = (node.corners as Vec3[] | undefined) ?? []; closed = true; }
+    else return [];   // fiducial (points only), roi (RoiCropDM)
+    const segs: LineSegment[] = [];
+    for (let i = 0; i + 1 < pts.length; i++) segs.push({ a: pts[i], b: pts[i + 1], radius: 3, color: c });
+    if (closed && pts.length > 2) segs.push({ a: pts[pts.length - 1], b: pts[0], radius: 3, color: c });
+    return segs;
+  }
   private allSpheres(): Sphere[] {
     const out: Sphere[] = [];
-    for (const s of this.points.values()) out.push(...s);
+    for (const n of this.nodes.values()) out.push(...this.spheresFor(n));
     return out;
+  }
+  private allSegments(): LineSegment[] {
+    const out: LineSegment[] = [];
+    for (const n of this.nodes.values()) out.push(...this.segmentsFor(n));
+    return out;
+  }
+  private refresh(scene: LiveScene, first = false) {
+    if (!this.field) this.field = new FiducialField(this.allSpheres(), { screenSpace: true, ghost: true, shininess: 60 });
+    else this.field.setSpheres(this.allSpheres());          // in place
+    if (!this.lines) this.lines = new CapsuleField(this.allSegments(), { screenSpace: true, ghost: true });
+    else this.lines.setSegments(this.allSegments());
+    if (first) {
+      scene.view?.setField("markups", this.field);           // coarse add once
+      scene.view?.setField("markupLines", this.lines);
+    } else scene.view?.redraw();
+  }
+
+  /** Every draggable control point, in the same order allSpheres() lays them out. */
+  handles(): MarkupHandle[] {
+    const out: MarkupHandle[] = [];
+    for (const n of this.nodes.values()) {
+      const cps = (n.controlPoints as { position: number[] }[] | undefined) ?? [];
+      cps.forEach((cp, index) => out.push({ id: n.id, index, ras: cp.position as Vec3 }));
+    }
+    return out;
+  }
+
+  /** Optimistic local move of one control point (SlicerLive drag), before Slicer echoes it back.
+   *  Keeps the glyph under the cursor with zero round-trip latency. */
+  moveLocal(id: string, index: number, ras: Vec3, scene: LiveScene) {
+    const n = this.nodes.get(id);
+    const cps = n?.controlPoints as { position: number[] }[] | undefined;
+    if (!cps || !cps[index]) return;
+    cps[index].position = [...ras];
+    this.refresh(scene);
+  }
+
+  // ORIGIN / echo suppression: while the user drags a control point locally, that point is the
+  // authoritative source — suppress the (stale) echo of our OWN move so it can't rubber-band the
+  // glyph. AUTO-EXPIRING (a deadline, not a sticky flag): `touch()` on every drag frame extends the
+  // window; it lapses ~holdMs after the last move, so a drag that never cleanly releases (pointer
+  // left the canvas, JS error) can NEVER permanently freeze a markup's sync. The final flushed op's
+  // echo (arriving well within holdMs) then re-syncs to the same value → no jump.
+  private heldUntil = new Map<string, number>();   // "id:index" -> perf.now() deadline
+  touch(id: string, index: number, holdMs = 250) { this.heldUntil.set(id + ":" + index, performance.now() + holdMs); }
+  private isHeld(id: string): boolean {
+    const now = performance.now();
+    let held = false;
+    for (const [k, t] of this.heldUntil) {
+      if (t <= now) { this.heldUntil.delete(k); continue; }
+      if (k.startsWith(id + ":")) held = true;
+    }
+    return held;
   }
 
   onNodeAdded(node: MrsonNode, scene: LiveScene) {
     if (node.markupType === "roi") return;                 // ROI crop is RoiCropDM's job
+    if (node.visible === false) { this.onNodeRemoved(node.id, scene); return; }
+    if (this.isHeld(node.id)) return;                      // keep the local optimistic drag state
     const first = !this.field;
-    this.points.set(node.id, this.spheresFor(node));
-    if (!this.field) this.field = new FiducialField(this.allSpheres(), { screenSpace: true, ghost: true, shininess: 60 });
-    else this.field.setSpheres(this.allSpheres());          // in place (fine)
-    if (first) scene.view?.setField("markups", this.field); // add once (coarse -> rebuild)
-    else scene.view?.redraw();
+    this.nodes.set(node.id, node);
+    this.refresh(scene, first);
   }
   onNodeRemoved(id: string, scene: LiveScene) {
-    if (!this.points.delete(id) || !this.field) return;
+    if (!this.nodes.delete(id) || !this.field) return;
     this.field.setSpheres(this.allSpheres());
+    this.lines?.setSegments(this.allSegments());
     scene.view?.redraw();
   }
   onSceneClosed(scene: LiveScene) {
-    this.points.clear();
+    this.nodes.clear();
     this.field = undefined;
+    this.lines = undefined;
+    scene.view?.removeField("markupLines");
     scene.view?.removeField("markups");
   }
 }
@@ -221,9 +335,14 @@ export class SliceDisplayableManager implements DisplayableManager {
     const cell = SliceDisplayableManager.CELL[node.layoutName as string];
     const m = node.sliceToRAS as number[] | undefined;
     if (!orient || !cell || !m) return;
-    const trans: Vec3 = [m[3], m[7], m[11]];   // slice origin in RAS
+    const trans: Vec3 = [m[3], m[7], m[11]];   // slice centre in RAS (in-plane pan + out-of-plane offset)
     const axis = orient === "axial" ? 2 : orient === "coronal" ? 1 : 0;
-    scene.view?.setSlicePlane(cell, { orient, posMm: trans[axis] });
+    const plane: SlicePlane = { orient, posMm: trans[axis] };
+    const fov = node.fieldOfView as number[] | undefined;   // [fovX, fovY, slabThickness] mm — Slicer's zoom
+    if (fov && fov.length >= 2 && fov[0] > 0 && fov[1] > 0) {
+      plane.centerRAS = trans; plane.fovX = fov[0]; plane.fovY = fov[1];
+    }
+    scene.view?.setSlicePlane(cell, plane);
   }
 }
 
@@ -232,6 +351,126 @@ export class LayoutDisplayableManager implements DisplayableManager {
   interestedTypes = ["layout"];
   onNodeAdded(node: MrsonNode, scene: LiveScene) {
     if (node.type === "layout") scene.view?.setLayout((node.arrangementName as string) ?? "fourUp");
+  }
+}
+
+/** Mirrors a volume-based segmentation (labelmap; no surface). Fetches the content-addressed
+ *  labelmap, colorizes it with the per-segment palette, sets it as the slice overlay, and adds
+ *  a colorized RGBAVolumeField to the 3D view. `sigma` controls the bake smoothing — 0 gives a
+ *  crisp (nearest-like) labelmap, matching Slicer's slice display. */
+/** Effective [fill, outline] slice opacities from a segmentation node's 2D display settings,
+ *  gated by overall visibility — mirrors Slicer's Opacity * {Opacity2DFill, Opacity2DOutline}
+ *  with the Visibility2D{Fill,Outline} toggles. Defaults match Slicer (fill 0.5, outline 1.0). */
+function slice2DOpacities(node: MrsonNode, visible: boolean): [number, number] {
+  if (!visible) return [0, 0];
+  const overall = typeof node.opacity === "number" ? node.opacity : 1;
+  const f = node.fill2D as { visible?: boolean; opacity?: number } | undefined;
+  const o = node.outline2D as { visible?: boolean; opacity?: number } | undefined;
+  const fill = (f?.visible ?? true) ? overall * (f?.opacity ?? 0.5) : 0;
+  const outline = (o?.visible ?? true) ? overall * (o?.opacity ?? 1) : 0;
+  return [fill, outline];
+}
+
+type Segment = { labelValue: number; color: number[]; visible?: boolean };
+
+/** 256-entry RGBA palette from the per-segment colours; a hidden segment (visible === false)
+ *  gets alpha 0 so it drops out of both the fill and the 3D field. */
+function segPalette(segments: Segment[]): Float32Array {
+  const p = new Float32Array(256 * 4);
+  for (const s of segments ?? []) {
+    const lv = s.labelValue;
+    if (lv > 0 && lv < 256 && s.visible !== false) { p[lv * 4] = s.color[0]; p[lv * 4 + 1] = s.color[1]; p[lv * 4 + 2] = s.color[2]; p[lv * 4 + 3] = 1; }
+  }
+  return p;
+}
+/** Stable key over the colours + per-segment visibility — changes only when a re-bake is needed. */
+function paletteKey(segments: Segment[]): string {
+  return (segments ?? []).map((s) => `${s.labelValue}:${s.color.map((x) => x.toFixed(3)).join(",")}:${s.visible !== false}`).join("|");
+}
+
+export class SegmentationDisplayableManager implements DisplayableManager {
+  interestedTypes = ["segmentation"];
+  private baker?: ColorizeBaker;     // resident: labelmap uploaded once, re-colorized in place
+  private overlayTex?: GPUTexture;   // crisp (σ=0) — 2D slice overlay (reused every re-bake)
+  private volTex?: GPUTexture;       // smoothed (σ) — 3D colorized field (reused every re-bake)
+  private field?: RGBAVolumeField;
+  private segId?: string;
+  private blobBaseHref = "";
+  private dims?: Vec3;
+  private ijkToRAS?: number[];
+  private palKey = "";
+  private added = false;             // is the 3D field currently in the view?
+
+  constructor(private dev: GPUDevice, private sigma = 1.5, private onBytes?: (n: number) => void) {}
+
+  async onNodeAdded(node: MrsonNode, scene: LiveScene): Promise<void> {
+    if (node.type !== "segmentation" || !node.zarr || this.baker) return;
+    this.blobBaseHref = scene.blobBase();
+    this.segId = node.id;
+    const zv = await fetchZarrVolume(this.blobBaseHref, node.zarr as ZarrDesc, this.onBytes);
+    const lab = Uint8Array.from(zv.data);   // labels back to u8
+    this.dims = zv.dims;
+    this.ijkToRAS = node.ijkToRAS as number[];
+    // upload the labelmap to the GPU ONCE; every later display change re-colorizes in place
+    this.baker = new ColorizeBaker(this.dev, lab, zv.dims);
+    this.overlayTex = this.baker.output();
+    this.volTex = this.baker.output();
+    const segments = (node.segments as Segment[]) ?? [];
+    this.palKey = paletteKey(segments);
+    this.recolorize(segPalette(segments));
+    this.field = new RGBAVolumeField(this.volTex, zv.dims, [1, 1, 1], { ijkToRAS: this.ijkToRAS, shade: [0.3, 0.78, 0.5, 28], clippable: false });
+    this.apply(node, scene);
+  }
+
+  /** Live display change (opacity/visibility/colour). Re-colorize IN PLACE only when the palette
+   *  (colour or per-segment visibility) changed — the bulk labelmap is never re-fetched or
+   *  re-uploaded, and the output textures are reused, so the 3D field + slice bind stay valid
+   *  (a redraw suffices). Opacity-only changes skip the bake entirely. */
+  onEvent(ev: Record<string, unknown>, scene: LiveScene) {
+    if (ev.event !== "SegmentationDisplayModified" || ev.sourceId !== this.segId || !this.baker) return;
+    const d = ev.display as MrsonNode & { segments?: Segment[] };
+    const key = paletteKey(d.segments ?? []);
+    if (key !== this.palKey) { this.palKey = key; this.recolorize(segPalette(d.segments ?? [])); }
+    this.apply(d, scene);
+  }
+
+  /** Push current visibility/opacity to the view. The output textures are stable objects, so an
+   *  in-place re-colorize needs only a redraw (no setField / scene rebuild); visibility flips add
+   *  or remove the 3D field. */
+  private apply(disp: MrsonNode, scene: LiveScene) {
+    const visible = disp.visible !== false;
+    const [fill, outline] = slice2DOpacities(disp, visible);
+    scene.view?.setSegmentationOverlay(visible ? this.overlayTex! : null, fill, outline);
+    if (visible) {
+      if (!this.added) { scene.view?.setField("seg:" + this.segId, this.field!); this.added = true; }
+      else scene.view?.redraw();   // texture content changed in place — just re-render
+    } else if (this.added) {
+      scene.view?.removeField("seg:" + this.segId!); this.added = false;
+    }
+  }
+
+  /** Re-colorize the crisp slice overlay (σ=0) + smoothed 3D field (σ) into the resident output
+   *  textures from a palette — reuses the baker's uploaded labelmap, pipelines, and scratch. */
+  private recolorize(palette: Float32Array) {
+    this.baker!.bakeInto(this.overlayTex!, palette, 0);
+    this.baker!.bakeInto(this.volTex!, palette, this.sigma);
+  }
+
+  onNodeRemoved(id: string, scene: LiveScene) { if (id === this.segId) this.reset(scene); }
+  onSceneClosed(scene: LiveScene) { this.reset(scene); }
+  private reset(scene: LiveScene) {
+    if (this.added && this.segId) scene.view?.removeField("seg:" + this.segId);
+    scene.view?.setSegmentationOverlay(null, 0, 0);
+    this.baker?.destroy();
+    this.overlayTex?.destroy();
+    this.volTex?.destroy();
+    this.baker = undefined;
+    this.overlayTex = undefined;
+    this.volTex = undefined;
+    this.field = undefined;
+    this.segId = undefined;
+    this.added = false;
+    this.palKey = "";
   }
 }
 

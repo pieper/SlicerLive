@@ -150,6 +150,36 @@ export class VtkCamera {
     this.translate(motion);
   }
 
+  /** Project a world (RAS) point to display pixels (y DOWN, origin top-left) for a w×h viewport.
+   *  Vertical-FOV perspective matching SceneRenderer.setCamera (perspectiveZO(fovy, w/h)). `depth`
+   *  is the distance along the view direction (>0 in front of the camera). Used to hit-test
+   *  screen-space markup glyphs. */
+  worldToDisplay(p: Vec3, w: number, h: number): { x: number; y: number; depth: number } {
+    const { right, up } = this.basis();
+    const dop = this.directionOfProjection;
+    const rel = sub(p, this.position);
+    const depth = dot(rel, dop);
+    const halfH = Math.max(1e-6, depth) * Math.tan((this.viewAngle * Math.PI) / 360);
+    const aspect = w / h;
+    const ndcx = dot(rel, right) / (halfH * aspect);
+    const ndcy = dot(rel, up) / halfH;
+    return { x: (ndcx * 0.5 + 0.5) * w, y: (0.5 - ndcy * 0.5) * h, depth };
+  }
+
+  /** Inverse of worldToDisplay at a FIXED view-depth: the world point under display pixel (x,y)
+   *  lying in the plane perpendicular to the view at `depth`. Dragging a 3D handle in this plane
+   *  keeps its distance from the camera, so it tracks the cursor without depth ambiguity. */
+  displayToWorldAtDepth(x: number, y: number, depth: number, w: number, h: number): Vec3 {
+    const { right, up } = this.basis();
+    const dop = this.directionOfProjection;
+    const halfH = Math.max(1e-6, depth) * Math.tan((this.viewAngle * Math.PI) / 360);
+    const aspect = w / h;
+    const ndcx = (x / w) * 2 - 1;
+    const ndcy = 1 - (y / h) * 2;
+    const offset = add(scale(right, ndcx * halfH * aspect), scale(up, ndcy * halfH));
+    return add(add(this.position, scale(dop, depth)), offset);
+  }
+
   /** vtkCamera-comparable snapshot for the harness. */
   state() {
     return {

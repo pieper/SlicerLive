@@ -1,6 +1,8 @@
 node_modules/
 *-bundle.js
 bundle.js
+render/demos/*.js
+.mcp.json
 _*.png
 .DS_Store
 mrhead/

@@ -21,9 +21,12 @@ export class BudgetController {
 
   constructor(opts: BudgetOpts = {}) {
     this.targetMs = opts.targetMs ?? 16;
-    this.minPx = opts.minPx ?? 0.15e6;
+    // Floor low enough that even a SMALL viewport can downscale under load: a heavy DVR in a
+    // 0.27MP cell must be allowed to drop below native to hit targetMs. Start modest so the first
+    // interaction frame isn't a full-res hitch; the controller ramps back up when there's headroom.
+    this.minPx = opts.minPx ?? 0.03e6;
     this.maxPx = opts.maxPx ?? 8e6;
-    this.budgetPx = opts.startPx ?? 1.2e6;
+    this.budgetPx = opts.startPx ?? 0.35e6;
   }
 
   /** Nudge the budget toward hitting targetMs. Multiplicative, clamped per step (0.8–1.25×) so the
@@ -32,7 +35,7 @@ export class BudgetController {
     if (!(measuredMs > 0) || !Number.isFinite(measuredMs)) return;
     // Asymmetric: shrink faster than we grow, so a heavy scene drops to an interactive resolution
     // within a few frames (engagement latency), then eases back up gently when there's headroom.
-    const adj = Math.max(0.6, Math.min(1.2, this.targetMs / measuredMs));
+    const adj = Math.max(0.35, Math.min(1.2, this.targetMs / measuredMs));
     this.budgetPx = Math.max(this.minPx, Math.min(this.maxPx, this.budgetPx * adj));
   }
 

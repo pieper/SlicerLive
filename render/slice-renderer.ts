@@ -23,13 +23,14 @@ struct U {
   origin : vec4<f32>,    // RAS of the plane center (for the current scrub offset)
   uvec : vec4<f32>,      // RAS vector spanning the view width  (isotropic mm)
   vvec : vec4<f32>,      // RAS vector spanning the view height (isotropic mm)
-  params : vec4<f32>,    // win, lev, overlayOpacity, outlineMode(0/1)
+  params : vec4<f32>,    // win, lev, fillOpacity, outlineOpacity
   size : vec4<f32>,      // sizeX, sizeY, _, _
 };
 @group(0) @binding(0) var<uniform> u : U;
 @group(0) @binding(1) var s_lin : sampler;
 @group(0) @binding(2) var t_scalar : texture_3d<f32>;
 @group(0) @binding(3) var t_overlay : texture_3d<f32>;
+@group(0) @binding(4) var s_nn : sampler;   // NEAREST — labelmap overlay is per-voxel crisp (matches Slicer)
 
 struct V { @builtin(position) position : vec4<f32> };
 @vertex
@@ -45,7 +46,7 @@ fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
 fn ov_at(ras : vec3<f32>) -> vec4<f32> {   // overlay at a RAS point (0 outside the volume)
   let t = (u.p2t * vec4<f32>(ras, 1.0)).xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
-  return textureSampleLevel(t_overlay, s_lin, t, 0.0);
+  return textureSampleLevel(t_overlay, s_nn, t, 0.0);
 }
 @fragment
 fn fs_main(v : V) -> @location(0) vec4<f32> {
@@ -58,17 +59,23 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
   let win = max(u.params.x, 1e-6);
   let g = clamp((val - (u.params.y - win * 0.5)) / win, 0.0, 1.0);
   var col = vec3<f32>(g);
-  let ov = textureSampleLevel(t_overlay, s_lin, tex, 0.0);
-  var ovA = clamp(ov.a * u.params.z, 0.0, 1.0);
-  if (u.params.w > 0.5) {   // OUTLINE mode: keep the overlay only at segment boundaries (screen-space)
+  let ov = textureSampleLevel(t_overlay, s_nn, tex, 0.0);
+  // Slicer-style 2D segmentation: a semi-transparent per-voxel FILL plus a brighter boundary
+  // OUTLINE, with independent opacities (params.z = fill, params.w = outline). The outline is
+  // screen-space (constant pixel width under zoom), drawn in the segment's own colour along its
+  // inner edge — at both label↔label and label↔background boundaries.
+  let fillA = clamp(ov.a * u.params.z, 0.0, 1.0);
+  var outA = 0.0;
+  if (u.params.w > 0.0) {
     let du = u.uvec.xyz / u.size.x * 1.5;   // ~1.5 px right, in RAS
     let dv = u.vvec.xyz / u.size.y * 1.5;   // ~1.5 px up
     let n0 = ov_at(ras + du); let n1 = ov_at(ras - du); let n2 = ov_at(ras + dv); let n3 = ov_at(ras - dv);
     let e = max(max(distance(n0.rgb, ov.rgb) + abs(n0.a - ov.a), distance(n1.rgb, ov.rgb) + abs(n1.a - ov.a)),
                 max(distance(n2.rgb, ov.rgb) + abs(n2.a - ov.a), distance(n3.rgb, ov.rgb) + abs(n3.a - ov.a)));
-    ovA = ovA * clamp((e - 0.03) * 12.0, 0.0, 1.0);   // 0 in the interior, full at a colour/label edge
+    let edge = clamp((e - 0.03) * 12.0, 0.0, 1.0);   // 0 in the interior, 1 at a colour/label edge
+    outA = clamp(ov.a * u.params.w * edge, 0.0, 1.0);
   }
-  col = mix(col, ov.rgb, ovA);
+  col = mix(col, ov.rgb, max(fillA, outA));
   return vec4<f32>(srgb2physical(col), 1.0);
 }
 `;
@@ -128,6 +135,7 @@ export class SliceRenderer {
   private format: GPUTextureFormat;
   private pipeline: GPURenderPipeline;
   private sampler: GPUSampler;
+  private nnSampler: GPUSampler;
   private ubuf: GPUBuffer;
   private u = new Float32Array(36);  // p2t(16) + origin(4) + uvec(4) + vvec(4) + params(4) + size(4)
   private bind?: GPUBindGroup;
@@ -163,6 +171,7 @@ export class SliceRenderer {
       primitive: { topology: "triangle-list", cullMode: "none" },
     });
     this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
+    this.nnSampler = this.dev.createSampler({ magFilter: "nearest", minFilter: "nearest", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
     this.ubuf = this.dev.createBuffer({ size: this.u.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setWindowLevel(255, 127);
     this.setOverlayOpacity(0.55);
@@ -196,6 +205,7 @@ export class SliceRenderer {
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: scalar.createView() },
         { binding: 3, resource: this.overlay.createView() },
+        { binding: 4, resource: this.nnSampler },
       ],
     });
   }
@@ -207,8 +217,11 @@ export class SliceRenderer {
     this.offset01 = Math.max(0, Math.min(1, offset01));
   }
   setWindowLevel(win: number, lev: number) { this.u[28] = win; this.u[29] = lev; }
+  /** Overlay FILL opacity (per-voxel coloured regions). 0 hides the fill. */
   setOverlayOpacity(o: number) { this.u[30] = o; }
-  /** Overlay draw mode: false = FILL (solid coloured regions), true = OUTLINE (segment boundaries only). */
+  /** Overlay OUTLINE opacity (boundary line, composited over the fill). 0 hides the outline. */
+  setOutlineOpacity(o: number) { this.u[31] = o; }
+  /** Convenience toggle: outline on (opacity 1) / off (0). Composites over the fill. */
   setOverlayOutline(on: boolean) { this.u[31] = on ? 1 : 0; }
 
   /** Physical size (mm) of the square view for the current plane (isotropic, letterboxed).
@@ -283,6 +296,23 @@ export class SliceRenderer {
 
   /** Reset pan/zoom for an orientation to the fitted view. */
   resetView(orient: Orientation) { this.viewState[orient] = { panU: 0, panV: 0, zoom: 1 }; }
+
+  /** Mirror Slicer's in-plane navigation for an orientation: drive pan + zoom from the slice
+   *  node's RAS centre and field of view (mm). zoom = extent/FOV on the limiting axis (== 1 when
+   *  Slicer is fitted, per FitSliceToBackground's no-margin fit), so SlicerLive tracks Slicer's
+   *  zoom proportionally; pan is the centre's offset from the volume centre projected onto the
+   *  plane's in-plane axes. The out-of-plane offset is applied separately via setPlane. */
+  setMirrorFrame(orient: Orientation, centerRAS: Vec3, fovX: number, fovY: number) {
+    const b = BASES[orient];
+    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
+    const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
+    const zoom = Math.max(uExt / Math.max(fovX, 1e-6), vExt / Math.max(fovY, 1e-6));
+    const volC: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    const d: Vec3 = [centerRAS[0] - volC[0], centerRAS[1] - volC[1], centerRAS[2] - volC[2]];
+    const panU = d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2];
+    const panV = d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2];
+    this.viewState[orient] = { panU, panV, zoom: Math.max(1e-3, zoom) };
+  }
 
   /** Map a view (u,v) in [0,1] (y down) to normalized texture coords for the current
    *  plane — for click picking. Returns the tex coord; the caller converts to IJK via

@@ -87,6 +87,14 @@ export function bakeColorizeRGBA(dev: GPUDevice, labelmap: Uint8Array, dims: Vec
   const enc = dev.createCommandEncoder();
   { const p = enc.beginComputePass(); p.setPipeline(initPipe); p.setBindGroup(0, initBind); p.dispatchWorkgroups(gx, gy, gz); p.end(); }
 
+  // sigma <= 0: crisp per-voxel labelmap (no alpha smoothing) — for the 2D slice overlay,
+  // which must match Slicer's per-voxel labelmap fill (paired with a NEAREST sampler).
+  if (sigmaVoxels <= 0) {
+    dev.queue.submit([enc.finish()]);
+    labelTex.destroy(); texB.destroy();
+    return texA; // rgba16float 3D, crisp
+  }
+
   // 3 separable Gaussian passes on alpha: X (A->B), Y (B->A), Z (A->B). Result in texB.
   const { radius, w } = gaussHalfKernel(sigmaVoxels);
   const blurPipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: BLUR_WGSL }), entryPoint: "main" } });
@@ -106,6 +114,79 @@ export function bakeColorizeRGBA(dev: GPUDevice, labelmap: Uint8Array, dims: Vec
 
   labelTex.destroy(); texA.destroy();
   return texB; // rgba16float 3D, ready for RGBAVolumeField
+}
+
+/** A reusable colorize baker: uploads a labelmap to the GPU ONCE and re-colorizes into caller-
+ *  owned output textures on demand. Unlike bakeColorizeRGBA (which re-uploads the labelmap and
+ *  allocates fresh textures every call), a display change (segment colour/visibility/opacity) only
+ *  writes the 256-entry palette + dispatches compute into the SAME output textures — no re-transmit
+ *  of the bulk labelmap, no re-allocation, so visibility toggles are cheap. The label texture,
+ *  pipelines, uniform buffers, and blur scratch are all held resident and reused. */
+export class ColorizeBaker {
+  private labelTex: GPUTexture;
+  private scratch?: GPUTexture;                 // blur ping-pong (lazy; only when sigma > 0)
+  private palBuf: GPUBuffer;
+  private dimsBuf: GPUBuffer;
+  private initPipe: GPUComputePipeline;
+  private blurPipe: GPUComputePipeline;
+  private g: [number, number, number];
+
+  constructor(private dev: GPUDevice, labelmap: Uint8Array, private dims: Vec3) {
+    const [dx, dy, dz] = dims;
+    this.labelTex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    dev.queue.writeTexture({ texture: this.labelTex }, labelmap, { bytesPerRow: dx, rowsPerImage: dy }, dims as [number, number, number]);
+    this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.dimsBuf = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    dev.queue.writeBuffer(this.dimsBuf, 0, new Uint32Array([dx, dy, dz, 0]));
+    this.initPipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: INIT_WGSL }), entryPoint: "main" } });
+    this.blurPipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: BLUR_WGSL }), entryPoint: "main" } });
+    this.g = [Math.ceil(dx / 4), Math.ceil(dy / 4), Math.ceil(dz / 4)];
+  }
+
+  /** Allocate an output texture sized/typed for this baker's labelmap (caller owns it). */
+  output(): GPUTexture {
+    return this.dev.createTexture({ size: this.dims as [number, number, number], dimension: "3d", format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
+  }
+
+  /** (Re)colorize into `out` with `palette` (256*4 f32: rgb + presence*opacity) and Gaussian
+   *  `sigmaVoxels` (0 = crisp, for the 2D slice overlay). In place — reuses everything resident. */
+  bakeInto(out: GPUTexture, palette: Float32Array, sigmaVoxels = 1.5) {
+    const dev = this.dev, [gx, gy, gz] = this.g, [dx, dy, dz] = this.dims;
+    const palData = new Float32Array(256 * 4);
+    palData.set(palette.subarray(0, Math.min(palette.length, 256 * 4)));
+    dev.queue.writeBuffer(this.palBuf, 0, palData);
+    const enc = dev.createCommandEncoder();
+    const smooth = sigmaVoxels > 0;
+    if (smooth && !this.scratch) this.scratch = this.output();
+    const initDst = smooth ? this.scratch! : out;   // crisp result lands directly in out; smooth via scratch
+    const initBind = dev.createBindGroup({ layout: this.initPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: this.labelTex.createView() },
+      { binding: 1, resource: initDst.createView() },
+      { binding: 2, resource: { buffer: this.palBuf } },
+      { binding: 3, resource: { buffer: this.dimsBuf } },
+    ] });
+    { const p = enc.beginComputePass(); p.setPipeline(this.initPipe); p.setBindGroup(0, initBind); p.dispatchWorkgroups(gx, gy, gz); p.end(); }
+    if (smooth) {
+      const s = this.scratch!;
+      const { radius, w } = gaussHalfKernel(sigmaVoxels);
+      // 3 separable passes, ending in `out`: X s->out, Y out->s, Z s->out.
+      const passes: Array<[GPUTexture, GPUTexture, number]> = [[s, out, 0], [out, s, 1], [s, out, 2]];
+      for (const [src, dst, axis] of passes) {
+        const ub = dev.createBuffer({ size: 16 + 16 + 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        dev.queue.writeBuffer(ub, 0, new Uint32Array([dx, dy, dz, 0, axis, radius, 0, 0]));
+        dev.queue.writeBuffer(ub, 32, w);
+        const b = dev.createBindGroup({ layout: this.blurPipe.getBindGroupLayout(0), entries: [
+          { binding: 0, resource: src.createView() },
+          { binding: 1, resource: dst.createView() },
+          { binding: 2, resource: { buffer: ub } },
+        ] });
+        const p = enc.beginComputePass(); p.setPipeline(this.blurPipe); p.setBindGroup(0, b); p.dispatchWorkgroups(gx, gy, gz); p.end();
+      }
+    }
+    dev.queue.submit([enc.finish()]);
+  }
+
+  destroy() { this.labelTex.destroy(); this.scratch?.destroy(); this.palBuf.destroy(); this.dimsBuf.destroy(); }
 }
 
 /** Bake a BINARY presence mask -> rgba16float whose .a is the Gaussian-smoothed presence

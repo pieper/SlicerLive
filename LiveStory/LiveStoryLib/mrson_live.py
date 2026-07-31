@@ -36,9 +36,14 @@ from . import mrson_server as HS
 
 _WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+# inbound rate limit: coalesce per-node Modified echoes to at most one per FLUSH_MS (~30Hz). Small
+# enough to look continuous, large enough that a kHz source can't saturate the wire or the client.
+FLUSH_MS = 33
+
 # vtkMRML class -> neutral mrson type (matches serialize_mrson)
 _CLASS_TYPE = {
     "vtkMRMLScalarVolumeNode": "image",
+    "vtkMRMLSegmentationNode": "segmentation",
     "vtkMRMLScalarVolumeDisplayNode": "scalarVolumeDisplay",
     "vtkMRMLVolumePropertyNode": "transferFunction",
     "vtkMRMLModelNode": "mesh",
@@ -54,17 +59,34 @@ def _mrson_type(node):
     cls = node.GetClassName()
     if "VolumeRenderingDisplayNode" in cls:
         return "volumeRenderingDisplay"
-    if "MarkupsDisplayNode" in cls:
-        return "markupDisplay"
     if cls.startswith("vtkMRMLMarkups"):
-        return "markup"
+        # markup display nodes are vtkMRMLMarkups<Type>DisplayNode (e.g.
+        # vtkMRMLMarkupsFiducialDisplayNode) AND the base vtkMRMLMarkupsDisplayNode.
+        # They start with vtkMRMLMarkups too, so classify by DisplayNode to avoid
+        # serializing a display node as a control-point markup (GetNumberOfControlPoints crash).
+        return "markupDisplay" if "DisplayNode" in cls else "markup"
     return _CLASS_TYPE.get(cls)
+
+
+def _seg_for_display(dn):
+    """The segmentation node whose display node is `dn` (reverse of GetDisplayNode)."""
+    for seg in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+        if seg.GetDisplayNodeID() == dn.GetID():
+            return seg
+    return None
 
 
 def _node_event(node):
     """The mrson event to push when `node` is modified (light — never re-writes zarr)."""
     t = _mrson_type(node)
     nid, cls = node.GetID(), node.GetClassName()
+    # segmentation (node OR its display node): a light display-only event (opacity/visibility/
+    # colour) — the client updates fill/outline + 3D field in place, re-baking only if needed.
+    if cls == "vtkMRMLSegmentationNode":
+        return M._segmentation_display_event(node)
+    if "SegmentationDisplayNode" in cls:
+        seg = _seg_for_display(node)
+        return M._segmentation_display_event(seg) if seg is not None else {"event": "Modified", "sourceId": nid}
     if t == "camera":
         c = node.GetCamera()
         return {"event": "CameraModified", "sourceId": nid,
@@ -190,16 +212,52 @@ class _WSClient:
             msg = json.loads(text)
         except Exception:
             return
-        if msg.get("op") == "subscribe":
+        op = msg.get("op")
+        if op == "subscribe":
             self._subscribe(msg.get("types", []))
+        elif op == "applyOps":
+            self._applyOps(msg.get("ops", []), msg.get("tag"))
 
-    def _onDisconnected(self):
-        for obj, tag in self.tags:
+    def _applyOps(self, ops, tag):
+        """Apply SlicerLive -> Slicer ops over the SAME WebSocket the events stream on: one
+        ordered, low-overhead control channel (no per-op HTTP, no CORS, no Content-Length quirks).
+        Applying fires the MRML observers synchronously, so the echo (and every other subscriber's
+        echo) goes out before the OpAck.
+
+        NO processEvents() here: this runs inside the socket readyRead handler (already on the event
+        loop). Forcing a re-entrant processEvents() per op made Slicer render synchronously on every
+        one of a ~30Hz browser-driven op stream — a classic Qt/VTK jank source. Applying the op marks
+        the views dirty; Slicer renders them on its own render scheduler at its natural rate (and a
+        burst of ops decoded in one readyRead collapses to a single render). Smoother, event-driven."""
+        import time
+        t0 = time.perf_counter()
+        applied = 0
+        for o in ops:
+            try:
+                if HS._apply_op(o):
+                    applied += 1
+            except Exception:  # noqa: BLE001
+                pass
+        if applied:
+            HS.markDirty()
+        self.send({"event": "OpAck", "tag": tag, "received": len(ops), "applied": applied,
+                   "applyMs": round((time.perf_counter() - t0) * 1000, 3), "eventsMs": 0})
+
+    def teardown(self):
+        """Remove MRML observers and close the socket (so a restart doesn't leak clients/observers)."""
+        for obj, tag in list(self.tags):
             try:
                 obj.RemoveObserver(tag)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         self.tags = []
+        try:
+            self.socket.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _onDisconnected(self):
+        self.teardown()
         self.server._drop(self)
 
     # -- subscription + observers --
@@ -234,6 +292,11 @@ class _WSClient:
         # markups fire a dedicated PointModifiedEvent on control-point drags
         if _mrson_type(node) == "markup" and hasattr(node, "PointModifiedEvent"):
             self._tags_add(node, node.AddObserver(node.PointModifiedEvent, self._onNodeModified))
+        # segmentation: 2D fill/outline/visibility live on the display node — observe it too
+        if node.GetClassName() == "vtkMRMLSegmentationNode":
+            dn = node.GetDisplayNode()
+            if dn is not None:
+                self._tags_add(dn, dn.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onNodeModified))
 
     def _tags_add(self, obj, tag):
         self.tags.append((obj, tag))
@@ -241,6 +304,11 @@ class _WSClient:
     # -- observer callbacks (main thread) --
     def _onNodeModified(self, caller, _event):
         HS.markDirty()          # keep the HTTP snapshot fresh for the next reload/subscribe
+        # IMMEDIATE send. A QTimer-based flush starves during a Slicer interaction (the interactor +
+        # render hold the main thread, so the timer never fires until the drag pauses) → the client
+        # sees nothing until you stop. Sending in the observer callback fires synchronously WITH the
+        # interaction, so every intermediate update reaches the client. (Rate-limiting a genuine
+        # high-rate source belongs at the source or on a decimated observer, not a starvable timer.)
         self.send(_node_event(caller))
 
     @vtk.calldata_type(vtk.VTK_OBJECT)
@@ -289,8 +357,32 @@ class MrsonLiveServer:
             self.clients.remove(client)
 
     def stop(self):
-        self.server.close()
+        # tear DOWN every client (remove MRML observers, stop its flush timer, close the socket) so
+        # a restart doesn't leave leaked _WSClient objects with dangling observers/timers.
+        for c in list(self.clients):
+            try:
+                c.teardown()
+            except Exception:  # noqa: BLE001
+                pass
         self.clients = []
+        self.server.close()
+
+
+def deepClean():
+    """Sweep EVERY _WSClient still alive (including ones leaked by earlier restarts) and fully tear
+    it down — removes any dangling MRML observers and stops any surviving flush timer. Safe to run
+    before a fresh startMrsonLive(). Returns how many were cleaned + observers removed."""
+    import gc
+    cleaned = removed = 0
+    for c in [o for o in gc.get_objects() if type(o).__name__ == "_WSClient"]:
+        try:
+            removed += len(getattr(c, "tags", []))
+            c.teardown()
+            cleaned += 1
+        except Exception:  # noqa: BLE001
+            pass
+    gc.collect()
+    return {"clients_cleaned": cleaned, "observers_removed": removed}
 
 
 def startMrsonLive(port=2132):

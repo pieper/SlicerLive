@@ -9,6 +9,7 @@ import { SliceRenderer } from "../slice-renderer.ts";
 import { VtkCamera } from "../vtk-camera.ts";
 import type { Field, ImageField } from "../fields.ts";
 import { mountAdaptive3d } from "./accum-loop.ts";
+import { Coalescer } from "../rate-limiter.ts";
 import {
   CameraDisplayableManager,
   type CameraState,
@@ -17,6 +18,7 @@ import {
   MarkupsDisplayableManager,
   type MirrorView,
   RoiCropDisplayableManager,
+  SegmentationDisplayableManager,
   SliceDisplayableManager,
   type SlicePlane,
   type Vec3,
@@ -59,6 +61,9 @@ async function main() {
 
   const slice = new SliceRenderer(gpu, srgb);
   let volumeReady = false;
+  let segOverlay: GPUTexture | null = null;
+  let segFill = 0.5;
+  let segOutline = 1.0;
   const planes: Record<string, SlicePlane | undefined> = {};
   const visible = new Set<string>(CELLS);
 
@@ -75,6 +80,9 @@ async function main() {
     size: () => ({ w: visible.has("threeD") ? cv.threeD.width : 0, h: cv.threeD.height }),
     setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
     gpu,
+    movingScaleCap: 0.4,   // heavy segmentation DVR: ~0.4x res while moving -> ~60fps interactive (measured 16ms @0.33)
+    target: 8,             // converge AA in ~0.8s after motion stops (not ~2.8s)
+
   });
 
   const renderSlice = (c: string) => {
@@ -85,6 +93,9 @@ async function main() {
     const [lo, hi] = volumeField!.aabb();
     const axis = pl.orient === "axial" ? 2 : pl.orient === "coronal" ? 1 : 0;
     const off01 = Math.max(0, Math.min(1, (pl.posMm - lo[axis]) / Math.max(hi[axis] - lo[axis], 1e-6)));
+    // mirror Slicer's pan + zoom when the slice node carries them, else the fitted view
+    if (pl.centerRAS && pl.fovX && pl.fovY) slice.setMirrorFrame(pl.orient, pl.centerRAS as Vec3, pl.fovX, pl.fovY);
+    else slice.resetView(pl.orient);
     slice.setPlane(pl.orient, off01);
     slice.renderToView(cx[c].getCurrentTexture().createView({ format: srgb }), cv[c].width, cv[c].height);
   };
@@ -121,7 +132,10 @@ async function main() {
   const view: MirrorView = {
     setField(k, f) { fields3d.set(k, f); rebuild3d(); },
     removeField(k) { if (fields3d.delete(k)) rebuild3d(); },
-    redraw() { a3d.draw(); },
+    // A field changed IN PLACE (markup point moved, colours, etc.): re-pack the material uniforms
+    // (sphere/segment positions live there) so the change reaches the GPU — the render's flush()
+    // then uploads it. Without this, redraw re-renders STALE uniforms and the glyph never moves.
+    redraw() { scene?.syncUniforms(); a3d.draw(); },
     setCamera(c: CameraState) {
       camera.position = c.position as Vec3;
       camera.focalPoint = c.focalPoint as Vec3;
@@ -139,9 +153,10 @@ async function main() {
       if (f) {
         const [lo, hi] = f.aabb();
         slice.setVolume(f.patientToTexture(), lo, hi);
-        slice.setTextures(f.volumeTexture());
+        slice.setTextures(f.volumeTexture(), segOverlay ?? undefined);
         if (wl) slice.setWindowLevel(wl.win, wl.lev);
-        slice.setOverlayOpacity(0);
+        slice.setOverlayOpacity(segOverlay ? segFill : 0);
+        slice.setOutlineOpacity(segOverlay ? segOutline : 0);
         volumeReady = true;
         renderSlices();
       } else {
@@ -153,19 +168,83 @@ async function main() {
     showVolume3D(show) { volumeShown3D = show; rebuild3d(); },
     setSlicePlane(cell, pl) { planes[cell] = pl; renderSlice(cell); },
     setLayout(name) { applyLayout(name); },
+    setSegmentationOverlay(tex, fillOpacity, outlineOpacity) {
+      segOverlay = tex;
+      segFill = fillOpacity;
+      segOutline = outlineOpacity;
+      if (volumeField) {
+        slice.setTextures(volumeField.volumeTexture(), tex ?? undefined);
+        slice.setOverlayOpacity(tex ? fillOpacity : 0);
+        slice.setOutlineOpacity(tex ? outlineOpacity : 0);
+      }
+      renderSlices();
+    },
   };
 
   addEventListener("resize", () => { resizeAll(); renderSlices(); a3d.draw(); });
 
+  const markupsDM = new MarkupsDisplayableManager();
   const live = new LiveScene(wsUrl, httpBase, [
     new LayoutDisplayableManager(),
     new CameraDisplayableManager(),
     new VolumeRenderingDisplayableManager(gpu.device),
     new SliceDisplayableManager(),
-    new MarkupsDisplayableManager(),
+    new SegmentationDisplayableManager(gpu.device, 1.5),   // σ=1.5 = the existing SlicerLive bake (repro Andrey's artifact)
+    markupsDM,
     new RoiCropDisplayableManager(),
   ]);
   live.view = view;
+
+  // Markup drag (SlicerLive -> Slicer): grab a 3D control-point glyph and move it in the plane
+  // perpendicular to the view at its own depth. The local glyph follows the cursor immediately
+  // (optimistic, every frame); the setControlPoint op is COALESCED (latest-wins per control point)
+  // and rate-limited onto the live WebSocket by the Coalescer — impedance matching between the
+  // pointer's rate and the wire. pointer-up forces the authoritative final flush.
+  const opWire = new Coalescer<Record<string, unknown>>(33, (batch) => live.sendOps([...batch.values()]));
+  let drag: { id: string; index: number; depth: number } | null = null;
+  const HIT_PX = 16;
+  const evPx = (e: PointerEvent) => ({ sx: e.offsetX * dpr, sy: e.offsetY * dpr });
+  const pick = (sx: number, sy: number): typeof drag => {
+    let best: typeof drag = null, bestD = HIT_PX * dpr;
+    for (const hd of markupsDM.handles()) {
+      const pr = camera.worldToDisplay(hd.ras, cv.threeD.width, cv.threeD.height);
+      if (pr.depth <= 0) continue;
+      const d = Math.hypot(pr.x - sx, pr.y - sy);
+      if (d < bestD) { bestD = d; best = { id: hd.id, index: hd.index, depth: pr.depth }; }
+    }
+    return best;
+  };
+  const opFor = (sx: number, sy: number) => {
+    const ras = camera.displayToWorldAtDepth(sx, sy, drag!.depth, cv.threeD.width, cv.threeD.height);
+    return { ras, op: { op: "cmd", id: drag!.id, cmd: "setControlPoint", args: { index: drag!.index, position: ras } } };
+  };
+  cv.threeD.addEventListener("pointerdown", (e: PointerEvent) => {
+    if (!visible.has("threeD")) return;
+    const { sx, sy } = evPx(e);
+    const h = pick(sx, sy);
+    if (h) { drag = h; markupsDM.touch(h.id, h.index); cv.threeD.setPointerCapture(e.pointerId); cv.threeD.style.cursor = "grabbing"; e.preventDefault(); }
+  });
+  cv.threeD.addEventListener("pointermove", (e: PointerEvent) => {
+    const { sx, sy } = evPx(e);
+    if (!drag) { cv.threeD.style.cursor = pick(sx, sy) ? "grab" : "default"; return; }
+    const { ras, op } = opFor(sx, sy);
+    markupsDM.moveLocal(drag.id, drag.index, ras as Vec3, live);   // optimistic — every frame
+    markupsDM.touch(drag.id, drag.index);                          // extend echo-suppression window
+    opWire.update(`cp:${drag.id}:${drag.index}`, op);              // coalesced + rate-limited to the wire
+  });
+  const endDrag = (e: PointerEvent) => {
+    if (!drag) return;
+    const { id, index } = drag;
+    const { sx, sy } = evPx(e);
+    opWire.update(`cp:${id}:${index}`, opFor(sx, sy).op);
+    opWire.flushNow();                                             // authoritative final position, now
+    markupsDM.touch(id, index);                                    // suppression auto-expires ~250ms later
+    try { cv.threeD.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    cv.threeD.style.cursor = "default";
+    drag = null;
+  };
+  cv.threeD.addEventListener("pointerup", endDrag);
+  cv.threeD.addEventListener("pointercancel", endDrag);
   status("connecting to Slicer live channel…");
   await live.connect();
   status("subscribed — mirroring Slicer");

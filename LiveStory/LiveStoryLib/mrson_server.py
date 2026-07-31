@@ -141,6 +141,18 @@ def _apply_cmd(node, cmd, args):
             except Exception: node.SetSize(*args["size"])  # noqa: BLE001
         node.Modified()
         return True
+    if cmd == "setControlPoint" and node is not None:
+        # move one markup control point (SlicerLive drag -> Slicer). World (RAS) coords.
+        idx = int(args.get("index", 0))
+        pos = args.get("position")
+        if pos is None or not (0 <= idx < node.GetNumberOfControlPoints()):
+            return False
+        try:
+            node.SetNthControlPointPositionWorld(idx, pos[0], pos[1], pos[2])
+        except Exception:  # noqa: BLE001
+            import vtk
+            node.SetNthControlPointPositionWorld(idx, vtk.vtkVector3d(pos[0], pos[1], pos[2]))
+        return True
     return False
 
 
@@ -181,29 +193,46 @@ class MrsonRequestHandler(WebServerLib.BaseRequestHandler):
             return b"application/json", json.dumps({"error": traceback.format_exc()}).encode()
 
     def _apply_ops(self, requestBody):
-        """Phase 3: apply mrson ops (patch/cmd/del) to the MRML scene — SlicerLive drives Slicer."""
+        """Phase 3: apply mrson ops (patch/cmd/del) to the MRML scene — SlicerLive drives Slicer.
+        Instrumented: `applyMs` = time in the MRML apply loop, `eventsMs` = time in
+        processEvents() (the render/observer fan-out), so the harness can separate transport
+        cost from Slicer-side apply cost. Echoes `tag` (client seq) for round-trip correlation."""
+        import time
+        t0 = time.perf_counter()
         try:
             ops = json.loads(requestBody or b"[]")
         except (json.JSONDecodeError, ValueError) as e:
             return b"application/json", json.dumps({"error": f"parse: {e}"}).encode()
         if isinstance(ops, dict):
             ops = [ops]
+        tag = None
         applied, errors = 0, []
         for op in ops:
+            if tag is None and isinstance(op, dict) and "tag" in op:
+                tag = op["tag"]
             try:
                 if _apply_op(op):
                     applied += 1
             except Exception as e:  # noqa: BLE001
                 errors.append(str(e))
+        t1 = time.perf_counter()
         if applied:
             markDirty()
             slicer.app.processEvents()
-        return b"application/json", json.dumps({"ok": not errors, "received": len(ops), "applied": applied, "errors": errors}).encode()
+        t2 = time.perf_counter()
+        return b"application/json", json.dumps({
+            "ok": not errors, "received": len(ops), "applied": applied, "errors": errors,
+            "tag": tag, "applyMs": round((t1 - t0) * 1000, 3), "eventsMs": round((t2 - t1) * 1000, 3),
+        }).encode()
 
 
 def startMrsonServer(port=2131, logMessage=None):
-    """Start the mrson server on `port`. Returns the WebServerLogic (stop with .stop())."""
-    log = logMessage or (lambda *a: print("mrson:", *a))
+    """Start the mrson server on `port`. Returns the WebServerLogic (stop with .stop()).
+
+    logMessage defaults to a NO-OP: the core WebServerLogic logs every request/response, and each
+    print() is a synchronous repaint of Slicer's Python console (main thread) — pure overhead we
+    don't want competing with interaction. Pass a real logMessage to debug."""
+    log = logMessage or (lambda *a: None)
     _STATE["serialized"] = False
     logic = WebServer.WebServerLogic(
         port=port, logMessage=log,
@@ -211,5 +240,5 @@ def startMrsonServer(port=2131, logMessage=None):
         enableCORS=True, requestHandlers=[MrsonRequestHandler(logMessage=log)],
     )
     logic.start()
-    print(f"\n  mrson server: http://localhost:{logic.port}/mrson/scene.json\n")
+    print(f"\n  mrson server: http://localhost:{logic.port}/mrson/scene.json  (request logging off)\n")
     return logic
