@@ -14,15 +14,9 @@ import { ColorizeBaker } from "./bake.ts";
 import { fetchZarrVolume, type ZarrDesc, type ZarrVolume } from "./zarr.ts";
 import { lutFromTransferFunctions } from "./scene-volume.ts";
 import type { MrsonNode } from "./mrson.ts";
+import { applyOp, type ApplyResult, type Op } from "./liveops.ts";
 
 export type Vec3 = [number, number, number];
-
-/** Connection state for the UI feedback line. `waiting` carries the backoff countdown target
- *  (nextRetryAt, ms epoch) and the attempt count so a demo can render "reconnecting in Ns". */
-export type LiveStatus =
-  | { state: "connecting"; attempt: number }
-  | { state: "connected" }
-  | { state: "waiting"; attempt: number; nextRetryAt: number };
 
 /** The renderer surface a displayable manager drives — the SlicerLive analogue of the view
  *  a Slicer displayable manager renders into. Managers ADD/REMOVE fields (coarse -> rebuild)
@@ -63,25 +57,32 @@ export interface DisplayableManager {
   onSceneClosed?(scene: LiveScene): void;   // scene-level reset (Slicer EndCloseEvent)
 }
 
+/** One record on the LiveScene `_changes` feed. Inbound remote events and local writes both
+ *  normalize into this, so DisplayableManagers, Controls, and LiveSync consume ONE stream — the
+ *  CouchDB `_changes` shape (ARCHITECTURE-2026-08-02 §2). */
+export interface Change {
+  id: string;
+  type?: string;
+  kind: "upsert" | "remove" | "reset";
+  origin: string;      // "local" (this place) or a peer's origin id
+  v: number;           // monotonic sequence for this LiveScene
+  node?: MrsonNode;    // present on upsert
+  op?: Op;             // the originating op, present only for LOCAL writes → LiveSync replicates it out
+}
+
 export class LiveScene {
   nodes = new Map<string, MrsonNode>();
-  ws?: WebSocket;
   view?: MirrorView;                                  // the renderer surface managers drive
-  private queue: Promise<void> = Promise.resolve();   // serialize event handling in arrival order
 
-  /** Connection-state feedback (set by the view). Fires on every connect/drop/retry so a demo
-   *  can show a feedback line + a "reconnect now" control. */
-  onStatus?: (s: LiveStatus) => void;
-  // Exponential backoff for event-driven reconnect (no heartbeat): on close/error, retry after
-  // base*factor^attempt ms, capped at max, until the socket re-opens (laptop-sleep resilient).
-  private backoff = { base: 1000, factor: 2, max: 30000 };
-  private attempt = 0;
-  private retryTimer?: ReturnType<typeof setTimeout>;
-  private wantClose = false;                           // true after close() -> stop auto-reconnecting
-  private firstOpen?: () => void;                       // resolves the connect() promise on first open
+  /** This place's origin id — stamps local writes and drives echo suppression. */
+  origin = "local";
+  private seq = 0;                                     // monotonic _changes sequence
+  private changeSubs = new Set<(c: Change) => void>();
 
+  // LiveScene is the pure data model — no wire. A LiveSync (render/livesync.ts) owns the transport,
+  // reconnect, coalescing, and echo suppression; it drives this model via receiveEvent()/applyRemote()
+  // and observes it via subscribe(). httpBase stays only so managers can resolve blob URLs (blobBase).
   constructor(
-    public wsUrl: string,     // ws://host:2132/
     public httpBase: string,  // http://host:2131/mrson/
     public managers: DisplayableManager[],
   ) {}
@@ -92,108 +93,104 @@ export class LiveScene {
     return undefined;
   }
 
-  private types(): string[] {
+  /** The union of node types the DisplayableManagers care about; LiveSync subscribes the peer to
+   *  these on (re)connect. Public because LiveSync — not the model — owns the wire. */
+  subscribedTypes(): string[] {
     return [...new Set(this.managers.flatMap((m) => m.interestedTypes))];
   }
   private interested(type: string | undefined): DisplayableManager[] {
     return type ? this.managers.filter((m) => m.interestedTypes.includes(type)) : [];
   }
 
-  private emit(s: LiveStatus): void { try { this.onStatus?.(s); } catch { /* UI must never break the socket */ } }
+  // ── local authority + the _changes feed (ARCHITECTURE-2026-08-02) ───────────
 
-  /** Open the live channel and keep it open. Resolves on the FIRST successful connect; after that,
-   *  drops (onclose/onerror — e.g. laptop sleep) trigger an autonomous exponential-backoff reconnect
-   *  that re-subscribes (the server re-sends the snapshot), so the mirror self-heals. Progress is
-   *  reported through onStatus; there is no reject — a down server just keeps retrying. */
-  connect(): Promise<void> {
-    this.wantClose = false;
-    return new Promise((resolve) => { this.firstOpen = resolve; this.dial(); });
+  /** Observe the `_changes` feed. Controls use it to reflect current node state; LiveSync uses it to
+   *  replicate out. Returns an unsubscribe function. */
+  subscribe(cb: (c: Change) => void): () => void {
+    this.changeSubs.add(cb);
+    return () => { this.changeSubs.delete(cb); };
   }
 
-  private dial(): void {
-    if (this.wantClose) return;
-    this.emit({ state: "connecting", attempt: this.attempt });
-    let ws: WebSocket;
-    try { ws = new WebSocket(this.wsUrl); } catch { this.scheduleReconnect(); return; }
-    this.ws = ws;
-    ws.onopen = () => {
-      this.attempt = 0;                                          // reset backoff on success
-      ws.send(JSON.stringify({ op: "subscribe", types: this.types() }));
-      this.emit({ state: "connected" });
-      this.firstOpen?.(); this.firstOpen = undefined;
-    };
-    ws.onmessage = (m) => {
-      const ev = JSON.parse(m.data as string);
-      this.queue = this.queue.then(() => this.handle(ev));       // process in order, never overlapping
-    };
-    // A failed/closed socket always ends in onclose (onerror precedes it) — drive reconnect from there.
-    ws.onerror = () => { /* handled by onclose */ };
-    ws.onclose = () => {
-      if (this.ws === ws) this.ws = undefined;
-      this.scheduleReconnect();
-    };
+  private feed(c: Change): void {
+    for (const cb of this.changeSubs) {
+      try { cb(c); } catch { /* a subscriber must never break the feed */ }
+    }
   }
 
-  private scheduleReconnect(): void {
-    if (this.wantClose || this.retryTimer !== undefined) return;
-    const delay = Math.min(this.backoff.max, this.backoff.base * this.backoff.factor ** this.attempt);
-    this.attempt++;
-    this.emit({ state: "waiting", attempt: this.attempt, nextRetryAt: Date.now() + delay });
-    this.retryTimer = setTimeout(() => { this.retryTimer = undefined; this.dial(); }, delay);
+  /** LOCAL authoritative write — how a Control or Interactor changes the scene. Applies the op to the
+   *  model IMMEDIATELY (optimistic), notifies displayers, emits on the `_changes` feed, and — if the
+   *  op is locally-originated — queues it for sync. Standalone and connected run the identical path;
+   *  "connected" only adds a LiveSync peer downstream. Echo suppression is by construction: only
+   *  local-origin ops are sent out, and an inbound remote op is applied via `applyRemote`, never here. */
+  write(op: Op): void {
+    const stamped = { ...op, origin: op.origin ?? this.origin, v: op.v ?? ++this.seq, role: op.role ?? "human" } as Op;
+    const r = applyOp(this.nodes, stamped);
+    if (r.changed) this.applied(r, stamped.origin as string, stamped.v as number, stamped);
+    // No send here — LiveScene is the model. The op rides the _changes feed (Change.op); LiveSync, if
+    // connected, coalesces + sends it. Standalone: applied locally, nothing to send. Identical path.
   }
 
-  /** Force an immediate reconnect attempt now (the "Try now" button) — cancels the pending wait.
-   *  Does not reset the backoff, so a repeated failure resumes the same schedule. */
-  reconnectNow(): void {
-    if (this.retryTimer !== undefined) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
-    this.dial();
+  writeMany(ops: Op[]): void { for (const o of ops) this.write(o); }
+
+  /** Apply an op that arrived from a peer (inbound remote). Same mutation + notify as a local write,
+   *  but NOT re-sent (echo suppression). Not yet on the wire path (inbound is still event-shaped in
+   *  `handle`); present so Controls/tests exercise the symmetric remote path. */
+  applyRemote(op: Op): void {
+    const r = applyOp(this.nodes, op);
+    if (r.changed) this.applied(r, (op.origin as string) ?? "remote", (op.v as number) ?? ++this.seq);
   }
 
-  close(): void {
-    this.wantClose = true;
-    if (this.retryTimer !== undefined) { clearTimeout(this.retryTimer); this.retryTimer = undefined; }
-    this.ws?.close();
-    this.ws = undefined;
+  /** Fan a completed op mutation out to displayers + the `_changes` feed. `op` is set only for LOCAL
+   *  writes so LiveSync replicates them (echo suppression: remote/event changes carry no op). */
+  private applied(r: ApplyResult, origin: string, v: number, op?: Op): void {
+    if (r.kind === "del") {
+      for (const m of this.managers) m.onNodeRemoved?.(r.id, this);   // type gone → offer to all (they no-op)
+      this.feed({ id: r.id, kind: "remove", origin, v, op });
+      return;
+    }
+    const node = this.nodes.get(r.id);
+    if (!node) return;
+    for (const m of this.interested(node.type)) m.onNodeAdded?.(node, this);   // re-deliver the updated node
+    this.feed({ id: r.id, type: node.type, kind: "upsert", origin, v, node, op });
   }
 
-  /** POST mrson ops to Slicer (SlicerLive -> Slicer). Fire-and-forget; the change echoes back
-   *  over the live channel as the corresponding node event.
-   *
-   *  No Content-Type header on purpose: it keeps this a CORS "simple request" (fetch defaults to
-   *  text/plain), avoiding a preflight — the core WebServer's CORS only allows the `Accept` request
-   *  header, so an application/json preflight would be blocked. The server parses the body as JSON
-   *  regardless of content-type. */
-  async postOps(ops: unknown[]): Promise<void> {
-    try {
-      await fetch(new URL("ops", this.httpBase).href, { method: "POST", body: JSON.stringify(ops) });
-    } catch { /* ignore — best-effort */ }
-  }
-
-  /** Send ops over the LIVE WebSocket (the unified control channel) — preferred over postOps: one
-   *  ordered low-overhead channel, no per-op HTTP/CORS/Content-Length fragility. The server applies
-   *  and echoes the change back as a normal node event; an OpAck (with apply timing) also returns. */
-  private opTag = 0;
-  sendOps(ops: unknown[]): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify({ op: "applyOps", ops, tag: ++this.opTag }));
-  }
-
-  private async handle(ev: Record<string, unknown>): Promise<void> {
+  /** Apply one inbound event from a peer (via LiveSync). Slicer sends event-shaped changes (NodeAdded
+   *  upsert / NodeRemoved / CameraModified / SceneClosed); each mutates the model, notifies displayers,
+   *  and emits on the `_changes` feed with a remote origin so Controls reflect it. */
+  async receiveEvent(ev: Record<string, unknown>): Promise<void> {
     const e = ev.event as string;
     if (e === "NodeAdded" && ev.node) {
       const node = ev.node as MrsonNode;
       this.nodes.set(node.id, node);                       // upsert
       for (const m of this.interested(node.type)) await m.onNodeAdded?.(node, this);
+      this.feed({ id: node.id, type: node.type, kind: "upsert", origin: "remote", v: ++this.seq, node });
     } else if (e === "NodeRemoved") {
       const id = ev.sourceId as string;
       const node = this.nodes.get(id);
       this.nodes.delete(id);
       for (const m of this.interested(node?.type)) m.onNodeRemoved?.(id, this);
+      this.feed({ id, type: node?.type, kind: "remove", origin: "remote", v: ++this.seq });
     } else if (e === "SnapshotComplete") {
       /* managers already received their snapshot nodes */
     } else if (e === "SceneClosed") {
       this.nodes.clear();                                 // wholesale reset (Slicer closed the scene)
       for (const m of this.managers) m.onSceneClosed?.(this);
+      this.feed({ id: "", kind: "reset", origin: "remote", v: ++this.seq });
+    } else if (e === "SegmentationDisplayModified") {
+      // A display-only change from Slicer (visibility / opacity / colour). Keep the MODEL authoritative:
+      // merge the display fields into the segmentation node, let the seg manager update the render, then
+      // emit on the _changes feed so Controls (the popup switch) reflect it — inbound events must not
+      // bypass the model (ARCHITECTURE-2026-08-02 §1).
+      const id = ev.sourceId as string;
+      const node = this.nodes.get(id);
+      const disp = ev.display as Record<string, unknown> | undefined;
+      if (node && disp) {
+        for (const k of ["visible", "opacity", "fill2D", "outline2D", "segments"]) {
+          if (k in disp) (node as unknown as Record<string, unknown>)[k] = disp[k];
+        }
+      }
+      for (const m of this.interested("segmentation")) await m.onEvent?.(ev, this);
+      if (node) this.feed({ id, type: "segmentation", kind: "upsert", origin: "remote", v: ++this.seq, node });
     } else {
       const t = this.nodes.get(ev.sourceId as string)?.type ?? (e === "CameraModified" ? "camera" : undefined);
       for (const m of this.interested(t)) await m.onEvent?.(ev, this);

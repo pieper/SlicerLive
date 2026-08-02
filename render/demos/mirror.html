@@ -26,11 +26,13 @@
 </style>
 </head>
 <body>
+  <!-- Cell order = Slicer's Four-Up: Red/axial (TL), 3D (TR), Green/coronal (BL), Yellow/sagittal (BR).
+       The CSS grid auto-places in DOM order, so this order IS the on-screen quadrant layout. -->
   <div id="grid">
     <div class="cell" id="cell-red"><canvas id="c-red"></canvas><div class="lab red">R · Axial</div></div>
-    <div class="cell" id="cell-yellow"><canvas id="c-yellow"></canvas><div class="lab yellow">Y · Sagittal</div></div>
-    <div class="cell" id="cell-green"><canvas id="c-green"></canvas><div class="lab green">G · Coronal</div></div>
     <div class="cell" id="cell-threeD"><canvas id="c-threeD"></canvas><div class="lab threeD">3D</div></div>
+    <div class="cell" id="cell-green"><canvas id="c-green"></canvas><div class="lab green">G · Coronal</div></div>
+    <div class="cell" id="cell-yellow"><canvas id="c-yellow"></canvas><div class="lab yellow">Y · Sagittal</div></div>
   </div>
   <div id="status"><span id="status-text">loading…</span><button id="status-retry" hidden>Try now</button></div>
   <script type="module" src="mirror.js"></script>

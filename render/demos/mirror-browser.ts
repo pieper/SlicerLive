@@ -9,13 +9,15 @@ import { SliceRenderer } from "../slice-renderer.ts";
 import { VtkCamera } from "../vtk-camera.ts";
 import type { Field, ImageField } from "../fields.ts";
 import { mountAdaptive3d } from "./accum-loop.ts";
-import { Coalescer } from "../rate-limiter.ts";
+import { LiveSync, type LiveStatus } from "../livesync.ts";
+import { WsTransport } from "../transport.ts";
+import type { Op } from "../liveops.ts";
+import { installChrome, type VizControl } from "./sl-chrome.ts";
 import {
   CameraDisplayableManager,
   type CameraState,
   LayoutDisplayableManager,
   LiveScene,
-  type LiveStatus,
   MarkupsDisplayableManager,
   type MirrorView,
   RoiCropDisplayableManager,
@@ -185,7 +187,7 @@ async function main() {
   addEventListener("resize", () => { resizeAll(); renderSlices(); a3d.draw(); });
 
   const markupsDM = new MarkupsDisplayableManager();
-  const live = new LiveScene(wsUrl, httpBase, [
+  const live = new LiveScene(httpBase, [
     new LayoutDisplayableManager(),
     new CameraDisplayableManager(),
     new VolumeRenderingDisplayableManager(gpu.device),
@@ -195,13 +197,35 @@ async function main() {
     new RoiCropDisplayableManager(),
   ]);
   live.view = view;
+  // LiveSync owns the wire: LiveScene is the pure data model; the WebSocket transport + outbound
+  // coalescing + reconnect all live in LiveSync (ARCHITECTURE-2026-08-02 §2).
+  const sync = new LiveSync(live, new WsTransport(wsUrl));
+
+  // First LiveInterface Control: the SlicerLive logo popup toggles (ported from SegRoulette's chrome).
+  // Each is a VizControl bound to a LiveScene node property — get() reads the model, set() does a
+  // scene.write() (an mrson patch → LiveSync → Slicer MRML → the Qt GUI updates). The reverse: a
+  // Slicer-side change lands on the _changes feed → chrome.refresh() flips the switch. This is a
+  // Control (the DOM dual of a qMRML widget), bidirectional by construction.
+  const nodeVisible = (type: string) => { const n = live.find(type); return !!(n && n.visible !== false); };
+  const setNodeVisible = (type: string, on: boolean) => {
+    const n = live.find(type);
+    if (n) live.write({ op: "patch", id: n.id, path: "#/visible", value: on });
+  };
+  const controls: VizControl[] = [
+    { label: "Volume rendering", disabled: () => !live.find("volumeRenderingDisplay"),
+      get: () => nodeVisible("volumeRenderingDisplay"), set: (on) => setNodeVisible("volumeRenderingDisplay", on) },
+    { label: "Segmentation", disabled: () => !live.find("segmentation"),
+      get: () => nodeVisible("segmentation"), set: (on) => setNodeVisible("segmentation", on) },
+  ];
+  const chrome = installChrome({ controls, anchor: cv.threeD });
+  live.subscribe((c) => { if (c.type === "volumeRenderingDisplay" || c.type === "segmentation") chrome.refresh(); });
+  Object.assign(globalThis, { __live: live, __sync: sync });   // debug hook
 
   // Markup drag (SlicerLive -> Slicer): grab a 3D control-point glyph and move it in the plane
   // perpendicular to the view at its own depth. The local glyph follows the cursor immediately
   // (optimistic, every frame); the setControlPoint op is COALESCED (latest-wins per control point)
-  // and rate-limited onto the live WebSocket by the Coalescer — impedance matching between the
-  // pointer's rate and the wire. pointer-up forces the authoritative final flush.
-  const opWire = new Coalescer<Record<string, unknown>>(33, (batch) => live.sendOps([...batch.values()]));
+  // onto the wire by LiveSync — impedance matching between the pointer's rate and the transport.
+  // pointer-up forces the authoritative final flush.
   let drag: { id: string; index: number; depth: number } | null = null;
   const HIT_PX = 16;
   const evPx = (e: PointerEvent) => ({ sx: e.offsetX * dpr, sy: e.offsetY * dpr });
@@ -215,7 +239,7 @@ async function main() {
     }
     return best;
   };
-  const opFor = (sx: number, sy: number) => {
+  const opFor = (sx: number, sy: number): { ras: number[]; op: Op } => {
     const ras = camera.displayToWorldAtDepth(sx, sy, drag!.depth, cv.threeD.width, cv.threeD.height);
     return { ras, op: { op: "cmd", id: drag!.id, cmd: "setControlPoint", args: { index: drag!.index, position: ras } } };
   };
@@ -231,14 +255,14 @@ async function main() {
     const { ras, op } = opFor(sx, sy);
     markupsDM.moveLocal(drag.id, drag.index, ras as Vec3, live);   // optimistic — every frame
     markupsDM.touch(drag.id, drag.index);                          // extend echo-suppression window
-    opWire.update(`cp:${drag.id}:${drag.index}`, op);              // coalesced + rate-limited to the wire
+    sync.sendOps([op]);                                            // coalesced onto the wire by LiveSync
   });
   const endDrag = (e: PointerEvent) => {
     if (!drag) return;
     const { id, index } = drag;
     const { sx, sy } = evPx(e);
-    opWire.update(`cp:${id}:${index}`, opFor(sx, sy).op);
-    opWire.flushNow();                                             // authoritative final position, now
+    sync.sendOps([opFor(sx, sy).op]);
+    sync.flush();                                                  // authoritative final position, now
     markupsDM.touch(id, index);                                    // suppression auto-expires ~250ms later
     try { cv.threeD.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
     cv.threeD.style.cursor = "default";
@@ -246,11 +270,11 @@ async function main() {
   };
   cv.threeD.addEventListener("pointerup", endDrag);
   cv.threeD.addEventListener("pointercancel", endDrag);
-  // Connection feedback + Gmail-style reconnect UI. LiveScene reconnects on its own (exponential
+  // Connection feedback + Gmail-style reconnect UI. LiveSync reconnects on its own (exponential
   // backoff) after a drop (e.g. laptop sleep); here we render the state and let "Try now" force it.
   const retryBtn = document.getElementById("status-retry") as HTMLButtonElement | null;
   const statusBar = document.getElementById("status");
-  retryBtn?.addEventListener("click", () => live.reconnectNow());
+  retryBtn?.addEventListener("click", () => sync.reconnectNow());
   let countdown: number | undefined;
   const stopCountdown = () => { if (countdown !== undefined) { clearInterval(countdown); countdown = undefined; } };
   const renderStatus = (s: LiveStatus) => {
@@ -274,7 +298,7 @@ async function main() {
       countdown = setInterval(tick, 500) as unknown as number;
     }
   };
-  live.onStatus = renderStatus;
-  await live.connect();
+  sync.onStatus = renderStatus;
+  await sync.connect();
 }
 main();
