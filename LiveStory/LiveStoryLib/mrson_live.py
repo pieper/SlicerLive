@@ -40,6 +40,56 @@ _WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 # enough to look continuous, large enough that a kHz source can't saturate the wire or the client.
 FLUSH_MS = 33
 
+# --- optional profiling of the Slicer-side send path (measure a REAL drag) ---------------------
+# Off by default (zero cost). startProfile() -> drag in Slicer -> dragStats() reports per-event
+# serialize/send time, event rate, inter-event gaps, and outbound bytesToWrite, from a bounded ring
+# buffer (no console printing — printing would itself repaint the main thread and skew the result).
+_COALESCE = {"on": True}   # A/B switch: outbound coalescer vs immediate send (camera dedup stays on)
+
+
+def setCoalesce(v):
+    _COALESCE["on"] = bool(v)
+    return "coalesce=%s (camera dedup always on)" % _COALESCE["on"]
+
+
+def _new_prof():
+    return {"on": False, "produced": {}, "camDropped": 0, "sent": 0, "flushes": 0,
+            "btwWire": 0, "inOps": 0, "t0": None, "tN": None}
+
+
+_prof = _new_prof()
+
+
+def startProfile():
+    global _prof
+    on_flag = {"on": True}
+    _prof = _new_prof(); _prof.update(on_flag)
+    return "mrson profiling ON (drag a markup in Slicer, then call dragStats())"
+
+
+def stopProfile():
+    _prof["on"] = False
+    return "mrson profiling OFF"
+
+
+def dragStats():
+    produced = dict(_prof["produced"])
+    total_prod = sum(produced.values())
+    dur = (_prof["tN"] - _prof["t0"]) if (_prof["t0"] and _prof["tN"]) else 0.0
+    return {
+        # PRODUCED = raw Modified events entering the observer (after camera-pose dedup drops).
+        "produced": produced, "producedTotal": total_prod,
+        "cameraDropped": _prof["camDropped"],           # redundant camera events killed at the source
+        # SENT = what actually went on the wire after coalescing (latest-wins per node, ~30Hz).
+        "sent": _prof["sent"], "flushes": _prof["flushes"],
+        "durSec": round(dur, 2),
+        "producedPerSec": round(total_prod / dur, 0) if dur > 0 else -1,
+        "sentPerSec": round(_prof["sent"] / dur, 0) if dur > 0 else -1,
+        "coalesceRatio": round(total_prod / _prof["sent"], 1) if _prof["sent"] else None,
+        "bytesToWriteMaxAtFlush": _prof["btwWire"],      # should stay small now (was 7513 backed up)
+        "inboundOps": _prof["inOps"],
+    }
+
 # vtkMRML class -> neutral mrson type (matches serialize_mrson)
 _CLASS_TYPE = {
     "vtkMRMLScalarVolumeNode": "image",
@@ -159,6 +209,62 @@ def _decode_frames(buf):
     return out
 
 
+# ---- outbound coalescer (server half of impedance matching) -----------------
+
+class _OutCoalescer:
+    """Rate-limit the Slicer->client event stream to one message per node per FLUSH_MS, latest-wins
+    (the server analogue of the client's Coalescer). A native Slicer drag fires camera + markup
+    Modified in sub-millisecond bursts every render frame; sending each immediately backs up the
+    socket (measured: bytesToWrite climbing to 7.5KB with multi-second stalls). Coalescing collapses
+    each burst to one send per node so the client always drains — the same discipline the inbound
+    (client->Slicer) ops already use, which is why dragging in SlicerLive never stutters.
+
+    LEADING-EDGE INLINE: when >= interval has elapsed, update() flushes immediately (driven by the
+    incoming events, NOT a timer) so the client sees updates promptly and the cadence can't STARVE
+    during a drag (the earlier immediate-send worked around a starvable timer; this doesn't rely on
+    one). A QTimer only covers the TRAILING flush after events stop, so the final pose always lands."""
+
+    def __init__(self, interval_ms, flush):
+        import time
+        self._interval = interval_ms / 1000.0
+        self._flush = flush              # flush(list_of_events)
+        self._pending = {}               # sourceId -> latest event
+        self._last = -1e18
+        self._clock = time.perf_counter
+        self._timer = qt.QTimer()
+        self._timer.setSingleShot(True)
+        self._timer.connect("timeout()", self._onTimer)
+
+    def update(self, key, value):
+        self._pending[key] = value       # latest wins
+        now = self._clock()
+        if now - self._last >= self._interval:
+            self._doFlush()              # leading edge — no timer dependency
+        elif not self._timer.isActive():
+            wait = int(max(1, (self._interval - (now - self._last)) * 1000))
+            self._timer.start(wait)      # trailing flush only
+
+    def _onTimer(self):
+        self._doFlush()
+
+    def _doFlush(self):
+        self._timer.stop()
+        if not self._pending:
+            return
+        self._last = self._clock()
+        batch = list(self._pending.values())
+        self._pending = {}
+        self._flush(batch)
+
+    def flush_now(self):
+        """Drain pending in order before an out-of-band structural send (add/remove/close)."""
+        self._doFlush()
+
+    def clear(self):
+        self._timer.stop()
+        self._pending = {}
+
+
 # ---- one connected client --------------------------------------------------
 
 class _WSClient:
@@ -169,8 +275,18 @@ class _WSClient:
         self.handshook = False
         self.types = set()
         self.tags = []          # (vtkObject, observerTag) to remove on disconnect
+        self._out = _OutCoalescer(FLUSH_MS, self._flushOut)   # rate-limit Slicer->client live events
+        self._lastCamSig = None                               # camera pose dedup (skip unchanged)
         socket.connect("readyRead()", self._onReadyRead)
         socket.connect("disconnected()", self._onDisconnected)
+
+    def _flushOut(self, batch):
+        if _prof["on"]:
+            _prof["flushes"] += 1; _prof["sent"] += len(batch)
+            try: _prof["btwWire"] = max(_prof["btwWire"], self.socket.bytesToWrite())
+            except Exception: pass  # noqa: BLE001
+        for ev in batch:
+            self.send(ev)
 
     # -- socket io --
     def _onReadyRead(self):
@@ -230,6 +346,8 @@ class _WSClient:
         the views dirty; Slicer renders them on its own render scheduler at its natural rate (and a
         burst of ops decoded in one readyRead collapses to a single render). Smoother, event-driven."""
         import time
+        if _prof["on"]:
+            _prof["inOps"] += len(ops)
         t0 = time.perf_counter()
         applied = 0
         for o in ops:
@@ -251,6 +369,10 @@ class _WSClient:
             except Exception:  # noqa: BLE001
                 pass
         self.tags = []
+        try:
+            self._out.clear()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             self.socket.close()
         except Exception:  # noqa: BLE001
@@ -285,6 +407,7 @@ class _WSClient:
 
     def _onSceneClosed(self, _caller, _event):
         HS.markDirty()
+        self._out.flush_now()          # drain pending live events before the structural event
         self.send({"event": "SceneClosed", "sourceId": ""})
 
     def _observeInstance(self, node):
@@ -304,12 +427,34 @@ class _WSClient:
     # -- observer callbacks (main thread) --
     def _onNodeModified(self, caller, _event):
         HS.markDirty()          # keep the HTTP snapshot fresh for the next reload/subscribe
-        # IMMEDIATE send. A QTimer-based flush starves during a Slicer interaction (the interactor +
-        # render hold the main thread, so the timer never fires until the drag pauses) → the client
-        # sees nothing until you stop. Sending in the observer callback fires synchronously WITH the
-        # interaction, so every intermediate update reaches the client. (Rate-limiting a genuine
-        # high-rate source belongs at the source or on a decimated observer, not a starvable timer.)
-        self.send(_node_event(caller))
+        ev = _node_event(caller)
+        # Camera dedup: a native markup drag continuously changes scene bounds, so the renderer
+        # touches the camera every frame -> ModifiedEvent fires with an UNCHANGED pose (only the
+        # clip range moved). Those carry nothing the client can use -> drop them at the source.
+        if ev.get("event") == "CameraModified":
+            sig = (tuple(ev.get("position") or ()), tuple(ev.get("focalPoint") or ()),
+                   tuple(ev.get("viewUp") or ()), ev.get("viewAngle"))
+            if sig == self._lastCamSig:
+                if _prof["on"]:
+                    _prof["camDropped"] += 1
+                return
+            self._lastCamSig = sig
+        if _prof["on"]:
+            import time
+            now = time.perf_counter()
+            if _prof["t0"] is None:
+                _prof["t0"] = now
+            _prof["tN"] = now
+            _prof["produced"][caller.GetClassName()] = _prof["produced"].get(caller.GetClassName(), 0) + 1
+        # Coalesce onto the wire (latest-wins per node, ~30Hz) instead of sending every burst event.
+        # Toggleable so we can A/B whether the coalescer (vs immediate send) is the slowness. Camera
+        # dedup above is unconditional (unambiguously correct).
+        if _COALESCE["on"]:
+            self._out.update(ev.get("sourceId"), ev)
+        else:
+            if _prof["on"]:
+                _prof["sent"] += 1
+            self.send(ev)
 
     @vtk.calldata_type(vtk.VTK_OBJECT)
     def _onSceneNodeAdded(self, _caller, _event, callData):
@@ -326,6 +471,7 @@ class _WSClient:
             if node_m:
                 ev = {"event": "NodeAdded", "sourceId": node.GetID(),
                       "nodeClass": node.GetClassName(), "node": node_m}
+        self._out.flush_now()          # keep structural events ordered w.r.t. coalesced live events
         self.send(ev)
         self._observeInstance(node)
 
@@ -333,6 +479,7 @@ class _WSClient:
     def _onSceneNodeRemoved(self, _caller, _event, callData):
         node = callData
         if node is not None and _mrson_type(node) in self.types:
+            self._out.flush_now()
             self.send({"event": "NodeRemoved", "sourceId": node.GetID()})
 
 

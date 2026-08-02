@@ -122,6 +122,17 @@ def _apply_patch(node, path, value):
             return False
         node.Modified()
         return True
+    if cls == "vtkMRMLSegmentationNode":
+        # A SlicerLive Control patches the SEGMENTATION node (mrson folds display into it); map to the
+        # segmentation display node so the Qt GUI (eye icon / opacity) updates. (dual of serialize's fold.)
+        dn = node.GetDisplayNode()
+        if dn is None:
+            return False
+        if k0 in ("visible", "visibility"):
+            dn.SetVisibility(bool(value)); return True
+        if k0 == "opacity":
+            dn.SetOpacity(float(value)); return True
+        return False
     return False
 
 
