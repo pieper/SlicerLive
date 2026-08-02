@@ -15,6 +15,8 @@ const IDS = {
   markup: "vtkMRMLMarkupsFiducialNode1",
   camera: "vtkMRMLCameraNode1",
   sliceRed: "vtkMRMLSliceNodeRed",
+  tf: "vtkMRMLVolumePropertyNode1",
+  layout: "vtkMRMLLayoutNodevtkMRMLLayoutNode",
 };
 
 type Val = number | boolean | number[];
@@ -46,6 +48,20 @@ const ROWS: Row[] = [
   { label: "camera.parallelScale", id: IDS.camera, path: "#/parallelScale", get: "nd.GetCamera().GetParallelScale()", set: "nd.GetCamera().SetParallelScale(%V%); nd.Modified()", inV: 120, outV: 80, tol: 0.5 },
   // slice — out-of-plane scroll (mm). A slice change echoes as a `view` NodeAdded upsert.
   { label: "slice.offset", id: IDS.sliceRed, path: "#/offset", get: "nd.GetSliceOffset()", set: "nd.SetSliceOffset(%V%)", inV: 12.0, outV: -8.0, tol: 0.5 },
+  // slice field of view [fovX, fovY, slab] mm — the in-plane zoom. Round-trips exactly (no aspect snap).
+  { label: "slice.fieldOfView", id: IDS.sliceRed, path: "#/fieldOfView", get: "list(nd.GetFieldOfView())", set: "nd.SetFieldOfView(%V%); nd.UpdateMatrices()", inV: [250, 180, 1], outV: [300, 200, 1], tol: 0.5 },
+  // transfer function — per-point edits (the point x-value stays; only the channel changes). nd.Modified()
+  // in the setter emits the NodeAdded echo. tfId = the volume-property node id.
+  { label: "transferFunction.scalarOpacity[3]", id: IDS.tf, path: "#/scalarOpacity/3/opacity",
+    get: "(lambda v=[0.0,0.0,0.0,0.0]: (nd.GetVolumeProperty().GetScalarOpacity(0).GetNodeValue(3,v), v[1])[1])()",
+    set: "so=nd.GetVolumeProperty().GetScalarOpacity(0); v=[0.0,0.0,0.0,0.0]; so.GetNodeValue(3,v); v[1]=%V%; so.SetNodeValue(3,v); nd.Modified()",
+    inV: 0.62, outV: 0.44, tol: 0.01 },
+  { label: "transferFunction.colorStops[3].rgba", id: IDS.tf, path: "#/colorStops/3/rgba",
+    get: "(lambda v=[0.0]*6: (nd.GetVolumeProperty().GetRGBTransferFunction(0).GetNodeValue(3,v), [v[1],v[2],v[3]])[1])()",
+    set: "f=nd.GetVolumeProperty().GetRGBTransferFunction(0); v=[0.0]*6; f.GetNodeValue(3,v); _c=[%V%]; v[1],v[2],v[3]=_c[0],_c[1],_c[2]; f.SetNodeValue(3,v); nd.Modified()",
+    inV: [0.2, 0.5, 0.9], outV: [0.9, 0.4, 0.1], tol: 0.02 },
+  // layout arrangement (int) — echoes as a `layout` NodeAdded. Ends on fourUp(3) to restore the mirror.
+  { label: "layout.arrangement", id: IDS.layout, path: "#/arrangement", get: "nd.GetViewArrangement()", set: "nd.SetViewArrangement(%V%)", inV: 6, outV: 3, tol: 0.1 },
 ];
 
 // ---- MCP (Slicer) ---- use curl: Deno fetch POSTs a chunked body (no Content-Length) that the

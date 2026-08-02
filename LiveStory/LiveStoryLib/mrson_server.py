@@ -116,6 +116,36 @@ def _apply_patch(node, path, value):
             node.SetFieldOfView(float(value[0]), float(value[1]), float(value[2])); node.UpdateMatrices(); return True
         return False
 
+    if cls == "vtkMRMLLayoutNode":
+        if k0 == "arrangement": node.SetViewArrangement(int(value)); return True
+        return False
+
+    if cls == "vtkMRMLVolumePropertyNode":
+        # dual of serialize_mrson._transfer_function_node: per-point opacity/colour edits + shade.
+        # `#/scalarOpacity/<i>/opacity`, `#/colorStops/<i>/rgba`, `#/shade`. Point x-value stays put;
+        # only the edited channel changes (SetNodeValue keeps midpoint/sharpness).
+        prop = node.GetVolumeProperty()
+        if k0 == "shade":
+            prop.SetShade(bool(value)); node.Modified(); return True
+        if k0 == "scalarOpacity" and len(key) >= 3 and key[2] == "opacity":
+            try: i = int(k1)
+            except (ValueError, TypeError): return False
+            f = prop.GetScalarOpacity(0)
+            if 0 <= i < f.GetSize():
+                v = [0.0, 0.0, 0.0, 0.0]; f.GetNodeValue(i, v); v[1] = float(value)
+                f.SetNodeValue(i, v); node.Modified(); return True
+            return False
+        if k0 == "colorStops" and len(key) >= 3 and key[2] == "rgba" and isinstance(value, (list, tuple)) and len(value) >= 3:
+            try: i = int(k1)
+            except (ValueError, TypeError): return False
+            f = prop.GetRGBTransferFunction(0)
+            if 0 <= i < f.GetSize():
+                v = [0.0] * 6; f.GetNodeValue(i, v)
+                v[1], v[2], v[3] = float(value[0]), float(value[1]), float(value[2])
+                f.SetNodeValue(i, v); node.Modified(); return True
+            return False
+        return False
+
     if cls == "vtkMRMLScalarVolumeDisplayNode":
         if k0 == "window": node.SetWindow(float(value)); return True
         if k0 == "level": node.SetLevel(float(value)); return True
