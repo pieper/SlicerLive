@@ -302,6 +302,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     // it to the VIEW focal so they stay a constant on-screen size (rays/frustum are unchanged).
     this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([this.focalPx * (viewH / renderH)]));
     this.dev.queue.writeBuffer(this.superresBuf, 0, new Float32Array([renderW, renderH, viewW, viewH]));
+    this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));   // bg for the superres composite (u_bg) — else moving frames composite over black
     const enc = this.dev.createCommandEncoder();
     const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.lowView!, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
     tp.setPipeline(this.pipeline); tp.setBindGroup(0, this.bind); tp.draw(3); tp.end();
