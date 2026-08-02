@@ -10,3 +10,4 @@ idctest.html
 viewer/idcdemo/
 __pycache__/
 *.pyc
+render/test/*.js
