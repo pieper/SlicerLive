@@ -89,50 +89,69 @@ def _apply_op(op):
 
 
 def _apply_patch(node, path, value):
-    """patch a single property. path is a URI-fragment JSON pointer, e.g. '#/position'."""
+    """Apply a single-property patch (mrson -> MRML), the dual of serialize_mrson. `path` is a
+    URI-fragment JSON pointer, e.g. '#/window' or nested '#/outline2D/opacity'. Display properties
+    that mrson FOLDS onto a displayable node (segmentation, markup carry their display node's props)
+    map through GetDisplayNode(). Class branches return True when they handle the key and otherwise
+    FALL THROUGH, so the generic display-visibility fallback at the end still applies."""
     if node is None:
         return False
     key = [p for p in path.lstrip("#").strip("/").split("/") if p]
     k0 = key[0] if key else ""
+    k1 = key[1] if len(key) > 1 else ""
     cls = node.GetClassName()
+
     if "CameraNode" in cls:
-        if k0 == "position": node.SetPosition(*value)
-        elif k0 == "focalPoint": node.SetFocalPoint(*value)
-        elif k0 == "viewUp": node.SetViewUp(*value)
-        elif k0 == "viewAngle": node.GetCamera().SetViewAngle(value)
-        else: return False
-        node.Modified()
-        return True
+        if k0 == "position": node.SetPosition(*value); node.Modified(); return True
+        if k0 == "focalPoint": node.SetFocalPoint(*value); node.Modified(); return True
+        if k0 == "viewUp": node.SetViewUp(*value); node.Modified(); return True
+        if k0 == "viewAngle": node.GetCamera().SetViewAngle(value); node.Modified(); return True
+        return False
+
     if cls == "vtkMRMLScalarVolumeDisplayNode":
-        if k0 == "window": node.SetWindow(float(value))
-        elif k0 == "level": node.SetLevel(float(value))
-        else: return False
-        return True
-    if "DisplayNode" in cls and k0 in ("visible", "visibility"):
-        node.SetVisibility(bool(value))
-        return True
-    if cls == "vtkMRMLMarkupsROINode":
-        if k0 == "center":
+        if k0 == "window": node.SetWindow(float(value)); return True
+        if k0 == "level": node.SetLevel(float(value)); return True
+        if k0 == "interpolate": node.SetInterpolate(bool(value)); return True
+        # visible falls through to the generic display-visibility fallback
+
+    if "VolumeRenderingDisplayNode" in cls:
+        if k0 == "cropEnabled": node.SetCroppingEnabled(bool(value)); return True
+        # visible falls through
+
+    if cls == "vtkMRMLSegmentationNode":
+        dn = node.GetDisplayNode()
+        if dn is not None:
+            if k0 in ("visible", "visibility"): dn.SetVisibility(bool(value)); return True
+            if k0 == "opacity": dn.SetOpacity(float(value)); return True
+            if k0 == "fill2D" and k1 == "opacity": dn.SetOpacity2DFill(float(value)); return True
+            if k0 == "fill2D" and k1 == "visible": dn.SetVisibility2DFill(bool(value)); return True
+            if k0 == "outline2D" and k1 == "opacity": dn.SetOpacity2DOutline(float(value)); return True
+            if k0 == "outline2D" and k1 == "visible": dn.SetVisibility2DOutline(bool(value)); return True
+        return False
+
+    if cls.startswith("vtkMRMLMarkups") and "DisplayNode" not in cls:
+        # ROI geometry lives on the node; other markup display props (mrson folds them onto the node)
+        # map to the markup's display node -- dual of serialize_mrson._markup_node.
+        if cls == "vtkMRMLMarkupsROINode" and k0 == "center":
             try: node.SetCenterWorld(value)
             except Exception: node.SetCenterWorld(*value)  # noqa: BLE001
-        elif k0 == "size":
+            node.Modified(); return True
+        if cls == "vtkMRMLMarkupsROINode" and k0 == "size":
             try: node.SetSizeWorld(value)
             except Exception: node.SetSize(*value)  # noqa: BLE001
-        else:
-            return False
-        node.Modified()
-        return True
-    if cls == "vtkMRMLSegmentationNode":
-        # A SlicerLive Control patches the SEGMENTATION node (mrson folds display into it); map to the
-        # segmentation display node so the Qt GUI (eye icon / opacity) updates. (dual of serialize's fold.)
+            node.Modified(); return True
         dn = node.GetDisplayNode()
-        if dn is None:
-            return False
-        if k0 in ("visible", "visibility"):
-            dn.SetVisibility(bool(value)); return True
-        if k0 == "opacity":
-            dn.SetOpacity(float(value)); return True
+        if dn is not None:
+            if k0 in ("visible", "visibility"): dn.SetVisibility(bool(value)); return True
+            if k0 == "glyphScale": dn.SetGlyphScale(float(value)); return True
+            if k0 == "color" and isinstance(value, (list, tuple)) and len(value) >= 3:
+                dn.SetSelectedColor(float(value[0]), float(value[1]), float(value[2])); return True
         return False
+
+    if "DisplayNode" in cls and k0 in ("visible", "visibility"):   # scalar/model/etc. display visibility
+        node.SetVisibility(bool(value))
+        return True
+
     return False
 
 

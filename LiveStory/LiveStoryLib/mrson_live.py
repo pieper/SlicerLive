@@ -415,6 +415,12 @@ class _WSClient:
         # markups fire a dedicated PointModifiedEvent on control-point drags
         if _mrson_type(node) == "markup" and hasattr(node, "PointModifiedEvent"):
             self._tags_add(node, node.AddObserver(node.PointModifiedEvent, self._onNodeModified))
+        # markup display props (visibility/colour/glyphScale) live on the display node; mrson folds
+        # them onto the markup node, so re-send the MARKUP node when its display node changes.
+        if _mrson_type(node) == "markup":
+            dn = node.GetDisplayNode()
+            if dn is not None:
+                self._tags_add(dn, dn.AddObserver(vtk.vtkCommand.ModifiedEvent, lambda _c, _e, m=node: self._onNodeModified(m, _e)))
         # segmentation: 2D fill/outline/visibility live on the display node — observe it too
         if node.GetClassName() == "vtkMRMLSegmentationNode":
             dn = node.GetDisplayNode()
