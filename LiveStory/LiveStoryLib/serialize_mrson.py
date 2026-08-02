@@ -139,7 +139,7 @@ def _markup_node(n, node_id):
              "vtkMRMLMarkupsROINode": "roi"}.get(cls, "fiducial")
     node = {
         "type": "markup", "id": node_id, "name": n.GetName(), "frame": "RAS",
-        "markupType": mtype, "controlPoints": pts,
+        "markupType": mtype, "controlPoints": pts, "locked": bool(n.GetLocked()),
         "refs": {}, "source": {"mrmlClass": cls},
     }
     if "Curve" in cls:                       # open/closed curve: the interpolated world polyline
@@ -175,6 +175,8 @@ def _markup_node(n, node_id):
         node["color"] = [sc[0], sc[1], sc[2], 1.0]
         node["visible"] = bool(dn.GetVisibility())
         node["glyphScale"] = float(dn.GetGlyphScale())
+        if hasattr(dn, "GetTextScale"):
+            node["textScale"] = float(dn.GetTextScale())
     return node
 
 

@@ -127,11 +127,19 @@ def _apply_patch(node, path, value):
             if k0 == "fill2D" and k1 == "visible": dn.SetVisibility2DFill(bool(value)); return True
             if k0 == "outline2D" and k1 == "opacity": dn.SetOpacity2DOutline(float(value)); return True
             if k0 == "outline2D" and k1 == "visible": dn.SetVisibility2DOutline(bool(value)); return True
+            if k0 == "segments" and len(key) >= 3 and key[2] == "visible":   # per-segment visibility
+                segn = node.GetSegmentation()
+                try: i = int(k1)
+                except (ValueError, TypeError): return False
+                if 0 <= i < segn.GetNumberOfSegments():
+                    dn.SetSegmentVisibility(segn.GetNthSegmentID(i), bool(value)); return True
         return False
 
     if cls.startswith("vtkMRMLMarkups") and "DisplayNode" not in cls:
         # ROI geometry lives on the node; other markup display props (mrson folds them onto the node)
         # map to the markup's display node -- dual of serialize_mrson._markup_node.
+        if k0 == "locked":
+            node.SetLocked(bool(value)); node.Modified(); return True
         if cls == "vtkMRMLMarkupsROINode" and k0 == "center":
             try: node.SetCenterWorld(value)
             except Exception: node.SetCenterWorld(*value)  # noqa: BLE001
@@ -144,6 +152,7 @@ def _apply_patch(node, path, value):
         if dn is not None:
             if k0 in ("visible", "visibility"): dn.SetVisibility(bool(value)); return True
             if k0 == "glyphScale": dn.SetGlyphScale(float(value)); return True
+            if k0 == "textScale": dn.SetTextScale(float(value)); return True
             if k0 == "color" and isinstance(value, (list, tuple)) and len(value) >= 3:
                 dn.SetSelectedColor(float(value[0]), float(value[1]), float(value[2])); return True
         return False

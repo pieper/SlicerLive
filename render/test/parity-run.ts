@@ -15,11 +15,12 @@ const IDS = {
   markup: "vtkMRMLMarkupsFiducialNode1",
 };
 
+type Val = number | boolean | number[];
 interface Row {
   label: string; id: string; path: string;
   get: string;                 // python expr on `nd`
   set: string;                 // python stmt on `nd`, %V% = the value literal
-  inV: number | boolean; outV: number | boolean;
+  inV: Val; outV: Val;
   bool?: boolean; tol?: number;
 }
 const ROWS: Row[] = [
@@ -30,6 +31,11 @@ const ROWS: Row[] = [
   { label: "segmentation.opacity", id: IDS.seg, path: "#/opacity", get: "nd.GetDisplayNode().GetOpacity()", set: "nd.GetDisplayNode().SetOpacity(%V%)", inV: 0.6, outV: 0.85, tol: 0.02 },
   { label: "segmentation.outline2D.opacity", id: IDS.seg, path: "#/outline2D/opacity", get: "nd.GetDisplayNode().GetOpacity2DOutline()", set: "nd.GetDisplayNode().SetOpacity2DOutline(%V%)", inV: 0.4, outV: 0.7, tol: 0.02 },
   { label: "markup.glyphScale", id: IDS.markup, path: "#/glyphScale", get: "nd.GetDisplayNode().GetGlyphScale()", set: "nd.GetDisplayNode().SetGlyphScale(%V%)", inV: 5.0, outV: 2.5, tol: 0.05 },
+  { label: "markup.textScale", id: IDS.markup, path: "#/textScale", get: "nd.GetDisplayNode().GetTextScale()", set: "nd.GetDisplayNode().SetTextScale(%V%)", inV: 4.0, outV: 2.0, tol: 0.05 },
+  { label: "markup.locked", id: IDS.markup, path: "#/locked", get: "nd.GetLocked()", set: "nd.SetLocked(%V%)", inV: true, outV: false, bool: true },
+  { label: "markup.color", id: IDS.markup, path: "#/color", get: "list(nd.GetDisplayNode().GetSelectedColor())", set: "nd.GetDisplayNode().SetSelectedColor(%V%)", inV: [0.2, 0.8, 0.4], outV: [0.9, 0.3, 0.1], tol: 0.02 },
+  { label: "segmentation.fill2D.opacity", id: IDS.seg, path: "#/fill2D/opacity", get: "nd.GetDisplayNode().GetOpacity2DFill()", set: "nd.GetDisplayNode().SetOpacity2DFill(%V%)", inV: 0.35, outV: 0.65, tol: 0.02 },
+  { label: "segmentation.segments[0].visible", id: IDS.seg, path: "#/segments/0/visible", get: "nd.GetDisplayNode().GetSegmentVisibility(nd.GetSegmentation().GetNthSegmentID(0))", set: "nd.GetDisplayNode().SetSegmentVisibility(nd.GetSegmentation().GetNthSegmentID(0), %V%)", inV: false, outV: true, bool: true },
 ];
 
 // ---- MCP (Slicer) ---- use curl: Deno fetch POSTs a chunked body (no Content-Length) that the
@@ -42,8 +48,8 @@ function mcp(code: string): string {
   if (parsed.error || !parsed.result) throw new Error("MCP error: " + JSON.stringify(parsed).slice(0, 300));
   return parsed.result.content[0].text;
 }
-const pyLit = (v: number | boolean) => (typeof v === "boolean" ? (v ? "True" : "False") : String(v));
-const slicerSet = (r: Row, v: number | boolean) =>
+const pyLit = (v: Val) => (Array.isArray(v) ? v.join(", ") : typeof v === "boolean" ? (v ? "True" : "False") : String(v));
+const slicerSet = (r: Row, v: Val) =>
   mcp(`import slicer\nnd = slicer.mrmlScene.GetNodeByID(${JSON.stringify(r.id)})\n${r.set.replace("%V%", pyLit(v))}\nslicer.app.processEvents()\n__result="ok"`);
 const slicerGet = (r: Row) =>
   mcp(`import slicer, json\nnd = slicer.mrmlScene.GetNodeByID(${JSON.stringify(r.id)})\n__result = json.dumps(${r.get})`);
@@ -64,12 +70,15 @@ async function evalJS(expr: string): Promise<unknown> {
 }
 const browserRead = (r: Row) => evalJS(
   `(()=>{const n=window.__live.nodes.get(${JSON.stringify(r.id)});if(!n)return null;let c=n;for(const k of ${JSON.stringify(r.path.replace(/^#/, "").split("/").filter(Boolean))})c=c==null?c:c[k];return c;})()`);
-const browserWrite = (r: Row, v: number | boolean) =>
+const browserWrite = (r: Row, v: Val) =>
   evalJS(`window.__live.write({op:"patch",id:${JSON.stringify(r.id)},path:${JSON.stringify(r.path)},value:${JSON.stringify(v)}}),"ok"`);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const same = (r: Row, a: unknown, b: number | boolean) =>
-  r.bool ? Boolean(a) === Boolean(b) && (a !== null && a !== undefined) : Math.abs(Number(a) - Number(b)) <= (r.tol ?? 0.01);
+function same(r: Row, a: unknown, b: Val): boolean {
+  if (Array.isArray(b)) return Array.isArray(a) && b.every((bv, i) => Math.abs(Number((a as number[])[i]) - Number(bv)) <= (r.tol ?? 0.02));
+  if (r.bool) return a !== null && a !== undefined && Boolean(a) === Boolean(b);
+  return Math.abs(Number(a) - Number(b)) <= (r.tol ?? 0.01);
+}
 
 // ---- run ----
 console.log("\n  " + "property".padEnd(40) + "inbound (Slicer->SL)   outbound (SL->Slicer)");
