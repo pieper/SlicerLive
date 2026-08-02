@@ -13,6 +13,8 @@ const IDS = {
   vr: "vtkMRMLGPURayCastVolumeRenderingDisplayNode1",
   seg: "vtkMRMLSegmentationNode1",
   markup: "vtkMRMLMarkupsFiducialNode1",
+  camera: "vtkMRMLCameraNode1",
+  sliceRed: "vtkMRMLSliceNodeRed",
 };
 
 type Val = number | boolean | number[];
@@ -36,6 +38,14 @@ const ROWS: Row[] = [
   { label: "markup.color", id: IDS.markup, path: "#/color", get: "list(nd.GetDisplayNode().GetSelectedColor())", set: "nd.GetDisplayNode().SetSelectedColor(%V%)", inV: [0.2, 0.8, 0.4], outV: [0.9, 0.3, 0.1], tol: 0.02 },
   { label: "segmentation.fill2D.opacity", id: IDS.seg, path: "#/fill2D/opacity", get: "nd.GetDisplayNode().GetOpacity2DFill()", set: "nd.GetDisplayNode().SetOpacity2DFill(%V%)", inV: 0.35, outV: 0.65, tol: 0.02 },
   { label: "segmentation.segments[0].visible", id: IDS.seg, path: "#/segments/0/visible", get: "nd.GetDisplayNode().GetSegmentVisibility(nd.GetSegmentation().GetNthSegmentID(0))", set: "nd.GetDisplayNode().SetSegmentVisibility(nd.GetSegmentation().GetNthSegmentID(0), %V%)", inV: false, outV: true, bool: true },
+  // camera — the pose a recording must reproduce. position/viewUp fire the node's Modified directly;
+  // viewAngle/parallelScale live on the vtkCamera, so nudge nd.Modified() to emit the CameraModified event.
+  { label: "camera.position", id: IDS.camera, path: "#/position", get: "list(nd.GetPosition())", set: "nd.SetPosition(%V%)", inV: [10, 20, 30], outV: [-40, -50, -60], tol: 0.5 },
+  { label: "camera.viewUp", id: IDS.camera, path: "#/viewUp", get: "list(nd.GetViewUp())", set: "nd.SetViewUp(%V%)", inV: [1, 0, 0], outV: [0, 0, 1], tol: 0.02 },
+  { label: "camera.viewAngle", id: IDS.camera, path: "#/viewAngle", get: "nd.GetCamera().GetViewAngle()", set: "nd.GetCamera().SetViewAngle(%V%); nd.Modified()", inV: 25, outV: 40, tol: 0.1 },
+  { label: "camera.parallelScale", id: IDS.camera, path: "#/parallelScale", get: "nd.GetCamera().GetParallelScale()", set: "nd.GetCamera().SetParallelScale(%V%); nd.Modified()", inV: 120, outV: 80, tol: 0.5 },
+  // slice — out-of-plane scroll (mm). A slice change echoes as a `view` NodeAdded upsert.
+  { label: "slice.offset", id: IDS.sliceRed, path: "#/offset", get: "nd.GetSliceOffset()", set: "nd.SetSliceOffset(%V%)", inV: 12.0, outV: -8.0, tol: 0.5 },
 ];
 
 // ---- MCP (Slicer) ---- use curl: Deno fetch POSTs a chunked body (no Content-Length) that the

@@ -268,6 +268,9 @@ def _slice_view_node(n, node_id):
         "layoutName": n.GetLayoutName(), "orientation": n.GetOrientation(),
         "sliceToRAS": S._mat4(n.GetSliceToRAS()), "xyToRAS": S._mat4(n.GetXYToRAS()),
         "dimensions": [int(d) for d in n.GetDimensions()],
+        # offset = the out-of-plane scroll position (mm along the slice normal); a clean scalar
+        # dual to SetSliceOffset (the sliceToRAS translation encodes it, but the scalar round-trips).
+        "offset": n.GetSliceOffset(),
         "fieldOfView": list(n.GetFieldOfView()), "source": {"mrmlClass": n.GetClassName()},
     }
 

@@ -106,6 +106,14 @@ def _apply_patch(node, path, value):
         if k0 == "focalPoint": node.SetFocalPoint(*value); node.Modified(); return True
         if k0 == "viewUp": node.SetViewUp(*value); node.Modified(); return True
         if k0 == "viewAngle": node.GetCamera().SetViewAngle(value); node.Modified(); return True
+        if k0 == "parallelScale": node.GetCamera().SetParallelScale(float(value)); node.Modified(); return True
+        return False
+
+    if cls == "vtkMRMLSliceNode":
+        # dual of serialize_mrson._slice_view_node: out-of-plane scroll + in-plane zoom.
+        if k0 == "offset": node.SetSliceOffset(float(value)); return True
+        if k0 == "fieldOfView" and isinstance(value, (list, tuple)) and len(value) >= 3:
+            node.SetFieldOfView(float(value[0]), float(value[1]), float(value[2])); node.UpdateMatrices(); return True
         return False
 
     if cls == "vtkMRMLScalarVolumeDisplayNode":

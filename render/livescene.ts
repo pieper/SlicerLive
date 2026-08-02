@@ -191,8 +191,21 @@ export class LiveScene {
       }
       for (const m of this.interested("segmentation")) await m.onEvent?.(ev, this);
       if (node) this.feed({ id, type: "segmentation", kind: "upsert", origin: "remote", v: ++this.seq, node });
+    } else if (e === "CameraModified") {
+      // Live camera pose from Slicer. Keep the MODEL authoritative — merge the pose fields into the
+      // camera node (like SegmentationDisplayModified) so Controls/recorders read current state from
+      // nodes, not just the CameraDisplayableManager's private copy (ARCHITECTURE-2026-08-02 §1).
+      const id = ev.sourceId as string;
+      const node = this.nodes.get(id);
+      if (node) {
+        for (const k of ["position", "focalPoint", "viewUp", "viewAngle", "parallelScale"]) {
+          if (k in ev) (node as unknown as Record<string, unknown>)[k] = ev[k];
+        }
+      }
+      for (const m of this.interested("camera")) await m.onEvent?.(ev, this);
+      if (node) this.feed({ id, type: "camera", kind: "upsert", origin: "remote", v: ++this.seq, node });
     } else {
-      const t = this.nodes.get(ev.sourceId as string)?.type ?? (e === "CameraModified" ? "camera" : undefined);
+      const t = this.nodes.get(ev.sourceId as string)?.type;
       for (const m of this.interested(t)) await m.onEvent?.(ev, this);
     }
   }

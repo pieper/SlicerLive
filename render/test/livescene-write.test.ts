@@ -83,3 +83,21 @@ Deno.test("receiveEvent: inbound NodeAdded/NodeRemoved drive the model + feed as
   assert(!scene.nodes.has("vol9"), "inbound remove applied");
   eq(mgr.removed.includes("vol9"), true, "displayer removal");
 });
+
+Deno.test("receiveEvent CameraModified: merges the pose into the node (model stays authoritative)", async () => {
+  const mgr = new FakeMgr(["camera"]);
+  const scene = new LiveScene("http://x/mrson/", [mgr]);
+  scene.nodes.set("cam1", { type: "camera", id: "cam1", position: [0, 0, 0], viewAngle: 30, parallelScale: 1 });
+  const changes: Change[] = [];
+  scene.subscribe((c) => changes.push(c));
+  await scene.receiveEvent({
+    event: "CameraModified", sourceId: "cam1",
+    position: [10, 20, 30], focalPoint: [0, 0, 0], viewUp: [1, 0, 0], viewAngle: 25, parallelScale: 120,
+  });
+  const n = scene.nodes.get("cam1")!;
+  eq(n.position, [10, 20, 30], "position merged into the model node");
+  eq(n.viewAngle, 25, "viewAngle merged");
+  eq(n.parallelScale, 120, "parallelScale merged");
+  eq(changes.at(-1)!.origin, "remote", "live camera change feeds as remote");
+  eq(changes.at(-1)!.type, "camera", "feed carries the camera type");
+});

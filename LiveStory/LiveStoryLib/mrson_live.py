@@ -439,7 +439,7 @@ class _WSClient:
         # clip range moved). Those carry nothing the client can use -> drop them at the source.
         if ev.get("event") == "CameraModified":
             sig = (tuple(ev.get("position") or ()), tuple(ev.get("focalPoint") or ()),
-                   tuple(ev.get("viewUp") or ()), ev.get("viewAngle"))
+                   tuple(ev.get("viewUp") or ()), ev.get("viewAngle"), ev.get("parallelScale"))
             if sig == self._lastCamSig:
                 if _prof["on"]:
                     _prof["camDropped"] += 1
