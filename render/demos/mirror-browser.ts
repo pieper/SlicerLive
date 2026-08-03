@@ -13,7 +13,6 @@ import { LiveSync, type LiveStatus } from "../livesync.ts";
 import { WsTransport } from "../transport.ts";
 import type { Op } from "../liveops.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
-import { SceneRecorder } from "../recorder.ts";
 import { Recording } from "../recording.ts";
 import type { MrsonNode } from "../mrson.ts";
 import {
@@ -303,13 +302,16 @@ async function main() {
   };
   sync.onStatus = renderStatus;
 
-  // ── SceneRecorder / Recording timeline (scrubbable replay) ──────────────────
-  // One timeline drives either a LIVE SceneRecorder (records off the _changes feed; restores a past
-  // timepoint while the DVR head keeps advancing) or a loaded on-disk Recording (finalized session
-  // from Slicer). Both expose span/seek/nearestThumb/head; restore = applySnapshot(seek(t)).
+  // ── Timeline: live mirror while you work → on scene close, replay the finalized Slicer recording ──
+  // While live, the mirror follows Slicer and the slider is idle ("● recording"). When you CLOSE the
+  // scene in Slicer, the Slicer-side recorder (mrson_recorder.py) finalizes that session; the browser
+  // hears SceneClosed, auto-loads the recording, and switches to REPLAY: scrub the slider to
+  // reconstruct any timepoint (applySnapshot(seek(t))), with Slicer's OWN 4-up screenshots as the
+  // scrub thumbnails. "Live" returns to mirroring. (The browser-side canvas can't be screenshotted
+  // via drawImage — WebGPU returns blank — which is why the authoritative thumbnails come from Slicer.)
   interface PlaybackSource {
     span(): [number, number]; seek(t: number): Map<string, MrsonNode>;
-    nearestThumb(t: number): { t: number; url: string } | undefined; head(): number;
+    nearestThumb(t: number): { t: number; url: string } | undefined; head(): number; base?: string;
   }
   const tl = document.getElementById("timeline")!;
   const scrub = document.getElementById("tl-scrub") as HTMLInputElement;
@@ -318,129 +320,121 @@ async function main() {
   const playBtn = document.getElementById("tl-play") as HTMLButtonElement;
   const liveBtn = document.getElementById("tl-live") as HTMLButtonElement;
   const markBtn = document.getElementById("tl-mark") as HTMLButtonElement;
+  const liveHttpBase = httpBase;
 
-  function installTimeline(source: PlaybackSource, mode: {
-    isLive: boolean; liveNodes?: () => Map<string, MrsonNode>; onMark?: () => void; captureTick?: () => void;
-  }) {
-    const [t0] = source.span();
-    let displayed: Map<string, MrsonNode> | null = null;   // node map the VIEW shows while in replay
-    let restoring = false, pendingT: number | null = null;
-    let following = mode.isLive;
-    let playTimer: number | undefined, playAnchorT = 0, playAnchorWall = 0;
+  let src: PlaybackSource | null = null;                 // active scrub source (a loaded Recording); null ⇔ live
+  let displayed: Map<string, MrsonNode> | null = null;   // node map the VIEW currently shows while replaying
+  let restoring = false, pendingT: number | null = null;
+  let playTimer: number | undefined, playAnchorT = 0, playAnchorWall = 0;
+  let t0 = 0;
 
-    const tAt = (v: number) => { const [a, b] = source.span(); return a + (v / 1000) * Math.max(0, b - a); };
-    const fmt = (t: number) => { const s = Math.max(0, (t - t0) / 1000); return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`; };
-    const stopPlay = () => { if (playTimer !== undefined) { clearInterval(playTimer); playTimer = undefined; playBtn.classList.remove("on"); playBtn.textContent = "▶"; } };
+  const tAt = (v: number) => { if (!src) return 0; const [a, b] = src.span(); return a + (v / 1000) * Math.max(0, b - a); };
+  const fmt = (t: number) => { const s = Math.max(0, (t - t0) / 1000); return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`; };
+  const stopPlay = () => { if (playTimer !== undefined) { clearInterval(playTimer); playTimer = undefined; playBtn.classList.remove("on"); playBtn.textContent = "▶"; } };
 
-    async function restore(t: number) {
-      if (restoring) { pendingT = t; return; }
-      restoring = true;
-      if (displayed === null) { live.setLive(false); displayed = new Map(live.nodes); tl.classList.add("replay"); }
-      const target = source.seek(t);
-      await live.applySnapshot(target, displayed);
-      displayed = target;
-      restoring = false;
-      if (pendingT !== null) { const n = pendingT; pendingT = null; restore(n); }
-    }
-    async function goLive() {
-      stopPlay();
-      if (mode.isLive) {                                    // re-attach the view to the live model
-        if (displayed !== null) { await live.applySnapshot(mode.liveNodes!(), displayed); displayed = null; }
-        live.setLive(true); tl.classList.remove("replay");
-        following = true; liveBtn.classList.add("on");
-        scrub.value = "1000"; timeLbl.textContent = "live"; preview.style.display = "none";
-      } else {                                              // a finalized recording has no "live" — jump to the end
-        await restore(source.head()); scrub.value = "1000"; timeLbl.textContent = "end"; preview.style.display = "none";
-      }
-    }
-
-    const showPreview = (v: number) => {
-      const th = source.nearestThumb(tAt(v));
-      if (th) { preview.src = th.url; preview.style.display = "block";
-        const frac = v / 1000, x = 12 + frac * (window.innerWidth - 24 - 200);
-        preview.style.left = `${Math.max(6, Math.min(window.innerWidth - 206, x))}px`; }
-      timeLbl.textContent = fmt(tAt(v));
-    };
-    scrub.addEventListener("input", () => { following = false; liveBtn.classList.remove("on"); stopPlay(); showPreview(Number(scrub.value)); });
-    scrub.addEventListener("change", () => {
-      if (following) return;
-      const v = Number(scrub.value);
-      preview.style.display = "none";
-      if (v >= 999 && mode.isLive) { goLive(); return; }
-      restore(tAt(v));
-    });
-    playBtn.addEventListener("click", () => {
-      if (playTimer !== undefined) { stopPlay(); return; }
-      playAnchorT = following ? source.span()[0] : tAt(Number(scrub.value));
-      playAnchorWall = Date.now();
-      following = false; liveBtn.classList.remove("on");
-      playBtn.classList.add("on"); playBtn.textContent = "⏸";
-      playTimer = setInterval(() => {
-        const [lo, hi] = source.span();
-        const t = playAnchorT + (Date.now() - playAnchorWall);
-        if (t >= hi) { goLive(); return; }
-        scrub.value = String(Math.round(((t - lo) / Math.max(1, hi - lo)) * 1000));
-        timeLbl.textContent = fmt(t);
-        restore(t);
-      }, 200) as unknown as number;
-    });
-    liveBtn.addEventListener("click", () => { goLive(); });
-    liveBtn.textContent = mode.isLive ? "Live" : "End";
-    markBtn.disabled = !mode.onMark;
-    markBtn.addEventListener("click", () => mode.onMark?.());
-
-    // Follow the head: live → track the advancing DVR head; also drives periodic thumbnail capture.
-    if (mode.isLive) {
-      setInterval(() => {
-        const [a, b] = source.span();
-        mode.captureTick?.();
-        if (following) { scrub.value = "1000"; timeLbl.textContent = b > a ? `live · ${fmt(b)}` : "live"; }
-      }, 400);
-    }
+  async function restore(t: number) {
+    if (!src) return;
+    if (restoring) { pendingT = t; return; }
+    restoring = true;
+    const target = src.seek(t);
+    await live.applySnapshot(target, displayed ?? new Map());
+    displayed = target;
+    restoring = false;
+    if (pendingT !== null) { const n = pendingT; pendingT = null; restore(n); }
   }
 
+  function setLiveUI() {
+    tl.classList.remove("replay");
+    scrub.disabled = true; scrub.value = "1000";
+    timeLbl.textContent = "● recording";
+    liveBtn.textContent = "Live"; liveBtn.classList.add("on"); liveBtn.disabled = true;
+    playBtn.disabled = true; markBtn.disabled = true; preview.style.display = "none";
+  }
+  function enterReplay(recording: Recording) {
+    stopPlay();
+    src = recording;
+    live.httpBase = recording.base;      // ImageField/zarr fetch the recording's blobs
+    live.setLive(false);                 // freeze the live view; the timeline drives it now
+    displayed = new Map();               // the view was cleared on SceneClosed → diff from empty
+    [t0] = recording.span();
+    tl.classList.add("replay");
+    scrub.disabled = false; playBtn.disabled = false; liveBtn.disabled = false;
+    liveBtn.textContent = "Live"; liveBtn.classList.remove("on");
+    markBtn.disabled = true;
+    Object.assign(globalThis, { __recording: recording });
+    status(`replay: ${recording.session.id} — scrub the timeline`);
+    scrub.value = "0"; restore(recording.span()[0]);   // start at the beginning; scrub/play forward
+  }
+  async function goLive() {
+    stopPlay();
+    live.httpBase = liveHttpBase;                       // blobs back to the live scene
+    if (displayed !== null) { await live.applySnapshot(live.nodes, displayed); displayed = null; }  // sync view to current Slicer
+    live.setLive(true);
+    src = null;
+    setLiveUI();
+    status("mirroring Slicer");
+  }
+
+  scrub.addEventListener("input", () => {
+    if (!src) return;
+    stopPlay();
+    const th = src.nearestThumb(tAt(Number(scrub.value)));
+    if (th) {
+      preview.src = th.url; preview.style.display = "block";
+      const frac = Number(scrub.value) / 1000, x = 12 + frac * (window.innerWidth - 24 - 200);
+      preview.style.left = `${Math.max(6, Math.min(window.innerWidth - 206, x))}px`;
+    }
+    timeLbl.textContent = fmt(tAt(Number(scrub.value)));
+  });
+  scrub.addEventListener("change", () => { if (!src) return; preview.style.display = "none"; restore(tAt(Number(scrub.value))); });
+  playBtn.addEventListener("click", () => {
+    if (!src) return;
+    if (playTimer !== undefined) { stopPlay(); return; }
+    playAnchorT = Number(scrub.value) >= 999 ? src.span()[0] : tAt(Number(scrub.value));
+    playAnchorWall = Date.now();
+    playBtn.classList.add("on"); playBtn.textContent = "⏸";
+    playTimer = setInterval(() => {
+      if (!src) { stopPlay(); return; }
+      const [lo, hi] = src.span();
+      const t = playAnchorT + (Date.now() - playAnchorWall);
+      if (t >= hi) { stopPlay(); scrub.value = "1000"; restore(hi); return; }
+      scrub.value = String(Math.round(((t - lo) / Math.max(1, hi - lo)) * 1000));
+      timeLbl.textContent = fmt(t);
+      restore(t);
+    }, 200) as unknown as number;
+  });
+  liveBtn.addEventListener("click", () => { if (src) goLive(); });
+
+  // Explicit ?rec=<name> → open that recording immediately (no live connection).
   const recName = p.get("rec");
   if (recName) {
-    // ── replay a finalized on-disk recording (no live connection) ──
     status(`loading recording ${recName}…`);
-    const recBase = new URL(`rec/${recName}/`, httpBase).href;   // http://host:2131/mrson/rec/<name>/
-    const recording = await Recording.load(recBase);
-    live.httpBase = recBase;                                      // blobBase → the recording's blobs
-    scene = null;                                                 // built lazily by applySnapshot
-    Object.assign(globalThis, { __recording: recording });
-    installTimeline(recording, { isLive: false });
-    document.getElementById("status-text")!.textContent = `replay: ${recName}`;
-    await recording.seek(recording.head());                       // warm
-    await live.applySnapshot(recording.seek(recording.head()), new Map());   // show the final state
+    const recording = await Recording.load(new URL(`rec/${recName}/`, httpBase).href);
+    enterReplay(recording);
     return;
   }
 
-  // ── live mirror + recording ──
-  const rec = new SceneRecorder(live, { keyEveryMs: 8000 });
-  rec.start();
-  Object.assign(globalThis, { __rec: rec });
-
-  // Live thumbnails: composite the visible WebGPU cells into a small 2D canvas (drawImage — captures
-  // what's on screen, no GPU readback). (A finalized recording carries Slicer's own 4-up screenshots.)
-  const thumbCv = document.createElement("canvas");
-  thumbCv.width = 240; thumbCv.height = 180;
-  const tctx = thumbCv.getContext("2d")!;
-  const THUMB_POS: Record<string, [number, number]> = { red: [0, 0], threeD: [1, 0], green: [0, 1], yellow: [1, 1] };
-  const captureThumb = (): string => {
-    tctx.fillStyle = "#05060a"; tctx.fillRect(0, 0, thumbCv.width, thumbCv.height);
-    const vis = CELLS.filter((c) => visible.has(c));
-    try {
-      if (vis.length === 1) tctx.drawImage(cv[vis[0]], 0, 0, thumbCv.width, thumbCv.height);
-      else { const hw = thumbCv.width / 2, hh = thumbCv.height / 2; for (const c of vis) { const [cx, ry] = THUMB_POS[c]; tctx.drawImage(cv[c], cx * hw, ry * hh, hw, hh); } }
-    } catch { /* canvas not yet drawn */ }
-    return thumbCv.toDataURL("image/jpeg", 0.5);
-  };
-  let lastThumb = 0;
-  installTimeline(rec, {
-    isLive: true,
-    liveNodes: () => live.nodes,
-    onMark: () => { const l = prompt("Mark this moment (LiveStory step):", "step"); if (l) { rec.mark(l); rec.addThumb(captureThumb()); } },
-    captureTick: () => { const now = Date.now(); if (now - lastThumb >= 1500) { lastThumb = now; rec.addThumb(captureThumb()); } },
+  // Live mode: mirror Slicer; on scene close, auto-load the just-finalized recording and replay it.
+  setLiveUI();
+  async function loadLatestRecording(): Promise<Recording | null> {
+    for (let i = 0; i < 15; i++) {                       // retry ~4.5s: the recorder finalizes on scene close
+      try {
+        const list = await (await fetch(new URL("recs", liveHttpBase).href)).json();
+        const names: string[] = list.recordings || [];
+        if (names.length) {
+          const r = await Recording.load(new URL(`rec/${names[names.length - 1]}/`, liveHttpBase).href);
+          if (r.session.frames.length) return r;
+        }
+      } catch { /* server mid-write */ }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    return null;
+  }
+  live.subscribe(async (c) => {
+    if (c.kind !== "reset" || src) return;               // Slicer closed the scene (and we're not already replaying)
+    status("finalizing recording…");
+    const recording = await loadLatestRecording();
+    if (recording) enterReplay(recording); else status("mirroring Slicer (no recording found)");
   });
 
   await sync.connect();
