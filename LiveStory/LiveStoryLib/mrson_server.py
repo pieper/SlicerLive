@@ -252,6 +252,30 @@ class MrsonRequestHandler(WebServerLib.BaseRequestHandler):
             if method == "GET" and path == "/mrson/state.json":
                 return b"application/json", json.dumps(_live_state()).encode()
 
+            if method == "GET" and path == "/mrson/recs":
+                # list finalized recordings (dirs under /tmp/mrson_rec with a recording.json)
+                root = "/tmp/mrson_rec"
+                recs = []
+                if os.path.isdir(root):
+                    for name in sorted(os.listdir(root)):
+                        if os.path.exists(os.path.join(root, name, "recording.json")):
+                            recs.append(name)
+                return b"application/json", json.dumps({"recordings": recs}).encode()
+
+            if method == "GET" and path.startswith("/mrson/rec/"):
+                # serve a file from a recording dir: /mrson/rec/<name>/<relpath> (json / png / blob)
+                rest = path[len("/mrson/rec/"):]
+                if ".." in rest:
+                    return b"application/json", b'{"error":"bad path"}'
+                fpath = os.path.join("/tmp/mrson_rec", *rest.split("/"))
+                if not os.path.exists(fpath):
+                    return b"application/json", b'{"error":"not found"}'
+                ext = os.path.splitext(fpath)[1].lower()
+                ctype = {".json": b"application/json", ".png": b"image/png",
+                         ".jpg": b"image/jpeg", ".jpeg": b"image/jpeg"}.get(ext, b"application/octet-stream")
+                with open(fpath, "rb") as f:
+                    return ctype, f.read()
+
             if method == "GET" and path.startswith("/mrson/blobs/"):
                 rest = path[len("/mrson/blobs/"):]
                 if ".." in rest:
