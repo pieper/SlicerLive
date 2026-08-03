@@ -60,7 +60,7 @@ export interface SealOpts {
   base?: BranchPoint;                  // set on a fork's first commit
   isoFromMs?: (ms: number) => string;  // ms → ISO (injectable for deterministic tests)
 }
-type TimedDelta = { t?: number } & Record<string, unknown>;
+interface TimedDelta { t?: number; [k: string]: unknown }
 
 /** Seal a time-ordered delta stream into a commit chain: consecutive ~intervalMs windows, each a
  *  content-addressed Commit linked to its parent. Deterministic given the same input + isoFromMs. */
@@ -77,7 +77,7 @@ export async function sealStream(deltas: TimedDelta[], opts: SealOpts = {}): Pro
     const c: Omit<Commit, "hash"> = {
       parents: parent ? [parent] : [],
       ...(commits.length === 0 && opts.base ? { base: opts.base } : {}),
-      t: iso(last.t ?? windowStart ?? 0),
+      t: iso((last.t as number | undefined) ?? windowStart ?? 0),
       ...(opts.author ? { author: opts.author } : {}),
       ...(opts.role ? { role: opts.role } : {}),
       ops: bundle,
@@ -90,7 +90,7 @@ export async function sealStream(deltas: TimedDelta[], opts: SealOpts = {}): Pro
   };
 
   for (const d of deltas) {
-    const t = d.t ?? windowStart ?? 0;
+    const t: number = (d.t as number | undefined) ?? windowStart ?? 0;
     if (windowStart !== null && t - windowStart >= interval) await seal();
     if (windowStart === null) windowStart = t;
     bundle.push(d);

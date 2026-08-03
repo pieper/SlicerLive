@@ -131,12 +131,25 @@ class MrsonRecorder:
             "hasContent": hasContent, "blobBase": "blobs/", "keyframes": self.keyframes,
             "events": self.events, "thumbs": thumbs, "marks": self.marks,
         }
+        # git-style history: seal the event stream into a content-addressed commit chain (hashes are
+        # byte-identical to render/commits.ts — see render/test/commits-conformance.test.ts), so the
+        # recording carries `commits`/`head`/`root` that SlicerLive verifies without recomputing.
+        head = None
+        try:
+            from . import mrson_commits
+            commits = mrson_commits.seal_stream(self.events, interval_ms=1000, role="module")
+            manifest["commits"] = commits
+            manifest["root"] = commits[0]["hash"] if commits else None
+            head = commits[-1]["hash"] if commits else None
+            manifest["head"] = head
+        except Exception as e:  # noqa: BLE001
+            print("mrson_recorder: sealing failed: %s" % e)
         with open(self.manifestPath(), "w") as f:
             json.dump(manifest, f)
         # tiny sidecar so /mrson/recs can list sessions without parsing the full (event-heavy) manifest
         with open(os.path.join(self.dir, "meta.json"), "w") as f:
             json.dump({"id": manifest["id"], "hasContent": hasContent,
-                       "startedAt": startedAt, "endedAt": endedAt}, f)
+                       "startedAt": startedAt, "endedAt": endedAt, "head": head}, f)
         self.lastFinalized = self.manifestPath()
         self._session = False
         print("\n  mrson recorder FINALIZED: %s  (%d events, %d keyframes, %d thumbs, content=%s) — ready for replay\n"
