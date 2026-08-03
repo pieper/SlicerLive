@@ -49,6 +49,40 @@ export interface RecorderOpts {
 
 const clone = <T>(v: T): T => structuredClone(v);
 
+/** Reconstruct the full node map as of time `t` from a frame tape: restore the nearest keyframe/reset
+ *  at or before t, then apply every delta up to t in order. Shared by the live SceneRecorder and a
+ *  loaded on-disk Recording (render/recording.ts) so both scrub identically. */
+export function seekFrames(frames: Frame[], t: number): Map<string, MrsonNode> {
+  let base = -1;
+  for (let i = 0; i < frames.length; i++) {
+    if (frames[i].t > t) break;
+    if (frames[i].k === "key" || frames[i].k === "reset") base = i;
+  }
+  const nodes = new Map<string, MrsonNode>();
+  let start = 0;
+  if (base >= 0) {
+    const b = frames[base];
+    if (b.k === "key") for (const [id, n] of Object.entries(b.nodes)) nodes.set(id, clone(n));
+    start = base + 1;
+  }
+  for (let i = start; i < frames.length; i++) {
+    const e = frames[i];
+    if (e.t > t) break;
+    if (e.k === "up") nodes.set(e.id, clone(e.node));
+    else if (e.k === "rm") nodes.delete(e.id);
+    else if (e.k === "reset") nodes.clear();
+    else if (e.k === "key") { nodes.clear(); for (const [id, n] of Object.entries(e.nodes)) nodes.set(id, clone(n)); }
+  }
+  return nodes;
+}
+
+/** The thumbnail nearest `t` (instant scrub feedback before the exact state is reconstructed). */
+export function nearestThumbOf(thumbs: Thumb[], t: number): Thumb | undefined {
+  let best: Thumb | undefined, bestD = Infinity;
+  for (const th of thumbs) { const d = Math.abs(th.t - t); if (d < bestD) { bestD = d; best = th; } }
+  return best;
+}
+
 export class SceneRecorder {
   session: Session;
   private now: () => number;
@@ -127,32 +161,8 @@ export class SceneRecorder {
   /** [startedAt, head] — the scrub range. */
   span(): [number, number] { return [this.session.startedAt, this.head()]; }
 
-  /** Reconstruct the full node map as of time `t`: restore the nearest keyframe/reset at or before t,
-   *  then apply every delta up to t in order. O(frames) with a keyframe cap on the replay length. */
-  seek(t: number): Map<string, MrsonNode> {
-    const f = this.session.frames;
-    let base = -1;
-    for (let i = 0; i < f.length; i++) {
-      if (f[i].t > t) break;
-      if (f[i].k === "key" || f[i].k === "reset") base = i;
-    }
-    const nodes = new Map<string, MrsonNode>();
-    let start = 0;
-    if (base >= 0) {
-      const b = f[base];
-      if (b.k === "key") for (const [id, n] of Object.entries(b.nodes)) nodes.set(id, clone(n));
-      start = base + 1;
-    }
-    for (let i = start; i < f.length; i++) {
-      const e = f[i];
-      if (e.t > t) break;
-      if (e.k === "up") nodes.set(e.id, clone(e.node));
-      else if (e.k === "rm") nodes.delete(e.id);
-      else if (e.k === "reset") nodes.clear();
-      else if (e.k === "key") { nodes.clear(); for (const [id, n] of Object.entries(e.nodes)) nodes.set(id, clone(n)); }
-    }
-    return nodes;
-  }
+  /** Reconstruct the full node map as of time `t` (nearest keyframe + deltas). */
+  seek(t: number): Map<string, MrsonNode> { return seekFrames(this.session.frames, t); }
 
   // ── narrative + thumbnails (LiveStory side-channels) ─────────────────────────
 
@@ -165,14 +175,7 @@ export class SceneRecorder {
     this.session.thumbs.push({ t, url });
   }
   /** The thumbnail nearest `t` (for instant scrub feedback before the exact state is reconstructed). */
-  nearestThumb(t: number): Thumb | undefined {
-    let best: Thumb | undefined, bestD = Infinity;
-    for (const th of this.session.thumbs) {
-      const d = Math.abs(th.t - t);
-      if (d < bestD) { bestD = d; best = th; }
-    }
-    return best;
-  }
+  nearestThumb(t: number): Thumb | undefined { return nearestThumbOf(this.session.thumbs, t); }
 
   // ── bulk-data references + culling ───────────────────────────────────────────
 
