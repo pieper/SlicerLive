@@ -9,6 +9,7 @@
 // LiveScene.applySnapshot(seek(t)) — identical to live scrub.
 
 import { nearestThumbOf, seekFrames, type Frame, type Mark, type Session, type Thumb } from "./recorder.ts";
+import { branchPointAtTime, type BranchPoint, type Commit, type ContentHash, sealStream, verifyChain, type VerifyResult } from "./commits.ts";
 import type { MrsonNode } from "./mrson.ts";
 
 interface RecEvent { t: number; event: string; sourceId?: string; node?: MrsonNode; display?: Record<string, unknown>; [k: string]: unknown }
@@ -18,6 +19,7 @@ interface Manifest {
   events: RecEvent[];
   thumbs: { t: number; file: string }[];
   marks: Mark[];
+  commits?: Commit[]; head?: ContentHash; root?: ContentHash;   // git-style history (sealed on disk, or computed on load)
 }
 
 /** Apply one recorded mrson event to a node map, returning the resulting frame delta. This is the pure
@@ -65,6 +67,13 @@ function reduceEvent(nodes: Map<string, MrsonNode>, ev: RecEvent): Frame | null 
 }
 
 export class Recording {
+  // git-style history over the event stream (see commits.ts). Present when the recording was sealed on
+  // disk (render/tools/seal-recording.ts); otherwise computed deterministically on load, so every
+  // recording "has" a verifiable commit chain and a stable head hash.
+  commits: Commit[] = [];
+  headCommit?: ContentHash;   // NB: distinct from head() (the timeline's max frame time)
+  rootCommit?: ContentHash;
+
   constructor(public base: string, public session: Session) {}
 
   /** Fetch + compile a finalized recording at `base` (…/mrson/rec/<name>/). */
@@ -98,7 +107,12 @@ export class Recording {
 
     const thumbs: Thumb[] = man.thumbs.map((th) => ({ t: th.t, url: base + th.file }));
     const session: Session = { id: man.id, startedAt: man.startedAt, frames, thumbs, marks: man.marks ?? [] };
-    return new Recording(base, session);
+    const rec = new Recording(base, session);
+    // git-style history: use the on-disk chain if the recording was sealed, else compute it deterministically.
+    rec.commits = (man.commits && man.commits.length) ? man.commits : await sealStream(man.events ?? [], { intervalMs: 1000, role: "module" });
+    rec.rootCommit = man.root ?? rec.commits[0]?.hash;
+    rec.headCommit = man.head ?? rec.commits[rec.commits.length - 1]?.hash;
+    return rec;
   }
 
   // Same query surface as SceneRecorder, so the timeline UI drives either interchangeably.
@@ -110,4 +124,10 @@ export class Recording {
   frameTimes(): number[] { return this.session.frames.map((f) => f.t); }
   /** blobBase for a LiveScene replaying this recording (so ImageField/zarr fetch the recording's blobs). */
   blobBase(): string { return this.base; }
+
+  // ── git-style history ────────────────────────────────────────────────────
+  /** The `(commit, offset)` branch point at a timeline position — the address to fork from here. */
+  branchPointAt(tMs: number): BranchPoint { return branchPointAtTime(this.commits, tMs); }
+  /** Re-hash the commit chain: detects any altered delta (integrity). */
+  verify(): Promise<VerifyResult> { return verifyChain(this.commits); }
 }
