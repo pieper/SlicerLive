@@ -23,6 +23,25 @@
             cursor: pointer; }
   #status-retry:hover { background: #24365a; }
   #status.down #status-text { color: #f0b04a; }
+
+  /* ── SceneRecorder timeline (scrubbable replay) ───────────────────────────── */
+  #grid { height: calc(100vh - 46px); }            /* leave room for the timeline bar */
+  #timeline { position: fixed; left: 0; right: 0; bottom: 0; height: 46px; z-index: 4;
+              display: flex; align-items: center; gap: 10px; padding: 0 12px; box-sizing: border-box;
+              background: #0b0e16; border-top: 1px solid #1b2740;
+              font: 12px -apple-system, system-ui, sans-serif; color: #9fb3d0; }
+  #tl-btns { display: flex; gap: 4px; }
+  #timeline button { font: 600 12px -apple-system, system-ui, sans-serif; color: #d6e2f2;
+              background: #1b2740; border: 1px solid #33507e; border-radius: 4px; padding: 3px 9px; cursor: pointer; }
+  #timeline button:hover { background: #24365a; }
+  #timeline button.on { background: #2b6cb0; border-color: #3f86d0; color: #fff; }
+  #tl-scrub { flex: 1; height: 6px; accent-color: #4a90d9; cursor: pointer; }
+  #tl-time { min-width: 118px; text-align: right; font-variant-numeric: tabular-nums; opacity: .9; }
+  #tl-preview { position: fixed; bottom: 52px; z-index: 5; width: 200px; pointer-events: none;
+              border: 1px solid #33507e; border-radius: 5px; box-shadow: 0 6px 22px rgba(0,0,0,.6);
+              background: #000; display: none; }
+  #tl-live-dot { width: 8px; height: 8px; border-radius: 50%; background: #5ad07a; box-shadow: 0 0 6px #5ad07a; }
+  #timeline.replay #tl-live-dot { background: #f0b04a; box-shadow: 0 0 6px #f0b04a; }
 </style>
 </head>
 <body>
@@ -35,6 +54,18 @@
     <div class="cell" id="cell-yellow"><canvas id="c-yellow"></canvas><div class="lab yellow">Y · Sagittal</div></div>
   </div>
   <div id="status"><span id="status-text">loading…</span><button id="status-retry" hidden>Try now</button></div>
+  <!-- SceneRecorder timeline: scrub through the recorded session, restore any timepoint, resume live. -->
+  <img id="tl-preview" alt="">
+  <div id="timeline">
+    <span id="tl-live-dot" title="live / replay"></span>
+    <div id="tl-btns">
+      <button id="tl-play" title="Play / pause the recorded session">▶</button>
+      <button id="tl-live" class="on" title="Jump to live and follow">Live</button>
+      <button id="tl-mark" title="Mark this moment (LiveStory step)">＋ Mark</button>
+    </div>
+    <input id="tl-scrub" type="range" min="0" max="1000" value="1000" step="1">
+    <span id="tl-time">live</span>
+  </div>
   <script type="module" src="mirror.js"></script>
 </body>
 </html>

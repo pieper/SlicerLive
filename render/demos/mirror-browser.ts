@@ -13,6 +13,8 @@ import { LiveSync, type LiveStatus } from "../livesync.ts";
 import { WsTransport } from "../transport.ts";
 import type { Op } from "../liveops.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
+import { SceneRecorder } from "../recorder.ts";
+import type { MrsonNode } from "../mrson.ts";
 import {
   CameraDisplayableManager,
   type CameraState,
@@ -299,6 +301,127 @@ async function main() {
     }
   };
   sync.onStatus = renderStatus;
+
+  // ── SceneRecorder + scrubbable replay timeline ──────────────────────────────
+  // Record the whole session off the LiveScene _changes feed (keyframes + deltas; bulk data stays
+  // hash-referenced). The timeline restores any past timepoint by driving the view with
+  // applySnapshot(seek(t)) while the model keeps advancing live underneath (the DVR head).
+  const rec = new SceneRecorder(live, { keyEveryMs: 8000 });
+  rec.start();
+  Object.assign(globalThis, { __rec: rec });
+
+  const tl = document.getElementById("timeline")!;
+  const scrub = document.getElementById("tl-scrub") as HTMLInputElement;
+  const timeLbl = document.getElementById("tl-time")!;
+  const preview = document.getElementById("tl-preview") as HTMLImageElement;
+  const playBtn = document.getElementById("tl-play") as HTMLButtonElement;
+  const liveBtn = document.getElementById("tl-live") as HTMLButtonElement;
+  const markBtn = document.getElementById("tl-mark") as HTMLButtonElement;
+
+  // Thumbnail = the visible cells composited into a small 2D canvas (drawImage from the WebGPU
+  // canvases — captures exactly what's on screen, no GPU readback, no disturbance to the render).
+  const thumbCv = document.createElement("canvas");
+  thumbCv.width = 240; thumbCv.height = 180;
+  const tctx = thumbCv.getContext("2d")!;
+  const THUMB_POS: Record<string, [number, number]> = { red: [0, 0], threeD: [1, 0], green: [0, 1], yellow: [1, 1] };
+  const captureThumb = (): string => {
+    tctx.fillStyle = "#05060a";
+    tctx.fillRect(0, 0, thumbCv.width, thumbCv.height);
+    const vis = CELLS.filter((c) => visible.has(c));
+    try {
+      if (vis.length === 1) {
+        tctx.drawImage(cv[vis[0]], 0, 0, thumbCv.width, thumbCv.height);
+      } else {
+        const hw = thumbCv.width / 2, hh = thumbCv.height / 2;
+        for (const c of vis) { const [cx, ry] = THUMB_POS[c]; tctx.drawImage(cv[c], cx * hw, ry * hh, hw, hh); }
+      }
+    } catch { /* a canvas with no committed frame yet — skip */ }
+    return thumbCv.toDataURL("image/jpeg", 0.5);
+  };
+  setInterval(() => rec.addThumb(captureThumb()), 1500);
+
+  // Replay controller: `displayed` is the node map the VIEW currently shows while in replay; live
+  // mode shows the model itself. Restores are serialized (latest-wins) so fast scrubbing can't
+  // interleave async manager work.
+  let displayed: Map<string, MrsonNode> | null = null;   // non-null ⇔ in replay
+  let restoring = false, pendingT: number | null = null;
+  const [t0] = rec.span();
+  const tAt = (v: number) => { const [a, b] = rec.span(); return a + (v / 1000) * Math.max(0, b - a); };
+  const fmt = (t: number) => { const s = Math.max(0, (t - t0) / 1000); return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`; };
+
+  async function restore(t: number) {
+    if (restoring) { pendingT = t; return; }
+    restoring = true;
+    if (displayed === null) { live.setLive(false); displayed = new Map(live.nodes); tl.classList.add("replay"); }
+    const target = rec.seek(t);
+    await live.applySnapshot(target, displayed);
+    displayed = target;
+    restoring = false;
+    if (pendingT !== null) { const n = pendingT; pendingT = null; restore(n); }
+  }
+  async function goLive() {
+    stopPlay();
+    if (displayed !== null) { await live.applySnapshot(live.nodes, displayed); displayed = null; }
+    live.setLive(true);
+    tl.classList.remove("replay");
+    following = true; liveBtn.classList.add("on");
+    scrub.value = "1000"; timeLbl.textContent = "live"; preview.style.display = "none";
+  }
+
+  // Scrub: while dragging show the nearest thumbnail (instant); on release restore the exact state.
+  let following = true;
+  const showPreview = (v: number) => {
+    const th = rec.nearestThumb(tAt(v));
+    if (th) { preview.src = th.url; preview.style.display = "block";
+      const frac = v / 1000, x = 12 + frac * (window.innerWidth - 24 - 200);
+      preview.style.left = `${Math.max(6, Math.min(window.innerWidth - 206, x))}px`; }
+    timeLbl.textContent = fmt(tAt(v));
+  };
+  scrub.addEventListener("input", () => {
+    following = false; liveBtn.classList.remove("on"); stopPlay();
+    showPreview(Number(scrub.value));
+  });
+  const commitScrub = () => {
+    if (following) return;
+    const v = Number(scrub.value);
+    preview.style.display = "none";
+    if (v >= 999) { goLive(); return; }
+    restore(tAt(v));
+  };
+  scrub.addEventListener("change", commitScrub);
+
+  // Play: advance from the current point at real speed, restoring as it goes; snap to Live at the end.
+  let playTimer: number | undefined, playAnchorT = 0, playAnchorWall = 0;
+  const stopPlay = () => { if (playTimer !== undefined) { clearInterval(playTimer); playTimer = undefined; playBtn.classList.remove("on"); playBtn.textContent = "▶"; } };
+  playBtn.addEventListener("click", () => {
+    if (playTimer !== undefined) { stopPlay(); return; }
+    const [a, b] = rec.span();
+    playAnchorT = following ? a : tAt(Number(scrub.value));
+    playAnchorWall = Date.now();
+    following = false; liveBtn.classList.remove("on");
+    playBtn.classList.add("on"); playBtn.textContent = "⏸";
+    playTimer = setInterval(() => {
+      const [lo, hi] = rec.span();
+      const t = playAnchorT + (Date.now() - playAnchorWall);
+      if (t >= hi) { goLive(); return; }
+      scrub.value = String(Math.round(((t - lo) / Math.max(1, hi - lo)) * 1000));
+      timeLbl.textContent = fmt(t);
+      restore(t);
+    }, 200) as unknown as number;
+  });
+
+  liveBtn.addEventListener("click", () => { goLive(); });
+  markBtn.addEventListener("click", () => {
+    const label = prompt("Mark this moment (LiveStory step):", "step");
+    if (label) { rec.mark(label); rec.addThumb(captureThumb()); }
+  });
+
+  // Follow the DVR head while live: keep the scrub range fresh and the thumb pinned to the latest.
+  setInterval(() => {
+    const [a, b] = rec.span();
+    if (following) { scrub.value = "1000"; timeLbl.textContent = b > a ? `live · ${fmt(b)}` : "live"; }
+  }, 400);
+
   await sync.connect();
 }
 main();

@@ -154,27 +154,58 @@ export class LiveScene {
     this.feed({ id: r.id, type: node.type, kind: "upsert", origin, v, node, op });
   }
 
+  // ── replay (SceneRecorder) ──────────────────────────────────────────────────
+  // When applyView is false the model + _changes feed still update on every inbound event (so a
+  // SceneRecorder keeps a LOSSLESS record of the live session), but the DISPLAYABLE MANAGERS are NOT
+  // driven — the view is under replay control via applySnapshot(). Resuming live re-attaches the view
+  // to the current model. This is the DVR head advancing while you scrub the past.
+  applyView = true;
+
+  /** Enter/leave replay mode. Leaving does NOT itself repaint — the caller reconciles the view to the
+   *  desired node map (present or a seeked past) with applySnapshot(). */
+  setLive(on: boolean): void { this.applyView = on; }
+
+  /** Drive the displayable managers so the VIEW reflects `target` (a full node map — the live model, or
+   *  a SceneRecorder.seek(t) reconstruction), reconciling from `from` (what the view currently shows).
+   *  Emits nothing on the _changes feed and does NOT mutate this.nodes — replay must not pollute the
+   *  recording nor the authoritative model. Removes gone nodes, (re)adds new/changed ones (JSON-diff);
+   *  heavy GPU resources keyed by id are reused by the managers, so scrubbing is cheap after the first
+   *  fetch. */
+  async applySnapshot(target: Map<string, MrsonNode>, from: Map<string, MrsonNode>): Promise<void> {
+    for (const [id, node] of from) {
+      if (!target.has(id)) for (const m of this.interested(node.type)) m.onNodeRemoved?.(id, this);
+    }
+    for (const [id, node] of target) {
+      const prev = from.get(id);
+      if (!prev || JSON.stringify(prev) !== JSON.stringify(node)) {
+        for (const m of this.interested(node.type)) await m.onNodeAdded?.(node, this);
+      }
+    }
+  }
+
   /** Apply one inbound event from a peer (via LiveSync). Slicer sends event-shaped changes (NodeAdded
-   *  upsert / NodeRemoved / CameraModified / SceneClosed); each mutates the model, notifies displayers,
-   *  and emits on the `_changes` feed with a remote origin so Controls reflect it. */
+   *  upsert / NodeRemoved / CameraModified / SceneClosed); each mutates the model, notifies displayers
+   *  (unless replay froze the view), and emits on the `_changes` feed with a remote origin so Controls
+   *  and the SceneRecorder reflect it. */
   async receiveEvent(ev: Record<string, unknown>): Promise<void> {
     const e = ev.event as string;
+    const live = this.applyView;   // drive managers only when the view is attached to the live model
     if (e === "NodeAdded" && ev.node) {
       const node = ev.node as MrsonNode;
       this.nodes.set(node.id, node);                       // upsert
-      for (const m of this.interested(node.type)) await m.onNodeAdded?.(node, this);
+      if (live) for (const m of this.interested(node.type)) await m.onNodeAdded?.(node, this);
       this.feed({ id: node.id, type: node.type, kind: "upsert", origin: "remote", v: ++this.seq, node });
     } else if (e === "NodeRemoved") {
       const id = ev.sourceId as string;
       const node = this.nodes.get(id);
       this.nodes.delete(id);
-      for (const m of this.interested(node?.type)) m.onNodeRemoved?.(id, this);
+      if (live) for (const m of this.interested(node?.type)) m.onNodeRemoved?.(id, this);
       this.feed({ id, type: node?.type, kind: "remove", origin: "remote", v: ++this.seq });
     } else if (e === "SnapshotComplete") {
       /* managers already received their snapshot nodes */
     } else if (e === "SceneClosed") {
       this.nodes.clear();                                 // wholesale reset (Slicer closed the scene)
-      for (const m of this.managers) m.onSceneClosed?.(this);
+      if (live) for (const m of this.managers) m.onSceneClosed?.(this);
       this.feed({ id: "", kind: "reset", origin: "remote", v: ++this.seq });
     } else if (e === "SegmentationDisplayModified") {
       // A display-only change from Slicer (visibility / opacity / colour). Keep the MODEL authoritative:
@@ -189,7 +220,7 @@ export class LiveScene {
           if (k in disp) (node as unknown as Record<string, unknown>)[k] = disp[k];
         }
       }
-      for (const m of this.interested("segmentation")) await m.onEvent?.(ev, this);
+      if (live) for (const m of this.interested("segmentation")) await m.onEvent?.(ev, this);
       if (node) this.feed({ id, type: "segmentation", kind: "upsert", origin: "remote", v: ++this.seq, node });
     } else if (e === "CameraModified") {
       // Live camera pose from Slicer. Keep the MODEL authoritative — merge the pose fields into the
@@ -202,11 +233,11 @@ export class LiveScene {
           if (k in ev) (node as unknown as Record<string, unknown>)[k] = ev[k];
         }
       }
-      for (const m of this.interested("camera")) await m.onEvent?.(ev, this);
+      if (live) for (const m of this.interested("camera")) await m.onEvent?.(ev, this);
       if (node) this.feed({ id, type: "camera", kind: "upsert", origin: "remote", v: ++this.seq, node });
     } else {
       const t = this.nodes.get(ev.sourceId as string)?.type;
-      for (const m of this.interested(t)) await m.onEvent?.(ev, this);
+      if (live) for (const m of this.interested(t)) await m.onEvent?.(ev, this);
     }
   }
 }
