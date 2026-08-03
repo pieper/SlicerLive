@@ -14,6 +14,7 @@ import { WsTransport } from "../transport.ts";
 import type { Op } from "../liveops.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
 import { Recording } from "../recording.ts";
+import { CameraInteractor } from "../vtk-interactor.ts";
 import type { MrsonNode } from "../mrson.ts";
 import {
   CameraDisplayableManager,
@@ -63,6 +64,7 @@ async function main() {
   let volumeField: ImageField | null = null;
   let volumeShown3D = false;
   let clip: { lo: Vec3; hi: Vec3 } | null = null;
+  let inReplay = false;   // replaying a finalized recording → local 3D orbit + slice scroll (branch); Play snaps back
 
   const slice = new SliceRenderer(gpu, srgb);
   let volumeReady = false;
@@ -221,7 +223,7 @@ async function main() {
   ];
   const chrome = installChrome({ controls, anchor: cv.threeD });
   live.subscribe((c) => { if (c.type === "volumeRenderingDisplay" || c.type === "segmentation") chrome.refresh(); });
-  Object.assign(globalThis, { __live: live, __sync: sync });   // debug hook
+  Object.assign(globalThis, { __live: live, __sync: sync, __camState: () => camera.state() });   // debug hook
 
   // Markup drag (SlicerLive -> Slicer): grab a 3D control-point glyph and move it in the plane
   // perpendicular to the view at its own depth. The local glyph follows the cursor immediately
@@ -246,12 +248,13 @@ async function main() {
     return { ras, op: { op: "cmd", id: drag!.id, cmd: "setControlPoint", args: { index: drag!.index, position: ras } } };
   };
   cv.threeD.addEventListener("pointerdown", (e: PointerEvent) => {
-    if (!visible.has("threeD")) return;
+    if (inReplay || !visible.has("threeD")) return;   // replay → the camera interactor owns the 3D view
     const { sx, sy } = evPx(e);
     const h = pick(sx, sy);
     if (h) { drag = h; markupsDM.touch(h.id, h.index); cv.threeD.setPointerCapture(e.pointerId); cv.threeD.style.cursor = "grabbing"; e.preventDefault(); }
   });
   cv.threeD.addEventListener("pointermove", (e: PointerEvent) => {
+    if (inReplay) return;
     const { sx, sy } = evPx(e);
     if (!drag) { cv.threeD.style.cursor = pick(sx, sy) ? "grab" : "default"; return; }
     const { ras, op } = opFor(sx, sy);
@@ -332,13 +335,16 @@ async function main() {
   const fmt = (t: number) => { const s = Math.max(0, (t - t0) / 1000); return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`; };
   const stopPlay = () => { if (playTimer !== undefined) { clearInterval(playTimer); playTimer = undefined; playBtn.classList.remove("on"); playBtn.textContent = "▶"; } };
 
+  let branched = false;   // user diverged the view with local interaction; Play/scrub snaps it back
   async function restore(t: number) {
     if (!src) return;
     if (restoring) { pendingT = t; return; }
     restoring = true;
     const target = src.seek(t);
-    await live.applySnapshot(target, displayed ?? new Map());
+    // force camera + slice ('view') nodes so a branched-off local view snaps back to the recorded path
+    await live.applySnapshot(target, displayed ?? new Map(), { force: (n) => n.type === "camera" || n.type === "view" });
     displayed = target;
+    if (branched) { branched = false; tl.classList.remove("branched"); }
     restoring = false;
     if (pendingT !== null) { const n = pendingT; pendingT = null; restore(n); }
   }
@@ -353,6 +359,7 @@ async function main() {
   function enterReplay(recording: Recording) {
     stopPlay();
     src = recording;
+    inReplay = true;                     // enable local 3D orbit + slice scroll (branch off the recording)
     live.httpBase = recording.base;      // ImageField/zarr fetch the recording's blobs
     live.setLive(false);                 // freeze the live view; the timeline drives it now
     displayed = new Map();               // the view was cleared on SceneClosed → diff from empty
@@ -367,6 +374,7 @@ async function main() {
   }
   async function goLive() {
     stopPlay();
+    inReplay = false; branched = false; tl.classList.remove("branched");
     live.httpBase = liveHttpBase;                       // blobs back to the live scene
     if (displayed !== null) { await live.applySnapshot(live.nodes, displayed); displayed = null; }  // sync view to current Slicer
     live.setLive(true);
@@ -393,6 +401,7 @@ async function main() {
     playAnchorT = Number(scrub.value) >= 999 ? src.span()[0] : tAt(Number(scrub.value));
     playAnchorWall = Date.now();
     playBtn.classList.add("on"); playBtn.textContent = "⏸";
+    restore(playAnchorT);                                // snap the branched view back to the recording, now
     playTimer = setInterval(() => {
       if (!src) { stopPlay(); return; }
       const [lo, hi] = src.span();
@@ -404,6 +413,35 @@ async function main() {
     }, 200) as unknown as number;
   });
   liveBtn.addEventListener("click", () => { if (src) goLive(); });
+
+  // ── interactive branch (replay only): orbit/zoom the 3D view + scroll slices off the recorded
+  //    scene; Play or scrub snaps back to the recording path (restore() force-re-applies camera+slices).
+  const branch = () => { if (!inReplay) return; stopPlay(); if (!branched) { branched = true; tl.classList.add("branched"); } timeLbl.textContent = "⎇ branched — Play to resume"; };
+  const cam3d = new CameraInteractor(camera, () => a3d.draw());
+  const xy3d = (e: PointerEvent | WheelEvent) => { const r = cv.threeD.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+  cv.threeD.addEventListener("contextmenu", (e) => { if (inReplay) e.preventDefault(); });
+  cv.threeD.addEventListener("pointerdown", (e) => {
+    if (!inReplay) return;
+    const { x, y } = xy3d(e);
+    cam3d.start(e.button as 0 | 1 | 2, x, y, cv.threeD.clientHeight, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
+    cv.threeD.setPointerCapture(e.pointerId); branch();
+  });
+  cv.threeD.addEventListener("pointermove", (e) => { if (!inReplay || cam3d.action === "none") return; const { x, y } = xy3d(e); cam3d.move(x, y, cv.threeD.clientWidth, cv.threeD.clientHeight); });
+  const end3d = (e: PointerEvent) => { if (cam3d.action !== "none") { cam3d.end(); try { cv.threeD.releasePointerCapture(e.pointerId); } catch { /* */ } } };
+  cv.threeD.addEventListener("pointerup", end3d);
+  cv.threeD.addEventListener("pointercancel", end3d);
+  cv.threeD.addEventListener("wheel", (e) => { if (!inReplay) return; e.preventDefault(); cam3d.wheel(e.deltaY < 0); branch(); }, { passive: false });
+  for (const c of SLICE_CELLS) {
+    cv[c].addEventListener("wheel", (e) => {
+      if (!inReplay || !volumeField) return;
+      e.preventDefault();
+      const pl = planes[c]; if (!pl) return;
+      const [lo, hi] = volumeField.aabb();
+      const axis = pl.orient === "axial" ? 2 : pl.orient === "coronal" ? 1 : 0;
+      pl.posMm = Math.max(lo[axis], Math.min(hi[axis], pl.posMm + (hi[axis] - lo[axis]) * 0.012 * (e.deltaY > 0 ? 1 : -1)));
+      branch(); renderSlice(c);
+    }, { passive: false });
+  }
 
   // Explicit ?rec=<name> → open that recording immediately (no live connection).
   const recName = p.get("rec");

@@ -171,13 +171,20 @@ export class LiveScene {
    *  recording nor the authoritative model. Removes gone nodes, (re)adds new/changed ones (JSON-diff);
    *  heavy GPU resources keyed by id are reused by the managers, so scrubbing is cheap after the first
    *  fetch. */
-  async applySnapshot(target: Map<string, MrsonNode>, from: Map<string, MrsonNode>): Promise<void> {
+  async applySnapshot(
+    target: Map<string, MrsonNode>,
+    from: Map<string, MrsonNode>,
+    opts?: { force?: (n: MrsonNode) => boolean },
+  ): Promise<void> {
     for (const [id, node] of from) {
       if (!target.has(id)) for (const m of this.interested(node.type)) m.onNodeRemoved?.(id, this);
     }
     for (const [id, node] of target) {
       const prev = from.get(id);
-      if (!prev || JSON.stringify(prev) !== JSON.stringify(node)) {
+      // `force` re-delivers a node even when its value is unchanged — used to SNAP the view (camera,
+      // slice offsets) back to the recorded state after the user branched off with local interaction
+      // (which mutates the view but not the model node, so a plain diff would skip it).
+      if (!prev || JSON.stringify(prev) !== JSON.stringify(node) || opts?.force?.(node)) {
         for (const m of this.interested(node.type)) await m.onNodeAdded?.(node, this);
       }
     }
