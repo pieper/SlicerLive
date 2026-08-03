@@ -420,9 +420,13 @@ async function main() {
     for (let i = 0; i < 15; i++) {                       // retry ~4.5s: the recorder finalizes on scene close
       try {
         const list = await (await fetch(new URL("recs", liveHttpBase).href)).json();
-        const names: string[] = list.recordings || [];
-        if (names.length) {
-          const r = await Recording.load(new URL(`rec/${names[names.length - 1]}/`, liveHttpBase).href);
+        const recs: { name: string; hasContent?: boolean; endedAt?: number }[] = list.recordings || [];
+        // the just-closed Clear-to-Clear span: has real content AND ended within the last ~20s
+        // (an empty / "start-fresh" Clear finalizes an empty session → skipped → stay live).
+        const fresh = recs.filter((r) => r.hasContent && r.endedAt && Date.now() - r.endedAt < 20000)
+          .sort((a, b) => (b.endedAt! - a.endedAt!));
+        if (fresh.length) {
+          const r = await Recording.load(new URL(`rec/${fresh[0].name}/`, liveHttpBase).href);
           if (r.session.frames.length) return r;
         }
       } catch { /* server mid-write */ }
@@ -430,11 +434,15 @@ async function main() {
     }
     return null;
   }
+  let loadingRec = false;
   live.subscribe(async (c) => {
-    if (c.kind !== "reset" || src) return;               // Slicer closed the scene (and we're not already replaying)
+    if (c.kind !== "reset" || src || loadingRec) return; // Slicer closed the scene (not already replaying/loading)
+    loadingRec = true;
     status("finalizing recording…");
     const recording = await loadLatestRecording();
-    if (recording) enterReplay(recording); else status("mirroring Slicer (no recording found)");
+    loadingRec = false;
+    if (src) return;                                      // a concurrent close already entered replay
+    if (recording) enterReplay(recording); else status("mirroring Slicer");   // empty Clear → nothing to replay; stay live
   });
 
   await sync.connect();

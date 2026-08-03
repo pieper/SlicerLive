@@ -253,13 +253,24 @@ class MrsonRequestHandler(WebServerLib.BaseRequestHandler):
                 return b"application/json", json.dumps(_live_state()).encode()
 
             if method == "GET" and path == "/mrson/recs":
-                # list finalized recordings (dirs under /tmp/mrson_rec with a recording.json)
+                # list finalized recordings via the tiny meta.json sidecar (avoids parsing the
+                # event-heavy recording.json). Each: {name, hasContent, startedAt, endedAt}.
                 root = "/tmp/mrson_rec"
                 recs = []
                 if os.path.isdir(root):
                     for name in sorted(os.listdir(root)):
-                        if os.path.exists(os.path.join(root, name, "recording.json")):
-                            recs.append(name)
+                        d = os.path.join(root, name)
+                        if not os.path.exists(os.path.join(d, "recording.json")):
+                            continue
+                        entry = {"name": name, "hasContent": True}
+                        try:
+                            with open(os.path.join(d, "meta.json")) as f:
+                                m = json.load(f)
+                            entry.update({"hasContent": bool(m.get("hasContent")),
+                                          "startedAt": m.get("startedAt"), "endedAt": m.get("endedAt")})
+                        except Exception:  # noqa: BLE001
+                            pass
+                        recs.append(entry)
                 return b"application/json", json.dumps({"recordings": recs}).encode()
 
             if method == "GET" and path.startswith("/mrson/rec/"):

@@ -94,6 +94,7 @@ class MrsonRecorder:
         self._nkey = 0
         self._finalized = False
         self._last_key_t = -1e18
+        self._firstContentT = None       # time of the first real data node (image/seg/markup/mesh)
         self._evfile = open(os.path.join(self.dir, "events.jsonl"), "a")
         self._session = True
         self.keyframe()                                  # seed keyframe = current full scene
@@ -118,18 +119,28 @@ class MrsonRecorder:
             self._evfile.close()
         except Exception:  # noqa: BLE001
             pass
+        endedAt = _now_ms()
+        hasContent = self._firstContentT is not None
+        # The scrub timeline starts at the first real content (right after the Clear), so an empty
+        # lead-in doesn't pad the recording — a session is effectively "from Clear (first data) to Clear".
+        startedAt = self._firstContentT if hasContent else self.startedAt
+        thumbs = [th for th in self.thumbs if th["t"] >= startedAt] or self.thumbs
         manifest = {
             "mrsonRecording": 1, "id": os.path.basename(self.dir),
-            "startedAt": self.startedAt, "endedAt": _now_ms(),
-            "blobBase": "blobs/", "keyframes": self.keyframes,
-            "events": self.events, "thumbs": self.thumbs, "marks": self.marks,
+            "startedAt": startedAt, "rawStartedAt": self.startedAt, "endedAt": endedAt,
+            "hasContent": hasContent, "blobBase": "blobs/", "keyframes": self.keyframes,
+            "events": self.events, "thumbs": thumbs, "marks": self.marks,
         }
         with open(self.manifestPath(), "w") as f:
             json.dump(manifest, f)
+        # tiny sidecar so /mrson/recs can list sessions without parsing the full (event-heavy) manifest
+        with open(os.path.join(self.dir, "meta.json"), "w") as f:
+            json.dump({"id": manifest["id"], "hasContent": hasContent,
+                       "startedAt": startedAt, "endedAt": endedAt}, f)
         self.lastFinalized = self.manifestPath()
         self._session = False
-        print("\n  mrson recorder FINALIZED: %s  (%d events, %d keyframes, %d thumbs) — ready for replay\n"
-              % (self.lastFinalized, len(self.events), len(self.keyframes), len(self.thumbs)))
+        print("\n  mrson recorder FINALIZED: %s  (%d events, %d keyframes, %d thumbs, content=%s) — ready for replay\n"
+              % (self.lastFinalized, len(self.events), len(self.keyframes), len(thumbs), hasContent))
         return self.lastFinalized
 
     def _sceneTag(self, tag):
@@ -174,7 +185,26 @@ class MrsonRecorder:
             if nm:
                 ev = {"event": "NodeAdded", "sourceId": node.GetID(), "nodeClass": node.GetClassName(), "node": nm}
         self._append(ev)
+        if self._firstContentT is None and self._is_content(node):
+            self._firstContentT = self.events[-1]["t"] if self.events else _now_ms()
         self._observeInstance(node)
+
+    @staticmethod
+    def _is_content(node):
+        """Real user data that marks the meaningful start of a session — image / segmentation / markup /
+        user model. EXCLUDES Slicer's slice-intersection display models (vtkMRMLModelNode infrastructure
+        recreated after every Clear), which would otherwise anchor the trim to t≈0 and defeat it."""
+        t = L._mrson_type(node)
+        if t in ("image", "segmentation", "markup"):
+            return True
+        if t == "mesh":
+            try:
+                if node.GetAttribute("SliceLogic.IsSliceModelNode") == "1" or node.GetHideFromEditors():
+                    return False
+            except Exception:  # noqa: BLE001
+                pass
+            return True
+        return False
 
     @vtk.calldata_type(vtk.VTK_OBJECT)
     def _onNodeRemoved(self, _caller, _event, callData):
