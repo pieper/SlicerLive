@@ -106,6 +106,8 @@ export class Recording {
   nearestThumb(t: number): Thumb | undefined { return nearestThumbOf(this.session.thumbs, t); }
   head(): number { const f = this.session.frames; return f.length ? f[f.length - 1].t : this.session.startedAt; }
   span(): [number, number] { return [this.session.startedAt, this.head()]; }
+  /** Times of every recorded frame (keyframe/delta), ascending — used to skip idle gaps in playback. */
+  frameTimes(): number[] { return this.session.frames.map((f) => f.t); }
   /** blobBase for a LiveScene replaying this recording (so ImageField/zarr fetch the recording's blobs). */
   blobBase(): string { return this.base; }
 }

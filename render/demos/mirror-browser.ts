@@ -15,6 +15,7 @@ import type { Op } from "../liveops.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
 import { Recording } from "../recording.ts";
 import { CameraInteractor } from "../vtk-interactor.ts";
+import { attachSliceControls, type SliceControls } from "./slice-control.ts";
 import type { MrsonNode } from "../mrson.ts";
 import {
   CameraDisplayableManager,
@@ -72,6 +73,11 @@ async function main() {
   let segFill = 0.5;
   let segOutline = 1.0;
   const planes: Record<string, SlicePlane | undefined> = {};
+  // In replay a cell is "branched" once the user pans/zooms/scrolls it locally: renderSlice then
+  // PRESERVES its local view (setMirrorFrame would overwrite the pan/zoom viewState every frame).
+  // Cleared on Play/scrub so the recorded frame snaps back.
+  const sliceBranched: Record<string, boolean> = {};
+  const CELL_ORIENT: Record<string, "axial" | "coronal" | "sagittal"> = { red: "axial", green: "coronal", yellow: "sagittal" };
   const visible = new Set<string>(CELLS);
 
   const clearCanvas = (c: string) => {
@@ -100,9 +106,13 @@ async function main() {
     const [lo, hi] = volumeField!.aabb();
     const axis = pl.orient === "axial" ? 2 : pl.orient === "coronal" ? 1 : 0;
     const off01 = Math.max(0, Math.min(1, (pl.posMm - lo[axis]) / Math.max(hi[axis] - lo[axis], 1e-6)));
-    // mirror Slicer's pan + zoom when the slice node carries them, else the fitted view
-    if (pl.centerRAS && pl.fovX && pl.fovY) slice.setMirrorFrame(pl.orient, pl.centerRAS as Vec3, pl.fovX, pl.fovY);
-    else slice.resetView(pl.orient);
+    // mirror Slicer's pan + zoom when the slice node carries them, else the fitted view — UNLESS the
+    // user has branched this cell locally (pan/zoom), in which case keep their view (setMirrorFrame
+    // overwrites the pan/zoom viewState). The out-of-plane offset (setPlane) always tracks posMm.
+    if (!sliceBranched[c]) {
+      if (pl.centerRAS && pl.fovX && pl.fovY) slice.setMirrorFrame(pl.orient, pl.centerRAS as Vec3, pl.fovX, pl.fovY);
+      else slice.resetView(pl.orient);
+    }
     slice.setPlane(pl.orient, off01);
     slice.renderToView(cx[c].getCurrentTexture().createView({ format: srgb }), cv[c].width, cv[c].height);
   };
@@ -314,7 +324,8 @@ async function main() {
   // via drawImage — WebGPU returns blank — which is why the authoritative thumbnails come from Slicer.)
   interface PlaybackSource {
     span(): [number, number]; seek(t: number): Map<string, MrsonNode>;
-    nearestThumb(t: number): { t: number; url: string } | undefined; head(): number; base?: string;
+    nearestThumb(t: number): { t: number; url: string } | undefined; head(): number;
+    frameTimes(): number[]; base?: string;
   }
   const tl = document.getElementById("timeline")!;
   const scrub = document.getElementById("tl-scrub") as HTMLInputElement;
@@ -328,7 +339,30 @@ async function main() {
   let src: PlaybackSource | null = null;                 // active scrub source (a loaded Recording); null ⇔ live
   let displayed: Map<string, MrsonNode> | null = null;   // node map the VIEW currently shows while replaying
   let restoring = false, pendingT: number | null = null;
-  let playTimer: number | undefined, playAnchorT = 0, playAnchorWall = 0;
+  let playTimer: number | undefined, playAnchorWall = 0;
+  // Playback with idle-gap skipping: any interval > GAP_MS with no recorded frames compresses to
+  // GAP_MS of wall-clock, so dead air (operator idle in Slicer) fast-forwards while active periods
+  // play 1:1. Built on Play from the current position; `warp` maps wall-elapsed → recording time.
+  const GAP_MS = 1000;
+  let playSched: { recStart: number; recEnd: number; playStart: number; playDur: number }[] = [];
+  let playTotal = 0;
+  function buildSchedule(startT: number) {
+    const [lo, hi] = src!.span();
+    const s0 = Math.max(lo, Math.min(hi, startT));
+    const times = [s0, ...src!.frameTimes().filter((t) => t > s0 && t <= hi)];
+    if (times[times.length - 1] < hi) times.push(hi);
+    playSched = []; let cum = 0;
+    for (let i = 0; i + 1 < times.length; i++) {
+      const dur = Math.min(times[i + 1] - times[i], GAP_MS);
+      playSched.push({ recStart: times[i], recEnd: times[i + 1], playStart: cum, playDur: dur });
+      cum += dur;
+    }
+    playTotal = cum;
+  }
+  const warp = (E: number): number => {
+    for (const s of playSched) if (E < s.playStart + s.playDur) return s.recStart + (s.playDur > 0 ? (E - s.playStart) / s.playDur : 1) * (s.recEnd - s.recStart);
+    return src!.span()[1];
+  };
   let t0 = 0;
 
   const tAt = (v: number) => { if (!src) return 0; const [a, b] = src.span(); return a + (v / 1000) * Math.max(0, b - a); };
@@ -340,6 +374,7 @@ async function main() {
     if (!src) return;
     if (restoring) { pendingT = t; return; }
     restoring = true;
+    for (const c of SLICE_CELLS) sliceBranched[c] = false;   // let setMirrorFrame re-apply the recorded slice view
     const target = src.seek(t);
     // force camera + slice ('view') nodes so a branched-off local view snaps back to the recorded path
     await live.applySnapshot(target, displayed ?? new Map(), { force: (n) => n.type === "camera" || n.type === "view" });
@@ -369,11 +404,14 @@ async function main() {
     liveBtn.textContent = "Live"; liveBtn.classList.remove("on");
     markBtn.disabled = true;
     Object.assign(globalThis, { __recording: recording });
-    status(`replay: ${recording.session.id} — scrub the timeline`);
+    status(`replay: ${recording.session.id} — scrub / drag to explore`);
+    attachSliceInteraction();            // pan / zoom / scroll the slice cells (branch off the recording)
     scrub.value = "0"; restore(recording.span()[0]);   // start at the beginning; scrub/play forward
   }
   async function goLive() {
     stopPlay();
+    detachSliceInteraction();
+    for (const c of SLICE_CELLS) sliceBranched[c] = false;
     inReplay = false; branched = false; tl.classList.remove("branched");
     live.httpBase = liveHttpBase;                       // blobs back to the live scene
     if (displayed !== null) { await live.applySnapshot(live.nodes, displayed); displayed = null; }  // sync view to current Slicer
@@ -398,19 +436,21 @@ async function main() {
   playBtn.addEventListener("click", () => {
     if (!src) return;
     if (playTimer !== undefined) { stopPlay(); return; }
-    playAnchorT = Number(scrub.value) >= 999 ? src.span()[0] : tAt(Number(scrub.value));
+    const startT = Number(scrub.value) >= 999 ? src.span()[0] : tAt(Number(scrub.value));
+    buildSchedule(startT);
     playAnchorWall = Date.now();
     playBtn.classList.add("on"); playBtn.textContent = "⏸";
-    restore(playAnchorT);                                // snap the branched view back to the recording, now
+    restore(startT);                                     // snap the branched view back to the recording, now
     playTimer = setInterval(() => {
       if (!src) { stopPlay(); return; }
       const [lo, hi] = src.span();
-      const t = playAnchorT + (Date.now() - playAnchorWall);
-      if (t >= hi) { stopPlay(); scrub.value = "1000"; restore(hi); return; }
+      const E = Date.now() - playAnchorWall;
+      if (E >= playTotal) { stopPlay(); scrub.value = "1000"; restore(hi); return; }
+      const t = warp(E);
       scrub.value = String(Math.round(((t - lo) / Math.max(1, hi - lo)) * 1000));
       timeLbl.textContent = fmt(t);
       restore(t);
-    }, 200) as unknown as number;
+    }, 120) as unknown as number;
   });
   liveBtn.addEventListener("click", () => { if (src) goLive(); });
 
@@ -431,17 +471,28 @@ async function main() {
   cv.threeD.addEventListener("pointerup", end3d);
   cv.threeD.addEventListener("pointercancel", end3d);
   cv.threeD.addEventListener("wheel", (e) => { if (!inReplay) return; e.preventDefault(); cam3d.wheel(e.deltaY < 0); branch(); }, { passive: false });
-  for (const c of SLICE_CELLS) {
-    cv[c].addEventListener("wheel", (e) => {
-      if (!inReplay || !volumeField) return;
-      e.preventDefault();
-      const pl = planes[c]; if (!pl) return;
-      const [lo, hi] = volumeField.aabb();
-      const axis = pl.orient === "axial" ? 2 : pl.orient === "coronal" ? 1 : 0;
-      pl.posMm = Math.max(lo[axis], Math.min(hi[axis], pl.posMm + (hi[axis] - lo[axis]) * 0.012 * (e.deltaY > 0 ? 1 : -1)));
-      branch(); renderSlice(c);
-    }, { passive: false });
+
+  // Slice cells: full Slicer-style controller (wheel/left-drag = scroll, shift/middle = pan, right or
+  // ⌘-wheel = zoom). Attached only in replay; scroll steps the recorded posMm, pan/zoom mark the cell
+  // branched so renderSlice keeps the local view until Play/scrub snaps it back.
+  let sliceCtl: SliceControls[] = [];
+  function attachSliceInteraction() {
+    detachSliceInteraction();
+    for (const c of SLICE_CELLS) {
+      sliceCtl.push(attachSliceControls(cv[c], {
+        orient: CELL_ORIENT[c],
+        getSlice: () => slice,
+        step: (fwd) => {
+          const pl = planes[c]; if (!pl || !volumeField) return;
+          const [lo, hi] = volumeField.aabb();
+          const axis = pl.orient === "axial" ? 2 : pl.orient === "coronal" ? 1 : 0;
+          pl.posMm = Math.max(lo[axis], Math.min(hi[axis], pl.posMm + (hi[axis] - lo[axis]) * 0.02 * (fwd ? -1 : 1)));
+        },
+        redraw: () => { sliceBranched[c] = true; branch(); renderSlice(c); },
+      }));
+    }
   }
+  function detachSliceInteraction() { for (const s of sliceCtl) s.detach(); sliceCtl = []; }
 
   // Explicit ?rec=<name> → open that recording immediately (no live connection).
   const recName = p.get("rec");
