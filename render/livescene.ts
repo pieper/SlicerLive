@@ -518,19 +518,29 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     if (node.type !== "segmentation" || !node.zarr) return;
     const sig = JSON.stringify(node.zarr);
     if (this.baker && sig === this.zarrSig) { this.apply(node, scene); return; }   // display-only change → keep the bake
-    if (this.baker && sig !== this.zarrSig) this.reset(scene);                      // labelmap edited (scrub/live) → rebuild
-    this.zarrSig = sig;
     this.blobBaseHref = scene.blobBase();
-    this.segId = node.id;
     const zv = await fetchZarrVolume(this.blobBaseHref, node.zarr as ZarrDesc, this.onBytes);
     const lab = Uint8Array.from(zv.data);   // labels back to u8
+    const segments = (node.segments as Segment[]) ?? [];
+    const sameDims = !!(this.baker && this.dims && zv.dims[0] === this.dims[0] && zv.dims[1] === this.dims[1] && zv.dims[2] === this.dims[2]);
+    if (this.baker && sameDims) {
+      // EDITED labelmap (live paint / scrub): re-upload + re-bake into the SAME textures the field
+      // already renders — an in-place REPLACE. No removeField/setField, so no dark flash between applies.
+      this.zarrSig = sig;
+      this.baker.updateLabelmap(lab);
+      this.palKey = paletteKey(segments);
+      this.recolorize(segPalette(segments));
+      this.apply(node, scene);
+      return;
+    }
+    if (this.baker) this.reset(scene);   // first segmentation, or its geometry changed → (re)build
+    this.zarrSig = sig;
+    this.segId = node.id;
     this.dims = zv.dims;
     this.ijkToRAS = node.ijkToRAS as number[];
-    // upload the labelmap to the GPU ONCE; every later display change re-colorizes in place
     this.baker = new ColorizeBaker(this.dev, lab, zv.dims);
     this.overlayTex = this.baker.output();
     this.volTex = this.baker.output();
-    const segments = (node.segments as Segment[]) ?? [];
     this.palKey = paletteKey(segments);
     this.recolorize(segPalette(segments));
     this.field = new RGBAVolumeField(this.volTex, zv.dims, [1, 1, 1], { ijkToRAS: this.ijkToRAS, shade: [0.3, 0.78, 0.5, 28], clippable: false });

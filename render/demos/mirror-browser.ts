@@ -66,6 +66,8 @@ async function main() {
   let volumeShown3D = false;
   let clip: { lo: Vec3; hi: Vec3 } | null = null;
   let inReplay = false;   // replaying a finalized recording → local 3D orbit + slice scroll (branch); Play snaps back
+  let followCamera = true; // LIVE mode: follow Slicer's camera. Orbiting locally sets false (look around);
+                           // Slicer's camera stops overriding until "Live" resyncs. Data still updates live.
 
   const slice = new SliceRenderer(gpu, srgb);
   let volumeReady = false;
@@ -154,6 +156,9 @@ async function main() {
     // then uploads it. Without this, redraw re-renders STALE uniforms and the glyph never moves.
     redraw() { scene?.syncUniforms(); a3d.draw(); },
     setCamera(c: CameraState) {
+      // In LIVE mode, if the user is looking around (followCamera=false) don't let Slicer's camera stream
+      // yank the view back. In replay, applySnapshot always drives it. Data updates are never gated.
+      if (!inReplay && !followCamera) return;
       camera.position = c.position as Vec3;
       camera.focalPoint = c.focalPoint as Vec3;
       camera.viewUp = c.viewUp as Vec3;
@@ -387,9 +392,20 @@ async function main() {
   function setLiveUI() {
     tl.classList.remove("replay");
     scrub.disabled = true; scrub.value = "1000";
-    timeLbl.textContent = "● recording";
-    liveBtn.textContent = "Live"; liveBtn.classList.add("on"); liveBtn.disabled = true;
     playBtn.disabled = true; markBtn.disabled = true; preview.style.display = "none";
+    updateLiveBtn();
+  }
+  function updateLiveBtn() {
+    liveBtn.textContent = "Live";
+    liveBtn.disabled = followCamera;                  // actionable only while looking around (to resync)
+    liveBtn.classList.toggle("on", followCamera);     // green = following Slicer
+    timeLbl.textContent = followCamera ? "● recording" : "⎇ looking around — Live to resync";
+  }
+  function resyncLive() {                               // return to following Slicer's live camera
+    followCamera = true;
+    const cam = [...live.nodes.values()].find((n) => n.type === "camera");
+    if (cam) view.setCamera({ position: cam.position as number[], focalPoint: cam.focalPoint as number[], viewUp: cam.viewUp as number[], viewAngle: cam.viewAngle as number });
+    updateLiveBtn();
   }
   function enterReplay(recording: Recording) {
     stopPlay();
@@ -412,7 +428,7 @@ async function main() {
     stopPlay();
     detachSliceInteraction();
     for (const c of SLICE_CELLS) sliceBranched[c] = false;
-    inReplay = false; branched = false; tl.classList.remove("branched");
+    inReplay = false; branched = false; followCamera = true; tl.classList.remove("branched");
     live.httpBase = liveHttpBase;                       // blobs back to the live scene
     if (displayed !== null) { await live.applySnapshot(live.nodes, displayed); displayed = null; }  // sync view to current Slicer
     live.setLive(true);
@@ -452,25 +468,30 @@ async function main() {
       restore(t);
     }, 120) as unknown as number;
   });
-  liveBtn.addEventListener("click", () => { if (src) goLive(); });
+  liveBtn.addEventListener("click", () => { if (src) goLive(); else resyncLive(); });
 
   // ── interactive branch (replay only): orbit/zoom the 3D view + scroll slices off the recorded
   //    scene; Play or scrub snaps back to the recording path (restore() force-re-applies camera+slices).
-  const branch = () => { if (!inReplay) return; stopPlay(); if (!branched) { branched = true; tl.classList.add("branched"); } timeLbl.textContent = "⎇ branched — Play to resume"; };
+  // branch() = the user diverged the view locally. Replay: pause playback (Play snaps back). Live: stop
+  // following Slicer's camera (look around) until "Live" resyncs — data keeps updating live.
+  const branch = () => {
+    if (inReplay) { stopPlay(); if (!branched) { branched = true; tl.classList.add("branched"); } timeLbl.textContent = "⎇ branched — Play to resume"; }
+    else if (followCamera) { followCamera = false; updateLiveBtn(); }
+  };
   const cam3d = new CameraInteractor(camera, () => a3d.draw());
   const xy3d = (e: PointerEvent | WheelEvent) => { const r = cv.threeD.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
-  cv.threeD.addEventListener("contextmenu", (e) => { if (inReplay) e.preventDefault(); });
+  cv.threeD.addEventListener("contextmenu", (e) => e.preventDefault());   // right-drag = zoom (both modes)
   cv.threeD.addEventListener("pointerdown", (e) => {
-    if (!inReplay) return;
+    if (drag) return;                    // a markup handle is being grabbed (live) → don't orbit
     const { x, y } = xy3d(e);
     cam3d.start(e.button as 0 | 1 | 2, x, y, cv.threeD.clientHeight, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
     cv.threeD.setPointerCapture(e.pointerId); branch();
   });
-  cv.threeD.addEventListener("pointermove", (e) => { if (!inReplay || cam3d.action === "none") return; const { x, y } = xy3d(e); cam3d.move(x, y, cv.threeD.clientWidth, cv.threeD.clientHeight); });
+  cv.threeD.addEventListener("pointermove", (e) => { if (cam3d.action === "none") return; const { x, y } = xy3d(e); cam3d.move(x, y, cv.threeD.clientWidth, cv.threeD.clientHeight); });
   const end3d = (e: PointerEvent) => { if (cam3d.action !== "none") { cam3d.end(); try { cv.threeD.releasePointerCapture(e.pointerId); } catch { /* */ } } };
   cv.threeD.addEventListener("pointerup", end3d);
   cv.threeD.addEventListener("pointercancel", end3d);
-  cv.threeD.addEventListener("wheel", (e) => { if (!inReplay) return; e.preventDefault(); cam3d.wheel(e.deltaY < 0); branch(); }, { passive: false });
+  cv.threeD.addEventListener("wheel", (e) => { e.preventDefault(); cam3d.wheel(e.deltaY < 0); branch(); }, { passive: false });
 
   // Slice cells: full Slicer-style controller (wheel/left-drag = scroll, shift/middle = pan, right or
   // ⌘-wheel = zoom). Attached only in replay; scroll steps the recorded posMm, pan/zoom mark the cell
@@ -525,13 +546,14 @@ async function main() {
   }
   let loadingRec = false;
   live.subscribe(async (c) => {
-    if (c.kind !== "reset" || src || loadingRec) return; // Slicer closed the scene (not already replaying/loading)
+    // Slicer closed the scene: load the just-finalized recording. Fire even if already replaying an OLDER
+    // one (a new close should pick up the newer session — this was the "scrub didn't enable" symptom).
+    if (c.kind !== "reset" || loadingRec) return;
     loadingRec = true;
     status("finalizing recording…");
     const recording = await loadLatestRecording();
     loadingRec = false;
-    if (src) return;                                      // a concurrent close already entered replay
-    if (recording) enterReplay(recording); else status("mirroring Slicer");   // empty Clear → nothing to replay; stay live
+    if (recording) enterReplay(recording); else if (!src) status("mirroring Slicer");   // empty Clear → stay live
   });
 
   await sync.connect();

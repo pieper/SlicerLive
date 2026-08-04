@@ -143,6 +143,14 @@ export class ColorizeBaker {
     this.g = [Math.ceil(dx / 4), Math.ceil(dy / 4), Math.ceil(dz / 4)];
   }
 
+  /** Re-upload an EDITED labelmap (same dims). Follow with bakeInto() to re-colorize into the caller's
+   *  existing output textures — an in-place replace (no re-allocation, so a segmentation edit updates
+   *  smoothly with no flash). */
+  updateLabelmap(labelmap: Uint8Array) {
+    const [dx, dy] = this.dims;
+    this.dev.queue.writeTexture({ texture: this.labelTex }, labelmap, { bytesPerRow: dx, rowsPerImage: dy }, this.dims as [number, number, number]);
+  }
+
   /** Allocate an output texture sized/typed for this baker's labelmap (caller owns it). */
   output(): GPUTexture {
     return this.dev.createTexture({ size: this.dims as [number, number, number], dimension: "3d", format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
