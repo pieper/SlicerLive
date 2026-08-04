@@ -69,6 +69,7 @@ async function main() {
   let inReplay = false;   // replaying a finalized recording → local 3D orbit + slice scroll (branch); Play snaps back
   let followCamera = true; // LIVE mode: follow Slicer's camera. Orbiting locally sets false (look around);
                            // Slicer's camera stops overriding until "Live" resyncs. Data still updates live.
+  let scrubToSlicer = true; // M3: scrubbing the replay also drives Slicer's camera + slices to that timepoint
 
   const slice = new SliceRenderer(gpu, srgb);
   let volumeReady = false;
@@ -403,6 +404,22 @@ async function main() {
     // force camera + slice ('view') nodes so a branched-off local view snaps back to the recorded path
     await live.applySnapshot(target, displayed ?? new Map(), { force: (n) => n.type === "camera" || n.type === "view" });
     displayed = target;
+    // M3 — bidirectional scrub-sync: drive Slicer's camera + slices to the recorded state at t. The ids
+    // are Slicer's stable singletons (vtkMRMLCameraNode1 / vtkMRMLSliceNode*), so the existing applyOps
+    // path lands them. Coalesced by LiveSync. (Non-destructive: only view state; seg-labelmap = M3 v2.)
+    if (scrubToSlicer) {
+      const ops: Op[] = [];
+      for (const n of target.values()) {
+        if (n.type === "camera") {
+          ops.push({ op: "patch", id: n.id, path: "#/position", value: n.position });
+          ops.push({ op: "patch", id: n.id, path: "#/focalPoint", value: n.focalPoint });
+          ops.push({ op: "patch", id: n.id, path: "#/viewUp", value: n.viewUp });
+        } else if (n.type === "view" && n.kind === "slice" && typeof n.offset === "number") {
+          ops.push({ op: "patch", id: n.id, path: "#/offset", value: n.offset });
+        }
+      }
+      if (ops.length) sync.sendOps(ops);
+    }
     updateStrokeOverlay(t);                              // fade the recorded strokes near this timepoint
     if (branched) { branched = false; tl.classList.remove("branched"); }
     restoring = false;
@@ -542,6 +559,7 @@ async function main() {
     status(`loading recording ${recName}…`);
     const recording = await Recording.load(new URL(`rec/${recName}/`, httpBase).href);
     enterReplay(recording);
+    sync.connect();   // connect the WS so scrub-sync (M3) can drive Slicer's views; view stays frozen
     return;
   }
 
