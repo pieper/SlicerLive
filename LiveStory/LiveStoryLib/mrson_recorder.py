@@ -77,6 +77,12 @@ class MrsonRecorder:
         self._segTimer.setSingleShot(True)
         self._segTimer.setInterval(250)
         self._segTimer.connect("timeout()", self._flushSegEdits)
+        # INTENT capture: while a segment-editor effect is active, observe the slice interactors and
+        # record one SegEdit/stroke op per committed stroke (the raw human input — points in RAS + brush
+        # + view frame — so any applier can replay it; the authoritative result rides the seg re-serialize).
+        self._segEd = None
+        self._interactorTags = []
+        self._stroke = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def start(self):
@@ -105,11 +111,16 @@ class MrsonRecorder:
         self._firstContentT = None       # time of the first real data node (image/seg/markup/mesh)
         self._evfile = open(os.path.join(self.dir, "events.jsonl"), "a")
         self._session = True
+        self._segEd = None
+        self._interactorTags = []
+        self._stroke = None
         self.keyframe()                                  # seed keyframe = current full scene
         for i in range(slicer.mrmlScene.GetNumberOfNodes()):
             n = slicer.mrmlScene.GetNthNode(i)
             if L._mrson_type(n) in RECORDED_TYPES:
                 self._observeInstance(n)
+        for segEd in slicer.util.getNodesByClass("vtkMRMLSegmentEditorNode"):
+            self._observeSegEditor(segEd)
         self._timer.start()
 
     def _finalizeSession(self):
@@ -119,6 +130,7 @@ class MrsonRecorder:
         self._timer.stop()
         self._segTimer.stop()
         self._segDirty.clear()
+        self._removeStrokeCapture()
         for obj, tag in list(self.node_tags):
             try:
                 obj.RemoveObserver(tag)
@@ -207,6 +219,8 @@ class MrsonRecorder:
     @vtk.calldata_type(vtk.VTK_OBJECT)
     def _onNodeAdded(self, _caller, _event, callData):
         node = callData
+        if node is not None and node.GetClassName() == "vtkMRMLSegmentEditorNode":
+            self._observeSegEditor(node)
         if not self._session or node is None or L._mrson_type(node) not in RECORDED_TYPES:
             return
         ev = L._node_event(node)
@@ -251,6 +265,103 @@ class MrsonRecorder:
         self._segDirty.add(node.GetID())
         if not self._segTimer.isActive():
             self._segTimer.start()
+
+    # ── intent capture: strokes while an effect is active ─────────────────────
+    def _observeSegEditor(self, segEd):
+        if not self._session:
+            return
+        self._segEd = segEd
+        self._nodeTag(segEd, segEd.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onSegEdModified))
+        if segEd.GetActiveEffectName():
+            self._installStrokeCapture()
+
+    def _onSegEdModified(self, caller, _event):
+        if not self._session or self._finalized:
+            return
+        self._segEd = caller
+        if caller.GetActiveEffectName():
+            self._installStrokeCapture()
+        else:
+            self._removeStrokeCapture()
+
+    def _installStrokeCapture(self):
+        if self._interactorTags:
+            return
+        lm = slicer.app.layoutManager()
+        if lm is None:
+            return
+        for name in ("Red", "Green", "Yellow"):
+            sw = lm.sliceWidget(name)
+            if not sw:
+                continue
+            try:
+                interactor = sw.sliceView().interactor()
+                sliceNode = sw.mrmlSliceNode()
+            except Exception:  # noqa: BLE001
+                continue
+            if interactor is None or sliceNode is None:
+                continue
+            # HIGH priority + never abort: we watch the same events the effect consumes without stealing them.
+            for evt in ("LeftButtonPressEvent", "MouseMoveEvent", "LeftButtonReleaseEvent"):
+                tag = interactor.AddObserver(evt, lambda c, e, sn=sliceNode: self._onStrokeEvent(c, e, sn), 10.0)
+                self._interactorTags.append((interactor, tag))
+
+    def _removeStrokeCapture(self):
+        for obj, tag in self._interactorTags:
+            try:
+                obj.RemoveObserver(tag)
+            except Exception:  # noqa: BLE001
+                pass
+        self._interactorTags = []
+        self._stroke = None
+
+    def _addStrokePoint(self, interactor, sliceNode):
+        x, y = interactor.GetEventPosition()
+        m = sliceNode.GetXYToRAS()
+        ras = [0.0, 0.0, 0.0, 1.0]
+        m.MultiplyPoint([float(x), float(y), 0.0, 1.0], ras)
+        self._stroke["points"].append([ras[0], ras[1], ras[2]])
+
+    def _onStrokeEvent(self, interactor, event, sliceNode):
+        if not self._session or self._finalized or self._segEd is None:
+            return
+        if event == "LeftButtonPressEvent":
+            self._stroke = {"points": []}
+            self._addStrokePoint(interactor, sliceNode)
+        elif event == "MouseMoveEvent":
+            if self._stroke is not None:
+                self._addStrokePoint(interactor, sliceNode)
+        elif event == "LeftButtonReleaseEvent":
+            if self._stroke is None:
+                return
+            self._addStrokePoint(interactor, sliceNode)
+            self._commitStroke(sliceNode)
+            self._stroke = None
+
+    def _commitStroke(self, sliceNode):
+        pts = self._stroke.get("points") if self._stroke else None
+        if not pts:
+            return
+        segEd = self._segEd
+        effect = segEd.GetActiveEffectName() or ""
+        brush = {"shape": "sphere" if (segEd.GetAttribute("Paint.BrushSphere") in ("1", "true", "True")) else "disk"}
+        diam = segEd.GetAttribute("Paint.BrushAbsoluteDiameter") or segEd.GetAttribute("Erase.BrushAbsoluteDiameter")
+        if diam:
+            try:
+                brush["diameterMm"] = float(diam)
+            except (ValueError, TypeError):
+                pass
+        segnode = segEd.GetSegmentationNode()
+        edit = {
+            "kind": "stroke",
+            "segmentId": segEd.GetSelectedSegmentID() or "",
+            "effect": effect,
+            "points": pts,
+            "brush": brush,
+            "mode": "remove" if effect.lower().startswith("erase") else "add",
+            "view": {"orientation": sliceNode.GetOrientation(), "offset": sliceNode.GetSliceOffset()},
+        }
+        self._append({"event": "SegEdit", "sourceId": (segnode.GetID() if segnode else ""), "edit": edit})
 
     def _flushSegEdits(self):
         """Re-serialize each edited segmentation (merged labelmap → content-addressed zarr; unchanged
