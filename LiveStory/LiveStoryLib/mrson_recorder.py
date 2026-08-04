@@ -70,6 +70,13 @@ class MrsonRecorder:
         self._timer = qt.QTimer()
         self._timer.setInterval(self._thumb_ms)
         self._timer.connect("timeout()", self._onTick)
+        # segmentation labelmap edits fire vtkSegmentation.SourceRepresentationModified (NOT the node's
+        # Modified). Debounce a burst of them (a paint stroke fires several) into one re-serialize.
+        self._segDirty = set()
+        self._segTimer = qt.QTimer()
+        self._segTimer.setSingleShot(True)
+        self._segTimer.setInterval(250)
+        self._segTimer.connect("timeout()", self._flushSegEdits)
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def start(self):
@@ -94,6 +101,7 @@ class MrsonRecorder:
         self._nkey = 0
         self._finalized = False
         self._last_key_t = -1e18
+        self._segDirty = set()
         self._firstContentT = None       # time of the first real data node (image/seg/markup/mesh)
         self._evfile = open(os.path.join(self.dir, "events.jsonl"), "a")
         self._session = True
@@ -109,6 +117,8 @@ class MrsonRecorder:
             return self.lastFinalized
         self._finalized = True
         self._timer.stop()
+        self._segTimer.stop()
+        self._segDirty.clear()
         for obj, tag in list(self.node_tags):
             try:
                 obj.RemoveObserver(tag)
@@ -167,6 +177,16 @@ class MrsonRecorder:
             dn = node.GetDisplayNode()
             if dn is not None:
                 self._nodeTag(dn, dn.AddObserver(vtk.vtkCommand.ModifiedEvent, lambda _c, _e, m=node: self._onModified(m, _e)))
+        # segmentation LABELMAP edits (paint/threshold/etc.): observe the source-representation-modified
+        # event on the vtkSegmentation so mid-session edits are captured (the node's Modified does NOT fire).
+        if node.GetClassName() == "vtkMRMLSegmentationNode":
+            try:
+                import vtkSegmentationCorePython as vsc
+                segmentation = node.GetSegmentation()
+                self._nodeTag(segmentation, segmentation.AddObserver(
+                    vsc.vtkSegmentation.SourceRepresentationModified, lambda _c, _e, m=node: self._onSegEdited(m)))
+            except Exception as e:  # noqa: BLE001
+                print("mrson_recorder: seg labelmap observer failed: %s" % e)
 
     def _nodeTag(self, obj, tag):
         self.node_tags.append((obj, tag))
@@ -224,6 +244,30 @@ class MrsonRecorder:
         node = callData
         if self._session and node is not None and L._mrson_type(node) in RECORDED_TYPES:
             self._append({"event": "NodeRemoved", "sourceId": node.GetID()})
+
+    def _onSegEdited(self, node):
+        if not self._session or self._finalized:
+            return
+        self._segDirty.add(node.GetID())
+        if not self._segTimer.isActive():
+            self._segTimer.start()
+
+    def _flushSegEdits(self):
+        """Re-serialize each edited segmentation (merged labelmap → content-addressed zarr; unchanged
+        chunks dedup, so this is incremental) and append it as a NodeAdded upsert — the AUTHORITATIVE
+        result the reader fast-forwards to. (Intent strokes are a separate channel, added next.)"""
+        if not self._session or self._finalized:
+            return
+        for segid in list(self._segDirty):
+            seg = slicer.mrmlScene.GetNodeByID(segid)
+            if seg is None:
+                continue
+            try:
+                node_m = M._segmentation_node(seg, segid, os.path.join(self.dir, "blobs"))
+                self._append({"event": "NodeAdded", "sourceId": segid, "nodeClass": seg.GetClassName(), "node": node_m})
+            except Exception as e:  # noqa: BLE001
+                print("mrson_recorder: seg re-serialize failed: %s" % e)
+        self._segDirty.clear()
 
     def _append(self, ev):
         if not self._session or self._finalized:

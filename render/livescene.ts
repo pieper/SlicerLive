@@ -512,8 +512,14 @@ export class SegmentationDisplayableManager implements DisplayableManager {
 
   constructor(private dev: GPUDevice, private sigma = 1.5, private onBytes?: (n: number) => void) {}
 
+  private zarrSig = "";   // signature of the current labelmap; changes when the segmentation is EDITED
+
   async onNodeAdded(node: MrsonNode, scene: LiveScene): Promise<void> {
-    if (node.type !== "segmentation" || !node.zarr || this.baker) return;
+    if (node.type !== "segmentation" || !node.zarr) return;
+    const sig = JSON.stringify(node.zarr);
+    if (this.baker && sig === this.zarrSig) { this.apply(node, scene); return; }   // display-only change → keep the bake
+    if (this.baker && sig !== this.zarrSig) this.reset(scene);                      // labelmap edited (scrub/live) → rebuild
+    this.zarrSig = sig;
     this.blobBaseHref = scene.blobBase();
     this.segId = node.id;
     const zv = await fetchZarrVolume(this.blobBaseHref, node.zarr as ZarrDesc, this.onBytes);
@@ -580,6 +586,7 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     this.segId = undefined;
     this.added = false;
     this.palKey = "";
+    this.zarrSig = "";
   }
 }
 
