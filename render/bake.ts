@@ -124,6 +124,7 @@ export function bakeColorizeRGBA(dev: GPUDevice, labelmap: Uint8Array, dims: Vec
  *  pipelines, uniform buffers, and blur scratch are all held resident and reused. */
 export class ColorizeBaker {
   private labelTex: GPUTexture;
+  private ownsLabel: boolean;                   // false when the label texture is owned externally (shared buffer)
   private scratch?: GPUTexture;                 // blur ping-pong (lazy; only when sigma > 0)
   private palBuf: GPUBuffer;
   private dimsBuf: GPUBuffer;
@@ -131,10 +132,21 @@ export class ColorizeBaker {
   private blurPipe: GPUComputePipeline;
   private g: [number, number, number];
 
-  constructor(private dev: GPUDevice, labelmap: Uint8Array, private dims: Vec3) {
+  /** `label` is either a CPU labelmap (baker allocates + uploads its own r8uint texture, the classic
+   *  path) OR an EXTERNAL r8uint 3D texture the baker only READS (the shared-buffer path used by
+   *  `algorithms/EditableSegmentation` — a compute effect writes the label texture on-GPU and the baker
+   *  re-colorizes from it, no CPU round-trip). An external texture must be `r8uint` with at least
+   *  TEXTURE_BINDING usage; the baker never writes or destroys it. */
+  constructor(private dev: GPUDevice, label: Uint8Array | GPUTexture, private dims: Vec3) {
     const [dx, dy, dz] = dims;
-    this.labelTex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    dev.queue.writeTexture({ texture: this.labelTex }, labelmap, { bytesPerRow: dx, rowsPerImage: dy }, dims as [number, number, number]);
+    if (label instanceof GPUTexture) {
+      this.labelTex = label;
+      this.ownsLabel = false;
+    } else {
+      this.labelTex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      dev.queue.writeTexture({ texture: this.labelTex }, label, { bytesPerRow: dx, rowsPerImage: dy }, dims as [number, number, number]);
+      this.ownsLabel = true;
+    }
     this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.dimsBuf = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     dev.queue.writeBuffer(this.dimsBuf, 0, new Uint32Array([dx, dy, dz, 0]));
@@ -147,6 +159,7 @@ export class ColorizeBaker {
    *  existing output textures — an in-place replace (no re-allocation, so a segmentation edit updates
    *  smoothly with no flash). */
   updateLabelmap(labelmap: Uint8Array) {
+    if (!this.ownsLabel) throw new Error("ColorizeBaker.updateLabelmap: label texture is external (write it via the owner, e.g. a compute effect), then call bakeInto()");
     const [dx, dy] = this.dims;
     this.dev.queue.writeTexture({ texture: this.labelTex }, labelmap, { bytesPerRow: dx, rowsPerImage: dy }, this.dims as [number, number, number]);
   }
@@ -194,7 +207,7 @@ export class ColorizeBaker {
     dev.queue.submit([enc.finish()]);
   }
 
-  destroy() { this.labelTex.destroy(); this.scratch?.destroy(); this.palBuf.destroy(); this.dimsBuf.destroy(); }
+  destroy() { if (this.ownsLabel) this.labelTex.destroy(); this.scratch?.destroy(); this.palBuf.destroy(); this.dimsBuf.destroy(); }
 }
 
 /** Bake a BINARY presence mask -> rgba16float whose .a is the Gaussian-smoothed presence

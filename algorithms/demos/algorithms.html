@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SlicerLive — algorithms (A-0)</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; background: #05060a; }
+  #wrap { display: flex; align-items: center; justify-content: center; width: 100vw; height: 100vh; }
+  #gpu { width: min(92vw, 92vh); height: min(92vw, 92vh); display: block; background: #000; touch-action: none; border-radius: 8px; }
+  #status { position: fixed; top: 8px; left: 12px; z-index: 3;
+            font: 12px -apple-system, system-ui, sans-serif; color: #9fb3d0;
+            background: rgba(5,6,10,.72); padding: 4px 10px; border-radius: 6px; }
+  #bar { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 3;
+         display: flex; gap: 8px; }
+  #bar button { font: 600 12px -apple-system, system-ui, sans-serif; color: #d6e2f2;
+         background: #1b2740; border: 1px solid #33507e; border-radius: 5px; padding: 5px 12px; cursor: pointer; }
+  #bar button:hover { background: #24365a; }
+</style>
+</head>
+<body>
+  <div id="status"><span id="status-text">loading…</span></div>
+  <div id="wrap"><canvas id="gpu"></canvas></div>
+  <div id="bar">
+    <button id="paint">Paint stroke</button>
+    <button id="poke">Poke sphere</button>
+    <button id="mode">Render: SDF</button>
+    <button id="reset">Reset</button>
+  </div>
+  <script type="module" src="algorithms.js"></script>
+</body>
+</html>

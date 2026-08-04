@@ -223,6 +223,7 @@ export interface SegmentFieldOpts {
   bandMm?: number;                       // iso-shell half-thickness (mm); slicer_wgpu default = 1 voxel
   sampleStepMm?: number;
   clippable?: boolean;                   // let ROI clip planes crop this segment (default true)
+  mode?: "iso" | "surface" | "sdf";      // iso = crisp presence shell (default); surface = gradient-opacity translucent (Carve look); sdf = crisp terrace-free shell from a signed-distance field
 }
 
 /** A single segment rendered exactly as slicer_wgpu's SegmentField in its DEFAULT
@@ -252,6 +253,7 @@ export class SegmentField implements Field {
   private shade: [number, number, number, number];
   private bandMm: number;
   private stepMm: number;
+  private mode: "iso" | "surface" | "sdf";
 
   constructor(tex: GPUTexture, dims: Vec3, spacing: Vec3, opts: SegmentFieldOpts) {
     this.tex = tex;
@@ -274,6 +276,7 @@ export class SegmentField implements Field {
     // slicer_wgpu SegmentField.sample_step_mm = max(0.5*voxel, 0.1)
     this.stepMm = opts.sampleStepMm ?? Math.max(0.5 * voxelMm, 0.1);
     this.clippable = opts.clippable ?? true;
+    this.mode = opts.mode ?? "iso";
   }
 
   uniformFloats() { return 28; }        // mat4(16) + color(4) + shade(4) + params(4)
@@ -295,6 +298,72 @@ export class SegmentField implements Field {
   }
 
   samplingWGSL(s: number): string {
+    // "sdf" mode: the input texture is a SIGNED-DISTANCE field (r32float, mm in .r; negative inside),
+    // not a presence field. A narrow band around sdf=0 renders a crisp, TERRACE-FREE shell — the
+    // surface-model look the Gaussian presence can't reach (docs/ALGORITHMS.md A-1r). Distance is read
+    // directly (no presence→distance derivation); the normal is the SDF gradient.
+    if (this.mode === "sdf") {
+      return /* wgsl */ `
+fn v_seg${s}(wp : vec3<f32>) -> f32 {
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = t4.xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 1e3; }   // far outside → culled
+  return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).r;                    // signed distance (mm)
+}
+fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
+  let op0 = u_material.seg${s}_color.a;
+  if (op0 <= 0.0) { return vec4<f32>(0.0); }
+  let sdf = v_seg${s}(wp);
+  let band = max(u_material.seg${s}_params.x, 1e-3);
+  let step = max(u_material.scene.x, 1e-3);
+  let d_mm = abs(sdf);
+  if (d_mm > band + step) { return vec4<f32>(0.0); }   // outside the shell (+ gradient stencil margin)
+  let a = 1.0 - clamp(d_mm / band, 0.0, 1.0);
+  if (a <= 0.0) { return vec4<f32>(0.0); }
+  let op = clamp(a * op0, 0.0, 1.0);
+  // Normal = SDF gradient (central difference); smooth SDF → smooth normal, no terracing.
+  let h = step;
+  let g = vec3<f32>(
+    v_seg${s}(wp + vec3<f32>(h,0,0)) - v_seg${s}(wp - vec3<f32>(h,0,0)),
+    v_seg${s}(wp + vec3<f32>(0,h,0)) - v_seg${s}(wp - vec3<f32>(0,h,0)),
+    v_seg${s}(wp + vec3<f32>(0,0,h)) - v_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);
+  let glen = length(g);
+  if (glen < 1e-5) { return vec4<f32>(0.0); }
+  var n = g / glen;
+  if (dot(n, -rd) < 0.0) { n = -n; }
+  let ka = u_material.seg${s}_shade.x; let kd = u_material.seg${s}_shade.y;
+  let ks = u_material.seg${s}_shade.z; let sh = u_material.seg${s}_shade.w;
+  let ldn = max(dot(-rd, n), 0.0);
+  let refl = normalize(2.0 * ldn * n + rd);
+  let rdv = max(dot(refl, -rd), 0.0);
+  let col = u_material.seg${s}_color.rgb;
+  var lit = col * ka + col * (kd * ldn) + vec3<f32>(ks * pow(rdv, max(sh, 1.0)));
+  lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
+  return vec4<f32>(lit * op, op);
+}`;
+    }
+    // The ONLY difference between iso and surface is the alpha rule (everything else — sampling,
+    // gradient, Phong — is shared), matching wgpu_vtk_inject.py's _seg_field_wgsl vs
+    // _seg_surface_field_wgsl (same helper, different α).
+    //   iso     : crisp 1-voxel band around the v=0.5 isosurface → opaque shell.
+    //   surface : α_step = opacity·|grad v|·step; integrated across the 0→1 presence transition it
+    //             sums to opacity regardless of thickness → parity with Slicer's polydata surface
+    //             (a 30%-opaque segment accumulates ~0.3 α per crossing, front+back faces add).
+    // scene.x IS the ray-march dt (SceneRenderer.setSampleStep), so the emission integral is
+    // correctly scaled by the actual step distance.
+    const alphaWGSL = this.mode === "surface"
+      ? /* wgsl */ `
+  let step = max(u_material.scene.x, 1e-3);
+  let op = clamp(op0 * glen * step, 0.0, 1.0);
+  if (op <= 0.0) { return vec4<f32>(0.0); }`
+      : /* wgsl */ `
+  // Local first-order signed distance to the v=0.5 isosurface (mm), then a
+  // 1-voxel opacity band around it: crisp opaque shell, sub-voxel anti-aliased.
+  let d_mm = abs((v - 0.5) / glen);
+  let band = max(u_material.seg${s}_params.x, 1e-3);
+  let a = 1.0 - clamp(d_mm / band, 0.0, 1.0);
+  if (a <= 0.0) { return vec4<f32>(0.0); }
+  let op = clamp(a * op0, 0.0, 1.0);`;
     return /* wgsl */ `
 fn v_seg${s}(wp : vec3<f32>) -> f32 {
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
@@ -314,14 +383,7 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     v_seg${s}(wp + vec3<f32>(0,h,0)) - v_seg${s}(wp - vec3<f32>(0,h,0)),
     v_seg${s}(wp + vec3<f32>(0,0,h)) - v_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);
   let glen = length(g);
-  if (glen < 1e-5) { return vec4<f32>(0.0); }
-  // Local first-order signed distance to the v=0.5 isosurface (mm), then a
-  // 1-voxel opacity band around it: crisp opaque shell, sub-voxel anti-aliased.
-  let d_mm = abs((v - 0.5) / glen);
-  let band = max(u_material.seg${s}_params.x, 1e-3);
-  let a = 1.0 - clamp(d_mm / band, 0.0, 1.0);
-  if (a <= 0.0) { return vec4<f32>(0.0); }
-  let op = clamp(a * op0, 0.0, 1.0);
+  if (glen < 1e-5) { return vec4<f32>(0.0); }${alphaWGSL}
   // Phong from the same gradient, normal flipped to face the camera.
   var n = g / glen;
   if (dot(n, -rd) < 0.0) { n = -n; }
