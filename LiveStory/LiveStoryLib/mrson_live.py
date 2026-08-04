@@ -24,6 +24,7 @@ Start:  from LiveStoryLib import mrson_live; mrson_live.startMrsonLive(2132)
 import base64
 import hashlib
 import json
+import os
 import struct
 
 import qt
@@ -277,8 +278,36 @@ class _WSClient:
         self.tags = []          # (vtkObject, observerTag) to remove on disconnect
         self._out = _OutCoalescer(FLUSH_MS, self._flushOut)   # rate-limit Slicer->client live events
         self._lastCamSig = None                               # camera pose dedup (skip unchanged)
+        # segmentation labelmap edits fire vtkSegmentation.SourceRepresentationModified (not Modified);
+        # debounce a stroke's burst into one re-serialize so live painting mirrors to the client.
+        self._segDirty = set()
+        self._segTimer = qt.QTimer()
+        self._segTimer.setSingleShot(True)
+        self._segTimer.setInterval(250)
+        self._segTimer.connect("timeout()", self._flushSegEdits)
         socket.connect("readyRead()", self._onReadyRead)
         socket.connect("disconnected()", self._onDisconnected)
+
+    def _onSegEdited(self, node):
+        self._segDirty.add(node.GetID())
+        if not self._segTimer.isActive():
+            self._segTimer.start()
+
+    def _flushSegEdits(self):
+        """Re-serialize each edited segmentation (merged labelmap → content-addressed zarr into the live
+        blob dir; unchanged chunks dedup) and send it as a NodeAdded upsert, so painting in Slicer mirrors
+        live to the client (the SegmentationDisplayableManager re-fetches on the zarr-signature change)."""
+        for segid in list(self._segDirty):
+            seg = slicer.mrmlScene.GetNodeByID(segid)
+            if seg is None:
+                continue
+            try:
+                node_m = M._segmentation_node(seg, segid, os.path.join(HS._live_dir(), "blobs"))
+                HS.markDirty()
+                self._out.update(segid, {"event": "NodeAdded", "sourceId": segid, "nodeClass": seg.GetClassName(), "node": node_m})
+            except Exception as e:  # noqa: BLE001
+                print("mrson_live: seg re-serialize failed: %s" % e)
+        self._segDirty.clear()
 
     def _flushOut(self, batch):
         if _prof["on"]:
@@ -370,6 +399,10 @@ class _WSClient:
                 pass
         self.tags = []
         try:
+            self._segTimer.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
             self._out.clear()
         except Exception:  # noqa: BLE001
             pass
@@ -426,6 +459,14 @@ class _WSClient:
             dn = node.GetDisplayNode()
             if dn is not None:
                 self._tags_add(dn, dn.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onNodeModified))
+            # LABELMAP edits (paint/threshold/…) → SourceRepresentationModified on the vtkSegmentation
+            try:
+                import vtkSegmentationCorePython as vsc
+                segmentation = node.GetSegmentation()
+                self._tags_add(segmentation, segmentation.AddObserver(
+                    vsc.vtkSegmentation.SourceRepresentationModified, lambda _c, _e, m=node: self._onSegEdited(m)))
+            except Exception as e:  # noqa: BLE001
+                print("mrson_live: seg labelmap observer failed: %s" % e)
 
     def _tags_add(self, obj, tag):
         self.tags.append((obj, tag))
