@@ -16,6 +16,7 @@ import { installChrome, type VizControl } from "./sl-chrome.ts";
 import { Recording } from "../recording.ts";
 import { CameraInteractor } from "../vtk-interactor.ts";
 import { attachSliceControls, type SliceControls } from "./slice-control.ts";
+import { CapsuleField, type Segment as LineSegment } from "../capsule-field.ts";
 import type { MrsonNode } from "../mrson.ts";
 import {
   CameraDisplayableManager,
@@ -331,7 +332,25 @@ async function main() {
     span(): [number, number]; seek(t: number): Map<string, MrsonNode>;
     nearestThumb(t: number): { t: number; url: string } | undefined; head(): number;
     frameTimes(): number[]; base?: string;
+    strokesInWindow?(t: number, windowMs: number): { t: number; edit: Record<string, unknown> }[];
   }
+  // Replay overlay: the recorded segment-editor INTENT strokes (M1b), rendered as fading tubes so you
+  // watch them being drawn. The authoritative segmentation still comes from the labelmap deltas.
+  const STROKE_WINDOW_MS = 2500;
+  let strokeField: CapsuleField | null = null;
+  function updateStrokeOverlay(t: number) {
+    const active = src?.strokesInWindow?.(t, STROKE_WINDOW_MS) ?? [];
+    const segs: LineSegment[] = [];
+    for (const s of active) {
+      const pts = (s.edit.points as number[][]) ?? [];
+      const a = Math.max(0.05, 1 - (t - s.t) / STROKE_WINDOW_MS);   // fade with age
+      const col: [number, number, number, number] = s.edit.mode === "remove" ? [1, 0.35, 0.35, a] : [0.45, 1, 0.55, a];
+      for (let i = 0; i + 1 < pts.length; i++) segs.push({ a: pts[i] as Vec3, b: pts[i + 1] as Vec3, radius: 2.5, color: col });
+    }
+    if (!strokeField) { strokeField = new CapsuleField(segs, { screenSpace: true, ghost: true }); view.setField("strokeOverlay", strokeField); }
+    else { strokeField.setSegments(segs); view.redraw(); }
+  }
+  function clearStrokeOverlay() { if (strokeField) { view.removeField("strokeOverlay"); strokeField = null; } }
   const tl = document.getElementById("timeline")!;
   const scrub = document.getElementById("tl-scrub") as HTMLInputElement;
   const timeLbl = document.getElementById("tl-time")!;
@@ -384,6 +403,7 @@ async function main() {
     // force camera + slice ('view') nodes so a branched-off local view snaps back to the recorded path
     await live.applySnapshot(target, displayed ?? new Map(), { force: (n) => n.type === "camera" || n.type === "view" });
     displayed = target;
+    updateStrokeOverlay(t);                              // fade the recorded strokes near this timepoint
     if (branched) { branched = false; tl.classList.remove("branched"); }
     restoring = false;
     if (pendingT !== null) { const n = pendingT; pendingT = null; restore(n); }
@@ -427,6 +447,7 @@ async function main() {
   async function goLive() {
     stopPlay();
     detachSliceInteraction();
+    clearStrokeOverlay();
     for (const c of SLICE_CELLS) sliceBranched[c] = false;
     inReplay = false; branched = false; followCamera = true; tl.classList.remove("branched");
     live.httpBase = liveHttpBase;                       // blobs back to the live scene

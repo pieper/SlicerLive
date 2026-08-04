@@ -12,7 +12,11 @@ import { nearestThumbOf, seekFrames, type Frame, type Mark, type Session, type T
 import { branchPointAtTime, type BranchPoint, type Commit, type ContentHash, sealStream, verifyChain, type VerifyResult } from "./commits.ts";
 import type { MrsonNode } from "./mrson.ts";
 
-interface RecEvent { t: number; event: string; sourceId?: string; node?: MrsonNode; display?: Record<string, unknown>; [k: string]: unknown }
+interface RecEvent { t: number; event: string; sourceId?: string; node?: MrsonNode; display?: Record<string, unknown>; edit?: Record<string, unknown>; [k: string]: unknown }
+
+/** A recorded segment-editor intent stroke (M1b) with its wall-clock time — a side-channel like thumbs,
+ *  rendered time-windowed during replay so you can watch the strokes being drawn. */
+export interface RecStroke { t: number; edit: Record<string, unknown> }
 interface Manifest {
   id: string; startedAt: number; endedAt: number; blobBase: string;
   keyframes: { t: number; scene: string }[];
@@ -73,6 +77,7 @@ export class Recording {
   commits: Commit[] = [];
   headCommit?: ContentHash;   // NB: distinct from head() (the timeline's max frame time)
   rootCommit?: ContentHash;
+  strokes: RecStroke[] = [];  // segment-editor intent strokes (M1b), for the replay stroke overlay
 
   constructor(public base: string, public session: Session) {}
 
@@ -108,6 +113,7 @@ export class Recording {
     const thumbs: Thumb[] = man.thumbs.map((th) => ({ t: th.t, url: base + th.file }));
     const session: Session = { id: man.id, startedAt: man.startedAt, frames, thumbs, marks: man.marks ?? [] };
     const rec = new Recording(base, session);
+    rec.strokes = man.events.filter((e) => e.event === "SegEdit" && e.edit).map((e) => ({ t: e.t, edit: e.edit! }));
     // git-style history: use the on-disk chain if the recording was sealed, else compute it deterministically.
     rec.commits = (man.commits && man.commits.length) ? man.commits : await sealStream(man.events ?? [], { intervalMs: 1000, role: "module" });
     rec.rootCommit = man.root ?? rec.commits[0]?.hash;
@@ -122,6 +128,8 @@ export class Recording {
   span(): [number, number] { return [this.session.startedAt, this.head()]; }
   /** Times of every recorded frame (keyframe/delta), ascending — used to skip idle gaps in playback. */
   frameTimes(): number[] { return this.session.frames.map((f) => f.t); }
+  /** Intent strokes committed within the last `windowMs` up to `t` — for the fading replay overlay. */
+  strokesInWindow(t: number, windowMs: number): RecStroke[] { return this.strokes.filter((s) => s.t <= t && s.t > t - windowMs); }
   /** blobBase for a LiveScene replaying this recording (so ImageField/zarr fetch the recording's blobs). */
   blobBase(): string { return this.base; }
 
