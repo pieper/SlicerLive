@@ -325,11 +325,11 @@ fn col_seg${s}(wp : vec3<f32>) -> vec3<f32> {   // per-label colour of the neare
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec3<f32>(0.0); }
   return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).rgb;
 }${this.attrTex ? `
-fn attr_seg${s}(wp : vec3<f32>) -> f32 {   // per-segment opacity of the nearest region
+fn attr_seg${s}(wp : vec3<f32>) -> vec2<f32> {   // per-segment (.x = opacity, .y = shading mode)
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = t4.xyz;
-  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 0.0; }
-  return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).r;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec2<f32>(0.0); }
+  return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).rg;
 }` : ""}
 fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let op0 = u_material.seg${s}_color.a;
@@ -337,13 +337,24 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let sdf = v_seg${s}(wp);
   let band = max(u_material.seg${s}_params.x, 1e-3);
   let step = max(u_material.scene.x, 1e-3);
+${this.attrTex ? `  let at = attr_seg${s}(wp);    // (opacity, shading mode)
+  let seg_op = at.x;
+  if (seg_op <= 0.0) { return vec4<f32>(0.0); }
+  if (at.y > 0.5) {
+    // VOLUME shading: DVR fill of the interior (sdf<0) with translucent emissive colour, so you see
+    // the segment as a solid cloud rather than a surface shell. ~24 mm opacity-unit-distance.
+    if (sdf >= 0.0) { return vec4<f32>(0.0); }
+    let vop = clamp(op0 * seg_op * step / 24.0, 0.0, 1.0);
+    if (vop <= 0.0) { return vec4<f32>(0.0); }
+    let vcol = srgb2physical(clamp(col_seg${s}(wp), vec3<f32>(0.0), vec3<f32>(1.0)));
+    return vec4<f32>(vcol * vop, vop);
+  }` : `  let seg_op = 1.0;`}
+  // SURFACE shading: crisp shell around sdf=0.
   let d_mm = abs(sdf);
   if (d_mm > band + step) { return vec4<f32>(0.0); }   // outside the shell (+ gradient stencil margin)
   let a = 1.0 - clamp(d_mm / band, 0.0, 1.0);
   if (a <= 0.0) { return vec4<f32>(0.0); }
-${this.attrTex ? `  let seg_op = attr_seg${s}(wp);   // per-segment opacity (0 = hidden)
-  if (seg_op <= 0.0) { return vec4<f32>(0.0); }
-  let op = clamp(a * op0 * seg_op, 0.0, 1.0);` : `  let op = clamp(a * op0, 0.0, 1.0);`}
+  let op = clamp(a * op0 * seg_op, 0.0, 1.0);
   // Normal = SDF gradient (central difference); smooth SDF → smooth normal, no terracing.
   let h = step;
   let g = vec3<f32>(

@@ -38,7 +38,8 @@ export class SegmentationLogic {
   private sigma: number;
   private bandMm?: number;
   private opacity: number;
-  private palette = new Float32Array(256 * 4); // label id → (r,g,b, 1 = defined); shared by both paths
+  private palette = new Float32Array(256 * 4);      // label id → (r,g,b, opacity); shared by both paths
+  private modePalette = new Float32Array(256 * 4);  // label id → (.x = shading mode: 0 surface / 1 volume) — sdf only
   private segField?: SegmentField;
   private redrawCbs: Array<() => void> = [];
   private unsubDirty: () => void;
@@ -83,9 +84,16 @@ export class SegmentationLogic {
     this.palette[id * 4 + 3] = Math.max(0, Math.min(1, opacity));
   }
 
+  /** Per-segment shading (sdf mode): "surface" = crisp SDF shell (surface model), "volume" = DVR fill
+   *  of the interior (translucent cloud). Rebake/refine to apply. */
+  setLabelShading(id: number, shading: "surface" | "volume") {
+    if (id < 1 || id > 255) return;
+    this.modePalette[id * 4] = shading === "volume" ? 1 : 0;
+  }
+
   /** Re-derive the render texture from the current master + palette (FAST, in place). */
   private rebake() {
-    if (this.sdf) { this.sdf.setPalette(this.palette); this.sdf.bake(); }
+    if (this.sdf) { this.sdf.setPalette(this.palette); this.sdf.setModePalette(this.modePalette); this.sdf.bake(); }
     else this.baker!.bakeInto(this.presenceTex!, this.palette, this.sigma);
   }
 
@@ -100,7 +108,7 @@ export class SegmentationLogic {
    *  Public so a test — or an app that knows the edit is done — can force the high-quality bake. */
   refineNow() {
     if (this.refineTimer !== undefined) { clearTimeout(this.refineTimer); this.refineTimer = undefined; }
-    if (this.sdf) { this.sdf.setPalette(this.palette); this.sdf.refine(); for (const cb of this.redrawCbs) cb(); }
+    if (this.sdf) { this.sdf.setPalette(this.palette); this.sdf.setModePalette(this.modePalette); this.sdf.refine(); for (const cb of this.redrawCbs) cb(); }
   }
 
   /** A SegmentField bound to the shared render texture — hand this to the SceneRenderer once; edits

@@ -87,6 +87,7 @@ struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
 @group(0) @binding(3) var<uniform> u : U;
 @group(0) @binding(4) var<uniform> u_pal : array<vec4<f32>, 256>;
 @group(0) @binding(5) var t_attr : texture_storage_3d<rgba16float, write>;
+@group(0) @binding(6) var<uniform> u_mode : array<vec4<f32>, 256>;   // .x = shading mode (0 surface, 1 volume)
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (any(gid >= u.dims.xyz)) { return; }
@@ -99,8 +100,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let sdf = select(dist, -dist, ins);
   let lbl = u32(s.w + 0.5) & 255u;
   let pal = select(vec4<f32>(0.0), u_pal[lbl], valid);
+  let mode = select(0.0, u_mode[lbl].x, valid);
   textureStore(t_out, c, vec4<f32>(pal.rgb, sdf));
-  textureStore(t_attr, c, vec4<f32>(pal.a, 0.0, 0.0, 0.0));   // .r = per-segment opacity
+  textureStore(t_attr, c, vec4<f32>(pal.a, mode, 0.0, 0.0));   // .r = per-segment opacity, .g = shading mode
 }`;
 
 // Separable Gaussian on the SDF's .a (distance) only, carrying .rgb (colour) from the centre tap.
@@ -174,7 +176,8 @@ export class JfaSdfBaker {
   private attrTex: GPUTexture;                   // rgba16float: .r = per-segment opacity — sampled by SegmentField
   private sdfScratch: GPUTexture;               // rgba16float blur ping-pong
   private uni: GPUBuffer;
-  private palBuf: GPUBuffer;                     // 256 × vec4 label→colour palette
+  private palBuf: GPUBuffer;                     // 256 × vec4 label→colour palette (.a = opacity)
+  private modeBuf: GPUBuffer;                    // 256 × vec4 label→shading mode (.x = 0 surface / 1 volume)
   private initPipe: GPUComputePipeline;
   private jfaPipe: GPUComputePipeline;
   private finalPipe: GPUComputePipeline;
@@ -195,6 +198,7 @@ export class JfaSdfBaker {
     this.sdfScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
     this.uni = dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.modeBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const mod = (code: string) => dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code }), entryPoint: "main" } });
     this.initPipe = mod(INIT_WGSL);
     this.jfaPipe = mod(JFA_WGSL);
@@ -217,11 +221,18 @@ export class JfaSdfBaker {
   /** The resident per-segment attribute texture (rgba16float; .r = opacity). Identity stable. */
   attrTexture(): GPUTexture { return this.attrTex; }
 
-  /** Set the label→colour palette (256 × rgba f32; index = label id). Call before bake(). */
+  /** Set the label→colour palette (256 × rgba f32: rgb = colour, a = opacity). Call before bake(). */
   setPalette(palette: Float32Array) {
     const pal = new Float32Array(256 * 4);
     pal.set(palette.subarray(0, Math.min(palette.length, 256 * 4)));
     this.dev.queue.writeBuffer(this.palBuf, 0, pal);
+  }
+
+  /** Set the per-label shading mode palette (256 × vec4; .x = 0 surface shell / 1 volume DVR fill). */
+  setModePalette(modes: Float32Array) {
+    const m = new Float32Array(256 * 4);
+    m.set(modes.subarray(0, Math.min(modes.length, 256 * 4)));
+    this.dev.queue.writeBuffer(this.modeBuf, 0, m);
   }
 
   private writeUni(step: number) {
@@ -286,6 +297,7 @@ export class JfaSdfBaker {
       { binding: 3, resource: { buffer: this.uni } },
       { binding: 4, resource: { buffer: this.palBuf } },
       { binding: 5, resource: this.attrTex.createView() },
+      { binding: 6, resource: { buffer: this.modeBuf } },
     ] });
     const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(gx, gy, gz); p.end();
     dev.queue.submit([enc.finish()]);
@@ -320,5 +332,5 @@ export class JfaSdfBaker {
     dev.queue.submit([enc.finish()]);
   }
 
-  destroy() { this.seed[0].destroy(); this.seed[1].destroy(); this.sdfTex.destroy(); this.attrTex.destroy(); this.sdfScratch.destroy(); this.uni.destroy(); this.palBuf.destroy(); }
+  destroy() { this.seed[0].destroy(); this.seed[1].destroy(); this.sdfTex.destroy(); this.attrTex.destroy(); this.sdfScratch.destroy(); this.uni.destroy(); this.palBuf.destroy(); this.modeBuf.destroy(); }
 }

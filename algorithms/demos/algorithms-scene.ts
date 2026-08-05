@@ -42,6 +42,11 @@ export interface AlgorithmsScene {
    *  through outer segments to inner ones). Persists across render-mode swaps. */
   setAllOpacity(opacity: number): void;
   allOpacity(): number;
+  /** Assign each segment a RANDOM opacity + random surface/volume shading, so the options are visible
+   *  at a glance. Persists across render-mode swaps. */
+  randomizeLook(): void;
+  /** Reset every segment to opaque surface shading. */
+  resetLook(): void;
 }
 
 export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): AlgorithmsScene {
@@ -57,7 +62,13 @@ export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): Algor
   // are remembered so they survive a render-mode swap (which rebuilds the logic).
   const keyToId = new Map<string, number>();
   const labelColors: Array<[number, [number, number, number]]> = [];
+  // Per-label look (opacity + surface/volume shading), remembered so it survives a render-mode swap.
+  const labelLook = new Map<number, { op: number; shading: "surface" | "volume" }>();
   let nextId = 1;
+  const applyLook = (id: number) => {
+    const lk = labelLook.get(id)!;
+    logic.setLabelOpacity(id, lk.op); logic.setLabelShading(id, lk.shading);
+  };
   const allocId = (key: string): number => {
     let id = keyToId.get(key);
     if (id !== undefined) return id;
@@ -65,7 +76,8 @@ export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): Algor
     const rgb = LABEL_COLORS[(id - 1) % LABEL_COLORS.length];
     keyToId.set(key, id);
     labelColors.push([id, rgb]);
-    logic.setLabelColor(id, rgb);
+    labelLook.set(id, { op: 1, shading: "surface" });
+    logic.setLabelColor(id, rgb); applyLook(id);
     return id;
   };
 
@@ -81,7 +93,7 @@ export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): Algor
   let allOpacity = 1;
   const makeLogic = () => {
     logic = new SegmentationLogic(gpu.device, seg, { renderMode: mode, opacity: 1.0, sigmaVoxels: 1.0 });
-    for (const [id, rgb] of labelColors) { logic.setLabelColor(id, rgb); logic.setLabelOpacity(id, allOpacity); }   // persist colours + opacity across swaps
+    for (const [id, rgb] of labelColors) { logic.setLabelColor(id, rgb); applyLook(id); }   // persist colours + look across swaps
     logic.onRedraw(() => { for (const cb of redrawCbs) cb(); });
     scene.build([logic.field()]);
     scene.setBackground(0.05, 0.06, 0.09);
@@ -121,9 +133,21 @@ export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): Algor
     refine() { logic.refineNow(); },
     setAllOpacity(op) {
       allOpacity = op;
-      for (const [id] of labelColors) logic.setLabelOpacity(id, op);
+      for (const [id] of labelColors) { labelLook.get(id)!.op = op; applyLook(id); }
       logic.refineNow();   // rebakes attr + redraws
     },
     allOpacity: () => allOpacity,
+    randomizeLook() {
+      for (const [id] of labelColors) {
+        const lk = { op: 0.3 + Math.random() * 0.7, shading: (Math.random() < 0.5 ? "surface" : "volume") as "surface" | "volume" };
+        labelLook.set(id, lk); applyLook(id);
+      }
+      logic.refineNow();   // rebakes attr (opacity + shading) + redraws
+    },
+    resetLook() {
+      allOpacity = 1;
+      for (const [id] of labelColors) { labelLook.set(id, { op: 1, shading: "surface" }); applyLook(id); }
+      logic.refineNow();
+    },
   };
 }

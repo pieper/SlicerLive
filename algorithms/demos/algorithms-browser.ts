@@ -98,16 +98,18 @@ async function main() {
     status(`render path: ${a.renderMode() === "sdf" ? "SDF (crisp, terrace-free)" : "Gaussian (gradient-opacity)"}`);
   });
 
-  // Opaque ↔ translucent surface models (per-segment opacity): translucent lets you see inner
-  // segments through outer ones.
-  const opacBtn = document.getElementById("opac") as HTMLButtonElement | null;
-  const syncOpacBtn = () => { if (opacBtn) opacBtn.textContent = a.allOpacity() < 1 ? "Surfaces: Translucent" : "Surfaces: Opaque"; };
-  syncOpacBtn();
-  opacBtn?.addEventListener("click", () => {
-    a.setAllOpacity(a.allOpacity() < 1 ? 1 : 0.45);
-    syncOpacBtn();
+  // Randomize the per-segment LOOK: each segment gets a random opacity + random surface/volume
+  // shading, so the rendering options are visible at a glance (surface = crisp shell, volume =
+  // translucent DVR cloud; low opacity = see-through).
+  document.getElementById("rand")?.addEventListener("click", () => {
+    a.randomizeLook();
     drawNow();
-    status(a.allOpacity() < 1 ? "translucent surface models — see through outer segments to inner ones" : "opaque surfaces");
+    status("randomized per-segment opacity + surface/volume shading");
+  });
+  document.getElementById("opaque")?.addEventListener("click", () => {
+    a.resetLook();
+    drawNow();
+    status("all segments opaque surfaces");
   });
 
   document.getElementById("reset")?.addEventListener("click", () => location.reload());
