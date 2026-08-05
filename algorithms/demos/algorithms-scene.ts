@@ -1,8 +1,8 @@
-// A-0 scene: the layered `algorithms/` + `logic/` + `render/` proof, headless-capable (same builder
-// runs under Deno render-to-PNG and in the browser). EditableSegmentation (algorithms) owns the
-// master labelmap; SegmentationLogic (logic) glues it to a surface-mode SegmentField (render); the
-// demo composes all three. A "poke" stamps another sphere on-GPU through the shared master and the
-// render updates in place — no editing UI, no CPU round-trip.
+// Multi-label demo scene: the layered `algorithms/` + `logic/` + `render/` proof, headless-capable
+// (same builder runs under Deno render-to-PNG and in the browser). EditableSegmentation (algorithms)
+// owns the master labelmap; SegmentationLogic (logic) glues it to a colorized surface (render); the
+// demo composes all three. Each poke/stroke gets a DISTINCT label id + colour, so a complex labelmap
+// renders with per-label colours and colour seams where different-label neighbours meet.
 //
 // This file is the composition/app layer, so it may import all three engines; the engines themselves
 // stay independent (algorithms ⊥ render, glued only by logic).
@@ -14,24 +14,30 @@ import { PaintEffect } from "../effects/paint.ts";
 import { SegEditDriver } from "../seg-edit-driver.ts";
 import { SegmentationLogic } from "../../logic/segmentation-logic.ts";
 
+// A distinct, well-separated colour per label (cycled past the 12th).
+const LABEL_COLORS: [number, number, number][] = [
+  [0.30, 0.85, 0.55], [0.35, 0.65, 0.95], [0.95, 0.60, 0.30], [0.90, 0.35, 0.45],
+  [0.70, 0.45, 0.95], [0.35, 0.85, 0.90], [0.95, 0.85, 0.35], [0.95, 0.50, 0.80],
+  [0.55, 0.80, 0.35], [0.50, 0.55, 0.90], [0.90, 0.70, 0.50], [0.80, 0.80, 0.85],
+];
+
 export interface AlgorithmsScene {
   scene: SceneRenderer;
   seg: EditableSegmentation;
   paint: PaintEffect;
-  driver: SegEditDriver;      // consumes SegEdit ops (A-1) — the same path a Slicer stream drives
+  driver: SegEditDriver;      // consumes SegEdit ops (A-1); each unique segmentId → a new coloured label
   center: Vec3;
   radius: number;
   dims: Vec3;
-  /** Stamp a sphere dab through the shared buffer (A-0 live-update poke, via PaintEffect). */
+  /** Stamp a sphere dab of a NEW coloured label through the shared buffer. */
   poke(centerRAS: Vec3, radiusMm: number): void;
   /** Called after any edit (post-rebake) so the app redraws. Persists across render-mode swaps. */
   onRedraw(cb: () => void): void;
-  /** Swap the render path (sdf ↔ surface) live, preserving the painted segmentation. */
+  /** Swap the render path (sdf ↔ surface) live, preserving the painted segmentation + colours. */
   setRenderMode(mode: "sdf" | "surface"): void;
   renderMode(): "sdf" | "surface";
 }
 
-/** Build the A-0 scene: a synthetic sphere segment rendered in surface mode. */
 export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): AlgorithmsScene {
   const dims: Vec3 = [96, 96, 96];
   const sp = 2; // 2 mm isotropic
@@ -40,26 +46,46 @@ export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): Algor
 
   const seg = new EditableSegmentation(gpu.device, dims, { ijkToRAS });
   const paint = new PaintEffect(seg);
-  const driver = new SegEditDriver(seg);
+
+  // Label allocation: each unique key (a stroke's segmentId, or a poke) → a fresh id + colour. Colours
+  // are remembered so they survive a render-mode swap (which rebuilds the logic).
+  const keyToId = new Map<string, number>();
+  const labelColors: Array<[number, [number, number, number]]> = [];
+  let nextId = 1;
+  const allocId = (key: string): number => {
+    let id = keyToId.get(key);
+    if (id !== undefined) return id;
+    id = nextId++;
+    const rgb = LABEL_COLORS[(id - 1) % LABEL_COLORS.length];
+    keyToId.set(key, id);
+    labelColors.push([id, rgb]);
+    logic.setLabelColor(id, rgb);
+    return id;
+  };
 
   const scene = new SceneRenderer(gpu, format);
 
   // The render path is swappable (sdf = crisp terrace-free default; surface = Gaussian gradient-
   // opacity). A swap rebuilds the SegmentationLogic over the SAME master (content preserved) and
-  // rebuilds the scene fields. A persistent redraw hook survives the swap. setBackground must FOLLOW
-  // scene.build (build re-creates the uniform buffer), so it's re-applied inside makeLogic.
+  // rebuilds the scene fields; the label colours are replayed so they persist. setBackground must
+  // FOLLOW scene.build (build re-creates the uniform buffer), so it's re-applied inside makeLogic.
   const redrawCbs: Array<() => void> = [];
   let mode: "sdf" | "surface" = "sdf";
   let logic!: SegmentationLogic;
   const makeLogic = () => {
-    logic = new SegmentationLogic(gpu.device, seg, { renderMode: mode, color: [0.30, 0.85, 0.55], opacity: 1.0, sigmaVoxels: 1.0 });
+    logic = new SegmentationLogic(gpu.device, seg, { renderMode: mode, opacity: 1.0, sigmaVoxels: 1.0 });
+    for (const [id, rgb] of labelColors) logic.setLabelColor(id, rgb);   // persist colours across swaps
     logic.onRedraw(() => { for (const cb of redrawCbs) cb(); });
     scene.build([logic.field()]);
     scene.setBackground(0.05, 0.06, 0.09);
   };
   makeLogic();
 
-  // Seed an initial sphere via the CPU load path (proves loadLabelmap): id 1, ~15-voxel radius at grid centre.
+  // Each unique segmentId in the SegEdit stream → a new coloured label.
+  const driver = new SegEditDriver(seg, { labelForSegment: (segId) => allocId(segId) });
+
+  // Seed an initial sphere (id 1) via the CPU load path (proves loadLabelmap): ~15-voxel radius at centre.
+  allocId("seed");   // → id 1, first colour
   const [nx, ny, nz] = dims;
   const lab = new Uint8Array(nx * ny * nz);
   const c = [48, 48, 48], rv = 15;
@@ -71,16 +97,17 @@ export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): Algor
 
   const center: Vec3 = [0, 0, 0];
   const radius = Math.hypot(96, 96, 96); // half-extent of the grid in mm
+  let pokeN = 0;
 
   return {
     scene, seg, paint, driver, center, radius, dims,
-    poke(centerRAS, radiusMm) { paint.stampStroke([centerRAS], { radiusMm, id: 1, mode: "add" }); },
+    poke(centerRAS, radiusMm) { paint.stampStroke([centerRAS], { radiusMm, id: allocId(`poke_${pokeN++}`), mode: "add" }); },
     onRedraw(cb) { redrawCbs.push(cb); },
     setRenderMode(m) {
       if (m === mode) return;
       logic.destroy();          // unsubscribes its onDirty + frees GPU textures
       mode = m;
-      makeLogic();              // new logic over the SAME master (content preserved) + rebuild scene
+      makeLogic();              // new logic over the SAME master (content + colours preserved) + rebuild scene
       for (const cb of redrawCbs) cb();
     },
     renderMode: () => mode,

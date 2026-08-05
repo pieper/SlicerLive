@@ -224,6 +224,7 @@ export interface SegmentFieldOpts {
   sampleStepMm?: number;
   clippable?: boolean;                   // let ROI clip planes crop this segment (default true)
   mode?: "iso" | "surface" | "sdf";      // iso = crisp presence shell (default); surface = gradient-opacity translucent (Carve look); sdf = crisp terrace-free shell from a signed-distance field
+  colorFromTexture?: boolean;            // iso/surface: take per-voxel colour from the texture's .rgb (multi-label) instead of the uniform colour. sdf always does.
 }
 
 /** A single segment rendered exactly as slicer_wgpu's SegmentField in its DEFAULT
@@ -254,6 +255,7 @@ export class SegmentField implements Field {
   private bandMm: number;
   private stepMm: number;
   private mode: "iso" | "surface" | "sdf";
+  private colorFromTex: boolean;
 
   constructor(tex: GPUTexture, dims: Vec3, spacing: Vec3, opts: SegmentFieldOpts) {
     this.tex = tex;
@@ -277,6 +279,7 @@ export class SegmentField implements Field {
     this.stepMm = opts.sampleStepMm ?? Math.max(0.5 * voxelMm, 0.1);
     this.clippable = opts.clippable ?? true;
     this.mode = opts.mode ?? "iso";
+    this.colorFromTex = opts.colorFromTexture ?? false;
   }
 
   uniformFloats() { return 28; }        // mat4(16) + color(4) + shade(4) + params(4)
@@ -298,17 +301,24 @@ export class SegmentField implements Field {
   }
 
   samplingWGSL(s: number): string {
-    // "sdf" mode: the input texture is a SIGNED-DISTANCE field (r32float, mm in .r; negative inside),
-    // not a presence field. A narrow band around sdf=0 renders a crisp, TERRACE-FREE shell — the
-    // surface-model look the Gaussian presence can't reach (docs/ALGORITHMS.md A-1r). Distance is read
-    // directly (no presence→distance derivation); the normal is the SDF gradient.
+    // "sdf" mode: the input texture is a COLORIZED SIGNED-DISTANCE field (rgba16float) — .a = signed
+    // distance mm (negative inside), .rgb = the per-label colour of the nearest region. A narrow band
+    // around sdf=0 renders a crisp, TERRACE-FREE shell — the surface-model look the Gaussian presence
+    // can't reach (docs/ALGORITHMS.md A-1r) — and the per-voxel colour lets one merged surface show
+    // multiple labels with a colour seam where different-label neighbours meet.
     if (this.mode === "sdf") {
       return /* wgsl */ `
-fn v_seg${s}(wp : vec3<f32>) -> f32 {
+fn v_seg${s}(wp : vec3<f32>) -> f32 {   // signed distance (mm)
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 1e3; }   // far outside → culled
-  return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).r;                    // signed distance (mm)
+  return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a;
+}
+fn col_seg${s}(wp : vec3<f32>) -> vec3<f32> {   // per-label colour of the nearest region
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = t4.xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec3<f32>(0.0); }
+  return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).rgb;
 }
 fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let op0 = u_material.seg${s}_color.a;
@@ -336,7 +346,7 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let ldn = max(dot(-rd, n), 0.0);
   let refl = normalize(2.0 * ldn * n + rd);
   let rdv = max(dot(refl, -rd), 0.0);
-  let col = u_material.seg${s}_color.rgb;
+  let col = col_seg${s}(wp);                 // per-label colour from the texture
   var lit = col * ka + col * (kd * ldn) + vec3<f32>(ks * pow(rdv, max(sh, 1.0)));
   lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
   return vec4<f32>(lit * op, op);
@@ -364,13 +374,25 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let a = 1.0 - clamp(d_mm / band, 0.0, 1.0);
   if (a <= 0.0) { return vec4<f32>(0.0); }
   let op = clamp(a * op0, 0.0, 1.0);`;
+    // Colour source: the uniform (single-label, default) or the texture's .rgb (multi-label — the
+    // colorize bake stores per-label colour in rgb, presence in .a). Only the colour differs.
+    const colWGSL = this.colorFromTex
+      ? /* wgsl */ `
+fn col_seg${s}(wp : vec3<f32>) -> vec3<f32> {
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = t4.xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec3<f32>(0.0); }
+  return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).rgb;
+}`
+      : "";
+    const colExpr = this.colorFromTex ? `col_seg${s}(wp)` : `u_material.seg${s}_color.rgb`;
     return /* wgsl */ `
 fn v_seg${s}(wp : vec3<f32>) -> f32 {
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 0.0; }
   return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a;   // Gaussian-smoothed presence in .a
-}
+}${colWGSL}
 fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let op0 = u_material.seg${s}_color.a;
   if (op0 <= 0.0) { return vec4<f32>(0.0); }
@@ -392,7 +414,7 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let ldn = max(dot(-rd, n), 0.0);
   let refl = normalize(2.0 * ldn * n + rd);
   let rdv = max(dot(refl, -rd), 0.0);
-  let col = u_material.seg${s}_color.rgb;
+  let col = ${colExpr};
   var lit = col * ka + col * (kd * ldn) + vec3<f32>(ks * pow(rdv, max(sh, 1.0)));
   lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
   return vec4<f32>(lit * op, op);

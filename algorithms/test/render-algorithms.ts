@@ -14,28 +14,26 @@ const t0 = performance.now();
 const a = buildAlgorithmsScene(gpu);
 a.scene.setCamera([90, -430, 150], a.center, [0, 0, 1], 30, W, H);
 
-const countGreen = (rgba: Uint8Array): number => {
-  let green = 0;
-  for (let i = 0; i < W * H; i++) {
-    const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
-    if (g > 60 && g > r + 15 && g > b + 15) green++;
-  }
-  return green;
+// Colour-agnostic "painted" count (poke now stamps a DIFFERENT-coloured label, so don't key on green).
+const countPainted = (rgba: Uint8Array): number => {
+  let n = 0;
+  for (let i = 0; i < W * H; i++) if (Math.max(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]) > 45) n++;
+  return n;
 };
 
-// Before: the seeded sphere, surface mode.
+// Before: the seeded sphere.
 const before = await a.scene.renderToRGBA(W, H);
 await Deno.writeFile(new URL("./algorithms-a0-before.png", import.meta.url).pathname, await encodePNG(before, W, H));
-const g0 = countGreen(before);
+const g0 = countPainted(before);
 
-// Poke: stamp a second sphere off-centre through the SHARED BUFFER (GPU compute write).
+// Poke: stamp a second (new-coloured) sphere off-centre through the SHARED BUFFER (GPU compute write).
 a.poke([46, 0, 24], 22);
 const after = await a.scene.renderToRGBA(W, H);
 await Deno.writeFile(new URL("./algorithms-a0-after.png", import.meta.url).pathname, await encodePNG(after, W, H));
-const g1 = countGreen(after);
+const g1 = countPainted(after);
 
 console.log(`A-0 surface render ${W}x${H} in ${(performance.now() - t0).toFixed(0)}ms`);
-console.log(`green pixels: before=${g0}  after=${g1}  (expect before>0 and after>before)`);
+console.log(`painted pixels: before=${g0}  after=${g1}  (expect before>0 and after>before)`);
 
 const ok = g0 > 500 && g1 > g0 * 1.05;
 console.log(ok ? "PASS — surface render present + shared-buffer poke propagated to render" : "FAIL");

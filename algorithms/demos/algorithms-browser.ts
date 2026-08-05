@@ -66,13 +66,14 @@ async function main() {
   // "Paint stroke": drive an incremental arc through the SegEditDriver (the SAME path a Slicer SegEdit
   // stream drives), one sample per animation frame — so you watch it paint in real time, interpolated
   // into a continuous tube. No UI palette; the driver consumes ops, exactly as A-1 intends.
-  let painting = false;
+  let painting = false, strokeN = 0;
   const paintStroke = async () => {
     if (painting) return;
     painting = true;
     const R = 55, N = 26;
     const cx = (Math.random() * 2 - 1) * 30, cy = (Math.random() * 2 - 1) * 30, cz = (Math.random() * 2 - 1) * 30;
-    a.driver.beginStroke({ segmentId: "Segment_1", effect: "Paint", brush: { shape: "sphere", diameterMm: 14 } });
+    // A unique segmentId per stroke → the driver allocates a new coloured label.
+    a.driver.beginStroke({ segmentId: `stroke_${++strokeN}`, effect: "Paint", brush: { shape: "sphere", diameterMm: 14 } });
     for (let i = 0; i < N; i++) {
       const t = (i / (N - 1)) * Math.PI * 1.5;
       a.driver.addPoint([cx + R * Math.cos(t), cy + R * Math.sin(t) * 0.6, cz + (i / N) * 40 - 20]);

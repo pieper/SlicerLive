@@ -16,27 +16,33 @@
 import { transpose4, type Vec3 } from "./mat4.ts";
 
 // U: ijkToRAS(64) + dims(16) + params(16). params.x = jfa step (voxels).
+// Seeds store (RAS.xyz, regionLabel): a boundary voxel's REGION LABEL (its own if inside, else its
+// inside neighbour's) so the flood carries per-label colour along with distance. w>0.5 = valid seed.
 const INIT_WGSL = /* wgsl */ `
 struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
 @group(0) @binding(0) var t_label : texture_3d<u32>;
 @group(0) @binding(1) var t_seed_out : texture_storage_3d<rgba32float, write>;
 @group(0) @binding(2) var<uniform> u : U;
-fn inside(c : vec3<i32>) -> bool {
+fn labelAt(c : vec3<i32>) -> u32 {
   let d = vec3<i32>(u.dims.xyz);
-  let cc = clamp(c, vec3<i32>(0), d - vec3<i32>(1));
-  return textureLoad(t_label, cc, 0).r != 0u;
+  return textureLoad(t_label, clamp(c, vec3<i32>(0), d - vec3<i32>(1)), 0).r;
 }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (any(gid >= u.dims.xyz)) { return; }
   let c = vec3<i32>(gid);
-  let me = inside(c);
-  // Boundary = a voxel whose 6-neighbourhood inside-ness differs (a surface passes between them).
-  let b = (inside(c + vec3<i32>(1,0,0)) != me) || (inside(c - vec3<i32>(1,0,0)) != me)
-       || (inside(c + vec3<i32>(0,1,0)) != me) || (inside(c - vec3<i32>(0,1,0)) != me)
-       || (inside(c + vec3<i32>(0,0,1)) != me) || (inside(c - vec3<i32>(0,0,1)) != me);
+  let my = labelAt(c);
+  let meIn = my != 0u;
+  var boundary = false;
+  var region = my;                                  // inside voxel → own label
+  let offs = array<vec3<i32>, 6>(vec3<i32>(1,0,0), vec3<i32>(-1,0,0), vec3<i32>(0,1,0), vec3<i32>(0,-1,0), vec3<i32>(0,0,1), vec3<i32>(0,0,-1));
+  for (var i = 0; i < 6; i = i + 1) {
+    let nl = labelAt(c + offs[i]);
+    let nIn = nl != 0u;
+    if (nIn != meIn) { boundary = true; if (!meIn) { region = nl; } }  // outside boundary → adopt inside neighbour's label
+  }
   var seed = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  if (b) { seed = vec4<f32>((u.ijkToRAS * vec4<f32>(vec3<f32>(gid), 1.0)).xyz, 1.0); }
+  if (boundary) { seed = vec4<f32>((u.ijkToRAS * vec4<f32>(vec3<f32>(gid), 1.0)).xyz, f32(region)); }
   textureStore(t_seed_out, c, seed);
 }`;
 
@@ -70,31 +76,38 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   textureStore(t_seed_out, c, best);
 }`;
 
+// Finalize → rgba16float: .rgb = the nearest region's palette colour, .a = signed distance (mm).
 const FINAL_WGSL = /* wgsl */ `
 struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
 @group(0) @binding(0) var t_seed_in : texture_3d<f32>;
 @group(0) @binding(1) var t_label : texture_3d<u32>;
-@group(0) @binding(2) var t_sdf_out : texture_storage_3d<r32float, write>;
+@group(0) @binding(2) var t_out : texture_storage_3d<rgba16float, write>;
 @group(0) @binding(3) var<uniform> u : U;
+@group(0) @binding(4) var<uniform> u_pal : array<vec4<f32>, 256>;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (any(gid >= u.dims.xyz)) { return; }
   let c = vec3<i32>(gid);
   let p = (u.ijkToRAS * vec4<f32>(vec3<f32>(gid), 1.0)).xyz;
   let s = textureLoad(t_seed_in, c, 0);
-  let dist = select(1e3, distance(p, s.xyz), s.w > 0.5);
+  let valid = s.w > 0.5;
+  let dist = select(1e3, distance(p, s.xyz), valid);
   let ins = textureLoad(t_label, c, 0).r != 0u;
-  textureStore(t_sdf_out, c, vec4<f32>(select(dist, -dist, ins), 0.0, 0.0, 0.0));
+  let sdf = select(dist, -dist, ins);
+  let lbl = u32(s.w + 0.5) & 255u;
+  let color = select(vec3<f32>(0.0), u_pal[lbl].rgb, valid);
+  textureStore(t_out, c, vec4<f32>(color, sdf));
 }`;
 
-// Separable Gaussian on the r32float SDF value. JFA distance is distance-to-nearest-SEED-VOXEL, so
-// it is piecewise-linear (Voronoi facets) and its gradient — the shading normal — is faceted (golf-
-// ball look). A light blur barely moves the zero level set (silhouette stays crisp) but smooths the
-// gradient → smooth surface shading.
+// Separable Gaussian on the SDF's .a (distance) only, carrying .rgb (colour) from the centre tap.
+// JFA distance is distance-to-nearest-SEED-VOXEL, so it is piecewise-linear (Voronoi facets) and its
+// gradient — the shading normal — is faceted (golf-ball look). A light blur of the distance barely
+// moves the zero level set (silhouette stays crisp) but smooths the gradient. The colour is NOT
+// blurred, so label seams stay crisp.
 const BLUR_WGSL = /* wgsl */ `
 struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4> };
 @group(0) @binding(0) var t_in : texture_3d<f32>;
-@group(0) @binding(1) var t_out : texture_storage_3d<r32float, write>;
+@group(0) @binding(1) var t_out : texture_storage_3d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> u : BU;
 fn wt(i : u32) -> f32 { return u.w[i >> 2u][i & 3u]; }
 @compute @workgroup_size(4, 4, 4)
@@ -104,13 +117,14 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
   var av = vec3<i32>(0);
   if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
-  var sum = textureLoad(t_in, c, 0).r * wt(0u);
+  let center = textureLoad(t_in, c, 0);
+  var sum = center.a * wt(0u);
   let R = i32(u.axis_r.y);
   for (var i = 1; i <= R; i = i + 1) {
-    sum = sum + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).r
-                            + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).r);
+    sum = sum + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).a
+                            + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).a);
   }
-  textureStore(t_out, c, vec4<f32>(sum, 0.0, 0.0, 0.0));
+  textureStore(t_out, c, vec4<f32>(center.rgb, sum));
 }`;
 
 function gaussHalfKernel(sigma: number): { radius: number; w: Float32Array } {
@@ -125,10 +139,11 @@ function gaussHalfKernel(sigma: number): { radius: number; w: Float32Array } {
 
 export class JfaSdfBaker {
   private dev: GPUDevice;
-  private seed: [GPUTexture, GPUTexture];       // rgba32float ping-pong (RAS seed xyz + valid)
-  private sdfTex: GPUTexture;                    // r32float signed distance (mm) — sampled by SegmentField
-  private sdfScratch: GPUTexture;               // r32float blur ping-pong
+  private seed: [GPUTexture, GPUTexture];       // rgba32float ping-pong (RAS seed xyz + regionLabel)
+  private sdfTex: GPUTexture;                    // rgba16float: .rgb = per-label colour, .a = signed dist (mm) — sampled by SegmentField
+  private sdfScratch: GPUTexture;               // rgba16float blur ping-pong
   private uni: GPUBuffer;
+  private palBuf: GPUBuffer;                     // 256 × vec4 label→colour palette
   private initPipe: GPUComputePipeline;
   private jfaPipe: GPUComputePipeline;
   private finalPipe: GPUComputePipeline;
@@ -143,9 +158,10 @@ export class JfaSdfBaker {
     const [dx, dy, dz] = dims;
     const mk = (fmt: GPUTextureFormat, extra = 0) => dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: fmt, usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra });
     this.seed = [mk("rgba32float"), mk("rgba32float")];
-    this.sdfTex = mk("r32float", GPUTextureUsage.COPY_DST);   // final blur pass copies into it
-    this.sdfScratch = mk("r32float", GPUTextureUsage.COPY_SRC);
+    this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST);   // final blur pass copies into it
+    this.sdfScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
     this.uni = dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const mod = (code: string) => dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code }), entryPoint: "main" } });
     this.initPipe = mod(INIT_WGSL);
     this.jfaPipe = mod(JFA_WGSL);
@@ -159,9 +175,17 @@ export class JfaSdfBaker {
     this.steps = steps;
   }
 
-  /** The resident SDF texture (r32float, signed mm). Identity stable across bakes → the SceneRenderer
-   *  bind group stays valid, so a live edit updates in place. */
+  /** The resident colorized-SDF texture (rgba16float: .rgb = per-label colour, .a = signed mm).
+   *  Identity stable across bakes → the SceneRenderer bind group stays valid; a live edit updates in
+   *  place. */
   sdfTexture(): GPUTexture { return this.sdfTex; }
+
+  /** Set the label→colour palette (256 × rgba f32; index = label id). Call before bake(). */
+  setPalette(palette: Float32Array) {
+    const pal = new Float32Array(256 * 4);
+    pal.set(palette.subarray(0, Math.min(palette.length, 256 * 4)));
+    this.dev.queue.writeBuffer(this.palBuf, 0, pal);
+  }
 
   private writeUni(step: number) {
     const ab = new ArrayBuffer(96);
@@ -205,13 +229,14 @@ export class JfaSdfBaker {
       src = dst;
     }
 
-    // finalize: seed[src] + label → sdfTex (signed mm)
+    // finalize: seed[src] + label + palette → sdfTex (.rgb colour, .a signed mm)
     enc = dev.createCommandEncoder();
     const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
       { binding: 0, resource: this.seed[src].createView() },
       { binding: 1, resource: this.labelTex.createView() },
       { binding: 2, resource: this.sdfTex.createView() },
       { binding: 3, resource: { buffer: this.uni } },
+      { binding: 4, resource: { buffer: this.palBuf } },
     ] });
     const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(gx, gy, gz); p.end();
     dev.queue.submit([enc.finish()]);
@@ -246,5 +271,5 @@ export class JfaSdfBaker {
     }
   }
 
-  destroy() { this.seed[0].destroy(); this.seed[1].destroy(); this.sdfTex.destroy(); this.sdfScratch.destroy(); this.uni.destroy(); }
+  destroy() { this.seed[0].destroy(); this.seed[1].destroy(); this.sdfTex.destroy(); this.sdfScratch.destroy(); this.uni.destroy(); this.palBuf.destroy(); }
 }
