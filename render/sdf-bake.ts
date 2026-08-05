@@ -23,9 +23,15 @@ struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
 @group(0) @binding(0) var t_label : texture_3d<u32>;
 @group(0) @binding(1) var t_seed_out : texture_storage_3d<rgba32float, write>;
 @group(0) @binding(2) var<uniform> u : U;
+// SYNTHETIC BACKGROUND BORDER: out-of-bounds reads as background (0), NOT clamp-to-edge. A segment
+// touching the volume face then sees a background neighbour across it → that face is flagged as a
+// boundary and seeded, so its SDF surface closes with a flat cap at the volume edge. With clamp-to-
+// edge the face voxel read its own label back, was never a boundary, got no seed, and left an open/
+// degenerate SDF at the border → black speckles where the ray enters the volume.
 fn labelAt(c : vec3<i32>) -> u32 {
   let d = vec3<i32>(u.dims.xyz);
-  return textureLoad(t_label, clamp(c, vec3<i32>(0), d - vec3<i32>(1)), 0).r;
+  if (any(c < vec3<i32>(0)) || any(c >= d)) { return 0u; }
+  return textureLoad(t_label, c, 0).r;
 }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
