@@ -336,9 +336,8 @@ fn attr_seg${s}(wp : vec3<f32>) -> vec2<f32> {   // per-segment (.x = opacity, .
 fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
   let d_mm = abs(sdf);
   if (d_mm > band + step) { return vec4<f32>(0.0); }
-  let a = 1.0 - clamp(d_mm / band, 0.0, 1.0);
-  if (a <= 0.0) { return vec4<f32>(0.0); }
-  let op = clamp(a * op0 * seg_op, 0.0, 1.0);
+  let T = clamp(op0 * seg_op, 0.0, 1.0);      // TARGET surface opacity (per-segment × field)
+  if (T <= 0.0) { return vec4<f32>(0.0); }
   let h = step;
   let g = vec3<f32>(
     v_seg${s}(wp + vec3<f32>(h,0,0)) - v_seg${s}(wp - vec3<f32>(h,0,0)),
@@ -348,6 +347,22 @@ fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step :
   if (glen < 1e-5) { return vec4<f32>(0.0); }
   var n = g / glen;
   if (dot(n, -rd) < 0.0) { n = -n; }
+  // SURFACE opacity (Slicer polydata parity): the shell is a THIN surface of opacity T, not a solid
+  // band. A raymarch crosses it in several samples; giving each α=T lets the front-to-back OVER
+  // saturate toward opaque (50% looked like ~100%). Instead accumulate OPTICAL DEPTH with a shell
+  // profile ρ = a/band that integrates to 1 across the crossing, scaled by -ln(1-T): Σdτ = -ln(1-T),
+  // so net opacity = 1-e^(-Σdτ) = T EXACTLY — independent of band thickness and sample rate, and T→1
+  // stays crisply opaque. |dot(rd,n)| converts ray-step to shell-normal distance (→0 at grazing =
+  // built-in silhouette AA).
+  let a = max(1.0 - d_mm / band, 0.0);
+  if (a <= 0.0) { return vec4<f32>(0.0); }
+  // Convert ray-step to d_mm-distance with the RAW gradient projection |dot(rd,g)| = |d(d_mm)/ds|
+  // (includes |grad sdf|, which the distance blur pulls below 1) so Σ(a/band)·Δd_mm = ∫(a/band)dd = 1
+  // exactly. →0 at grazing = built-in silhouette AA.
+  let rate = max(abs(dot(rd, g)), 1e-3);
+  let tau = -log(1.0 - min(T, 0.9999)) * (a / band) * (step * rate);
+  let op = 1.0 - exp(-tau);
+  if (op <= 0.0004) { return vec4<f32>(0.0); }
   let ka = u_material.seg${s}_shade.x; let kd = u_material.seg${s}_shade.y;
   let ks = u_material.seg${s}_shade.z; let sh = u_material.seg${s}_shade.w;
   let ldn = max(dot(-rd, n), 0.0);

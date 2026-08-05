@@ -136,8 +136,11 @@ async function main() {
     anchor: cv.threeD.parentElement ?? undefined,
     segments: {
       list: () => (rs?.segments ?? []).map((s) => ({ num: s.num, name: s.name, color: s.color })),
-      get: (num) => rs?.isSegmentVisible(num) ?? true,
-      set: (num, on) => { rs?.setSegmentVisible(num, on); redrawSlices(); draw3d(); xhair?.redraw(); },
+      get: (num) => rs?.segmentOpacity(num) ?? 1,
+      cycle: (num) => {
+        const next = ({ 1: 0.5, 0.5: 0, 0: 1 } as Record<number, number>)[rs?.segmentOpacity(num) ?? 1] ?? 1;
+        rs?.setSegmentOpacity(num, next); redrawSlices(); draw3d(); xhair?.redraw();
+      },
       enabled: () => !!(rs?.hasSeg) && (layers.seg || layers.volume),
     },
   });
@@ -284,6 +287,8 @@ async function main() {
     converge3d: (n: number) => { a3d.renderSettled(true); for (let i = 1; i < n; i++) a3d.renderSettled(false); return rs?.scene.accumCount() ?? -1; },
     segVis: (num: number) => rs?.isSegmentVisible(num) ?? null,
     setSegVis: (num: number, on: boolean) => { rs?.setSegmentVisible(num, on); for (const p of planes) drawSlice(p); draw3d(); },
+    segOpacity: (num: number) => rs?.segmentOpacity(num) ?? null,
+    setSegOpacity: (num: number, o: number) => { rs?.setSegmentOpacity(num, o); for (const p of planes) drawSlice(p); draw3d(); },
     roi: () => rs ? { enabled: rs.roiEnabled(), visible: rs.roiVisible(), lo: rs.roi.lo(), hi: rs.roi.hi(), handles: rs.roi.handleList().length } : null,
     setRoi: (en: boolean, vis: boolean) => { roiEnabled = en; roiVisible = vis; if (en) roiFirstEnable = false; rs?.setRoiEnabled(en); rs?.setRoiVisible(vis); draw3d(); },
   };

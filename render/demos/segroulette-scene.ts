@@ -99,8 +99,11 @@ export interface SegrouletteScene {
   hasSeg: boolean;                         // whether there's a segmentation layer to toggle
   /** Toggle the two independent 3D layers (background modality VR + segmentation). */
   setLayers(showVolume: boolean, showSeg: boolean): void;
-  /** Per-segment visibility (3D + slice overlay). Rebakes the colorized overlay/field and, in iso
-   *  mode, rebuilds the scene with the visible subset. Caller redraws slices afterwards. */
+  /** Per-segment opacity (0 = hidden, 0.5 = translucent, 1 = opaque) — 3D SDF shell + slice overlay.
+   *  Rebakes the colorized overlay and the SDF attr in place. Caller redraws slices afterwards. */
+  setSegmentOpacity(num: number, opacity: number): void;
+  segmentOpacity(num: number): number;
+  /** Binary visibility convenience (opacity 0/1) — kept for tests + callers that only toggle. */
   setSegmentVisible(num: number, visible: boolean): void;
   isSegmentVisible(num: number): boolean;
   // Volume-only ROI crop (Slicer's independent enable + visibility). The box crops the VR but NOT
@@ -151,13 +154,14 @@ export function buildSegrouletteScene(
     }
   }
 
-  // Per-segment visibility: nums in `hidden` render nowhere. Baking uses a palette whose hidden
-  // entries have alpha 0 (drops them from the colorized overlay + 3D field); iso mode also filters
-  // the SegmentField subset at rebuild.
-  const hidden = new Set<number>();
+  // Per-segment opacity (tri-state in the UI: 1 → 0.5 → 0 → 1). Default 1 (opaque); 0 = hidden, 0.5 =
+  // translucent surface. Baking uses a palette whose alpha is the per-segment opacity (the colorized
+  // overlay dims with it; the SDF attr renders the shell at that opacity).
+  const segOpacity = new Map<number, number>();
+  const opacityOf = (num: number) => segOpacity.get(num) ?? 1;
   const visPalette = (): Float32Array => {
     const p = palette.slice();
-    for (const n of hidden) if (n < 256) p[n * 4 + 3] = 0;
+    for (const s of segments) if (s.num < 256) p[s.num * 4 + 3] = opacityOf(s.num);
     return p;
   };
 
@@ -175,7 +179,7 @@ export function buildSegrouletteScene(
     const cap = cappedLabelmap(seg.lab, dims, ct.ijkToRAS, opts.sdfMaxDim ?? SDF_MAX_DIM);
     editable = new EditableSegmentation(dev, cap.dims, { ijkToRAS: cap.ijkToRAS });
     segLogic = new SegmentationLogic(dev, editable, { renderMode: "sdf", opacity: 1.0, refineDelayMs: opts.refineDelayMs });
-    for (const s of segments) { segLogic.setLabelColor(s.num, s.color); segLogic.setLabelOpacity(s.num, hidden.has(s.num) ? 0 : 1); }
+    for (const s of segments) { segLogic.setLabelColor(s.num, s.color); segLogic.setLabelOpacity(s.num, opacityOf(s.num)); }
     editable.loadLabelmap(cap.lab);   // fast bake
     segLogic.refineNow();             // static scene → high-quality bake now
     mode = "sdf";
@@ -202,15 +206,15 @@ export function buildSegrouletteScene(
   };
   rebuild();
 
-  // Re-bake the colorized texture from the visible-segment palette; feeds the slice overlay and,
-  // in colorized mode, the 3D field. Cheap enough for an occasional toggle.
+  // Re-bake the 2D slice-overlay colorized texture from the current per-segment palette (alpha =
+  // opacity). The 3D seg is the SDF field (updated separately via setLabelOpacity); this feeds only
+  // the MPR overlay. Cheap enough for an occasional toggle.
   const rebakeColorized = () => {
     if (!seg) return;
     const nt = bakeColorizeRGBA(dev, seg.lab, dims, visPalette(), 1.5);
     const old = colorTex;
     colorTex = nt;
     slice.setTextures(volumeField.volumeTexture(), colorTex);
-    colorizedField?.setTexture(colorTex, false);   // swap in place; rebuild() refreshes the bind group
     old?.destroy();                                 // one owner destroys the retired texture
   };
 
@@ -226,13 +230,16 @@ export function buildSegrouletteScene(
     scene, slice, center, radius, rasLo, rasHi, ijkToRAS: ct.ijkToRAS, dims, win: ct.win, lev: ct.lev,
     segments, mode, hasSeg, roi,
     setLayers(sv, ss) { showVolume = sv; showSeg = ss; rebuild(); },
-    setSegmentVisible(num, visible) {
-      if (visible) hidden.delete(num); else hidden.add(num);
-      rebakeColorized();                                   // 2D slice overlay
-      segLogic?.setLabelOpacity(num, visible ? 1 : 0);     // 3D: per-segment opacity 0 = hidden
+    setSegmentOpacity(num, opacity) {
+      const o = Math.max(0, Math.min(1, opacity));
+      if (o >= 1) segOpacity.delete(num); else segOpacity.set(num, o);   // 1 is the default
+      rebakeColorized();                                   // 2D slice overlay (palette alpha = opacity)
+      segLogic?.setLabelOpacity(num, o);                   // 3D: per-segment shell opacity
       segLogic?.refineNow();                               // rebake attr + sdf in place (same field/texture)
     },
-    isSegmentVisible: (num) => !hidden.has(num),
+    segmentOpacity: (num) => opacityOf(num),
+    setSegmentVisible(num, visible) { this.setSegmentOpacity(num, visible ? 1 : 0); },
+    isSegmentVisible: (num) => opacityOf(num) > 0,
     setRoiEnabled(on) { roiEnabled = on; rebuild(); },
     setRoiVisible(on) { roiVisible = on; rebuild(); },
     roiEnabled: () => roiEnabled,

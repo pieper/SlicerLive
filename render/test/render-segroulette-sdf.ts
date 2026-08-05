@@ -61,8 +61,30 @@ for (let i = 0; i < W * H; i++) {
   if (bestD < 0.06) seen.add(best);
 }
 console.log(`SEGRoulette SDF: build+bake ${bakeMs.toFixed(0)}ms (dims ${nx}³ capped for SDF); distinct segment colours visible = ${seen.size}/15`);
-const ok = seen.size >= 7 && rs.mode === "sdf" && rs.hasSeg;
-console.log(ok ? "PASS — unified colorized-SDF renders many segments as one surface" : "FAIL");
+
+// Tri-state per-segment opacity (UI: 1 → 0.5 → 0 → 1). Verify the two robust, entanglement-free
+// signals: (a) hiding EVERY segment leaves the seg surface fully gone, (b) all-50% is translucent so
+// the scene is dimmer than all-opaque but not gone — plus the per-segment readback round-trips.
+const litMask = (rgba: Uint8Array) => { const m = new Uint8Array(W * H); let n = 0; for (let i = 0; i < W * H; i++) if (Math.max(rgba[i*4], rgba[i*4+1], rgba[i*4+2]) >= 40) { m[i] = 1; n++; } return { m, n }; };
+const brightIn = (rgba: Uint8Array, mask: Uint8Array) => { let s = 0; for (let i = 0; i < W * H; i++) if (mask[i]) s += rgba[i*4] + rgba[i*4+1] + rgba[i*4+2]; return s; };
+const render2 = async () => { rs.scene.setCamera(cam.position, cam.focalPoint, cam.viewUp, cam.viewAngle, W, H); return await rs.scene.renderToRGBA(W, H); };
+
+rs.setSegmentOpacity(1, 0.5);
+const triReadOk = rs.segmentOpacity(1) === 0.5 && rs.segmentOpacity(3) === 1;
+for (let s = 1; s <= 15; s++) rs.setSegmentOpacity(s, 1);
+const rgba100 = await render2();
+const { m: mask, n: lit100 } = litMask(rgba100);
+const bright100 = brightIn(rgba100, mask);          // brightness over the opaque-surface footprint
+for (let s = 1; s <= 15; s++) rs.setSegmentOpacity(s, 0.5);
+const bright50 = brightIn(await render2(), mask);   // ... same pixels, now translucent
+for (let s = 1; s <= 15; s++) rs.setSegmentOpacity(s, 0);
+const lit0 = litMask(await render2()).n;
+const hideOk = lit0 < lit100 * 0.02;                // opacity 0 on all → seg surface gone
+const dimOk = bright50 < bright100 * 0.95;           // 50% measurably changes the render (opacity applied, not ignored); the strong see-through proof is render/test/tri-behind-seethrough.ts
+console.log(`tri-state: readback ${triReadOk ? "ok" : "MISMATCH"}; lit 100%=${lit100} → 0%=${lit0} (hide ${hideOk ? "ok" : "FAIL"}); bright 50/100 over footprint=${(bright50/bright100).toFixed(2)} (dim ${dimOk ? "ok" : "FAIL"})`);
+
+const ok = seen.size >= 7 && rs.mode === "sdf" && rs.hasSeg && triReadOk && hideOk && dimOk;
+console.log(ok ? "PASS — unified colorized-SDF renders many segments + tri-state opacity hides/dims per segment" : "FAIL");
 rs.destroy();
 gpu.device.destroy();
 if (!ok) Deno.exit(1);

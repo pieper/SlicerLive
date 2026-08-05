@@ -14,8 +14,8 @@ export interface VizControl {
 export interface SegInfo { num: number; name: string; color: [number, number, number] }
 export interface SegmentControls {
   list: () => SegInfo[];              // the current case's segments (re-read each time the popup opens)
-  get: (num: number) => boolean;      // is this segment visible
-  set: (num: number, on: boolean) => void;
+  get: (num: number) => number;       // current opacity level (tri-state: 1, 0.5, or 0)
+  cycle: (num: number) => void;       // advance one tri-state step (1 → 0.5 → 0 → 1)
   enabled?: () => boolean;            // dim the whole section when there's nothing to toggle
 }
 export interface ChromeOpts {
@@ -142,6 +142,18 @@ export function installChrome(opts: ChromeOpts): Chrome {
   };
   const afterPaint = (fn: () => void) => requestAnimationFrame(() => requestAnimationFrame(fn));
 
+  // Tri-state per-segment opacity box: a rounded chip whose fill width + tint (the segment colour)
+  // tracks the level, with a percent label — reads clearly as 100% / 50% / 0% and cycles on click.
+  const paintTri = (box: HTMLElement, level: number, color: [number, number, number]) => {
+    const pct = Math.round(level * 100);
+    const c = `rgb(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)})`;
+    box.style.opacity = level === 0 ? "0.75" : "1";
+    box.innerHTML =
+      `<span style="position:absolute;left:0;top:0;bottom:0;width:${pct}%;background:${c};opacity:.9"></span>` +
+      `<span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;` +
+      `font:700 10px -apple-system,system-ui,sans-serif;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.75)">${pct}%</span>`;
+  };
+
   const rows: { c: VizControl; row: HTMLElement; sw: HTMLElement }[] = [];
   if (controls.length) {
     const head = document.createElement("div");
@@ -163,10 +175,10 @@ export function installChrome(opts: ChromeOpts): Chrome {
     pop.textContent = "SlicerLive — WebGPU renderer";
   }
 
-  // ---- per-segment visibility (swatch + toggle), rebuilt from the current case on each open ----
+  // ---- per-segment opacity (swatch + tri-state box), rebuilt from the current case on each open ----
   const segHost = document.createElement("div");
   pop.appendChild(segHost);
-  const segRows: { num: number; sw: HTMLElement }[] = [];
+  const segRows: { num: number; box: HTMLElement; color: [number, number, number] }[] = [];
   function buildSegments() {
     const S = opts.segments;
     segRows.length = 0; segHost.innerHTML = "";
@@ -187,12 +199,19 @@ export function installChrome(opts: ChromeOpts): Chrome {
       lab.textContent = s.name;
       lab.style.cssText = "font:500 12.5px -apple-system,system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
       left.appendChild(swatch); left.appendChild(lab);
-      const sw = document.createElement("span");
-      sw.style.cssText = "width:34px;height:19px;border-radius:999px;position:relative;transition:background 120ms;flex:0 0 auto;";
-      row.appendChild(left); row.appendChild(sw);
-      row.onclick = () => { if (S.enabled && !S.enabled()) return; const next = !S.get(s.num); paintSw(sw, next); afterPaint(() => { S.set(s.num, next); refresh(); }); };
+      const box = document.createElement("span");
+      box.title = "Opacity: click to cycle 100% → 50% → off";
+      box.style.cssText = "width:40px;height:18px;border-radius:6px;position:relative;overflow:hidden;flex:0 0 auto;" +
+        "background:rgba(255,255,255,.14);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);";
+      row.appendChild(left); row.appendChild(box);
+      row.onclick = () => {
+        if (S.enabled && !S.enabled()) return;
+        const next = ({ 1: 0.5, 0.5: 0, 0: 1 } as Record<number, number>)[S.get(s.num)] ?? 1;
+        paintTri(box, next, s.color);                        // optimistic paint
+        afterPaint(() => { S.cycle(s.num); refresh(); });
+      };
       wrap.appendChild(row);
-      segRows.push({ num: s.num, sw });
+      segRows.push({ num: s.num, box, color: s.color });
     }
     segHost.appendChild(wrap);
     paintSegments();
@@ -202,7 +221,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
     if (!S) return;
     const dis = S.enabled ? !S.enabled() : false;
     segHost.style.opacity = dis ? "0.4" : "1";
-    for (const { num, sw } of segRows) paintSw(sw, S.get(num));
+    for (const { num, box, color } of segRows) paintTri(box, S.get(num), color);
   }
 
   // ---- "About SlicerLive" row (matches the legacy popup) ----
