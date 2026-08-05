@@ -122,6 +122,7 @@ export function buildSegrouletteScene(
   format: GPUTextureFormat,
   ct: CTVolume,
   seg?: SegLabelmap,
+  opts: { sdfMaxDim?: number; refineDelayMs?: number } = {},
 ): SegrouletteScene {
   const dev = gpu.device;
   const dims = ct.dims;
@@ -171,9 +172,9 @@ export function buildSegrouletteScene(
   let segLogic: SegmentationLogic | undefined;
   let editable: EditableSegmentation | undefined;
   if (seg && segments.length > 0) {
-    const cap = cappedLabelmap(seg.lab, dims, ct.ijkToRAS, SDF_MAX_DIM);
+    const cap = cappedLabelmap(seg.lab, dims, ct.ijkToRAS, opts.sdfMaxDim ?? SDF_MAX_DIM);
     editable = new EditableSegmentation(dev, cap.dims, { ijkToRAS: cap.ijkToRAS });
-    segLogic = new SegmentationLogic(dev, editable, { renderMode: "sdf", opacity: 1.0 });
+    segLogic = new SegmentationLogic(dev, editable, { renderMode: "sdf", opacity: 1.0, refineDelayMs: opts.refineDelayMs });
     for (const s of segments) { segLogic.setLabelColor(s.num, s.color); segLogic.setLabelOpacity(s.num, hidden.has(s.num) ? 0 : 1); }
     editable.loadLabelmap(cap.lab);   // fast bake
     segLogic.refineNow();             // static scene → high-quality bake now

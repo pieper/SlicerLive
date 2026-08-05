@@ -28,6 +28,7 @@ export interface SegmentationLogicOpts {
   bandMm?: number;                            // shell half-thickness (sdf mode; default = 1 voxel)
   color?: [number, number, number];           // colour for label 1 (single-label convenience; use setLabelColor for more)
   opacity?: number;                           // segment 3D opacity (default 1)
+  refineDelayMs?: number;                     // debounce before the settle-refine (capability-tuned; default 180)
 }
 
 export class SegmentationLogic {
@@ -44,13 +45,14 @@ export class SegmentationLogic {
   private redrawCbs: Array<() => void> = [];
   private unsubDirty: () => void;
   private refineTimer?: ReturnType<typeof setTimeout>;
-  private refineDelayMs = 180;               // quiescence before the settle-refine (sdf mode)
+  private refineDelayMs: number;             // quiescence before the settle-refine (sdf mode; capability-tuned)
 
   constructor(device: GPUDevice, private seg: EditableSegmentation, opts: SegmentationLogicOpts = {}) {
     this.renderMode = opts.renderMode ?? "sdf";
     this.sigma = opts.sigmaVoxels ?? 1.0;
     this.bandMm = opts.bandMm;
     this.opacity = opts.opacity ?? 1.0;
+    this.refineDelayMs = opts.refineDelayMs ?? 180;
     this.setLabelColor(1, opts.color ?? [0.30, 0.85, 0.55]);   // single-label convenience default
 
     if (this.renderMode === "sdf") {

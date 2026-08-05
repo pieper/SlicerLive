@@ -49,7 +49,7 @@ export interface AlgorithmsScene {
   resetLook(): void;
 }
 
-export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): AlgorithmsScene {
+export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat, opts: { refineDelayMs?: number } = {}): AlgorithmsScene {
   const dims: Vec3 = [96, 96, 96];
   const sp = 2; // 2 mm isotropic
   // Row-major voxel-center → RAS: 2 mm spacing, centred so voxel (48,48,48) → RAS origin.
@@ -92,7 +92,7 @@ export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): Algor
   let logic!: SegmentationLogic;
   let allOpacity = 1;
   const makeLogic = () => {
-    logic = new SegmentationLogic(gpu.device, seg, { renderMode: mode, opacity: 1.0, sigmaVoxels: 1.0 });
+    logic = new SegmentationLogic(gpu.device, seg, { renderMode: mode, opacity: 1.0, sigmaVoxels: 1.0, refineDelayMs: opts.refineDelayMs });
     for (const [id, rgb] of labelColors) { logic.setLabelColor(id, rgb); applyLook(id); }   // persist colours + look across swaps
     logic.onRedraw(() => { for (const cb of redrawCbs) cb(); });
     scene.build([logic.field()]);

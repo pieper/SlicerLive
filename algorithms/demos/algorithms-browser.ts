@@ -9,6 +9,7 @@ import { SceneRenderer } from "../../render/scene-renderer.ts";
 import { attachCameraControls, framedCamera } from "../../render/demos/camera-control.ts";
 import { mountAdaptive3d } from "../../render/demos/accum-loop.ts";
 import { buildAlgorithmsScene } from "./algorithms-scene.ts";
+import { SegBudget } from "../../logic/seg-budget.ts";
 import type { Vec3 } from "../../render/mat4.ts";
 
 const status = (msg: string, err = false) => {
@@ -28,7 +29,11 @@ async function main() {
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
   ctx.configure({ device: gpu.device, format: preferred, viewFormats: [srgb], alphaMode: "opaque" });
 
-  const a = buildAlgorithmsScene(gpu, srgb);
+  // Capability probe: measure this machine, tune the settle-refine cadence (fast → dynamic, slow →
+  // patient). Same tier drives SDF resolution for large volumes elsewhere (SEGRoulette).
+  status("probing device capability…");
+  const budget = await SegBudget.probe(gpu.device);
+  const a = buildAlgorithmsScene(gpu, srgb, { refineDelayMs: budget.refineDelayMs() });
   const camera = framedCamera(a.center, a.radius, 2.8);
 
   const a3d = mountAdaptive3d({
@@ -117,12 +122,13 @@ async function main() {
   document.getElementById("reset")?.addEventListener("click", () => location.reload());
 
   resize();
-  status("surface-mode segmentation · drag to orbit · scroll/pinch to zoom · Poke to edit the shared buffer");
+  status(`surface-mode segmentation · ${budget.tier}-tier device · drag to orbit · scroll/pinch to zoom · Poke to edit`);
 
-  // Debug hook for automated tests (camera distance, gpu errors).
+  // Debug hook for automated tests (camera distance, gpu errors, device tier).
   (globalThis as unknown as { __algoDbg: unknown }).__algoDbg = {
     dist: () => camera.distance,
     err: () => ((globalThis as unknown as { __gpuErr: string[] }).__gpuErr || []).length,
+    tier: () => budget.tier,
   };
 }
 

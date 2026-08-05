@@ -8,6 +8,7 @@ import { initDevice } from "../device.ts";
 import { slicerDefaultOffset01 } from "../slice-renderer.ts";
 import { SliceInteractor } from "../slice-interactor.ts";
 import { buildSegrouletteScene, type SegrouletteScene } from "./segroulette-scene.ts";
+import { SegBudget } from "../../logic/seg-budget.ts";
 import { type Crosshair4up, mountCrosshair } from "./crosshair.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachSliceControls } from "./slice-control.ts";
@@ -44,6 +45,9 @@ async function main() {
   const gpu = await initDevice();
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
+  // Capability probe: pick the SDF resolution cap + refine cadence from the measured device tier, so a
+  // phone stays smooth on a big TotalSegmentator CT while a high-end GPU renders it at full detail.
+  const budget = await SegBudget.probe(gpu.device);
 
   const names = ["axial", "coronal", "sagittal", "threeD"] as const;
   const cv: Record<string, HTMLCanvasElement> = {}, cx: Record<string, GPUCanvasContext> = {};
@@ -187,7 +191,7 @@ async function main() {
       lastEntry = res.entry as (SeriesEntry & Record<string, unknown>) | undefined;
       status("baking segmentation surface…");
       rs?.destroy();   // free the previous case's 3D-seg GPU resources before replacing
-      rs = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
+      rs = buildSegrouletteScene(gpu, srgb, res.ct, res.seg, { sdfMaxDim: budget.sdfMaxDim(), refineDelayMs: budget.refineDelayMs() });
       // frame: slices at the Slicer default voxel-centre plane; camera fit to the volume
       sliceIx = new SliceInteractor({ ijkToRAS: rs.ijkToRAS, rasLo: rs.rasLo, rasHi: rs.rasHi });
       for (const p of planes) off[p.cell] = slicerDefaultOffset01(p.orient, rs.dims, rs.ijkToRAS, rs.rasLo, rs.rasHi);
