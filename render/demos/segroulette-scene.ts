@@ -11,15 +11,19 @@
 import type { Gpu } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { SliceRenderer } from "../slice-renderer.ts";
-import { ImageField, RGBAVolumeField, SegmentField, type Field } from "../fields.ts";
-import { bakeColorizeRGBA, bakeSegmentPresence } from "../bake.ts";
+import { ImageField, type Field } from "../fields.ts";
+import { bakeColorizeRGBA } from "../bake.ts";
 import { createRoiWidget, type RoiWidget } from "./roi-widget.ts";
+import { EditableSegmentation } from "../../algorithms/editable-segmentation.ts";
+import { SegmentationLogic } from "../../logic/segmentation-logic.ts";
 
-// WebGPU guarantees only 16 sampled textures per shader stage, and each SegmentField binds one 3D
-// texture. Past this many segments we can't give each its own iso field, so the 3D view switches to
-// a SINGLE colorized RGBAVolumeField (the same texture the MPR overlay already uses) — one binding,
-// scales to any number of segments. (Leaves headroom under 16.)
-const MAX_ISO_SEGMENTS = 12;
+// The 3D segmentation is ONE unified colorized signed-distance-field surface (algorithms/ + logic/):
+// every segment in a single labelmap → JFA-SDF → one SegmentField (crisp surface-model look, per-
+// segment colour + opacity, colour seams pre-blended). Replaces the old hack (per-segment iso fields
+// ≤12 segments, else an ugly colorized RGBA volume): one binding, any number of segments, one field
+// to ray-march. The JFA bake is capped to SDF_MAX_DIM per axis (the labelmap is downsampled for the
+// 3D SDF only; the 2D slice overlay stays full-res) so large IDC volumes don't blow GPU memory.
+const SDF_MAX_DIM = 256;
 import type { Vec3 } from "../mat4.ts";
 import type { CTVolume, SegLabelmap } from "../vendor/idc_tools/types.js";
 
@@ -47,6 +51,38 @@ function modalityLUT(modality: string | undefined, maxAlpha = 0.42): Uint8Array 
   return lut;
 }
 
+/** Downsample a label volume (nearest) so no axis exceeds `maxDim`, returning the capped labelmap +
+ *  an ijkToRAS whose spacing is scaled to cover the SAME RAS box. No-op (just a Uint32 copy) when the
+ *  volume already fits. For the 3D SDF only — the 2D slice overlay uses the full-res labelmap. */
+function cappedLabelmap(lab: ArrayLike<number>, dims: Vec3, ijkToRAS: number[], maxDim: number): { lab: Uint32Array; dims: Vec3; ijkToRAS: number[] } {
+  const scale = Math.min(1, maxDim / Math.max(...dims));
+  const cd: Vec3 = [
+    Math.max(1, Math.round(dims[0] * scale)), Math.max(1, Math.round(dims[1] * scale)), Math.max(1, Math.round(dims[2] * scale)),
+  ];
+  const [nx, ny, nz] = dims, [cx, cy, cz] = cd;
+  if (cx === nx && cy === ny && cz === nz) {
+    const out = new Uint32Array(nx * ny * nz);
+    for (let i = 0; i < out.length; i++) out[i] = lab[i];
+    return { lab: out, dims, ijkToRAS };
+  }
+  const out = new Uint32Array(cx * cy * cz);
+  for (let z = 0; z < cz; z++) {
+    const sz = Math.min(nz - 1, Math.floor((z + 0.5) * nz / cz));
+    for (let y = 0; y < cy; y++) {
+      const sy = Math.min(ny - 1, Math.floor((y + 0.5) * ny / cy));
+      for (let x = 0; x < cx; x++) {
+        const sx = Math.min(nx - 1, Math.floor((x + 0.5) * nx / cx));
+        out[(z * cy + y) * cx + x] = lab[(sz * ny + sy) * nx + sx];
+      }
+    }
+  }
+  // Scale the 3 direction columns by dims/cappedDims so the capped grid spans the same RAS extent.
+  const r = [nx / cx, ny / cy, nz / cz];
+  const m = ijkToRAS.slice();
+  for (let row = 0; row < 3; row++) { m[row * 4] *= r[0]; m[row * 4 + 1] *= r[1]; m[row * 4 + 2] *= r[2]; }
+  return { lab: out, dims: cd, ijkToRAS: m };
+}
+
 export interface SegrouletteScene {
   scene: SceneRenderer;
   slice: SliceRenderer;
@@ -59,7 +95,7 @@ export interface SegrouletteScene {
   win: number;
   lev: number;
   segments: { num: number; name: string; color: [number, number, number]; voxels: number }[];
-  mode: "iso" | "colorized" | "volume";   // how the 3D view renders the segmentation
+  mode: "sdf" | "volume";                  // 3D seg render: unified colorized-SDF surface (or none)
   hasSeg: boolean;                         // whether there's a segmentation layer to toggle
   /** Toggle the two independent 3D layers (background modality VR + segmentation). */
   setLayers(showVolume: boolean, showSeg: boolean): void;
@@ -76,6 +112,8 @@ export interface SegrouletteScene {
   roiVisible(): boolean;
   /** Re-apply the clip planes from the current box (after a handle drag) without a rebuild. */
   reclip(): void;
+  /** Free the 3D segmentation GPU resources (call before dropping a scene on Spin). */
+  destroy(): void;
 }
 
 /** Build the renderable scene (3D VR + segmentation iso + MPR) from an idc_tools load. */
@@ -122,29 +160,26 @@ export function buildSegrouletteScene(
     return p;
   };
 
-  // The colorized volume (one texture) drives BOTH the MPR overlay and the many-segment 3D fallback.
+  // 2D slice overlay: full-res colorized labelmap (crisp per-voxel fill; visPalette() alpha 0 hides).
   let colorTex = seg ? bakeColorizeRGBA(dev, seg.lab, dims, visPalette(), 1.5) : undefined;
 
-  // The SEGMENTATION layer, independent of the background volume: per-segment iso shells when few
-  // (crisp, the demo's identity), else ONE colorized RGBAVolumeField (all segments, one binding) so
-  // we never blow the 16-texture limit. Seg fields are clippable:false so the ROI crops only the VR.
-  const useIso = segments.length > 0 && segments.length <= MAX_ISO_SEGMENTS;
-  let mode: "iso" | "colorized" | "volume" = "volume";
-  const isoByNum = new Map<number, SegmentField>();
-  let colorizedField: RGBAVolumeField | undefined;
-  if (useIso) {
-    for (const s of segments) {
-      const mask = new Uint8Array(dims[0] * dims[1] * dims[2]);
-      for (let i = 0; i < seg!.lab.length; i++) if (seg!.lab[i] === s.num) mask[i] = 1;
-      const tex = bakeSegmentPresence(dev, mask, dims, 1.5);
-      isoByNum.set(s.num, new SegmentField(tex, dims, [1, 1, 1], { color: s.color, opacity: 1, ijkToRAS: ct.ijkToRAS, clippable: false }));
-    }
-    mode = "iso";
-  } else if (colorTex) {
-    colorizedField = new RGBAVolumeField(colorTex, dims, [1, 1, 1], { ijkToRAS: ct.ijkToRAS, shade: [0.3, 0.78, 0.5, 28], clippable: false });
-    mode = "colorized";
+  // 3D segmentation = ONE unified colorized signed-distance-field surface (algorithms/ + logic/): the
+  // whole labelmap (downsampled to the SDF cap) → JFA-SDF → a single SegmentField. Per-segment colour
+  // + opacity via the palette; visibility = opacity 0. Refined once (static scene). clippable:false so
+  // the ROI crops only the background VR, not the segmentation.
+  let mode: "sdf" | "volume" = "volume";
+  let segLogic: SegmentationLogic | undefined;
+  let editable: EditableSegmentation | undefined;
+  if (seg && segments.length > 0) {
+    const cap = cappedLabelmap(seg.lab, dims, ct.ijkToRAS, SDF_MAX_DIM);
+    editable = new EditableSegmentation(dev, cap.dims, { ijkToRAS: cap.ijkToRAS });
+    segLogic = new SegmentationLogic(dev, editable, { renderMode: "sdf", opacity: 1.0 });
+    for (const s of segments) { segLogic.setLabelColor(s.num, s.color); segLogic.setLabelOpacity(s.num, hidden.has(s.num) ? 0 : 1); }
+    editable.loadLabelmap(cap.lab);   // fast bake
+    segLogic.refineNow();             // static scene → high-quality bake now
+    mode = "sdf";
   }
-  const hasSeg = isoByNum.size > 0 || !!colorizedField;
+  const hasSeg = !!segLogic;
 
   const scene = new SceneRenderer(gpu, format);
   const [rasLo, rasHi] = volumeField.aabb();
@@ -154,10 +189,7 @@ export function buildSegrouletteScene(
   // it) and re-packs the shader, so every visibility/crop change funnels through here.
   let showVolume = true, showSeg = hasSeg;
   let roiEnabled = false, roiVisible = false;
-  const currentSegFields = (): Field[] => {
-    if (mode === "iso") return segments.filter((s) => !hidden.has(s.num)).map((s) => isoByNum.get(s.num)!);
-    return colorizedField ? [colorizedField] : [];
-  };
+  const currentSegFields = (): Field[] => segLogic ? [segLogic.field()] : [];
   const rebuild = () => {
     const f: Field[] = [];
     if (showVolume) f.push(volumeField);
@@ -195,8 +227,9 @@ export function buildSegrouletteScene(
     setLayers(sv, ss) { showVolume = sv; showSeg = ss; rebuild(); },
     setSegmentVisible(num, visible) {
       if (visible) hidden.delete(num); else hidden.add(num);
-      rebakeColorized();     // slices + colorized 3D field reflect the change
-      rebuild();             // refresh the 3D bind group (iso subset / swapped colorized texture)
+      rebakeColorized();                                   // 2D slice overlay
+      segLogic?.setLabelOpacity(num, visible ? 1 : 0);     // 3D: per-segment opacity 0 = hidden
+      segLogic?.refineNow();                               // rebake attr + sdf in place (same field/texture)
     },
     isSegmentVisible: (num) => !hidden.has(num),
     setRoiEnabled(on) { roiEnabled = on; rebuild(); },
@@ -204,5 +237,6 @@ export function buildSegrouletteScene(
     roiEnabled: () => roiEnabled,
     roiVisible: () => roiVisible,
     reclip() { if (roiEnabled) scene.setClipBox(roi.lo(), roi.hi()); else scene.clearClip(); scene.syncUniforms(); },
+    destroy() { segLogic?.destroy(); editable?.destroy(); },
   };
 }

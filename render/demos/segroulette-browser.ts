@@ -185,7 +185,8 @@ async function main() {
     try {
       const res: LoadResult = await pickAndLoad();
       lastEntry = res.entry as (SeriesEntry & Record<string, unknown>) | undefined;
-      status("baking segmentation iso shells…");
+      status("baking segmentation surface…");
+      rs?.destroy();   // free the previous case's 3D-seg GPU resources before replacing
       rs = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
       // frame: slices at the Slicer default voxel-centre plane; camera fit to the volume
       sliceIx = new SliceInteractor({ ijkToRAS: rs.ijkToRAS, rasLo: rs.rasLo, rasHi: rs.rasHi });
@@ -198,11 +199,10 @@ async function main() {
       chrome.refresh();   // reset toggles / re-apply outline pref per case
       showMeta(res.entry, rs);
       const d3 = document.querySelector(".lab.d3");
-      if (d3) d3.textContent = rs.mode === "colorized" ? "3D · colorized volume" : rs.mode === "iso" ? "3D · SegmentField iso" : "3D · volume";
+      if (d3) d3.textContent = rs.mode === "sdf" ? "3D · SDF surface" : "3D · volume";
       resize();
       mosaic.done();   // scene is up → fade out the download mosaic
-      const modeNote = rs.mode === "colorized" ? ` (colorized — too many for per-segment iso)` : "";
-      status(`${res.entry?.col ?? "IDC"} · ${res.entry?.m ?? ""} · ${rs.segments.length} segment${rs.segments.length === 1 ? "" : "s"}${modeNote} · scroll a slice, drag 3D to orbit · Spin for another`);
+      status(`${res.entry?.col ?? "IDC"} · ${res.entry?.m ?? ""} · ${rs.segments.length} segment${rs.segments.length === 1 ? "" : "s"} · scroll a slice, drag 3D to orbit · Spin for another`);
     } catch (e) {
       mosaic.status("load failed — try Spin again"); mosaic.done();
       status("load failed: " + ((e as Error)?.message ?? e) + " — try Spin again", true);
