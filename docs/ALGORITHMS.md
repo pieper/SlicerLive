@@ -191,6 +191,21 @@ demo's **Render: SDF/Gaussian** button A/Bs the two live.
 
 ---
 
+## Exact EDT — investigated, NOT ported (2026-08-05)
+
+Evaluated an exact Euclidean distance transform (separable Felzenszwalb–Huttenlocher + feature
+transform) as a "deeper-idle" refinement tier to de-noise the JFA. Built + verified the **CPU
+reference** (`render/edt-cpu.ts`) against a brute-force nearest-seed scan — exact (max 1.9e-6 mm,
+correct nearest-region, anisotropic). Then **measured whether it would change the render**
+(`render/test/edt-vs-jfa.ts`, via `JfaSdfBaker.readDistance`): raw JFA+2 vs exact EDT signed distance
+near surfaces is **max 0.003 mm, mean 0.0005 mm, 0 % of voxels differing by even ½ voxel.**
+
+Conclusion: **JFA+2 is already effectively exact**, so an exact EDT tier would produce a visually
+identical image — the boundary faceting is inherent to voxel-discrete seeds (smoothed by the blur in
+both paths), not JFA approximation error. **Not worth the intricate GPU port for image quality.** The
+CPU EDT + the measurement are kept as reference/evidence. If microCT resolution ever needs the memory
+win, the cheap path is `rgba16float` voxel-index JFA seeds (f16 exact ≤ 2048), *not* the EDT.
+
 ## Deliberately deferred (held for separate design)
 
 - **Multiple layers** — designed in, implemented at **A-6**.

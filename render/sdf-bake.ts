@@ -221,7 +221,7 @@ export class JfaSdfBaker {
     const [dx, dy, dz] = dims;
     const mk = (fmt: GPUTextureFormat, extra = 0) => dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: fmt, usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra });
     this.seed = [mk("rgba32float"), mk("rgba32float")];
-    this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST);   // final blur pass copies into it
+    this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC);   // blur copies in; readDistance copies out
     this.attrTex = mk("rgba16float", GPUTextureUsage.COPY_DST);  // .r opacity, .g mode; seam-blurred in refine
     this.attrScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
     this.sdfScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
@@ -250,6 +250,31 @@ export class JfaSdfBaker {
 
   /** The resident per-segment attribute texture (rgba16float; .r = opacity). Identity stable. */
   attrTexture(): GPUTexture { return this.attrTex; }
+
+  /** Read back the per-voxel signed distance (sdfTex .a, mm) to CPU. For accuracy comparison/tests. */
+  async readDistance(): Promise<Float32Array> {
+    const [dx, dy, dz] = this.dims;
+    const bpr = Math.ceil((dx * 8) / 256) * 256;   // rgba16float = 8 bytes/voxel
+    const rowU16 = bpr / 2;
+    const buf = this.dev.createBuffer({ size: bpr * dy * dz, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = this.dev.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture: this.sdfTex }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: dy }, [dx, dy, dz]);
+    this.dev.queue.submit([enc.finish()]);
+    await buf.mapAsync(GPUMapMode.READ);
+    const u16 = new Uint16Array(buf.getMappedRange());
+    const h2f = (h: number): number => {
+      const s = (h & 0x8000) ? -1 : 1, e = (h & 0x7C00) >> 10, f = h & 0x03FF;
+      if (e === 0) return s * Math.pow(2, -14) * (f / 1024);
+      if (e === 31) return f ? NaN : s * Infinity;
+      return s * Math.pow(2, e - 15) * (1 + f / 1024);
+    };
+    const out = new Float32Array(dx * dy * dz);
+    for (let z = 0; z < dz; z++) for (let y = 0; y < dy; y++) for (let x = 0; x < dx; x++) {
+      out[(z * dy + y) * dx + x] = h2f(u16[(z * dy + y) * rowU16 + x * 4 + 3]);
+    }
+    buf.unmap(); buf.destroy();
+    return out;
+  }
 
   /** Set the label→colour palette (256 × rgba f32: rgb = colour, a = opacity). Call before bake(). */
   setPalette(palette: Float32Array) {
