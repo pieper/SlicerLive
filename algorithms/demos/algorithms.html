@@ -6,7 +6,9 @@
 <title>SlicerLive — algorithms (A-0)</title>
 <style>
   :root { color-scheme: dark; }
-  html, body { height: 100%; margin: 0; background: #05060a; }
+  /* Touch: swallow browser swipe/zoom/refresh gestures so they drive the camera, not navigation. */
+  html, body { height: 100%; margin: 0; background: #05060a; overscroll-behavior: none; touch-action: none; }
+  #bar button { touch-action: manipulation; }   /* buttons still tap cleanly */
   #wrap { display: flex; align-items: center; justify-content: center; width: 100vw; height: 100vh; }
   #gpu { width: min(92vw, 92vh); height: min(92vw, 92vh); display: block; background: #000; touch-action: none; border-radius: 8px; }
   #status { position: fixed; top: 8px; left: 12px; z-index: 3;

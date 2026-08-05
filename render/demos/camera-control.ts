@@ -22,20 +22,64 @@ export function attachCameraControls(
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
 
+  // Touch: own all gestures on the canvas so a swipe orbits/zooms instead of the browser navigating
+  // back/forward or pull-to-refreshing. touch-action:none stops the built-in pan/zoom; overscroll-
+  // behavior:none stops pull-to-refresh; a non-passive touchmove preventDefault is the belt-and-braces
+  // (pointer events still fire, so drag/pinch keep working).
+  canvas.style.touchAction = "none";
+  const docEl = (canvas.ownerDocument ?? document).documentElement;
+  if (docEl) docEl.style.overscrollBehavior = "none";
+  canvas.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+
+  // Multi-touch: 1 finger = orbit (via the interactor); 2 fingers = pinch-zoom + two-finger pan.
+  const pointers = new Map<number, { x: number; y: number }>();
+  let pinch: { dist: number; mx: number; my: number } | null = null;
+  const pinchState = () => {
+    const [a, b] = [...pointers.values()];
+    return { dist: Math.hypot(b.x - a.x, b.y - a.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+  };
+
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());  // right-drag = zoom
   canvas.addEventListener("pointerdown", (e) => {
     const { x, y } = local(e);
-    interactor.start(e.button as 0 | 1 | 2, x, y, canvas.clientHeight, {
-      shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey,
-    });
+    pointers.set(e.pointerId, { x, y });
     canvas.setPointerCapture(e.pointerId);
-    opts.onLog?.("cameraStart", { action: interactor.action, x, y, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
+    if (pointers.size === 1) {
+      interactor.start(e.button as 0 | 1 | 2, x, y, canvas.clientHeight, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
+      opts.onLog?.("cameraStart", { action: interactor.action, x, y, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
+    } else if (pointers.size === 2) {
+      interactor.end();          // stop the 1-finger orbit; enter pinch
+      pinch = pinchState();
+    }
   });
-  canvas.addEventListener("pointerup", (e) => { interactor.end(); canvas.releasePointerCapture(e.pointerId); });
+  const endPointer = (e: PointerEvent) => {
+    if (!pointers.delete(e.pointerId)) return;
+    canvas.releasePointerCapture?.(e.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (pointers.size === 1) {   // dropped from pinch back to one finger → resume orbit
+      const p = [...pointers.values()][0];
+      interactor.start(0, p.x, p.y, canvas.clientHeight, { shift: false, ctrl: false, alt: false });
+    } else if (pointers.size === 0) {
+      interactor.end();
+    }
+  };
+  canvas.addEventListener("pointerup", endPointer);
+  canvas.addEventListener("pointercancel", endPointer);
   canvas.addEventListener("pointermove", (e) => {
-    if (interactor.action === "none") return;
+    if (!pointers.has(e.pointerId)) return;
     const { x, y } = local(e);
-    interactor.move(x, y, canvas.clientWidth, canvas.clientHeight);
+    pointers.set(e.pointerId, { x, y });
+    if (pointers.size >= 2) {
+      const p = pinchState();
+      if (pinch) {
+        if (p.dist > 0 && pinch.dist > 0) camera.dolly(p.dist / pinch.dist);         // spread = zoom in
+        camera.panByDisplayDelta(p.mx - pinch.mx, p.my - pinch.my, canvas.clientWidth, canvas.clientHeight);
+        opts.onChange?.();
+      }
+      pinch = p;
+    } else if (interactor.action !== "none") {
+      interactor.move(x, y, canvas.clientWidth, canvas.clientHeight);
+    }
   });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();

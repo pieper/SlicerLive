@@ -21,6 +21,8 @@ async function main() {
   if (!(navigator as unknown as { gpu?: unknown }).gpu) { status("WebGPU not available — try Chrome/Edge 113+ or Safari 18+.", true); return; }
   status("initializing WebGPU…");
   const gpu = await initDevice();
+  (globalThis as unknown as { __gpuErr: string[] }).__gpuErr = [];
+  gpu.device.addEventListener("uncapturederror", (e) => (globalThis as unknown as { __gpuErr: string[] }).__gpuErr.push(String((e as GPUUncapturedErrorEvent).error?.message ?? (e as GPUUncapturedErrorEvent).error)));
   const ctx = canvas.getContext("webgpu") as GPUCanvasContext;
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
@@ -115,7 +117,13 @@ async function main() {
   document.getElementById("reset")?.addEventListener("click", () => location.reload());
 
   resize();
-  status("surface-mode segmentation · drag to orbit · scroll to zoom · Poke to edit the shared buffer");
+  status("surface-mode segmentation · drag to orbit · scroll/pinch to zoom · Poke to edit the shared buffer");
+
+  // Debug hook for automated tests (camera distance, gpu errors).
+  (globalThis as unknown as { __algoDbg: unknown }).__algoDbg = {
+    dist: () => camera.distance,
+    err: () => ((globalThis as unknown as { __gpuErr: string[] }).__gpuErr || []).length,
+  };
 }
 
 main();
