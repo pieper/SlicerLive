@@ -9,8 +9,9 @@
 
 import { ImageField, SegmentField } from "../fields.ts";
 import { FiducialField, type Sphere } from "../fiducial-field.ts";
-import { bakeSegmentPresence } from "../bake.ts";
 import { loadSceneVolumeField, type SceneVolume } from "../scene-volume.ts";
+import { EditableSegmentation } from "../../algorithms/editable-segmentation.ts";
+import { SegmentationLogic } from "../../logic/segmentation-logic.ts";
 import type { Vec3 } from "../mat4.ts";
 
 export const SCENES = {
@@ -107,29 +108,38 @@ export const SEGMENTS: { name: string; color: [number, number, number]; test: (v
 
 export interface SegmentationScene {
   sv: SceneVolume;
-  /** One SegmentField per segment — exactly as slicer_wgpu's set_segmentation_node builds
-   *  bridge._segments (the selftest asserts "expected 2 SegmentFields"). */
+  /** The 3D segmentation as ONE unified colorized-SDF SegmentField (the default seg render method —
+   *  padded SDF grid + background-clamped normals → crisp caps, no boundary speckle). `segments` stays
+   *  an array so callers that spread it into scene.build() are unchanged. */
   segments: SegmentField[];
   counts: number[];
+  /** Owns the SDF GPU resources; call destroy() when dropping the scene. */
+  logic: SegmentationLogic;
+  editable: EditableSegmentation;
+  destroy(): void;
 }
 
 export async function buildSegmentation(dev: GPUDevice, onBytes?: (n: number) => void): Promise<SegmentationScene> {
   const sv = await loadSceneVolumeField(dev, SCENES.MRHead, onBytes);
   const v = sv.voxels;
-  const counts: number[] = [];
-  const segments: SegmentField[] = [];
-  for (const seg of SEGMENTS) {
-    const mask = new Uint8Array(v.length);
-    let n = 0;
-    for (let i = 0; i < v.length; i++) { if (seg.test(v[i])) { mask[i] = 1; n++; } }
-    counts.push(n);
-    // per-segment Gaussian-smoothed presence (sigma 1.5 voxels, slicer_wgpu default) ->
-    // SegmentField `iso` band-shell: crisp opaque isosurface of the smoothed field
-    // (band = 1 voxel, from ijkToRAS spacing), NOT a translucent colorize density.
-    const tex = bakeSegmentPresence(dev, mask, sv.dims, 1.5);
-    segments.push(new SegmentField(tex, sv.dims, [1, 1, 1], {
-      color: seg.color, opacity: 1, ijkToRAS: sv.ijkToRAS,
-    }));
+  // Merge the two disjoint intensity thresholds into ONE labelmap (Brain=1, High=2), then render it
+  // through the unified colorized-SDF path — same robust seg rendering as SEGRoulette/algorithms
+  // (padded SDF + clamped normals), instead of the legacy per-segment Gaussian iso shells that
+  // couldn't cap where a segment meets the volume boundary (deep-interior → transparent → speckle).
+  const lab = new Uint8Array(v.length);
+  const counts = [0, 0];
+  for (let i = 0; i < v.length; i++) {
+    if (SEGMENTS[1].test(v[i])) { lab[i] = 2; counts[1]++; }
+    else if (SEGMENTS[0].test(v[i])) { lab[i] = 1; counts[0]++; }
   }
-  return { sv, segments, counts };
+  const editable = new EditableSegmentation(dev, sv.dims, { ijkToRAS: sv.ijkToRAS });
+  const logic = new SegmentationLogic(dev, editable, { renderMode: "sdf", opacity: 1 });
+  logic.setLabelColor(1, SEGMENTS[0].color);
+  logic.setLabelColor(2, SEGMENTS[1].color);
+  editable.loadLabelmap(lab);
+  logic.refineNow();   // static scene → high-quality bake now
+  return {
+    sv, counts, logic, editable, segments: [logic.field()],
+    destroy() { logic.destroy(); editable.destroy(); },
+  };
 }
