@@ -73,7 +73,9 @@ export function attachCameraControls(
       const p = pinchState();
       if (pinch) {
         if (p.dist > 0 && pinch.dist > 0) camera.dolly(p.dist / pinch.dist);         // spread = zoom in
-        camera.panByDisplayDelta(p.mx - pinch.mx, p.my - pinch.my, canvas.clientWidth, canvas.clientHeight);
+        // panByDisplayDelta wants a DISPLAY-space delta (y up), like the interactor's toDisplay path;
+        // the midpoints are in CSS coords (y down), so negate dy — otherwise two-finger pan is flipped.
+        camera.panByDisplayDelta(p.mx - pinch.mx, pinch.my - p.my, canvas.clientWidth, canvas.clientHeight);
         opts.onChange?.();
       }
       pinch = p;
