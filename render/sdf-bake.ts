@@ -23,15 +23,18 @@ struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
 @group(0) @binding(0) var t_label : texture_3d<u32>;
 @group(0) @binding(1) var t_seed_out : texture_storage_3d<rgba32float, write>;
 @group(0) @binding(2) var<uniform> u : U;
-// SYNTHETIC BACKGROUND BORDER: out-of-bounds reads as background (0), NOT clamp-to-edge. A segment
-// touching the volume face then sees a background neighbour across it → that face is flagged as a
-// boundary and seeded, so its SDF surface closes with a flat cap at the volume edge. With clamp-to-
-// edge the face voxel read its own label back, was never a boundary, got no seed, and left an open/
-// degenerate SDF at the border → black speckles where the ray enters the volume.
+// PADDED SDF GRID: the seed/SDF textures are LARGER than the labelmap by 'pad' voxels on every side
+// (dims.w). Coord c is a padded-grid coord; the label lives at c-pad, and everything outside the label
+// range is background (0). This gives a real spatial margin of background BEYOND the segmentation, so
+// a segment touching the labelmap edge closes as a genuine capped surface with room for the SDF to go
+// positive — and gradient/finite-difference samples near that cap stay in-bounds (they read real
+// background) instead of hitting the out-of-volume cull sentinel, which used to poison the normal.
 fn labelAt(c : vec3<i32>) -> u32 {
-  let d = vec3<i32>(u.dims.xyz);
-  if (any(c < vec3<i32>(0)) || any(c >= d)) { return 0u; }
-  return textureLoad(t_label, c, 0).r;
+  let pad = i32(u.dims.w);
+  let ld = vec3<i32>(u.dims.xyz) - vec3<i32>(2 * pad);   // label dims = padded dims - 2·pad
+  let lc = c - vec3<i32>(pad);
+  if (any(lc < vec3<i32>(0)) || any(lc >= ld)) { return 0u; }
+  return textureLoad(t_label, lc, 0).r;
 }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
@@ -102,7 +105,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let s = textureLoad(t_seed_in, c, 0);
   let valid = s.w > 0.5;
   let dist = select(1e3, distance(p, s.xyz), valid);
-  let ins = textureLoad(t_label, c, 0).r != 0u;
+  let pad = i32(u.dims.w);                                       // label is offset by pad; pad region = background (outside)
+  let lc = c - vec3<i32>(pad);
+  let ld = vec3<i32>(u.dims.xyz) - vec3<i32>(2 * pad);
+  let inRange = all(lc >= vec3<i32>(0)) && all(lc < ld);
+  let ins = inRange && textureLoad(t_label, lc, 0).r != 0u;
   let sdf = select(dist, -dist, ins);
   let lbl = u32(s.w + 0.5) & 255u;
   let pal = select(vec4<f32>(0.0), u_pal[lbl], valid);
@@ -220,12 +227,26 @@ export class JfaSdfBaker {
   private g: [number, number, number];
   private steps: number[];
   private smoothSigma: number;
+  private pad: number;                            // background margin (voxels) padded around the labelmap
+  readonly labelDims: Vec3;                        // original (label) dims, before padding
 
-  constructor(dev: GPUDevice, private labelTex: GPUTexture, private dims: Vec3, private ijkToRAS: number[], smoothSigmaVoxels = 1.0) {
+  // `pad` voxels of background are added on every side so segments touching the labelmap edge get a
+  // real cap + in-bounds gradient neighbourhood (docs/ALGORITHMS.md border artifact). The SDF textures,
+  // dispatch, seeds, blur and readback all run on the PADDED grid; `dims`/`ijkToRAS` become the padded
+  // grid's, and `sdfDims()`/`sdfIjkToRAS()` expose them to the SegmentField.
+  constructor(dev: GPUDevice, private labelTex: GPUTexture, private dims: Vec3, private ijkToRAS: number[], smoothSigmaVoxels = 1.0, pad = 2) {
     this.dev = dev;
     this.smoothSigma = smoothSigmaVoxels;
-    const [dx, dy, dz] = dims;
-    const mk = (fmt: GPUTextureFormat, extra = 0) => dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: fmt, usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra });
+    this.pad = pad;
+    this.labelDims = [dims[0], dims[1], dims[2]];
+    // Grow the grid, and shift the ijkToRAS origin so padded voxel (pad,pad,pad) still maps to the RAS
+    // of original voxel (0,0,0): newOrigin = origin - M₃ₓ₃·(pad,pad,pad).
+    this.dims = [dims[0] + 2 * pad, dims[1] + 2 * pad, dims[2] + 2 * pad];
+    const m = ijkToRAS.slice();
+    for (let r = 0; r < 3; r++) m[r * 4 + 3] -= pad * (m[r * 4] + m[r * 4 + 1] + m[r * 4 + 2]);
+    this.ijkToRAS = m;
+    const [dx, dy, dz] = this.dims;
+    const mk = (fmt: GPUTextureFormat, extra = 0) => dev.createTexture({ size: this.dims as [number, number, number], dimension: "3d", format: fmt, usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra });
     this.seed = [mk("rgba32float"), mk("rgba32float")];
     this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC);   // blur copies in; readDistance copies out
     this.attrTex = mk("rgba16float", GPUTextureUsage.COPY_DST);  // .r opacity, .g mode; seam-blurred in refine
@@ -256,6 +277,14 @@ export class JfaSdfBaker {
 
   /** The resident per-segment attribute texture (rgba16float; .r = opacity). Identity stable. */
   attrTexture(): GPUTexture { return this.attrTex; }
+
+  /** The PADDED grid the SDF/attr textures live on (labelDims + 2·pad), and the ijkToRAS that maps it
+   *  to RAS — hand these to the SegmentField so its patient→texture transform covers the padded extent. */
+  sdfDims(): Vec3 { return this.dims; }
+  sdfIjkToRAS(): number[] { return this.ijkToRAS; }
+  /** Background margin (voxels) padded on each side; readDistance() is on the padded grid, so a label
+   *  voxel (x,y,z) is at padded (x+pad, y+pad, z+pad). */
+  padVoxels(): number { return this.pad; }
 
   /** Read back the per-voxel signed distance (sdfTex .a, mm) to CPU. For accuracy comparison/tests. */
   async readDistance(): Promise<Float32Array> {
@@ -300,7 +329,7 @@ export class JfaSdfBaker {
     const ab = new ArrayBuffer(96);
     const f = new Float32Array(ab), u = new Uint32Array(ab);
     f.set(transpose4(this.ijkToRAS), 0);
-    u[16] = this.dims[0]; u[17] = this.dims[1]; u[18] = this.dims[2]; u[19] = 0;
+    u[16] = this.dims[0]; u[17] = this.dims[1]; u[18] = this.dims[2]; u[19] = this.pad;   // dims.w = pad (label is offset by pad; pad region = background)
     f[20] = step; f[21] = 0; f[22] = 0; f[23] = 0;
     this.dev.queue.writeBuffer(this.uni, 0, ab);
   }

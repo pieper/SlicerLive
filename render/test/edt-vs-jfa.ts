@@ -35,19 +35,22 @@ seg.loadLabelmap(labels);
 baker.refine();   // JFA + 2 extra passes, no blur (smoothSigma 0)
 const jfa = await baker.readDistance();
 
-// DEBUG: sample a few near-surface voxels.
-const idx = (x: number, y: number, z: number) => (z * ny + y) * nx + x;
+// readDistance is on the PADDED grid; map a label voxel (x,y,z) → padded index.
+const pad = baker.padVoxels(), PX = nx + 2 * pad, PY = ny + 2 * pad;
+const idx = (x: number, y: number, z: number) => (z * ny + y) * nx + x;                 // label grid (edt)
+const pidx = (x: number, y: number, z: number) => ((z + pad) * PY + (y + pad)) * PX + (x + pad);  // padded grid (jfa)
 for (const [x, y, z] of [[16, 48, 48], [17, 48, 48], [38, 26, 48], [48, 48, 48], [38, 48, 48]] as [number, number, number][]) {
   const i = idx(x, y, z);
-  console.log(`  voxel(${x},${y},${z}) label=${labels[i]} edt=${edt.signedDist[i].toFixed(2)} jfa=${jfa[i].toFixed(2)}`);
+  console.log(`  voxel(${x},${y},${z}) label=${labels[i]} edt=${edt.signedDist[i].toFixed(2)} jfa=${jfa[pidx(x, y, z)].toFixed(2)}`);
 }
 
 // Compare where it matters: within ±6 mm of a surface (the shell band region that's actually rendered).
 let maxErr = 0, sumErr = 0, n = 0, over05vox = 0, over1vox = 0;
 const voxMm = sp;
-for (let i = 0; i < nx * ny * nz; i++) {
+for (let z = 0; z < nz; z++) for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+  const i = idx(x, y, z);
   if (Math.abs(edt.signedDist[i]) > 6) continue;
-  const e = Math.abs(jfa[i] - edt.signedDist[i]);
+  const e = Math.abs(jfa[pidx(x, y, z)] - edt.signedDist[i]);
   maxErr = Math.max(maxErr, e); sumErr += e; n++;
   if (e > 0.5 * voxMm) over05vox++;
   if (e > 1.0 * voxMm) over1vox++;

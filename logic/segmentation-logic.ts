@@ -122,8 +122,12 @@ export class SegmentationLogic {
       // smoothing (which would re-facet). Kept above the ray-march step (~0.7·voxel) to avoid holes.
       const voxelMm = Math.min(...this.seg.spacingMm());
       const band = this.bandMm ?? (this.renderMode === "sdf" ? 0.65 * voxelMm : undefined);
-      this.segField = new SegmentField(tex, this.seg.dims, [1, 1, 1], {
-        color: [1, 1, 1], opacity: this.opacity, ijkToRAS: this.seg.ijkToRAS,
+      // sdf textures live on the baker's PADDED grid (larger than the labelmap), so the field must use
+      // the padded dims + ijkToRAS; the surface (presence) path stays on the label grid.
+      const fdims = this.sdf ? this.sdf.sdfDims() : this.seg.dims;
+      const fijk = this.sdf ? this.sdf.sdfIjkToRAS() : this.seg.ijkToRAS;
+      this.segField = new SegmentField(tex, fdims, [1, 1, 1], {
+        color: [1, 1, 1], opacity: this.opacity, ijkToRAS: fijk,
         mode: this.renderMode === "sdf" ? "sdf" : "surface", colorFromTexture: true, bandMm: band, clippable: false,
         attrTexture: this.sdf ? this.sdf.attrTexture() : undefined,   // per-segment opacity (sdf)
       });

@@ -22,7 +22,8 @@ const pal = new Float32Array(256 * 4); for (let i = 1; i < 256; i++) pal[i * 4 +
 baker.setPalette(pal); baker.setModePalette(new Float32Array(256 * 4));
 seg.loadLabelmap(lab); baker.refine();
 const d = await baker.readDistance();
-const at = (x: number, y: number, z: number) => Math.abs(d[(z * n + y) * n + x]);
+const pad = baker.padVoxels(), P = n + 2 * pad;   // readDistance is on the padded grid
+const at = (x: number, y: number, z: number) => Math.abs(d[((z + pad) * P + (y + pad)) * P + (x + pad)]);
 
 // Voxels ON the volume boundary faces, inside the cube — must be a surface (|sdf|≈0), same as the
 // interior faces. Sample across all three boundary faces + a couple interior-face references.

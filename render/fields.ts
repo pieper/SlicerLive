@@ -319,6 +319,16 @@ fn v_seg${s}(wp : vec3<f32>) -> f32 {   // signed distance (mm)
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 1e3; }   // far outside → culled
   return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a;
 }
+fn vgrad_seg${s}(wp : vec3<f32>) -> f32 {   // signed distance for the NORMAL finite-difference
+  // A gradient tap that steps just outside the (padded) SDF texture must read BACKGROUND, not the
+  // out-of-volume cull sentinel (1e3) — a huge sentinel would fabricate an enormous fake gradient that
+  // points out through the volume face and unlights the surface (black speckle at the seg/boundary
+  // interface). Clamp to the texture edge: with the padded grid that edge IS background, so the normal
+  // near a cap stays correct. This is the "artificial background boundary sample" for the normal.
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
+  return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a;
+}
 fn col_seg${s}(wp : vec3<f32>) -> vec3<f32> {   // per-label colour of the nearest region
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = t4.xyz;
@@ -340,9 +350,9 @@ fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step :
   if (T <= 0.0) { return vec4<f32>(0.0); }
   let h = step;
   let g = vec3<f32>(
-    v_seg${s}(wp + vec3<f32>(h,0,0)) - v_seg${s}(wp - vec3<f32>(h,0,0)),
-    v_seg${s}(wp + vec3<f32>(0,h,0)) - v_seg${s}(wp - vec3<f32>(0,h,0)),
-    v_seg${s}(wp + vec3<f32>(0,0,h)) - v_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);
+    vgrad_seg${s}(wp + vec3<f32>(h,0,0)) - vgrad_seg${s}(wp - vec3<f32>(h,0,0)),
+    vgrad_seg${s}(wp + vec3<f32>(0,h,0)) - vgrad_seg${s}(wp - vec3<f32>(0,h,0)),
+    vgrad_seg${s}(wp + vec3<f32>(0,0,h)) - vgrad_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);
   let glen = length(g);
   if (glen < 1e-5) { return vec4<f32>(0.0); }
   var n = g / glen;
