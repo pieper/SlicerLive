@@ -331,31 +331,14 @@ fn attr_seg${s}(wp : vec3<f32>) -> vec2<f32> {   // per-segment (.x = opacity, .
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec2<f32>(0.0); }
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).rg;
 }` : ""}
-fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
-  let op0 = u_material.seg${s}_color.a;
-  if (op0 <= 0.0) { return vec4<f32>(0.0); }
-  let sdf = v_seg${s}(wp);
-  let band = max(u_material.seg${s}_params.x, 1e-3);
-  let step = max(u_material.scene.x, 1e-3);
-${this.attrTex ? `  let at = attr_seg${s}(wp);    // (opacity, shading mode)
-  let seg_op = at.x;
-  if (seg_op <= 0.0) { return vec4<f32>(0.0); }
-  if (at.y > 0.5) {
-    // VOLUME shading: DVR fill of the interior (sdf<0) with translucent emissive colour, so you see
-    // the segment as a solid cloud rather than a surface shell. ~24 mm opacity-unit-distance.
-    if (sdf >= 0.0) { return vec4<f32>(0.0); }
-    let vop = clamp(op0 * seg_op * step / 24.0, 0.0, 1.0);
-    if (vop <= 0.0) { return vec4<f32>(0.0); }
-    let vcol = srgb2physical(clamp(col_seg${s}(wp), vec3<f32>(0.0), vec3<f32>(1.0)));
-    return vec4<f32>(vcol * vop, vop);
-  }` : `  let seg_op = 1.0;`}
-  // SURFACE shading: crisp shell around sdf=0.
+// Shell (surface) contribution at wp: crisp Phong shell around sdf=0. Weighted by (1-mode) so it
+// morphs smoothly into the volume contribution across a blurred surface↔volume boundary.
+fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
   let d_mm = abs(sdf);
-  if (d_mm > band + step) { return vec4<f32>(0.0); }   // outside the shell (+ gradient stencil margin)
+  if (d_mm > band + step) { return vec4<f32>(0.0); }
   let a = 1.0 - clamp(d_mm / band, 0.0, 1.0);
   if (a <= 0.0) { return vec4<f32>(0.0); }
   let op = clamp(a * op0 * seg_op, 0.0, 1.0);
-  // Normal = SDF gradient (central difference); smooth SDF → smooth normal, no terracing.
   let h = step;
   let g = vec3<f32>(
     v_seg${s}(wp + vec3<f32>(h,0,0)) - v_seg${s}(wp - vec3<f32>(h,0,0)),
@@ -370,10 +353,37 @@ ${this.attrTex ? `  let at = attr_seg${s}(wp);    // (opacity, shading mode)
   let ldn = max(dot(-rd, n), 0.0);
   let refl = normalize(2.0 * ldn * n + rd);
   let rdv = max(dot(refl, -rd), 0.0);
-  let col = col_seg${s}(wp);                 // per-label colour from the texture
+  let col = col_seg${s}(wp);
   var lit = col * ka + col * (kd * ldn) + vec3<f32>(ks * pow(rdv, max(sh, 1.0)));
   lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
   return vec4<f32>(lit * op, op);
+}
+fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
+  let op0 = u_material.seg${s}_color.a;
+  if (op0 <= 0.0) { return vec4<f32>(0.0); }
+  let sdf = v_seg${s}(wp);
+  let band = max(u_material.seg${s}_params.x, 1e-3);
+  let step = max(u_material.scene.x, 1e-3);
+${this.attrTex ? `  let at = attr_seg${s}(wp);        // (opacity, shading mode)
+  let seg_op = at.x;
+  if (seg_op <= 0.0) { return vec4<f32>(0.0); }
+  let mode = clamp(at.y, 0.0, 1.0);
+  // Surface and volume are BLENDED by the (seam-blurred, fractional) mode, so an opaque-surface
+  // segment and a translucent-volume segment meet with a smooth transition instead of a jagged,
+  // voxel-quantized classification edge.
+  var acc = vec4<f32>(0.0);
+  if (mode > 0.001 && sdf < 0.0) {
+    // VOLUME: translucent DVR fill of the interior (~24 mm opacity-unit-distance).
+    let vop = clamp(op0 * seg_op * step / 24.0, 0.0, 1.0);
+    if (vop > 0.0) {
+      let vcol = srgb2physical(clamp(col_seg${s}(wp), vec3<f32>(0.0), vec3<f32>(1.0)));
+      acc += mode * vec4<f32>(vcol * vop, vop);
+    }
+  }
+  if (mode < 0.999) {
+    acc += (1.0 - mode) * surface_seg${s}(wp, rd, sdf, band, step, seg_op, op0);
+  }
+  return acc;` : `  return surface_seg${s}(wp, rd, sdf, band, step, 1.0, op0);`}
 }`;
     }
     // The ONLY difference between iso and surface is the alpha rule (everything else — sampling,
