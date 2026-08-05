@@ -30,19 +30,36 @@ async function run(mode: "sdf" | "surface", name: string) {
   scene.build([logic.field()]);
   scene.setBackground(0.05, 0.06, 0.09);
   scene.setCamera([120, -430, 150], [0, 0, 20], [0, 0, 1], 32, W, H);
-  const rgba = await scene.renderToRGBA(W, H);
-  await Deno.writeFile(new URL(`./multi-${name}.png`, import.meta.url).pathname, await encodePNG(rgba, W, H));
 
-  let red = 0, green = 0, blue = 0;
-  for (let i = 0; i < W * H; i++) {
-    const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
-    if (Math.max(r, g, b) < 45) continue;                 // background
-    if (r > g + 25 && r > b + 25) red++;
-    else if (g > r + 20 && g > b + 20) green++;
-    else if (b > r + 15 && b > g + 15) blue++;
+  const count = (rgba: Uint8Array) => {
+    let red = 0, green = 0, blue = 0, blended = 0, surf = 0;
+    for (let i = 0; i < W * H; i++) {
+      const r = rgba[i * 4], g = rgba[i * 4 + 1], b = rgba[i * 4 + 2];
+      if (Math.max(r, g, b) < 45) continue;               // background
+      surf++;
+      if (r > g + 25 && r > b + 25) red++;
+      else if (g > r + 20 && g > b + 20) green++;
+      else if (b > r + 15 && b > g + 15) blue++;
+      else blended++;   // seam pixels between labels: more = a smoother, pre-blended boundary
+    }
+    return { red, green, blue, blended, surf };
+  };
+
+  const fast = count(await scene.renderToRGBA(W, H));
+  await Deno.writeFile(new URL(`./multi-${name}.png`, import.meta.url).pathname, await encodePNG(await scene.renderToRGBA(W, H), W, H));
+
+  // Settle-refine (sdf only) → seams pre-blended, JFA+2 near-exact.
+  let refined = fast;
+  if (mode === "sdf") {
+    logic.refineNow();
+    const r = await scene.renderToRGBA(W, H);
+    refined = count(r);
+    await Deno.writeFile(new URL(`./multi-${name}-refined.png`, import.meta.url).pathname, await encodePNG(r, W, H));
   }
-  const ok = red > 300 && green > 300 && blue > 300;
-  console.log(`${name.padEnd(8)} red=${red} green=${green} blue=${blue} → ${ok ? "PASS (3 distinct label colours render)" : "FAIL"}`);
+
+  const ok = fast.red > 300 && fast.green > 300 && fast.blue > 300;
+  const seamNote = mode === "sdf" ? `  seam-blend fast=${fast.blended} → refined=${refined.blended} (${refined.blended > fast.blended ? "smoother ✓" : "no change"})` : "";
+  console.log(`${name.padEnd(8)} red=${fast.red} green=${fast.green} blue=${fast.blue} → ${ok ? "PASS (3 distinct colours)" : "FAIL"}${seamNote}`);
   seg.destroy(); logic.destroy();
   return ok;
 }

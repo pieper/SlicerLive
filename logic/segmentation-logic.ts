@@ -42,6 +42,8 @@ export class SegmentationLogic {
   private segField?: SegmentField;
   private redrawCbs: Array<() => void> = [];
   private unsubDirty: () => void;
+  private refineTimer?: ReturnType<typeof setTimeout>;
+  private refineDelayMs = 180;               // quiescence before the settle-refine (sdf mode)
 
   constructor(device: GPUDevice, private seg: EditableSegmentation, opts: SegmentationLogicOpts = {}) {
     this.renderMode = opts.renderMode ?? "sdf";
@@ -58,7 +60,11 @@ export class SegmentationLogic {
     }
 
     this.rebake();
-    this.unsubDirty = seg.onDirty(() => { this.rebake(); for (const cb of this.redrawCbs) cb(); });
+    this.scheduleRefine();   // the initial content is static → refine shortly
+    // Two-phase (sdf): every edit does a FAST bake for live feedback, then a settle-refine (JFA+2,
+    // tighter distance blur, colour-seam blur) after quiescence, so a static labelmap renders crisp
+    // and cheap while orbiting. Surface mode has no refine (ColorizeBaker is already fast+smooth).
+    this.unsubDirty = seg.onDirty(() => { this.rebake(); for (const cb of this.redrawCbs) cb(); this.scheduleRefine(); });
   }
 
   /** Assign a display colour to a label id (0..255). Takes effect on the next rebake. */
@@ -68,10 +74,24 @@ export class SegmentationLogic {
     this.palette[o] = rgb[0]; this.palette[o + 1] = rgb[1]; this.palette[o + 2] = rgb[2]; this.palette[o + 3] = 1;
   }
 
-  /** Re-derive the render texture from the current master + palette (in place). */
+  /** Re-derive the render texture from the current master + palette (FAST, in place). */
   private rebake() {
     if (this.sdf) { this.sdf.setPalette(this.palette); this.sdf.bake(); }
     else this.baker!.bakeInto(this.presenceTex!, this.palette, this.sigma);
+  }
+
+  /** Schedule the settle-refine after quiescence (debounced; sdf mode only). */
+  private scheduleRefine() {
+    if (!this.sdf) return;
+    if (this.refineTimer !== undefined) clearTimeout(this.refineTimer);
+    this.refineTimer = setTimeout(() => { this.refineTimer = undefined; this.refineNow(); }, this.refineDelayMs);
+  }
+
+  /** Run the settle-refine now (JFA+2 + tighter distance blur + colour-seam blur), then redraw.
+   *  Public so a test — or an app that knows the edit is done — can force the high-quality bake. */
+  refineNow() {
+    if (this.refineTimer !== undefined) { clearTimeout(this.refineTimer); this.refineTimer = undefined; }
+    if (this.sdf) { this.sdf.setPalette(this.palette); this.sdf.refine(); for (const cb of this.redrawCbs) cb(); }
   }
 
   /** A SegmentField bound to the shared render texture — hand this to the SceneRenderer once; edits
@@ -79,9 +99,13 @@ export class SegmentationLogic {
   field(): SegmentField {
     if (!this.segField) {
       const tex = this.sdf ? this.sdf.sdfTexture() : this.presenceTex!;
+      // sdf: a tight shell band (≈0.65 voxel) gives a crisp edge on the smooth SDF without under-
+      // smoothing (which would re-facet). Kept above the ray-march step (~0.7·voxel) to avoid holes.
+      const voxelMm = Math.min(...this.seg.spacingMm());
+      const band = this.bandMm ?? (this.renderMode === "sdf" ? 0.65 * voxelMm : undefined);
       this.segField = new SegmentField(tex, this.seg.dims, [1, 1, 1], {
         color: [1, 1, 1], opacity: this.opacity, ijkToRAS: this.seg.ijkToRAS,
-        mode: this.renderMode === "sdf" ? "sdf" : "surface", colorFromTexture: true, bandMm: this.bandMm, clippable: false,
+        mode: this.renderMode === "sdf" ? "sdf" : "surface", colorFromTexture: true, bandMm: band, clippable: false,
       });
     }
     return this.segField;
@@ -90,5 +114,8 @@ export class SegmentationLogic {
   /** Notified after every edit (post-rebake) so the app can redraw. */
   onRedraw(cb: () => void) { this.redrawCbs.push(cb); }
 
-  destroy() { this.unsubDirty(); this.sdf?.destroy(); this.baker?.destroy(); this.presenceTex?.destroy(); }
+  destroy() {
+    if (this.refineTimer !== undefined) clearTimeout(this.refineTimer);
+    this.unsubDirty(); this.sdf?.destroy(); this.baker?.destroy(); this.presenceTex?.destroy();
+  }
 }

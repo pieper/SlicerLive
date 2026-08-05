@@ -127,6 +127,32 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   textureStore(t_out, c, vec4<f32>(center.rgb, sum));
 }`;
 
+// Separable Gaussian on the .rgb (label colour), carrying .a (distance). Used ONLY in the refinement
+// pass: it pre-blends the voxel-quantized colour seams between neighbouring labels so ray-march
+// samples get a smooth colour transition instead of a staircase — while the geometry (.a) stays put.
+const COLBLUR_WGSL = /* wgsl */ `
+struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4> };
+@group(0) @binding(0) var t_in : texture_3d<f32>;
+@group(0) @binding(1) var t_out : texture_storage_3d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> u : BU;
+fn wt(i : u32) -> f32 { return u.w[i >> 2u][i & 3u]; }
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  if (any(gid >= u.dims.xyz)) { return; }
+  let c = vec3<i32>(gid);
+  let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
+  var av = vec3<i32>(0);
+  if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
+  let center = textureLoad(t_in, c, 0);
+  var sum = center.rgb * wt(0u);
+  let R = i32(u.axis_r.y);
+  for (var i = 1; i <= R; i = i + 1) {
+    sum = sum + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).rgb
+                            + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).rgb);
+  }
+  textureStore(t_out, c, vec4<f32>(sum, center.a));
+}`;
+
 function gaussHalfKernel(sigma: number): { radius: number; w: Float32Array } {
   const radius = Math.max(1, Math.min(15, Math.ceil(3 * sigma)));
   const raw = new Float32Array(radius + 1);
@@ -147,7 +173,8 @@ export class JfaSdfBaker {
   private initPipe: GPUComputePipeline;
   private jfaPipe: GPUComputePipeline;
   private finalPipe: GPUComputePipeline;
-  private blurPipe: GPUComputePipeline;
+  private blurPipe: GPUComputePipeline;      // blurs .a (distance), carries .rgb
+  private colBlurPipe: GPUComputePipeline;   // blurs .rgb (colour), carries .a
   private g: [number, number, number];
   private steps: number[];
   private smoothSigma: number;
@@ -167,6 +194,7 @@ export class JfaSdfBaker {
     this.jfaPipe = mod(JFA_WGSL);
     this.finalPipe = mod(FINAL_WGSL);
     this.blurPipe = mod(BLUR_WGSL);
+    this.colBlurPipe = mod(COLBLUR_WGSL);
     this.g = [Math.ceil(dx / 4), Math.ceil(dy / 4), Math.ceil(dz / 4)];
     // JFA step schedule: largest power of two < maxDim, halving to 1.
     const maxDim = Math.max(dx, dy, dz);
@@ -196,8 +224,20 @@ export class JfaSdfBaker {
     this.dev.queue.writeBuffer(this.uni, 0, ab);
   }
 
-  /** Recompute the SDF from the current master labelmap (one JFA sweep), in place. */
-  bake() {
+  /** FAST bake for LIVE editing: plain JFA (approximate) + a light distance-only blur (crisp colour
+   *  seams). Cheap, so it keeps up with an in-progress stroke; the seams stay voxel-jagged until the
+   *  edit settles and refine() runs. */
+  bake() { this.sweep([], this.smoothSigma, 0); }
+
+  /** REFINE for a STATIC labelmap (run once the edit settles): JFA+2 extra passes → a near-exact
+   *  Voronoi/SDF (fixes the small JFA mistakes near close/overlapping segments) and a colour-seam blur
+   *  so neighbouring-label boundaries are smooth, not a voxel staircase. Distance blur stays at the
+   *  same σ (dropping it re-introduces Voronoi facets — crispness comes from the render band, not from
+   *  under-smoothing). Higher quality lives in the resident texture, so camera renders stay cheap. */
+  refine() { this.sweep([2, 1], this.smoothSigma, 1.0); }
+
+  /** One full sweep: init → JFA (schedule + extra) → finalize → blur .a → optional blur .rgb. */
+  private sweep(extraSteps: number[], distSigma: number, colorSigma: number) {
     const dev = this.dev, [gx, gy, gz] = this.g;
     // init → seed[0]
     this.writeUni(0);
@@ -212,10 +252,9 @@ export class JfaSdfBaker {
     }
     dev.queue.submit([enc.finish()]);
 
-    // JFA passes, ping-ponging seed[src] → seed[dst]. Each pass needs its own uniform step, so submit
-    // per pass (small count, ≤ ~7). src starts at 0 (the init result).
+    // JFA passes (+ optional extra small steps = JFA+N refinement), ping-ponging seed[src] → seed[dst].
     let src = 0;
-    for (const step of this.steps) {
+    for (const step of [...this.steps, ...extraSteps]) {
       this.writeUni(step);
       const dst = src ^ 1;
       enc = dev.createCommandEncoder();
@@ -241,34 +280,34 @@ export class JfaSdfBaker {
     const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(gx, gy, gz); p.end();
     dev.queue.submit([enc.finish()]);
 
-    // Smooth the SDF (3 separable Gaussian passes) so the shading normal isn't Voronoi-faceted. Passes
-    // ping-pong sdfTex↔scratch ending in scratch, then copy back into sdfTex (identity stable for the
-    // renderer's bind group).
-    if (this.smoothSigma > 0) {
-      const { radius, w } = gaussHalfKernel(this.smoothSigma);
-      const [dx, dy, dz] = this.dims;
-      const passes: Array<[GPUTexture, GPUTexture, number]> = [[this.sdfTex, this.sdfScratch, 0], [this.sdfScratch, this.sdfTex, 1], [this.sdfTex, this.sdfScratch, 2]];
-      enc = dev.createCommandEncoder();
-      for (const [srcT, dstT, axis] of passes) {
-        const ab = new ArrayBuffer(96);
-        const u32 = new Uint32Array(ab), f32 = new Float32Array(ab);
-        u32[0] = dx; u32[1] = dy; u32[2] = dz; u32[4] = axis; u32[5] = radius;
-        f32.set(w, 8);   // w starts at byte 32 = float index 8 (dims 16B + axis_r 16B)
-        // NB: each pass needs its own uniform contents; use a fresh small buffer per pass to avoid
-        // overwriting a still-queued read.
-        const ub = dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        dev.queue.writeBuffer(ub, 0, ab);
-        const b = dev.createBindGroup({ layout: this.blurPipe.getBindGroupLayout(0), entries: [
-          { binding: 0, resource: srcT.createView() },
-          { binding: 1, resource: dstT.createView() },
-          { binding: 2, resource: { buffer: ub } },
-        ] });
-        const bp = enc.beginComputePass(); bp.setPipeline(this.blurPipe); bp.setBindGroup(0, b); bp.dispatchWorkgroups(gx, gy, gz); bp.end();
-      }
-      // passes end in sdfScratch → copy back into the resident sdfTex.
-      enc.copyTextureToTexture({ texture: this.sdfScratch }, { texture: this.sdfTex }, this.dims as [number, number, number]);
-      dev.queue.submit([enc.finish()]);
+    // Distance blur (smooths the shading normal; keeps colour crisp), then optional colour-seam blur.
+    if (distSigma > 0) this.blurStage(this.blurPipe, distSigma);
+    if (colorSigma > 0) this.blurStage(this.colBlurPipe, colorSigma);
+  }
+
+  /** 3 separable Gaussian passes with the given pipeline (which channels it blurs), sdfTex↔scratch,
+   *  ending in scratch → copied back to sdfTex so its identity stays stable for the renderer. */
+  private blurStage(pipe: GPUComputePipeline, sigma: number) {
+    const dev = this.dev, [gx, gy, gz] = this.g, [dx, dy, dz] = this.dims;
+    const { radius, w } = gaussHalfKernel(sigma);
+    const passes: Array<[GPUTexture, GPUTexture, number]> = [[this.sdfTex, this.sdfScratch, 0], [this.sdfScratch, this.sdfTex, 1], [this.sdfTex, this.sdfScratch, 2]];
+    const enc = dev.createCommandEncoder();
+    for (const [srcT, dstT, axis] of passes) {
+      const ab = new ArrayBuffer(96);
+      const u32 = new Uint32Array(ab), f32 = new Float32Array(ab);
+      u32[0] = dx; u32[1] = dy; u32[2] = dz; u32[4] = axis; u32[5] = radius;
+      f32.set(w, 8);   // w starts at byte 32 = float index 8 (dims 16B + axis_r 16B)
+      const ub = dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      dev.queue.writeBuffer(ub, 0, ab);
+      const b = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: srcT.createView() },
+        { binding: 1, resource: dstT.createView() },
+        { binding: 2, resource: { buffer: ub } },
+      ] });
+      const bp = enc.beginComputePass(); bp.setPipeline(pipe); bp.setBindGroup(0, b); bp.dispatchWorkgroups(gx, gy, gz); bp.end();
     }
+    enc.copyTextureToTexture({ texture: this.sdfScratch }, { texture: this.sdfTex }, this.dims as [number, number, number]);
+    dev.queue.submit([enc.finish()]);
   }
 
   destroy() { this.seed[0].destroy(); this.seed[1].destroy(); this.sdfTex.destroy(); this.sdfScratch.destroy(); this.uni.destroy(); this.palBuf.destroy(); }
