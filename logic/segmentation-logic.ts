@@ -67,11 +67,20 @@ export class SegmentationLogic {
     this.unsubDirty = seg.onDirty(() => { this.rebake(); for (const cb of this.redrawCbs) cb(); this.scheduleRefine(); });
   }
 
-  /** Assign a display colour to a label id (0..255). Takes effect on the next rebake. */
+  /** Assign a display colour to a label id (0..255). Keeps the current opacity (defaults to 1 =
+   *  opaque). Takes effect on the next rebake. */
   setLabelColor(id: number, rgb: [number, number, number]) {
     if (id < 1 || id > 255) return;
     const o = id * 4;
-    this.palette[o] = rgb[0]; this.palette[o + 1] = rgb[1]; this.palette[o + 2] = rgb[2]; this.palette[o + 3] = 1;
+    this.palette[o] = rgb[0]; this.palette[o + 1] = rgb[1]; this.palette[o + 2] = rgb[2];
+    if (this.palette[o + 3] === 0) this.palette[o + 3] = 1;   // first definition → opaque
+  }
+
+  /** Per-segment opacity (0 = hidden, 1 = opaque) — palette alpha. Enables translucent surface-model
+   *  rendering (see through outer segments to inner ones). Rebake/refine to apply. */
+  setLabelOpacity(id: number, opacity: number) {
+    if (id < 1 || id > 255) return;
+    this.palette[id * 4 + 3] = Math.max(0, Math.min(1, opacity));
   }
 
   /** Re-derive the render texture from the current master + palette (FAST, in place). */
@@ -106,6 +115,7 @@ export class SegmentationLogic {
       this.segField = new SegmentField(tex, this.seg.dims, [1, 1, 1], {
         color: [1, 1, 1], opacity: this.opacity, ijkToRAS: this.seg.ijkToRAS,
         mode: this.renderMode === "sdf" ? "sdf" : "surface", colorFromTexture: true, bandMm: band, clippable: false,
+        attrTexture: this.sdf ? this.sdf.attrTexture() : undefined,   // per-segment opacity (sdf)
       });
     }
     return this.segField;

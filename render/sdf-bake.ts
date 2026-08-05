@@ -76,7 +76,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   textureStore(t_seed_out, c, best);
 }`;
 
-// Finalize → rgba16float: .rgb = the nearest region's palette colour, .a = signed distance (mm).
+// Finalize → sdfTex rgba16float (.rgb = nearest region's palette colour, .a = signed distance mm) and
+// attrTex rgba16float (.r = that region's per-segment OPACITY = palette alpha). Opacity comes from the
+// FLOODED region label, so it's non-zero across the whole ±band shell (not just inside voxels).
 const FINAL_WGSL = /* wgsl */ `
 struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
 @group(0) @binding(0) var t_seed_in : texture_3d<f32>;
@@ -84,6 +86,7 @@ struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
 @group(0) @binding(2) var t_out : texture_storage_3d<rgba16float, write>;
 @group(0) @binding(3) var<uniform> u : U;
 @group(0) @binding(4) var<uniform> u_pal : array<vec4<f32>, 256>;
+@group(0) @binding(5) var t_attr : texture_storage_3d<rgba16float, write>;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   if (any(gid >= u.dims.xyz)) { return; }
@@ -95,8 +98,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let ins = textureLoad(t_label, c, 0).r != 0u;
   let sdf = select(dist, -dist, ins);
   let lbl = u32(s.w + 0.5) & 255u;
-  let color = select(vec3<f32>(0.0), u_pal[lbl].rgb, valid);
-  textureStore(t_out, c, vec4<f32>(color, sdf));
+  let pal = select(vec4<f32>(0.0), u_pal[lbl], valid);
+  textureStore(t_out, c, vec4<f32>(pal.rgb, sdf));
+  textureStore(t_attr, c, vec4<f32>(pal.a, 0.0, 0.0, 0.0));   // .r = per-segment opacity
 }`;
 
 // Separable Gaussian on the SDF's .a (distance) only, carrying .rgb (colour) from the centre tap.
@@ -167,6 +171,7 @@ export class JfaSdfBaker {
   private dev: GPUDevice;
   private seed: [GPUTexture, GPUTexture];       // rgba32float ping-pong (RAS seed xyz + regionLabel)
   private sdfTex: GPUTexture;                    // rgba16float: .rgb = per-label colour, .a = signed dist (mm) — sampled by SegmentField
+  private attrTex: GPUTexture;                   // rgba16float: .r = per-segment opacity — sampled by SegmentField
   private sdfScratch: GPUTexture;               // rgba16float blur ping-pong
   private uni: GPUBuffer;
   private palBuf: GPUBuffer;                     // 256 × vec4 label→colour palette
@@ -186,6 +191,7 @@ export class JfaSdfBaker {
     const mk = (fmt: GPUTextureFormat, extra = 0) => dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: fmt, usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra });
     this.seed = [mk("rgba32float"), mk("rgba32float")];
     this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST);   // final blur pass copies into it
+    this.attrTex = mk("rgba16float");                            // .r = per-segment opacity (not blurred)
     this.sdfScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
     this.uni = dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -207,6 +213,9 @@ export class JfaSdfBaker {
    *  Identity stable across bakes → the SceneRenderer bind group stays valid; a live edit updates in
    *  place. */
   sdfTexture(): GPUTexture { return this.sdfTex; }
+
+  /** The resident per-segment attribute texture (rgba16float; .r = opacity). Identity stable. */
+  attrTexture(): GPUTexture { return this.attrTex; }
 
   /** Set the label→colour palette (256 × rgba f32; index = label id). Call before bake(). */
   setPalette(palette: Float32Array) {
@@ -276,6 +285,7 @@ export class JfaSdfBaker {
       { binding: 2, resource: this.sdfTex.createView() },
       { binding: 3, resource: { buffer: this.uni } },
       { binding: 4, resource: { buffer: this.palBuf } },
+      { binding: 5, resource: this.attrTex.createView() },
     ] });
     const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(gx, gy, gz); p.end();
     dev.queue.submit([enc.finish()]);
@@ -310,5 +320,5 @@ export class JfaSdfBaker {
     dev.queue.submit([enc.finish()]);
   }
 
-  destroy() { this.seed[0].destroy(); this.seed[1].destroy(); this.sdfTex.destroy(); this.sdfScratch.destroy(); this.uni.destroy(); this.palBuf.destroy(); }
+  destroy() { this.seed[0].destroy(); this.seed[1].destroy(); this.sdfTex.destroy(); this.attrTex.destroy(); this.sdfScratch.destroy(); this.uni.destroy(); this.palBuf.destroy(); }
 }

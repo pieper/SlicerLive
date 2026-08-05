@@ -225,6 +225,7 @@ export interface SegmentFieldOpts {
   clippable?: boolean;                   // let ROI clip planes crop this segment (default true)
   mode?: "iso" | "surface" | "sdf";      // iso = crisp presence shell (default); surface = gradient-opacity translucent (Carve look); sdf = crisp terrace-free shell from a signed-distance field
   colorFromTexture?: boolean;            // iso/surface: take per-voxel colour from the texture's .rgb (multi-label) instead of the uniform colour. sdf always does.
+  attrTexture?: GPUTexture;              // sdf: per-voxel attribute texture (.r = per-segment opacity). When set, opacity is per-label (translucent surface models) instead of the single uniform value.
 }
 
 /** A single segment rendered exactly as slicer_wgpu's SegmentField in its DEFAULT
@@ -244,9 +245,10 @@ export interface SegmentFieldOpts {
  *  the selftest / paint demo uses `iso`. */
 export class SegmentField implements Field {
   readonly kind = "seg";
-  readonly bindingCount = 1;             // smoothed-presence texture (sampler shared)
+  readonly bindingCount: number;         // 1 (value texture) + 1 when an sdf attr (opacity) texture is bound
   readonly clippable: boolean;
   private tex: GPUTexture;
+  private attrTex?: GPUTexture;           // sdf per-voxel attributes (.r = opacity)
   private p2t: Mat4;
   private box: [Vec3, Vec3];
   private color: [number, number, number];
@@ -280,6 +282,8 @@ export class SegmentField implements Field {
     this.clippable = opts.clippable ?? true;
     this.mode = opts.mode ?? "iso";
     this.colorFromTex = opts.colorFromTexture ?? false;
+    this.attrTex = this.mode === "sdf" ? opts.attrTexture : undefined;
+    this.bindingCount = this.attrTex ? 2 : 1;
   }
 
   uniformFloats() { return 28; }        // mat4(16) + color(4) + shade(4) + params(4)
@@ -297,7 +301,8 @@ export class SegmentField implements Field {
   }
 
   declareBindings(s: number, base: number): string {
-    return `@group(0) @binding(${base}) var t_seg${s} : texture_3d<f32>;`;
+    const value = `@group(0) @binding(${base}) var t_seg${s} : texture_3d<f32>;`;
+    return this.attrTex ? `${value}\n@group(0) @binding(${base + 1}) var t_attr${s} : texture_3d<f32>;` : value;
   }
 
   samplingWGSL(s: number): string {
@@ -319,7 +324,13 @@ fn col_seg${s}(wp : vec3<f32>) -> vec3<f32> {   // per-label colour of the neare
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec3<f32>(0.0); }
   return textureSampleLevel(t_seg${s}, s_lin, t, 0.0).rgb;
-}
+}${this.attrTex ? `
+fn attr_seg${s}(wp : vec3<f32>) -> f32 {   // per-segment opacity of the nearest region
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = t4.xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 0.0; }
+  return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).r;
+}` : ""}
 fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let op0 = u_material.seg${s}_color.a;
   if (op0 <= 0.0) { return vec4<f32>(0.0); }
@@ -330,7 +341,9 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   if (d_mm > band + step) { return vec4<f32>(0.0); }   // outside the shell (+ gradient stencil margin)
   let a = 1.0 - clamp(d_mm / band, 0.0, 1.0);
   if (a <= 0.0) { return vec4<f32>(0.0); }
-  let op = clamp(a * op0, 0.0, 1.0);
+${this.attrTex ? `  let seg_op = attr_seg${s}(wp);   // per-segment opacity (0 = hidden)
+  if (seg_op <= 0.0) { return vec4<f32>(0.0); }
+  let op = clamp(a * op0 * seg_op, 0.0, 1.0);` : `  let op = clamp(a * op0, 0.0, 1.0);`}
   // Normal = SDF gradient (central difference); smooth SDF → smooth normal, no terracing.
   let h = step;
   let g = vec3<f32>(
@@ -429,7 +442,9 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   }
 
   bindEntries(_s: number, base: number): GPUBindGroupEntry[] {
-    return [{ binding: base, resource: this.tex.createView() }];
+    const e = [{ binding: base, resource: this.tex.createView() }];
+    if (this.attrTex) e.push({ binding: base + 1, resource: this.attrTex.createView() });
+    return e;
   }
 }
 

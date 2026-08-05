@@ -36,6 +36,12 @@ export interface AlgorithmsScene {
   /** Swap the render path (sdf ↔ surface) live, preserving the painted segmentation + colours. */
   setRenderMode(mode: "sdf" | "surface"): void;
   renderMode(): "sdf" | "surface";
+  /** Force the settle-refine now (JFA+2 + seam blend) — for tests / thumbnails. */
+  refine(): void;
+  /** Set every label's opacity (0..1) — 1 = opaque surfaces, <1 = translucent surface models (see
+   *  through outer segments to inner ones). Persists across render-mode swaps. */
+  setAllOpacity(opacity: number): void;
+  allOpacity(): number;
 }
 
 export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): AlgorithmsScene {
@@ -72,9 +78,10 @@ export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): Algor
   const redrawCbs: Array<() => void> = [];
   let mode: "sdf" | "surface" = "sdf";
   let logic!: SegmentationLogic;
+  let allOpacity = 1;
   const makeLogic = () => {
     logic = new SegmentationLogic(gpu.device, seg, { renderMode: mode, opacity: 1.0, sigmaVoxels: 1.0 });
-    for (const [id, rgb] of labelColors) logic.setLabelColor(id, rgb);   // persist colours across swaps
+    for (const [id, rgb] of labelColors) { logic.setLabelColor(id, rgb); logic.setLabelOpacity(id, allOpacity); }   // persist colours + opacity across swaps
     logic.onRedraw(() => { for (const cb of redrawCbs) cb(); });
     scene.build([logic.field()]);
     scene.setBackground(0.05, 0.06, 0.09);
@@ -111,5 +118,12 @@ export function buildAlgorithmsScene(gpu: Gpu, format?: GPUTextureFormat): Algor
       for (const cb of redrawCbs) cb();
     },
     renderMode: () => mode,
+    refine() { logic.refineNow(); },
+    setAllOpacity(op) {
+      allOpacity = op;
+      for (const [id] of labelColors) logic.setLabelOpacity(id, op);
+      logic.refineNow();   // rebakes attr + redraws
+    },
+    allOpacity: () => allOpacity,
   };
 }
