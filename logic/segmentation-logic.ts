@@ -29,6 +29,7 @@ export interface SegmentationLogicOpts {
   color?: [number, number, number];           // colour for label 1 (single-label convenience; use setLabelColor for more)
   opacity?: number;                           // segment 3D opacity (default 1)
   refineDelayMs?: number;                     // debounce before the settle-refine (capability-tuned; default 180)
+  boundaryMode?: "outer" | "all";             // sdf: "outer" = shell only at segment↔background (default; crisp separated segments). "all" = shell at ANY label change (multi-material interface field) so EMBEDDED/NESTED labels surface too — islands within islands — without one SDF per segment.
 }
 
 export class SegmentationLogic {
@@ -46,6 +47,7 @@ export class SegmentationLogic {
   private unsubDirty: () => void;
   private refineTimer?: ReturnType<typeof setTimeout>;
   private refineDelayMs: number;             // quiescence before the settle-refine (sdf mode; capability-tuned)
+  private boundaryMode: "outer" | "all";
 
   constructor(device: GPUDevice, private seg: EditableSegmentation, opts: SegmentationLogicOpts = {}) {
     this.renderMode = opts.renderMode ?? "sdf";
@@ -53,10 +55,11 @@ export class SegmentationLogic {
     this.bandMm = opts.bandMm;
     this.opacity = opts.opacity ?? 1.0;
     this.refineDelayMs = opts.refineDelayMs ?? 180;
+    this.boundaryMode = opts.boundaryMode ?? "outer";
     this.setLabelColor(1, opts.color ?? [0.30, 0.85, 0.55]);   // single-label convenience default
 
     if (this.renderMode === "sdf") {
-      this.sdf = new JfaSdfBaker(device, seg.masterTexture(), seg.dims, seg.ijkToRAS);
+      this.sdf = new JfaSdfBaker(device, seg.masterTexture(), seg.dims, seg.ijkToRAS, 1.0, 2, this.boundaryMode);
     } else {
       this.baker = new ColorizeBaker(device, seg.masterTexture(), seg.dims);
       this.presenceTex = this.baker.output();
@@ -121,7 +124,11 @@ export class SegmentationLogic {
       // sdf: a tight shell band (≈0.65 voxel) gives a crisp edge on the smooth SDF without under-
       // smoothing (which would re-facet). Kept above the ray-march step (~0.7·voxel) to avoid holes.
       const voxelMm = Math.min(...this.seg.spacingMm());
-      const band = this.bandMm ?? (this.renderMode === "sdf" ? 0.65 * voxelMm : undefined);
+      // "all" (multi-material interface) mode uses a wider band: its distance is blurred for a smooth,
+      // facet-free normal, which rounds the unsigned V-bottom up — a wider band keeps thin structures
+      // from dropping out of the shell. "outer" stays tight (0.65 vox) for crisp separated surfaces.
+      const interfaceMode = this.renderMode === "sdf" && this.boundaryMode === "all";
+      const band = this.bandMm ?? (this.renderMode === "sdf" ? (interfaceMode ? 1.5 : 0.65) * voxelMm : undefined);
       // sdf textures live on the baker's PADDED grid (larger than the labelmap), so the field must use
       // the padded dims + ijkToRAS; the surface (presence) path stays on the label grid.
       const fdims = this.sdf ? this.sdf.sdfDims() : this.seg.dims;
@@ -130,6 +137,7 @@ export class SegmentationLogic {
         color: [1, 1, 1], opacity: this.opacity, ijkToRAS: fijk,
         mode: this.renderMode === "sdf" ? "sdf" : "surface", colorFromTexture: true, bandMm: band, clippable: false,
         attrTexture: this.sdf ? this.sdf.attrTexture() : undefined,   // per-segment opacity (sdf)
+        interfaceMode,
       });
     }
     return this.segField;

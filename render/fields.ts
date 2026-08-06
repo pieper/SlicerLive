@@ -226,6 +226,7 @@ export interface SegmentFieldOpts {
   mode?: "iso" | "surface" | "sdf";      // iso = crisp presence shell (default); surface = gradient-opacity translucent (Carve look); sdf = crisp terrace-free shell from a signed-distance field
   colorFromTexture?: boolean;            // iso/surface: take per-voxel colour from the texture's .rgb (multi-label) instead of the uniform colour. sdf always does.
   attrTexture?: GPUTexture;              // sdf: per-voxel attribute texture (.r = per-segment opacity). When set, opacity is per-label (translucent surface models) instead of the single uniform value.
+  interfaceMode?: boolean;               // sdf: texture .a is an UNSIGNED distance to the nearest label CHANGE (multi-material, JfaSdfBaker "all"). The shell normal is derived on the fly by locally re-signing the distance from the region colour (so the unsigned field's interface — where |grad| collapses — still gets a clean normal), letting embedded/nested labels surface without one SDF per segment.
 }
 
 /** A single segment rendered exactly as slicer_wgpu's SegmentField in its DEFAULT
@@ -258,6 +259,7 @@ export class SegmentField implements Field {
   private stepMm: number;
   private mode: "iso" | "surface" | "sdf";
   private colorFromTex: boolean;
+  private interfaceMode: boolean;
 
   constructor(tex: GPUTexture, dims: Vec3, spacing: Vec3, opts: SegmentFieldOpts) {
     this.tex = tex;
@@ -282,6 +284,7 @@ export class SegmentField implements Field {
     this.clippable = opts.clippable ?? true;
     this.mode = opts.mode ?? "iso";
     this.colorFromTex = opts.colorFromTexture ?? false;
+    this.interfaceMode = this.mode === "sdf" && (opts.interfaceMode ?? false);
     this.attrTex = this.mode === "sdf" ? opts.attrTexture : undefined;
     this.bindingCount = this.attrTex ? 2 : 1;
   }
@@ -340,6 +343,28 @@ fn attr_seg${s}(wp : vec3<f32>) -> vec2<f32> {   // per-segment (.x = opacity, .
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec2<f32>(0.0); }
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).rg;
+}` : ""}${this.interfaceMode ? `
+fn bdist_seg${s}(wp : vec3<f32>) -> f32 {   // SMOOTH (seam-blurred) interface distance from attr.b — for the normal only
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
+  return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).b;
+}
+fn pres_seg${s}(wp : vec3<f32>) -> f32 {   // CRISP in-segment presence (attr.a), linear-sampled for ~1-voxel AA
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = t4.xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 0.0; }
+  return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).a;
+}
+fn g1_seg${s}(c : f32, wp : vec3<f32>, dir : vec3<f32>, h : f32) -> f32 {
+  // One-sided difference of the SMOOTH interface distance along dir, picking the STEEPER side. The
+  // unsigned distance has a V-crease at the surface: a central difference straddling it cancels (fake
+  // zero gradient → degenerate normal). Taking the steeper one-sided difference follows the true ±1
+  // slope AWAY from the interface, so the normal stays well-defined right at the shell — computed on
+  // the fly only at shell samples, no stored normal. Uses the blurred distance (attr.b) so the normal
+  // is smooth (no JFA facets); the SHARP sdfTex.a still drives shell membership (surface stays at 0).
+  let dp = bdist_seg${s}(wp + dir * h) - c;
+  let dm = c - bdist_seg${s}(wp - dir * h);
+  return select(dm, dp, abs(dp) > abs(dm)) / h;
 }` : ""}
 // Shell (surface) contribution at wp: crisp Phong shell around sdf=0. Weighted by (1-mode) so it
 // morphs smoothly into the volume contribution across a blurred surface↔volume boundary.
@@ -349,10 +374,16 @@ fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step :
   let T = clamp(op0 * seg_op, 0.0, 1.0);      // TARGET surface opacity (per-segment × field)
   if (T <= 0.0) { return vec4<f32>(0.0); }
   let h = step;
+${this.interfaceMode ? `  let hg = 1.5 * step;
+  let dc = bdist_seg${s}(wp);
   let g = vec3<f32>(
+    g1_seg${s}(dc, wp, vec3<f32>(1,0,0), hg),
+    g1_seg${s}(dc, wp, vec3<f32>(0,1,0), hg),
+    g1_seg${s}(dc, wp, vec3<f32>(0,0,1), hg));`
+  : `  let g = vec3<f32>(
     vgrad_seg${s}(wp + vec3<f32>(h,0,0)) - vgrad_seg${s}(wp - vec3<f32>(h,0,0)),
     vgrad_seg${s}(wp + vec3<f32>(0,h,0)) - vgrad_seg${s}(wp - vec3<f32>(0,h,0)),
-    vgrad_seg${s}(wp + vec3<f32>(0,0,h)) - vgrad_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);
+    vgrad_seg${s}(wp + vec3<f32>(0,0,h)) - vgrad_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);`}
   let glen = length(g);
   if (glen < 1e-5) { return vec4<f32>(0.0); }
   var n = g / glen;
@@ -366,12 +397,14 @@ fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step :
   // built-in silhouette AA).
   let a = max(1.0 - d_mm / band, 0.0);
   if (a <= 0.0) { return vec4<f32>(0.0); }
-  // Convert ray-step to d_mm-distance with the RAW gradient projection |dot(rd,g)| = |d(d_mm)/ds|
-  // (includes |grad sdf|, which the distance blur pulls below 1) so Σ(a/band)·Δd_mm = ∫(a/band)dd = 1
-  // exactly. →0 at grazing = built-in silhouette AA.
-  let rate = max(abs(dot(rd, g)), 1e-3);
+  // Convert ray-step to d_mm-distance. Outer: RAW gradient projection |dot(rd,g)| = |d(d_mm)/ds|
+  // (includes |grad sdf|, which the distance blur pulls below 1). Interface: the re-signed gradient has
+  // an arbitrary magnitude (a sign jump at the interface), so use the UNIT normal cosine |dot(rd,n)| —
+  // still →0 at grazing (silhouette AA), and keeps opacity thickness-consistent.
+  let rate = max(abs(dot(rd, ${this.interfaceMode ? "n" : "g"})), 1e-3);
   let tau = -log(1.0 - min(T, 0.9999)) * (a / band) * (step * rate);
-  let op = 1.0 - exp(-tau);
+  var op = 1.0 - exp(-tau);
+${this.interfaceMode ? `  op = op * pres_seg${s}(wp);   // gate to GENUINELY in-segment voxels — kills the bled colour/opacity halo beyond the real edge` : ""}
   if (op <= 0.0004) { return vec4<f32>(0.0); }
   let ka = u_material.seg${s}_shade.x; let kd = u_material.seg${s}_shade.y;
   let ks = u_material.seg${s}_shade.z; let sh = u_material.seg${s}_shade.w;

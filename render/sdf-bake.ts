@@ -42,13 +42,20 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let c = vec3<i32>(gid);
   let my = labelAt(c);
   let meIn = my != 0u;
+  let allMode = u.params.y > 0.5;                   // 0 = outer boundary only; 1 = ANY label change (multi-material interfaces)
   var boundary = false;
   var region = my;                                  // inside voxel → own label
   let offs = array<vec3<i32>, 6>(vec3<i32>(1,0,0), vec3<i32>(-1,0,0), vec3<i32>(0,1,0), vec3<i32>(0,-1,0), vec3<i32>(0,0,1), vec3<i32>(0,0,-1));
   for (var i = 0; i < 6; i = i + 1) {
     let nl = labelAt(c + offs[i]);
-    let nIn = nl != 0u;
-    if (nIn != meIn) { boundary = true; if (!meIn) { region = nl; } }  // outside boundary → adopt inside neighbour's label
+    // outer mode: boundary at inside↔outside (segment↔background). all mode: boundary at ANY label change
+    // (segment↔background AND segment↔segment) so embedded/nested structures get an interface shell too.
+    let isChange = select((nl != 0u) != meIn, nl != my, allMode);
+    // outer: a background boundary voxel adopts the neighbour's label (so the outer shell renders on both
+    // sides). all: every voxel keeps its OWN label (background stays 0 = transparent), so the region
+    // COLOUR changes across EVERY interface — including the outer one — which the shader's on-the-fly
+    // re-signing needs to recover a clean inside/outside normal there too.
+    if (isChange) { boundary = true; if (my == 0u && !allMode) { region = nl; } }
   }
   var seed = vec4<f32>(0.0, 0.0, 0.0, 0.0);
   if (boundary) { seed = vec4<f32>((u.ijkToRAS * vec4<f32>(vec3<f32>(gid), 1.0)).xyz, f32(region)); }
@@ -110,12 +117,18 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let ld = vec3<i32>(u.dims.xyz) - vec3<i32>(2 * pad);
   let inRange = all(lc >= vec3<i32>(0)) && all(lc < ld);
   let ins = inRange && textureLoad(t_label, lc, 0).r != 0u;
-  let sdf = select(dist, -dist, ins);
+  // outer mode: SIGNED (neg inside the union) — smooth zero-crossing = clean normals. all mode:
+  // UNSIGNED distance to the nearest interface (every label change is a wall; no global inside/outside).
+  let sdf = select(select(dist, -dist, ins), dist, u.params.y > 0.5);
   let lbl = u32(s.w + 0.5) & 255u;
   let pal = select(vec4<f32>(0.0), u_pal[lbl], valid);
   let mode = select(0.0, u_mode[lbl].x, valid);
   textureStore(t_out, c, vec4<f32>(pal.rgb, sdf));
-  textureStore(t_attr, c, vec4<f32>(pal.a, mode, 0.0, 0.0));   // .r = per-segment opacity, .g = shading mode
+  // .r = opacity, .g = shading mode, .b = distance (seam-blurred → SMOOTH distance for the interface-mode
+  // normal; sdfTex.a stays sharp for shell membership), .a = CRISP presence (1 inside a real segment, 0
+  // background) — the FULLBLUR carries it unblurred so the shader can tell a genuine in-segment voxel
+  // from one that merely caught BLED colour/opacity outside any segment, and gate the shell to the real edge.
+  textureStore(t_attr, c, vec4<f32>(pal.a, mode, sdf, select(0.0, 1.0, ins)));
 }`;
 
 // Separable Gaussian on the SDF's .a (distance) only, carrying .rgb (colour) from the centre tap.
@@ -172,10 +185,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   textureStore(t_out, c, vec4<f32>(sum, center.a));
 }`;
 
-// Separable Gaussian on ALL channels — used to seam-blur the attribute texture (.r opacity, .g
-// shading mode) so the surface↔volume / opacity classification transitions as smoothly as the colour
-// does, instead of a voxel-quantized (and JFA-approximate) hard edge that reads as jaggies where an
-// opaque surface segment meets a translucent volume one.
+// Separable Gaussian on the attribute texture's .rgb (.r opacity, .g shading mode, .b distance) so
+// those classification/normal channels transition as smoothly as the colour. Carries .a UNBLURRED —
+// it holds the CRISP in-segment presence bit, which must stay a hard 0/1 (linear texture sampling
+// gives it ~1-voxel anti-aliasing at render) so the shader can gate out bled colour beyond a segment.
 const FULLBLUR_WGSL = /* wgsl */ `
 struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4> };
 @group(0) @binding(0) var t_in : texture_3d<f32>;
@@ -189,13 +202,14 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
   var av = vec3<i32>(0);
   if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
-  var sum = textureLoad(t_in, c, 0) * wt(0u);
+  let center = textureLoad(t_in, c, 0);
+  var sum = center.rgb * wt(0u);
   let R = i32(u.axis_r.y);
   for (var i = 1; i <= R; i = i + 1) {
-    sum = sum + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0)
-                            + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0));
+    sum = sum + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).rgb
+                            + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).rgb);
   }
-  textureStore(t_out, c, sum);
+  textureStore(t_out, c, vec4<f32>(sum, center.a));
 }`;
 
 function gaussHalfKernel(sigma: number): { radius: number; w: Float32Array } {
@@ -234,9 +248,12 @@ export class JfaSdfBaker {
   // real cap + in-bounds gradient neighbourhood (docs/ALGORITHMS.md border artifact). The SDF textures,
   // dispatch, seeds, blur and readback all run on the PADDED grid; `dims`/`ijkToRAS` become the padded
   // grid's, and `sdfDims()`/`sdfIjkToRAS()` expose them to the SegmentField.
-  constructor(dev: GPUDevice, private labelTex: GPUTexture, private dims: Vec3, private ijkToRAS: number[], smoothSigmaVoxels = 1.0, pad = 2) {
+  private bmode: number;                          // 0 = outer boundary (signed); 1 = any label change (unsigned, multi-material)
+
+  constructor(dev: GPUDevice, private labelTex: GPUTexture, private dims: Vec3, private ijkToRAS: number[], smoothSigmaVoxels = 1.0, pad = 2, boundaryMode: "outer" | "all" = "outer") {
     this.dev = dev;
     this.smoothSigma = smoothSigmaVoxels;
+    this.bmode = boundaryMode === "all" ? 1 : 0;
     this.pad = pad;
     this.labelDims = [dims[0], dims[1], dims[2]];
     // Grow the grid, and shift the ijkToRAS origin so padded voxel (pad,pad,pad) still maps to the RAS
@@ -330,7 +347,7 @@ export class JfaSdfBaker {
     const f = new Float32Array(ab), u = new Uint32Array(ab);
     f.set(transpose4(this.ijkToRAS), 0);
     u[16] = this.dims[0]; u[17] = this.dims[1]; u[18] = this.dims[2]; u[19] = this.pad;   // dims.w = pad (label is offset by pad; pad region = background)
-    f[20] = step; f[21] = 0; f[22] = 0; f[23] = 0;
+    f[20] = step; f[21] = this.bmode; f[22] = 0; f[23] = 0;   // params.y = boundary mode (0 outer / 1 any-change)
     this.dev.queue.writeBuffer(this.uni, 0, ab);
   }
 

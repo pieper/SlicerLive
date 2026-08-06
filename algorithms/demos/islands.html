@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SlicerLive — islands within islands</title>
+<style>
+  :root { color-scheme: dark; }
+  /* Touch: swallow browser swipe/zoom/refresh gestures so they drive the camera, not navigation. */
+  html, body { height: 100%; margin: 0; background: #05060a; overscroll-behavior: none; touch-action: none; }
+  #bar button, #bar input { touch-action: manipulation; }
+  #wrap { display: flex; align-items: center; justify-content: center; width: 100vw; height: 100vh; }
+  #gpu { width: min(92vw, 92vh); height: min(92vw, 92vh); display: block; background: #000; touch-action: none; border-radius: 8px; }
+  #status { position: fixed; top: 8px; left: 12px; z-index: 3;
+            font: 12px -apple-system, system-ui, sans-serif; color: #9fb3d0;
+            background: rgba(5,6,10,.72); padding: 4px 10px; border-radius: 6px; }
+  #bar { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 3;
+         display: flex; gap: 8px; align-items: center; background: rgba(5,6,10,.6); padding: 6px 8px; border-radius: 8px; }
+  #bar button { font: 600 12px -apple-system, system-ui, sans-serif; color: #d6e2f2;
+         background: #1b2740; border: 1px solid #33507e; border-radius: 5px; padding: 5px 12px; cursor: pointer; }
+  #bar button:hover { background: #24365a; }
+  #bar label { font: 600 11px -apple-system, system-ui, sans-serif; color: #9fb3d0; display: flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+  <div id="status"><span id="status-text">loading…</span></div>
+  <div id="wrap"><canvas id="gpu"></canvas></div>
+  <div id="bar">
+    <button id="regen">🎲 Regenerate</button>
+    <button id="rand">Randomize look</button>
+    <button id="reset">Reset look</button>
+    <label>Opacity <input id="opacity" type="range" min="10" max="100" value="100"></label>
+  </div>
+  <script type="module" src="islands.js"></script>
+</body>
+</html>
