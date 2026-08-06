@@ -123,7 +123,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let lbl = u32(s.w + 0.5) & 255u;
   let pal = select(vec4<f32>(0.0), u_pal[lbl], valid);
   let mode = select(0.0, u_mode[lbl].x, valid);
-  textureStore(t_out, c, vec4<f32>(pal.rgb, sdf));
+  // PREMULTIPLIED colour (rgb·opacity): the colour-seam blur then can't bleed a HIDDEN (opacity 0)
+  // segment's colour into a visible neighbour — an invisible organ was still tinting the organ it
+  // abutted (looked like half-opacity). The shader divides by the per-segment opacity to recover the
+  // true colour, so a 0-opacity region contributes nothing to the blend.
+  textureStore(t_out, c, vec4<f32>(pal.rgb * pal.a, sdf));
   // .r = opacity, .g = shading mode, .b = distance (seam-blurred → SMOOTH distance for the interface-mode
   // normal; sdfTex.a stays sharp for shell membership), .a = CRISP presence (1 inside a real segment, 0
   // background) — the FULLBLUR carries it unblurred so the shader can tell a genuine in-segment voxel
@@ -185,10 +189,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   textureStore(t_out, c, vec4<f32>(sum, center.a));
 }`;
 
-// Separable Gaussian on the attribute texture's .rgb (.r opacity, .g shading mode, .b distance) so
-// those classification/normal channels transition as smoothly as the colour. Carries .a UNBLURRED —
-// it holds the CRISP in-segment presence bit, which must stay a hard 0/1 (linear texture sampling
-// gives it ~1-voxel anti-aliasing at render) so the shader can gate out bled colour beyond a segment.
+// Separable Gaussian on ONLY the attribute texture's .g (shading mode) and .b (distance) — those need
+// to transition smoothly (surface↔volume blend; smooth interface normal). Carries .r (opacity) AND .a
+// (presence) UNBLURRED: opacity is PER-SEGMENT, so blurring it across a label boundary drags a
+// segment's edge toward its neighbour's opacity — an opaque organ goes half-transparent exactly where
+// it abuts a hidden (0-opacity) one. Keeping .r crisp (linear sampling still gives ~1-voxel AA) renders
+// each segment's surface at its own opacity regardless of neighbours. .a is the crisp presence bit.
 const FULLBLUR_WGSL = /* wgsl */ `
 struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4> };
 @group(0) @binding(0) var t_in : texture_3d<f32>;
@@ -203,13 +209,13 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   var av = vec3<i32>(0);
   if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
   let center = textureLoad(t_in, c, 0);
-  var sum = center.rgb * wt(0u);
+  var gb = center.gb * wt(0u);
   let R = i32(u.axis_r.y);
   for (var i = 1; i <= R; i = i + 1) {
-    sum = sum + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).rgb
-                            + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).rgb);
+    gb = gb + wt(u32(i)) * (textureLoad(t_in, clamp(c + av * i, vec3<i32>(0), dmax), 0).gb
+                          + textureLoad(t_in, clamp(c - av * i, vec3<i32>(0), dmax), 0).gb);
   }
-  textureStore(t_out, c, vec4<f32>(sum, center.a));
+  textureStore(t_out, c, vec4<f32>(center.r, gb.x, gb.y, center.a));
 }`;
 
 function gaussHalfKernel(sigma: number): { radius: number; w: Float32Array } {
