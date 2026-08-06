@@ -69,6 +69,12 @@ export class SegBudget {
   /** SDF grid cap per axis for large volumes (SEGRoulette / microCT). */
   sdfMaxDim(): number { return this.tier === "high" ? 384 : this.tier === "mid" ? 256 : 128; }
 
+  /** TOTAL SDF voxel budget — the memory ceiling for the isotropic resample (~64 B/voxel across the
+   *  JFA seed + sdf/attr/scratch textures, so mid ≈ 256³ ≈ 1.1 GB). Thick-slice anisotropy is upsampled
+   *  toward isotropic (no per-slice gaps), and this caps how far, so a weaker device coarsens gracefully
+   *  instead of OOMing (the caller can then suggest remote rendering). NOT sdfMaxDim³ — high stays ~2 GB. */
+  sdfMaxVoxels(): number { return this.tier === "high" ? 320 ** 3 : this.tier === "mid" ? 256 ** 3 : 128 ** 3; }
+
   /** Debounce before the settle-refine fires (ms). Fast → near-immediate (dynamic); slow → patient. */
   refineDelayMs(): number { return this.tier === "high" ? 40 : this.tier === "mid" ? 150 : 320; }
 

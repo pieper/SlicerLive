@@ -194,7 +194,7 @@ async function main() {
       lastEntry = res.entry as (SeriesEntry & Record<string, unknown>) | undefined;
       status("baking segmentation surface…");
       rs?.destroy();   // free the previous case's 3D-seg GPU resources before replacing
-      rs = buildSegrouletteScene(gpu, srgb, res.ct, res.seg, { sdfMaxDim: budget.sdfMaxDim(), refineDelayMs: budget.refineDelayMs() });
+      rs = buildSegrouletteScene(gpu, srgb, res.ct, res.seg, { sdfMaxDim: budget.sdfMaxDim(), sdfMaxVoxels: budget.sdfMaxVoxels(), refineDelayMs: budget.refineDelayMs() });
       // frame: slices at the Slicer default voxel-centre plane; camera fit to the volume
       sliceIx = new SliceInteractor({ ijkToRAS: rs.ijkToRAS, rasLo: rs.rasLo, rasHi: rs.rasHi });
       for (const p of planes) off[p.cell] = slicerDefaultOffset01(p.orient, rs.dims, rs.ijkToRAS, rs.rasLo, rs.rasHi);

@@ -15,7 +15,7 @@ import { ImageField, type Field } from "../fields.ts";
 import { bakeColorizeRGBA } from "../bake.ts";
 import { createRoiWidget, type RoiWidget } from "./roi-widget.ts";
 import { EditableSegmentation } from "../../algorithms/editable-segmentation.ts";
-import { labelmapHasInternalBoundary } from "../../algorithms/geom.ts";
+import { labelmapHasInternalBoundary, resampleIsotropic } from "../../algorithms/geom.ts";
 import { SegmentationLogic } from "../../logic/segmentation-logic.ts";
 
 // The 3D segmentation is ONE unified colorized signed-distance-field surface (algorithms/ + logic/):
@@ -52,37 +52,6 @@ function modalityLUT(modality: string | undefined, maxAlpha = 0.42): Uint8Array 
   return lut;
 }
 
-/** Downsample a label volume (nearest) so no axis exceeds `maxDim`, returning the capped labelmap +
- *  an ijkToRAS whose spacing is scaled to cover the SAME RAS box. No-op (just a Uint32 copy) when the
- *  volume already fits. For the 3D SDF only — the 2D slice overlay uses the full-res labelmap. */
-function cappedLabelmap(lab: ArrayLike<number>, dims: Vec3, ijkToRAS: number[], maxDim: number): { lab: Uint32Array; dims: Vec3; ijkToRAS: number[] } {
-  const scale = Math.min(1, maxDim / Math.max(...dims));
-  const cd: Vec3 = [
-    Math.max(1, Math.round(dims[0] * scale)), Math.max(1, Math.round(dims[1] * scale)), Math.max(1, Math.round(dims[2] * scale)),
-  ];
-  const [nx, ny, nz] = dims, [cx, cy, cz] = cd;
-  if (cx === nx && cy === ny && cz === nz) {
-    const out = new Uint32Array(nx * ny * nz);
-    for (let i = 0; i < out.length; i++) out[i] = lab[i];
-    return { lab: out, dims, ijkToRAS };
-  }
-  const out = new Uint32Array(cx * cy * cz);
-  for (let z = 0; z < cz; z++) {
-    const sz = Math.min(nz - 1, Math.floor((z + 0.5) * nz / cz));
-    for (let y = 0; y < cy; y++) {
-      const sy = Math.min(ny - 1, Math.floor((y + 0.5) * ny / cy));
-      for (let x = 0; x < cx; x++) {
-        const sx = Math.min(nx - 1, Math.floor((x + 0.5) * nx / cx));
-        out[(z * cy + y) * cx + x] = lab[(sz * ny + sy) * nx + sx];
-      }
-    }
-  }
-  // Scale the 3 direction columns by dims/cappedDims so the capped grid spans the same RAS extent.
-  const r = [nx / cx, ny / cy, nz / cz];
-  const m = ijkToRAS.slice();
-  for (let row = 0; row < 3; row++) { m[row * 4] *= r[0]; m[row * 4 + 1] *= r[1]; m[row * 4 + 2] *= r[2]; }
-  return { lab: out, dims: cd, ijkToRAS: m };
-}
 
 export interface SegrouletteScene {
   scene: SceneRenderer;
@@ -126,7 +95,7 @@ export function buildSegrouletteScene(
   format: GPUTextureFormat,
   ct: CTVolume,
   seg?: SegLabelmap,
-  opts: { sdfMaxDim?: number; refineDelayMs?: number } = {},
+  opts: { sdfMaxDim?: number; sdfMaxVoxels?: number; refineDelayMs?: number } = {},
 ): SegrouletteScene {
   const dev = gpu.device;
   const dims = ct.dims;
@@ -177,7 +146,12 @@ export function buildSegrouletteScene(
   let segLogic: SegmentationLogic | undefined;
   let editable: EditableSegmentation | undefined;
   if (seg && segments.length > 0) {
-    const cap = cappedLabelmap(seg.lab, dims, ct.ijkToRAS, opts.sdfMaxDim ?? SDF_MAX_DIM);
+    // ISOTROPIC resample (capacity-gated): thick-slice CTs must upsample the slice axis toward
+    // isotropic or a near-slice-parallel surface falls between slices and the SDF shell misses it →
+    // holes (user report: lung/liver tops vanish when rotated). sdfMaxVoxels caps memory so a weaker
+    // device coarsens instead of OOMing; `coarsened` → we surfaced fewer voxels than ideal.
+    const cap = resampleIsotropic(seg.lab, dims, ct.ijkToRAS, opts.sdfMaxDim ?? SDF_MAX_DIM, opts.sdfMaxVoxels);
+    if (cap.coarsened) console.warn(`SEGRoulette: SDF grid coarsened to fit the device memory budget (${cap.dims.join("×")}, ${cap.vox.toFixed(2)}mm) — a remote render server would allow full resolution.`);
     editable = new EditableSegmentation(dev, cap.dims, { ijkToRAS: cap.ijkToRAS });
     // Real data often has EMBEDDED/adjacent labels (tumor in liver, cyst clusters): auto-pick the
     // multi-material interface field ("all") so internal label↔label boundaries surface too, else the
