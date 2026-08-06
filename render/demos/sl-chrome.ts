@@ -7,15 +7,20 @@ import { SL_LOGO } from "./sl-logo.ts";
 
 export interface VizControl {
   label: string;
-  get: () => boolean;
-  set: (on: boolean) => void;
   disabled?: () => boolean;    // e.g. no segmentation to toggle
+  // A control is EITHER a boolean switch (get/set) OR a unified opacity control (getOpacity/setOpacity):
+  // the latter clicks through the tri-state (100→50→0) and drags side-to-side into a live opacity slider.
+  get?: () => boolean;
+  set?: (on: boolean) => void;
+  getOpacity?: () => number;
+  setOpacity?: (o: number) => void;   // continuous 0..1 (hot-updates while dragging)
+  color?: [number, number, number];   // fill tint for the opacity chip (default cyan)
 }
 export interface SegInfo { num: number; name: string; color: [number, number, number] }
 export interface SegmentControls {
   list: () => SegInfo[];              // the current case's segments (re-read each time the popup opens)
-  get: (num: number) => number;       // current opacity level (tri-state: 1, 0.5, or 0)
-  cycle: (num: number) => void;       // advance one tri-state step (1 → 0.5 → 0 → 1)
+  get: (num: number) => number;       // current opacity 0..1
+  set: (num: number, o: number) => void;  // set opacity (continuous; hot-updates while dragging)
   enabled?: () => boolean;            // dim the whole section when there's nothing to toggle
 }
 export interface ChromeOpts {
@@ -147,14 +152,49 @@ export function installChrome(opts: ChromeOpts): Chrome {
   const paintTri = (box: HTMLElement, level: number, color: [number, number, number]) => {
     const pct = Math.round(level * 100);
     const c = `rgb(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)})`;
-    box.style.opacity = level === 0 ? "0.75" : "1";
+    box.style.opacity = level < 0.02 ? "0.75" : "1";
     box.innerHTML =
       `<span style="position:absolute;left:0;top:0;bottom:0;width:${pct}%;background:${c};opacity:.9"></span>` +
       `<span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;` +
       `font:700 10px -apple-system,system-ui,sans-serif;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.75)">${pct}%</span>`;
   };
 
-  const rows: { c: VizControl; row: HTMLElement; sw: HTMLElement }[] = [];
+  // Unified opacity control on a chip: a CLICK cycles the tri-state (100 → 50 → 0 → loop); a horizontal
+  // DRAG turns it into a continuous opacity slider that hot-updates as you slide (so a volume render can
+  // be dialed semi-transparent and composited with the segmentation). Shared by the layer controls and
+  // the per-segment list, so every visibility control behaves identically.
+  const triNext = (v: number) => (v > 0.66 ? 0.5 : v > 0.04 ? 0 : 1);
+  const attachOpacity = (box: HTMLElement, get: () => number, set: (o: number) => void, color: [number, number, number], onChange: () => void) => {
+    box.style.cursor = "ew-resize";
+    box.title = "Click: 100% → 50% → off · Drag sideways for a live opacity slider";
+    const paint = () => paintTri(box, get(), color);
+    paint();
+    let startX = 0, startV = 0, dragged = false, id = -1;
+    box.addEventListener("pointerdown", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      startX = e.clientX; startV = get(); dragged = false; id = e.pointerId;
+      try { box.setPointerCapture(id); } catch { /* ignore */ }
+    });
+    box.addEventListener("pointermove", (e) => {
+      if (id < 0) return;
+      const dx = e.clientX - startX;
+      if (Math.abs(dx) > 3) dragged = true;
+      if (dragged) { set(Math.max(0, Math.min(1, startV + dx / 130))); paint(); onChange(); }   // ~130px = full sweep
+    });
+    const end = () => {
+      if (id < 0) return;
+      if (!dragged) { set(triNext(get())); paint(); onChange(); }   // no drag → it was a click → tri-state cycle
+      try { box.releasePointerCapture(id); } catch { /* ignore */ }
+      id = -1;
+    };
+    box.addEventListener("pointerup", end);
+    box.addEventListener("pointercancel", end);
+    return paint;
+  };
+  const OPBOX_CSS = "width:44px;height:18px;border-radius:6px;position:relative;overflow:hidden;flex:0 0 auto;" +
+    "background:rgba(255,255,255,.14);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);touch-action:none;";
+
+  const rows: { c: VizControl; row: HTMLElement; sw?: HTMLElement; repaint?: () => void }[] = [];
   if (controls.length) {
     const head = document.createElement("div");
     head.textContent = "Visualization";
@@ -162,14 +202,24 @@ export function installChrome(opts: ChromeOpts): Chrome {
     pop.appendChild(head);
     for (const c of controls) {
       const row = document.createElement("div");
-      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:14px;padding:5px 0;cursor:pointer;";
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:14px;padding:5px 0;";
       const lab = document.createElement("span"); lab.textContent = c.label;
-      const sw = document.createElement("span");   // toggle pill
-      sw.style.cssText = "width:34px;height:19px;border-radius:999px;position:relative;transition:background 120ms;flex:0 0 auto;";
-      row.appendChild(lab); row.appendChild(sw);
-      row.onclick = () => { if (c.disabled?.()) return; const next = !c.get(); paintSw(sw, next); afterPaint(() => { c.set(next); opts.onChange?.(); refresh(); }); };
+      row.appendChild(lab);
+      if (c.getOpacity && c.setOpacity) {   // unified opacity control (tri-state click + drag slider)
+        const box = document.createElement("span");
+        box.style.cssText = OPBOX_CSS;
+        row.appendChild(box);
+        const paint = attachOpacity(box, c.getOpacity, (o) => c.setOpacity!(o), c.color ?? [0.62, 0.9, 1.0], () => opts.onChange?.());
+        rows.push({ c, row, repaint: paint });
+      } else {   // boolean switch
+        row.style.cursor = "pointer";
+        const sw = document.createElement("span");
+        sw.style.cssText = "width:34px;height:19px;border-radius:999px;position:relative;transition:background 120ms;flex:0 0 auto;";
+        row.appendChild(sw);
+        row.onclick = () => { if (c.disabled?.()) return; const next = !c.get!(); paintSw(sw, next); afterPaint(() => { c.set!(next); opts.onChange?.(); refresh(); }); };
+        rows.push({ c, row, sw });
+      }
       pop.appendChild(row);
-      rows.push({ c, row, sw });
     }
   } else if (opts.about === false && !opts.segments) {
     pop.textContent = "SlicerLive — WebGPU renderer";
@@ -178,7 +228,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
   // ---- per-segment opacity (swatch + tri-state box), rebuilt from the current case on each open ----
   const segHost = document.createElement("div");
   pop.appendChild(segHost);
-  const segRows: { num: number; box: HTMLElement; color: [number, number, number] }[] = [];
+  const segRows: { num: number; box: HTMLElement; color: [number, number, number]; paint: () => void }[] = [];
   function buildSegments() {
     const S = opts.segments;
     segRows.length = 0; segHost.innerHTML = "";
@@ -190,7 +240,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
       (list.length > 6 ? "max-height:210px;overflow-y:auto;" : "");
     for (const s of list) {
       const row = document.createElement("div");
-      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 2px;cursor:pointer;";
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 2px;";
       const left = document.createElement("span");
       left.style.cssText = "display:flex;align-items:center;gap:8px;min-width:0;";
       const swatch = document.createElement("span");
@@ -200,18 +250,11 @@ export function installChrome(opts: ChromeOpts): Chrome {
       lab.style.cssText = "font:500 12.5px -apple-system,system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
       left.appendChild(swatch); left.appendChild(lab);
       const box = document.createElement("span");
-      box.title = "Opacity: click to cycle 100% → 50% → off";
-      box.style.cssText = "width:40px;height:18px;border-radius:6px;position:relative;overflow:hidden;flex:0 0 auto;" +
-        "background:rgba(255,255,255,.14);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);";
+      box.style.cssText = OPBOX_CSS;
       row.appendChild(left); row.appendChild(box);
-      row.onclick = () => {
-        if (S.enabled && !S.enabled()) return;
-        const next = ({ 1: 0.5, 0.5: 0, 0: 1 } as Record<number, number>)[S.get(s.num)] ?? 1;
-        paintTri(box, next, s.color);                        // optimistic paint
-        afterPaint(() => { S.cycle(s.num); refresh(); });
-      };
+      const paint = attachOpacity(box, () => S.get(s.num), (o) => { if (!(S.enabled && !S.enabled())) S.set(s.num, o); }, s.color, () => opts.onChange?.());
       wrap.appendChild(row);
-      segRows.push({ num: s.num, box, color: s.color });
+      segRows.push({ num: s.num, box, color: s.color, paint });
     }
     segHost.appendChild(wrap);
     paintSegments();
@@ -221,7 +264,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
     if (!S) return;
     const dis = S.enabled ? !S.enabled() : false;
     segHost.style.opacity = dis ? "0.4" : "1";
-    for (const { num, box, color } of segRows) paintTri(box, S.get(num), color);
+    for (const r of segRows) r.paint();
   }
 
   // ---- "About SlicerLive" row (matches the legacy popup) ----
@@ -240,12 +283,14 @@ export function installChrome(opts: ChromeOpts): Chrome {
   }
 
   function refresh() {
-    for (const { c, row, sw } of rows) {
-      const on = c.get(), dis = c.disabled?.() ?? false;
+    for (const { c, row, sw, repaint } of rows) {
+      const dis = c.disabled?.() ?? false;
       row.style.opacity = dis ? "0.4" : "1";
+      if (repaint) { repaint(); continue; }     // opacity control repaints its own chip
+      const on = c.get!();
       row.style.cursor = dis ? "default" : "pointer";
-      sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
-      sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
+      sw!.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
+      sw!.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
     }
     paintSegments();
   }

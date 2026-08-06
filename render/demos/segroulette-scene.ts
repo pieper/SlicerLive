@@ -69,6 +69,13 @@ export interface SegrouletteScene {
   hasSeg: boolean;                         // whether there's a segmentation layer to toggle
   /** Toggle the two independent 3D layers (background modality VR + segmentation). */
   setLayers(showVolume: boolean, showSeg: boolean): void;
+  /** Continuous 3D-LAYER opacity (0..1): the background VR (scales its transfer-function alpha) and the
+   *  whole segmentation (field-level multiplier over per-segment opacity). 0 removes the layer from the
+   *  build; >0 composites it. Lets a semi-transparent VR sit behind the segmentation. */
+  setVolumeOpacity(o: number): void;
+  volumeOpacity(): number;
+  setSegOpacity(o: number): void;
+  segOpacity(): number;
   /** Per-segment opacity (0 = hidden, 0.5 = translucent, 1 = opaque) — 3D SDF shell + slice overlay.
    *  Rebakes the colorized overlay and the SDF attr in place. Caller redraws slices afterwards. */
   setSegmentOpacity(num: number, opacity: number): void;
@@ -104,7 +111,13 @@ export function buildSegrouletteScene(
 
   // The source volume: modality-appropriate VR (also the raw scalar the MPR window/levels). This is
   // the ONLY clippable field — the ROI crop spares the segmentation (seg fields are clippable:false).
-  const volumeField = new ImageField(dev, data, dims, [1, 1, 1], modalityLUT(ct.modality), {
+  const baseVolLut = modalityLUT(ct.modality);   // kept so the VR opacity control can scale its alpha live
+  const scaledVolLut = (o: number): Uint8Array => {
+    const l = baseVolLut.slice();
+    for (let i = 0; i < 256; i++) l[i * 4 + 3] = Math.round(l[i * 4 + 3] * o);
+    return l;
+  };
+  const volumeField = new ImageField(dev, data, dims, [1, 1, 1], baseVolLut, {
     clim, ijkToRAS: ct.ijkToRAS, shade: [0.25, 0.7, 0.45, 20],
   });
 
@@ -171,7 +184,8 @@ export function buildSegrouletteScene(
 
   // Central state + rebuild. build() creates the uniform buffer (so setBackground/clip must FOLLOW
   // it) and re-packs the shader, so every visibility/crop change funnels through here.
-  let showVolume = true, showSeg = hasSeg;
+  let volumeOpacity = 1, segLayerOpacity = 1;   // 3D layer opacities (segLayerOpacity = global seg multiplier; distinct from the per-segment `segOpacity` map)
+  let showVolume = true, showSeg = hasSeg;   // derived: opacity > 0 (field present in the scene build)
   let roiEnabled = false, roiVisible = false;
   const currentSegFields = (): Field[] => segLogic ? [segLogic.field()] : [];
   const rebuild = () => {
@@ -208,7 +222,21 @@ export function buildSegrouletteScene(
   return {
     scene, slice, center, radius, rasLo, rasHi, ijkToRAS: ct.ijkToRAS, dims, win: ct.win, lev: ct.lev,
     segments, mode, hasSeg, roi,
-    setLayers(sv, ss) { showVolume = sv; showSeg = ss; rebuild(); },
+    setLayers(sv, ss) { this.setVolumeOpacity(sv ? 1 : 0); this.setSegOpacity(ss ? 1 : 0); },
+    setVolumeOpacity(o) {
+      volumeOpacity = Math.max(0, Math.min(1, o));
+      const was = showVolume; showVolume = volumeOpacity > 0.001;
+      volumeField.setLUT(scaledVolLut(volumeOpacity));         // scale the VR transfer-function alpha
+      if (was !== showVolume) rebuild();                        // add/remove the VR field only when crossing 0
+    },
+    volumeOpacity: () => volumeOpacity,
+    setSegOpacity(o) {
+      segLayerOpacity = Math.max(0, Math.min(1, o));
+      const was = showSeg; showSeg = hasSeg && segLayerOpacity > 0.001;
+      segLogic?.setGlobalOpacity(segLayerOpacity);
+      if (was !== showSeg) rebuild(); else scene.syncUniforms();   // op0 is a uniform → re-pack in place
+    },
+    segOpacity: () => segLayerOpacity,
     setSegmentOpacity(num, opacity) {
       const o = Math.max(0, Math.min(1, opacity));
       if (o >= 1) segOpacity.delete(num); else segOpacity.set(num, o);   // 1 is the default

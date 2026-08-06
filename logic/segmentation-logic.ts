@@ -143,6 +143,10 @@ export class SegmentationLogic {
     return this.segField;
   }
 
+  /** Live GLOBAL segmentation opacity (0..1) — the field-level multiplier over every segment's own
+   *  opacity. Caller does scene.syncUniforms() + redraw. */
+  setGlobalOpacity(o: number) { this.opacity = o; this.segField?.setOpacity(o); }
+
   /** Notified after every edit (post-rebake) so the app can redraw. */
   onRedraw(cb: () => void) { this.redrawCbs.push(cb); }
 

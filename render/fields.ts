@@ -289,6 +289,10 @@ export class SegmentField implements Field {
     this.bindingCount = this.attrTex ? 2 : 1;
   }
 
+  /** Field-level opacity (multiplies every segment's per-label opacity in the shader). Live global
+   *  segmentation opacity — the caller does scene.syncUniforms() + redraw to apply. */
+  setOpacity(o: number) { this.opacity = Math.max(0, Math.min(1, o)); }
+
   uniformFloats() { return 28; }        // mat4(16) + color(4) + shade(4) + params(4)
   aabb(): [Vec3, Vec3] { return this.box; }
   sampleStep(): number { return this.stepMm; }

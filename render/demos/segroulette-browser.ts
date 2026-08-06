@@ -116,19 +116,19 @@ async function main() {
   // Shared chrome: SlicerLive logo popup with the independent 3D layer toggles (modality volume
   // render + segmentation), per-segment visibility, the volume-only ROI crop, and the "?" help
   // cheat-sheet. All state persists across spins.
-  const layers = { volume: true, seg: true };
   let sliceOutline = false;   // slice overlay: fill (default) vs outline — a session preference
   // ROI crop (VOLUME ONLY): Slicer's independent enable + visibility, both off by default. The first
   // time crop is enabled this session, also reveal the box (Slicer's "enable turns it on" behaviour).
   let roiEnabled = false, roiVisible = false, roiFirstEnable = true;
-  const applyLayers = () => { rs?.setLayers(layers.volume, layers.seg); draw3d(); xhair?.redraw(); };
   const redrawSlices = () => { for (const p of planes) drawSlice(p); xhair?.redraw(); };
   const applyRoi = () => { rs?.setRoiEnabled(roiEnabled); rs?.setRoiVisible(roiVisible); draw3d(); xhair?.redraw(); };
   const controls: VizControl[] = [
-    { label: "Volume render", get: () => layers.volume, set: (on) => { layers.volume = on; applyLayers(); } },
-    { label: "Segmentation", get: () => layers.seg, set: (on) => { layers.seg = on; applyLayers(); }, disabled: () => !(rs?.hasSeg) },
+    // Volume render + Segmentation are unified opacity controls (click = tri-state, drag = live slider),
+    // so a semi-transparent VR can be composited with the segmentation.
+    { label: "Volume render", getOpacity: () => rs?.volumeOpacity() ?? 1, setOpacity: (o) => { rs?.setVolumeOpacity(o); draw3d(); xhair?.redraw(); }, color: [0.75, 0.78, 0.85] },
+    { label: "Segmentation", getOpacity: () => rs?.segOpacity() ?? 1, setOpacity: (o) => { rs?.setSegOpacity(o); draw3d(); xhair?.redraw(); }, disabled: () => !(rs?.hasSeg), color: [0.62, 0.9, 1.0] },
     { label: "Slice outline", get: () => sliceOutline, set: (on) => { sliceOutline = on; rs?.slice.setOverlayOutline(on); redrawSlices(); }, disabled: () => !(rs?.hasSeg) },
-    { label: "Crop volume", get: () => roiEnabled, set: (on) => { roiEnabled = on; if (on && roiFirstEnable) { roiVisible = true; roiFirstEnable = false; } applyRoi(); }, disabled: () => !layers.volume },
+    { label: "Crop volume", get: () => roiEnabled, set: (on) => { roiEnabled = on; if (on && roiFirstEnable) { roiVisible = true; roiFirstEnable = false; } applyRoi(); }, disabled: () => (rs?.volumeOpacity() ?? 0) <= 0 },
     { label: "Show ROI box", get: () => roiVisible, set: (on) => { roiVisible = on; rs?.setRoiVisible(on); draw3d(); xhair?.redraw(); } },
   ];
   const chrome = installChrome({
@@ -137,11 +137,8 @@ async function main() {
     segments: {
       list: () => (rs?.segments ?? []).map((s) => ({ num: s.num, name: s.name, color: s.color })),
       get: (num) => rs?.segmentOpacity(num) ?? 1,
-      cycle: (num) => {
-        const next = ({ 1: 0.5, 0.5: 0, 0: 1 } as Record<number, number>)[rs?.segmentOpacity(num) ?? 1] ?? 1;
-        rs?.setSegmentOpacity(num, next); redrawSlices(); draw3d(); xhair?.redraw();
-      },
-      enabled: () => !!(rs?.hasSeg) && (layers.seg || layers.volume),
+      set: (num, o) => { rs?.setSegmentOpacity(num, o); redrawSlices(); draw3d(); xhair?.redraw(); },
+      enabled: () => !!(rs?.hasSeg) && ((rs?.segOpacity() ?? 0) > 0 || (rs?.volumeOpacity() ?? 0) > 0),
     },
   });
 
@@ -201,7 +198,7 @@ async function main() {
       const framed = framedCamera(rs.center, rs.radius);   // Slicer-default framing for this case
       camera.position = framed.position; camera.focalPoint = framed.focalPoint;
       camera.viewUp = framed.viewUp; camera.viewAngle = framed.viewAngle;
-      layers.volume = true; layers.seg = rs.hasSeg; rs.slice.setOverlayOutline(sliceOutline);
+      rs.slice.setOverlayOutline(sliceOutline);   // a fresh scene defaults to full VR + seg opacity
       rs.setRoiEnabled(roiEnabled); rs.setRoiVisible(roiVisible);   // carry the crop state into the new case
       chrome.refresh();   // reset toggles / re-apply outline pref per case
       showMeta(res.entry, rs);
