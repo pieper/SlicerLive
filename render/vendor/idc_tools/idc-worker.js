@@ -109,9 +109,11 @@ async function buildVolume(ctKeys) {
     const ijkToRAS = [c0[0], c1[0], c2[0], o[0], c0[1], c1[1], c2[1], o[1], c0[2], c1[2], c2[2], o[2], 0, 0, 0, 1];
     const isPET = MODNAME === 'PET';
     const vol = isPET ? new Float32Array(nx * ny * nz) : new Int16Array(nx * ny * nz);
-    const slope = Number(s0.RescaleSlope ?? 1), inter = Number(s0.RescaleIntercept ?? 0);
     for (let k = 0; k < nz; k++) {
         const ds = slices[k];
+        // PER-SLICE rescale: PET (and some CT/MR) carry a DIFFERENT RescaleSlope/RescaleIntercept on every
+        // slice — applying only the first slice's values mis-scales the rest of the volume. Read them per k.
+        const slope = Number(ds.RescaleSlope ?? 1), inter = Number(ds.RescaleIntercept ?? 0);
         let pd = ds.PixelData;
         if (Array.isArray(pd))
             pd = pd[0];
