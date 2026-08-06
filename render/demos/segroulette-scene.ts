@@ -15,6 +15,7 @@ import { ImageField, type Field } from "../fields.ts";
 import { bakeColorizeRGBA } from "../bake.ts";
 import { createRoiWidget, type RoiWidget } from "./roi-widget.ts";
 import { EditableSegmentation } from "../../algorithms/editable-segmentation.ts";
+import { labelmapHasInternalBoundary } from "../../algorithms/geom.ts";
 import { SegmentationLogic } from "../../logic/segmentation-logic.ts";
 
 // The 3D segmentation is ONE unified colorized signed-distance-field surface (algorithms/ + logic/):
@@ -178,7 +179,11 @@ export function buildSegrouletteScene(
   if (seg && segments.length > 0) {
     const cap = cappedLabelmap(seg.lab, dims, ct.ijkToRAS, opts.sdfMaxDim ?? SDF_MAX_DIM);
     editable = new EditableSegmentation(dev, cap.dims, { ijkToRAS: cap.ijkToRAS });
-    segLogic = new SegmentationLogic(dev, editable, { renderMode: "sdf", opacity: 1.0, refineDelayMs: opts.refineDelayMs });
+    // Real data often has EMBEDDED/adjacent labels (tumor in liver, cyst clusters): auto-pick the
+    // multi-material interface field ("all") so internal label↔label boundaries surface too, else the
+    // crisp outer shell for segments separated by background (ribs/vertebrae render identically).
+    const boundaryMode = labelmapHasInternalBoundary(cap.lab, cap.dims) ? "all" : "outer";
+    segLogic = new SegmentationLogic(dev, editable, { renderMode: "sdf", opacity: 1.0, boundaryMode, refineDelayMs: opts.refineDelayMs });
     for (const s of segments) { segLogic.setLabelColor(s.num, s.color); segLogic.setLabelOpacity(s.num, opacityOf(s.num)); }
     editable.loadLabelmap(cap.lab);   // fast bake
     segLogic.refineNow();             // static scene → high-quality bake now
