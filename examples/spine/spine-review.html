@@ -297,13 +297,15 @@ function openDrill(pid, level){
      <a href="spine-compare.html?case=${c.pid}&coll=${coll}${level?`&level=${level}`:''}" target="_blank" style="color:var(--mm);margin-left:10px">Open full-page ↗</a>`;
   document.getElementById('drill-chips').innerHTML = chipRow(c);
   const host = document.getElementById('drill-body');
-  host.innerHTML = `<iframe id="live" src="spine-compare.html?case=${c.pid}&coll=${coll}${level?`&level=${level}`:''}&v=20260810g" allow="fullscreen"></iframe>`;
+  host.innerHTML = `<iframe id="live" src="spine-compare.html?case=${c.pid}&coll=${coll}${level?`&level=${level}`:''}&v=20260810h" allow="fullscreen"></iframe>`;
   fetch(`${BUCKET}${coll}/${c.pid}/zarr/meta.json`,{method:'HEAD'}).then(r=>{
     if(!r.ok) host.innerHTML = `<div class="empty" style="padding:20px">No zarr bundle for ${c.pid} — the conversion worker hasn't reached this case.</div>` +
       (c.snap?`<img src="data:image/jpeg;base64,${c.snap}" style="max-width:70%;border-radius:8px;margin:0 auto;display:block">`:'');
   });
   document.getElementById('drill').hidden = false;
   document.body.style.overflow = 'hidden';   // the page scroll belongs to the modal now
+  const f = document.getElementById('live');
+  if(f){ f.focus(); f.addEventListener('load', () => f.focus()); }   // arrow keys work immediately
 }
 function closeDrill(){
   document.getElementById('drill').hidden = true;
@@ -312,7 +314,15 @@ function closeDrill(){
 }
 document.getElementById('drill-close').addEventListener('click',closeDrill);
 document.getElementById('drill').addEventListener('click',e=>{ if(e.target.id==='drill') closeDrill(); });
-addEventListener('keydown',e=>{ if(e.key==='Escape') closeDrill(); });
+addEventListener('keydown',e=>{
+  if(e.key==='Escape') return closeDrill();
+  // arrows always drive the drilldown while it's open, even if focus drifted to the parent
+  if(!document.getElementById('drill').hidden && (e.key==='ArrowLeft' || e.key==='ArrowRight')){
+    e.preventDefault();
+    const f=document.getElementById('live');
+    if(f) f.contentWindow.postMessage({type:'stepLevel', delta: e.key==='ArrowRight'?1:-1}, '*');
+  }
+});
 addEventListener('message',e=>{ if(e.data && e.data.type==='closeDrill') closeDrill(); });
 document.getElementById('drill-chips').addEventListener('click',e=>{
   const b=e.target.closest('button.lv'); if(!b) return;

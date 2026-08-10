@@ -6812,6 +6812,10 @@ async function main() {
   status(`${coll}/${pid} ready \u2014 click a vertebra to focus it, scroll a slice, drag any 3D to orbit (linked), shift+move to crosshair`);
   globalThis.addEventListener("message", (ev) => {
     const d = ev.data;
+    if (d?.type === "stepLevel" && typeof d.delta === "number") {
+      stepLevel(d.delta);
+      return;
+    }
     if (d?.type !== "jumpLevel" || !d.name) return;
     const label = nameToLabel[d.name];
     if (label != null && (sc.rows[0].levels.get(label) ?? sc.rows[1].levels.get(label))) selectLevel(label);

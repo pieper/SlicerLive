@@ -425,7 +425,8 @@ async function main() {
 
   // Embedded-in-dashboard integration: level chips postMessage {type:"jumpLevel", name}.
   globalThis.addEventListener("message", (ev: MessageEvent) => {
-    const d = ev.data as { type?: string; name?: string } | null;
+    const d = ev.data as { type?: string; name?: string; delta?: number } | null;
+    if (d?.type === "stepLevel" && typeof d.delta === "number") { stepLevel(d.delta); return; }
     if (d?.type !== "jumpLevel" || !d.name) return;
     const label = nameToLabel[d.name];
     if (label != null && (sc.rows[0].levels.get(label) ?? sc.rows[1].levels.get(label))) selectLevel(label);
