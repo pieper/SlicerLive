@@ -6683,6 +6683,11 @@ async function main() {
     levelSeq.push(label);
   }
   navBtn("\u25B6", 1, "next level (\u2192)");
+  const startLevel = PARAMS.get("level");
+  if (startLevel != null && nameToLabel[startLevel] != null) {
+    const l = nameToLabel[startLevel];
+    if (sc.rows[0].levels.get(l) ?? sc.rows[1].levels.get(l)) selectLevel(l);
+  }
   document.addEventListener("keydown", (e) => {
     if (e.target?.tagName === "INPUT") return;
     if (e.key === "ArrowLeft") {

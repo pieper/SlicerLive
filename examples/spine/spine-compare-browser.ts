@@ -340,6 +340,13 @@ async function main() {
     levelSeq.push(label);
   }
   navBtn("▶", 1, "next level (→)");
+  // deep-link: ?level=T8 opens already focused on that vertebra (the dashboard drilldown
+  // passes the axis column the user clicked, so an outlier is one click away)
+  const startLevel = PARAMS.get("level");
+  if (startLevel != null && nameToLabel[startLevel] != null) {
+    const l = nameToLabel[startLevel];
+    if (sc.rows[0].levels.get(l) ?? sc.rows[1].levels.get(l)) selectLevel(l);
+  }
   document.addEventListener("keydown", (e) => {
     if ((e.target as HTMLElement)?.tagName === "INPUT") return;   // don't hijack the case filter
     if (e.key === "ArrowLeft") { e.preventDefault(); stepLevel(-1); }

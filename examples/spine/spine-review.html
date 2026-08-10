@@ -274,17 +274,30 @@ function show(pid){
 // ── drilldown modal: click a case → the SlicerLive scene takes over the viewport ──
 // Fixed overlay = the page behind can't scroll, so wheel/two-finger gestures belong
 // entirely to the scene (no more scroll-vs-zoom overload), and the change is unmissable.
-function openDrill(pid){
+// Map a chart-click x to the nearest ANNOTATED level of the case (parallel axes are
+// evenly spaced between the parallel.left/right paddings).
+function levelAtX(c, offsetX){
+  const w = document.getElementById('chart').clientWidth;
+  const step = (w - 52 - 26) / (LEVELS.length - 1);
+  const i0 = Math.max(0, Math.min(LEVELS.length - 1, Math.round((offsetX - 52) / step)));
+  for(let d = 0; d < LEVELS.length; d++){
+    for(const i of [i0 - d, i0 + d]){
+      if(i >= 0 && i < LEVELS.length && c.detail && c.detail[LEVELS[i]]) return LEVELS[i];
+    }
+  }
+  return null;
+}
+function openDrill(pid, level){
   const c=CASES.find(x=>x.pid===pid); if(!c) return;
   const coll = collOf(c);
   document.getElementById('drill-title').innerHTML =
     `<span class="mono" style="font-weight:650">${c.pid}</span>
      <span class="pill ${c.coll==='mets'?'mets':'mm'}">${c.coll}</span>
      <span style="color:var(--ink-3)">${c.n_lv} levels · ${c.n_bad} discrepant · ${c.n_shift} shifted · mean Dice ${c.mdice}</span>
-     <a href="spine-compare.html?case=${c.pid}&coll=${coll}" target="_blank" style="color:var(--mm);margin-left:10px">Open full-page ↗</a>`;
+     <a href="spine-compare.html?case=${c.pid}&coll=${coll}${level?`&level=${level}`:''}" target="_blank" style="color:var(--mm);margin-left:10px">Open full-page ↗</a>`;
   document.getElementById('drill-chips').innerHTML = chipRow(c);
   const host = document.getElementById('drill-body');
-  host.innerHTML = `<iframe id="live" src="spine-compare.html?case=${c.pid}&coll=${coll}&v=20260810f" allow="fullscreen"></iframe>`;
+  host.innerHTML = `<iframe id="live" src="spine-compare.html?case=${c.pid}&coll=${coll}${level?`&level=${level}`:''}&v=20260810g" allow="fullscreen"></iframe>`;
   fetch(`${BUCKET}${coll}/${c.pid}/zarr/meta.json`,{method:'HEAD'}).then(r=>{
     if(!r.ok) host.innerHTML = `<div class="empty" style="padding:20px">No zarr bundle for ${c.pid} — the conversion worker hasn't reached this case.</div>` +
       (c.snap?`<img src="data:image/jpeg;base64,${c.snap}" style="max-width:70%;border-radius:8px;margin:0 auto;display:block">`:'');
@@ -306,8 +319,14 @@ document.getElementById('drill-chips').addEventListener('click',e=>{
   const f=document.getElementById('live');
   if(f) f.contentWindow.postMessage({type:'jumpLevel', name:b.dataset.lv}, '*');
 });
+globalThis.__dash = { levelAtX, openDrill, CASES: () => CASES };   // for the CDP test harness
 chart.on('mouseover',p=>{ const id=p.value&&p.value[LEVELS.length]; if(id) show(id); });
-chart.on('click',    p=>{ const id=p.value&&p.value[LEVELS.length]; if(id) openDrill(id); });
+chart.on('click',    p=>{
+  const id=p.value&&p.value[LEVELS.length]; if(!id) return;
+  const c=CASES.find(x=>x.pid===id);
+  const lvl=(c&&p.event)?levelAtX(c, p.event.offsetX):null;
+  openDrill(id, lvl);
+});
 document.getElementById('tb').addEventListener('click',e=>{
   const tr=e.target.closest('tr'); if(tr&&tr.dataset.pid) openDrill(tr.dataset.pid);
 });
