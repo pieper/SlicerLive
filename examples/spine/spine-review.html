@@ -78,6 +78,19 @@ tbody tr:hover{background:var(--panel-2)}
 .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;font-size:12.5px}
 .kv dt{color:var(--ink-3)}.kv dd{margin:0}
 .empty{color:var(--ink-3);font-size:12.5px;padding:10px 0}
+#drill[hidden]{display:none}
+#drill{position:fixed;inset:0;z-index:50;background:rgba(4,6,10,.72);backdrop-filter:blur(3px);
+  display:flex;align-items:center;justify-content:center}
+#drill-panel{width:min(96vw,1700px);height:94vh;display:flex;flex-direction:column;
+  background:var(--bg);border:1px solid var(--line);border-radius:12px;overflow:hidden;
+  box-shadow:0 24px 80px rgba(0,0,0,.65)}
+#drill-head{display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--line);flex:0 0 auto}
+#drill-title{display:flex;align-items:center;gap:8px;font-size:13px;min-width:0;flex-wrap:wrap}
+#drill-close{margin-left:auto;font-size:15px;line-height:1;padding:5px 10px}
+#drill-chips{padding:6px 14px;line-height:2;border-bottom:1px solid var(--line);flex:0 0 auto;
+  max-height:84px;overflow-y:auto}
+#drill-body{flex:1;min-height:0;display:flex}
+#drill-body iframe{flex:1;border:none;background:#05060a}
 </style>
 </head>
 <body>
@@ -125,6 +138,17 @@ Drag on any axis to filter; hover a line to preview, click to open the interacti
     </div>
   </div>
 </div>
+</div>
+
+<div id="drill" hidden>
+  <div id="drill-panel">
+    <div id="drill-head">
+      <div id="drill-title"></div>
+      <button id="drill-close" title="close (Esc)">✕</button>
+    </div>
+    <div id="drill-chips"></div>
+    <div id="drill-body"></div>
+  </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
@@ -238,42 +262,54 @@ function caseHead(c){
       <dt>Mean Dice</dt><dd class="mono">${c.mdice}</dd>
     </dl>`;
 }
-let selectedPid = null;
-function show(pid, {live=false}={}){
+function show(pid){
+  // hover PREVIEW only — chips + snapshot; the live scene lives in the drilldown modal
   const c=CASES.find(x=>x.pid===pid); if(!c) return;
-  if(live) selectedPid = pid;
-  const pane=document.getElementById('pane');
-  if(!live && selectedPid) return;   // a live selection stays put; hover only fills before first click
-  const chips=`<div style="margin-top:8px;line-height:2">${chipRow(c)}</div>`;
-  if(!live){
-    pane.innerHTML = caseHead(c) + chips +
-      (c.snap?`<img id="snap" src="data:image/jpeg;base64,${c.snap}" alt="snapshot ${c.pid}">`:'');
-    return;
-  }
-  const coll = collOf(c);
-  pane.innerHTML = caseHead(c) + chips + `
-    <div style="position:relative;margin-top:10px">
-      <iframe id="live" src="spine-compare.html?case=${c.pid}&coll=${coll}&v=20260810c"
-        style="width:100%;height:82vh;border:1px solid var(--line);border-radius:8px;background:#05060a"
-        allow="fullscreen"></iframe>
-    </div>
-    <p style="color:var(--ink-3);font-size:11px;margin:6px 0 0">SlicerLive scene — SPINEPS vs reference rows, linked
-      crosshair (shift+move), linked 3D cameras. Click a level chip above to jump. 
-      <a href="spine-compare.html?case=${c.pid}&coll=${coll}" target="_blank" style="color:var(--mm)">Open full-page ↗</a></p>`;
-  fetch(`${BUCKET}${coll}/${c.pid}/zarr/meta.json`,{method:'HEAD'}).then(r=>{
-    if(!r.ok){ const f=document.getElementById('live');
-      if(f) f.outerHTML = `<div class="empty">No zarr bundle for ${c.pid} yet — the conversion worker hasn\'t reached this case. ${c.snap?'Snapshot instead:':''}</div>` + (c.snap?`<img id="snap" src="data:image/jpeg;base64,${c.snap}">`:''); }
-  });
+  document.getElementById('pane').innerHTML = caseHead(c) +
+    `<div style="margin-top:8px;line-height:2">${chipRow(c)}</div>` +
+    (c.snap?`<img id="snap" src="data:image/jpeg;base64,${c.snap}" alt="snapshot ${c.pid}">`:'') +
+    `<p style="color:var(--ink-3);font-size:11.5px;margin:8px 0 0">Click the line (or a table row) to open the interactive comparison.</p>`;
 }
-document.getElementById('pane').addEventListener('click',e=>{
+
+// ── drilldown modal: click a case → the SlicerLive scene takes over the viewport ──
+// Fixed overlay = the page behind can't scroll, so wheel/two-finger gestures belong
+// entirely to the scene (no more scroll-vs-zoom overload), and the change is unmissable.
+function openDrill(pid){
+  const c=CASES.find(x=>x.pid===pid); if(!c) return;
+  const coll = collOf(c);
+  document.getElementById('drill-title').innerHTML =
+    `<span class="mono" style="font-weight:650">${c.pid}</span>
+     <span class="pill ${c.coll==='mets'?'mets':'mm'}">${c.coll}</span>
+     <span style="color:var(--ink-3)">${c.n_lv} levels · ${c.n_bad} discrepant · ${c.n_shift} shifted · mean Dice ${c.mdice}</span>
+     <a href="spine-compare.html?case=${c.pid}&coll=${coll}" target="_blank" style="color:var(--mm);margin-left:10px">Open full-page ↗</a>`;
+  document.getElementById('drill-chips').innerHTML = chipRow(c);
+  const host = document.getElementById('drill-body');
+  host.innerHTML = `<iframe id="live" src="spine-compare.html?case=${c.pid}&coll=${coll}&v=20260810f" allow="fullscreen"></iframe>`;
+  fetch(`${BUCKET}${coll}/${c.pid}/zarr/meta.json`,{method:'HEAD'}).then(r=>{
+    if(!r.ok) host.innerHTML = `<div class="empty" style="padding:20px">No zarr bundle for ${c.pid} — the conversion worker hasn't reached this case.</div>` +
+      (c.snap?`<img src="data:image/jpeg;base64,${c.snap}" style="max-width:70%;border-radius:8px;margin:0 auto;display:block">`:'');
+  });
+  document.getElementById('drill').hidden = false;
+  document.body.style.overflow = 'hidden';   // the page scroll belongs to the modal now
+}
+function closeDrill(){
+  document.getElementById('drill').hidden = true;
+  document.getElementById('drill-body').innerHTML = '';   // drop the iframe → frees the GPU
+  document.body.style.overflow = '';
+}
+document.getElementById('drill-close').addEventListener('click',closeDrill);
+document.getElementById('drill').addEventListener('click',e=>{ if(e.target.id==='drill') closeDrill(); });
+addEventListener('keydown',e=>{ if(e.key==='Escape') closeDrill(); });
+addEventListener('message',e=>{ if(e.data && e.data.type==='closeDrill') closeDrill(); });
+document.getElementById('drill-chips').addEventListener('click',e=>{
   const b=e.target.closest('button.lv'); if(!b) return;
   const f=document.getElementById('live');
   if(f) f.contentWindow.postMessage({type:'jumpLevel', name:b.dataset.lv}, '*');
 });
 chart.on('mouseover',p=>{ const id=p.value&&p.value[LEVELS.length]; if(id) show(id); });
-chart.on('click',    p=>{ const id=p.value&&p.value[LEVELS.length]; if(id) show(id,{live:true}); });
+chart.on('click',    p=>{ const id=p.value&&p.value[LEVELS.length]; if(id) openDrill(id); });
 document.getElementById('tb').addEventListener('click',e=>{
-  const tr=e.target.closest('tr'); if(tr&&tr.dataset.pid) show(tr.dataset.pid,{live:true});
+  const tr=e.target.closest('tr'); if(tr&&tr.dataset.pid) openDrill(tr.dataset.pid);
 });
 chart.on('axisareaselected',()=>{
   const ranges={};

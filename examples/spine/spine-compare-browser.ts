@@ -344,6 +344,11 @@ async function main() {
     if ((e.target as HTMLElement)?.tagName === "INPUT") return;   // don't hijack the case filter
     if (e.key === "ArrowLeft") { e.preventDefault(); stepLevel(-1); }
     else if (e.key === "ArrowRight") { e.preventDefault(); stepLevel(1); }
+    // embedded in the dashboard's drilldown: Esc lands here when the scene has focus —
+    // forward it so the modal can close
+    else if (e.key === "Escape" && globalThis.parent !== globalThis) {
+      globalThis.parent.postMessage({ type: "closeDrill" }, "*");
+    }
   });
 
   // ── chrome: layer toggles (tri-state opacity, SEGRoulette-style) on the rows ─

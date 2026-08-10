@@ -6691,6 +6691,10 @@ async function main() {
     } else if (e.key === "ArrowRight") {
       e.preventDefault();
       stepLevel(1);
+    } else if (e.key === "Escape" && globalThis.parent !== globalThis) {
+      globalThis.parent.postMessage({
+        type: "closeDrill"
+      }, "*");
     }
   });
   const controls = [
