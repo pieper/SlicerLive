@@ -30,10 +30,30 @@ export interface SegmentationLogicOpts {
   opacity?: number;                           // segment 3D opacity (default 1)
   refineDelayMs?: number;                     // debounce before the settle-refine (capability-tuned; default 180)
   boundaryMode?: "outer" | "all";             // sdf: "outer" = shell only at segment↔background (default; crisp separated segments). "all" = shell at ANY label change (multi-material interface field) so EMBEDDED/NESTED labels surface too — islands within islands — without one SDF per segment.
+  clippable?: boolean;                        // let scene clip boxes crop the shell (default false — Slicer's ROI crops the volume, not the segmentation; spine-compare's extent control opts in)
+}
+
+function invertAffine(m: number[]): number[] {
+  const r = [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]];
+  const det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
+  const i = [
+    (r[4] * r[8] - r[5] * r[7]) / det, (r[2] * r[7] - r[1] * r[8]) / det, (r[1] * r[5] - r[2] * r[4]) / det,
+    (r[5] * r[6] - r[3] * r[8]) / det, (r[0] * r[8] - r[2] * r[6]) / det, (r[2] * r[3] - r[0] * r[5]) / det,
+    (r[3] * r[7] - r[4] * r[6]) / det, (r[1] * r[6] - r[0] * r[7]) / det, (r[0] * r[4] - r[1] * r[3]) / det,
+  ];
+  const t = [m[3], m[7], m[11]];
+  return [
+    i[0], i[1], i[2], -(i[0] * t[0] + i[1] * t[1] + i[2] * t[2]),
+    i[3], i[4], i[5], -(i[3] * t[0] + i[4] * t[1] + i[5] * t[2]),
+    i[6], i[7], i[8], -(i[6] * t[0] + i[7] * t[1] + i[8] * t[2]),
+    0, 0, 0, 1,
+  ];
 }
 
 export class SegmentationLogic {
   readonly renderMode: "sdf" | "surface";
+  private clippable: boolean;
+  private attrSettleTimer?: number;
   private sdf?: JfaSdfBaker;                   // sdf path
   private baker?: ColorizeBaker;               // surface path
   private presenceTex?: GPUTexture;
@@ -56,6 +76,7 @@ export class SegmentationLogic {
     this.opacity = opts.opacity ?? 1.0;
     this.refineDelayMs = opts.refineDelayMs ?? 180;
     this.boundaryMode = opts.boundaryMode ?? "outer";
+    this.clippable = opts.clippable ?? false;
     this.setLabelColor(1, opts.color ?? [0.30, 0.85, 0.55]);   // single-label convenience default
 
     if (this.renderMode === "sdf") {
@@ -116,6 +137,46 @@ export class SegmentationLogic {
     if (this.sdf) { this.sdf.setPalette(this.palette); this.sdf.setModePalette(this.modePalette); this.sdf.refine(); for (const cb of this.redrawCbs) cb(); }
   }
 
+  /** FAST per-segment opacity refresh: attr-only rebake (no JFA re-sweep) — for visibility
+   *  toggles where the labelmap and colours are unchanged.
+   *
+   *  With `regionRAS` (the bbox of the labels whose opacity changed): the finalize AND the
+   *  seam blur run region-limited in one shot — full settled quality lands immediately, no
+   *  two-phase. Without it: full-volume fast pass + a debounced full-volume seam blur. */
+  refreshOpacity(regionRAS?: { lo: [number, number, number]; hi: [number, number, number] }) {
+    if (!this.sdf) { this.rebake(); return; }
+    this.sdf.setPalette(this.palette);
+    if (regionRAS) {
+      const dims = this.sdf.sdfDims();
+      const inv = invertAffine(this.sdf.sdfIjkToRAS());
+      const lo: [number, number, number] = [Infinity, Infinity, Infinity];
+      const hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+      for (const x of [regionRAS.lo[0], regionRAS.hi[0]]) for (const y of [regionRAS.lo[1], regionRAS.hi[1]]) for (const z of [regionRAS.lo[2], regionRAS.hi[2]]) {
+        const i = inv[0] * x + inv[1] * y + inv[2] * z + inv[3];
+        const j = inv[4] * x + inv[5] * y + inv[6] * z + inv[7];
+        const k = inv[8] * x + inv[9] * y + inv[10] * z + inv[11];
+        lo[0] = Math.min(lo[0], i); lo[1] = Math.min(lo[1], j); lo[2] = Math.min(lo[2], k);
+        hi[0] = Math.max(hi[0], i); hi[1] = Math.max(hi[1], j); hi[2] = Math.max(hi[2], k);
+      }
+      const M = 8;   // shell band + blur radius margin, in grid voxels
+      const region = {
+        lo: [Math.floor(lo[0]) - M, Math.floor(lo[1]) - M, Math.floor(lo[2]) - M] as [number, number, number],
+        hi: [Math.ceil(hi[0]) + M, Math.ceil(hi[1]) + M, Math.ceil(hi[2]) + M] as [number, number, number],
+      };
+      void dims;
+      this.sdf.rebakeAttr(true, region);      // finalize + seam blur, region-limited: settled instantly
+      for (const cb of this.redrawCbs) cb();
+      return;
+    }
+    this.sdf.rebakeAttr(false);               // instant, crisp (unblurred attr)
+    for (const cb of this.redrawCbs) cb();
+    if (this.attrSettleTimer !== undefined) clearTimeout(this.attrSettleTimer);
+    this.attrSettleTimer = setTimeout(() => {
+      this.attrSettleTimer = undefined;
+      if (this.sdf) { this.sdf.blurAttrOnly(); for (const cb of this.redrawCbs) cb(); }
+    }, 600);
+  }
+
   /** A SegmentField bound to the shared render texture — hand this to the SceneRenderer once; edits
    *  update it in place. Colour comes from the texture (per-label); the uniform supplies opacity. */
   field(): SegmentField {
@@ -135,7 +196,7 @@ export class SegmentationLogic {
       const fijk = this.sdf ? this.sdf.sdfIjkToRAS() : this.seg.ijkToRAS;
       this.segField = new SegmentField(tex, fdims, [1, 1, 1], {
         color: [1, 1, 1], opacity: this.opacity, ijkToRAS: fijk,
-        mode: this.renderMode === "sdf" ? "sdf" : "surface", colorFromTexture: true, bandMm: band, clippable: false,
+        mode: this.renderMode === "sdf" ? "sdf" : "surface", colorFromTexture: true, bandMm: band, clippable: this.clippable,
         attrTexture: this.sdf ? this.sdf.attrTexture() : undefined,   // per-segment opacity (sdf)
         interfaceMode,
       });

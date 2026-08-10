@@ -62,8 +62,30 @@ export async function fetchZarrVolume(
   const worker = async () => {
     while (idx < jobs.length) {
       const [kk, jj, ii] = jobs[idx++];
-      const gz = await (await fetch(chunkUrl(kk, jj, ii))).arrayBuffer();
-      onBytes?.(gz.byteLength);
+      // Stream the body so onBytes reports progress DURING the download — with
+      // large (even single-chunk) volumes on a throttled store, an arrayBuffer()
+      // wait looks like a hang to the user.
+      const resp = await fetch(chunkUrl(kk, jj, ii));
+      let gz: ArrayBuffer;
+      if (resp.body && onBytes) {
+        const parts: Uint8Array[] = [];
+        const rd = resp.body.getReader();
+        let total = 0;
+        for (;;) {
+          const { done, value } = await rd.read();
+          if (done) break;
+          parts.push(value);
+          total += value.byteLength;
+          onBytes(value.byteLength);
+        }
+        const all = new Uint8Array(total);
+        let o = 0;
+        for (const p of parts) { all.set(p, o); o += p.byteLength; }
+        gz = all.buffer;
+      } else {
+        gz = await resp.arrayBuffer();
+        onBytes?.(gz.byteLength);
+      }
       const chunk = new Ctor(await inflateDeflate(gz));   // (cz,cy,cx) C-order, padded to full chunk shape
       const z0 = kk * cz, y0 = jj * cy, x0 = ii * cx;
       const zw = Math.min(cz, nz - z0), yw = Math.min(cy, ny - y0), xw = Math.min(cx, nx - x0);

@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- spine-review dashboard: ported from the claude.ai artifact to the live gallery.
+     Data (payload.json, zarr bundles) comes from the public spine-review JS2 bucket;
+     the detail pane embeds the spine-compare SlicerLive scene. -->
+<title>SPINEPS vs IDC reference — per-vertebra discrepancy</title>
+<style>
+:root{
+  color-scheme: dark;
+  --bg:#0d1014; --panel:#141922; --panel-2:#1a2029; --line:#262e39;
+  --ink:#e9eef5; --ink-2:#98a5b6; --ink-3:#647184;
+  --mets:#ff7a33; --mm:#3d95d6; --bad:#e0475a; --ok:#2fb37a; --flag:#eda100;
+}
+@media (prefers-color-scheme: light){
+  :root:where(:not([data-theme="dark"])){
+    color-scheme: light;
+    --bg:#f3f6fa; --panel:#fff; --panel-2:#e9eff6; --line:#d3dce8;
+    --ink:#101720; --ink-2:#48566a; --ink-3:#78879b;
+    --mets:#d94f0c; --mm:#1f6fb8; --bad:#c4283c; --ok:#127a4f; --flag:#a07000;
+  }
+}
+:root[data-theme="light"]{
+  color-scheme: light;
+  --bg:#f3f6fa; --panel:#fff; --panel-2:#e9eff6; --line:#d3dce8;
+  --ink:#101720; --ink-2:#48566a; --ink-3:#78879b;
+  --mets:#d94f0c; --mm:#1f6fb8; --bad:#c4283c; --ok:#127a4f; --flag:#a07000;
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --bg:#0d1014; --panel:#141922; --panel-2:#1a2029; --line:#262e39;
+  --ink:#e9eef5; --ink-2:#98a5b6; --ink-3:#647184;
+  --mets:#ff7a33; --mm:#3d95d6; --bad:#e0475a; --ok:#2fb37a; --flag:#eda100;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+.wrap{max-width:1640px;margin:0 auto;padding:20px 22px 44px}
+h1{font-size:19px;margin:0;letter-spacing:-.01em;font-weight:650}
+.sub{color:var(--ink-2);font-size:12.5px;margin:4px 0 0;max-width:80ch}
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:9px;margin:16px 0 13px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+.stat .v{font-size:19px;font-weight:650;letter-spacing:-.02em}
+.stat .k{font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.07em;margin-top:2px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+button{font:inherit;font-size:12.5px;background:var(--panel);color:var(--ink-2);
+  border:1px solid var(--line);border-radius:7px;padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-3)}
+button[aria-pressed="true"]{background:var(--panel-2);color:var(--ink);border-color:var(--ink-3)}
+button:focus-visible{outline:2px solid var(--mm);outline-offset:2px}
+.key{display:flex;gap:15px;margin-left:auto;font-size:12.5px;color:var(--ink-2);align-items:center}
+.key i{display:inline-block;width:22px;height:3px;border-radius:2px;margin-right:6px;vertical-align:2px}
+.chartbox{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:6px 4px 2px;overflow-x:auto}
+#chart{width:100%;min-width:1080px;height:520px}
+.hint{color:var(--ink-3);font-size:11.5px;margin:8px 2px 0;max-width:96ch}
+.detail{display:flex;flex-direction:column;gap:14px;margin-top:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:14px 16px;min-width:0}
+.card h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3);margin:0 0 10px;font-weight:600}
+.tblwrap{overflow:auto;max-height:420px}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{text-align:left;padding:5px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel);color:var(--ink-3);font-size:10px;
+   text-transform:uppercase;letter-spacing:.06em;font-weight:600;z-index:1}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--panel-2)}
+.pill{font-size:10.5px;padding:1px 7px;border-radius:9px;border:1px solid currentColor;font-weight:600}
+.pill.mets{color:var(--mets)}.pill.mm{color:var(--mm)}
+.lv{display:inline-block;font-size:11px;padding:2px 6px;border-radius:5px;margin:2px 3px 0 0;
+    background:var(--panel-2);border:1px solid var(--line);color:var(--ink-2)}
+.lv.bad{background:color-mix(in srgb,var(--bad) 20%,transparent);color:var(--bad);border-color:var(--bad);font-weight:650}
+.lv.warn{background:color-mix(in srgb,var(--flag) 18%,transparent);color:var(--flag);border-color:var(--flag)}
+.lv.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent)}
+#snap{width:100%;border-radius:8px;border:1px solid var(--line);display:block;margin-top:10px;background:#000}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 14px;font-size:12.5px}
+.kv dt{color:var(--ink-3)}.kv dd{margin:0}
+.empty{color:var(--ink-3);font-size:12.5px;padding:10px 0}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<h1>SPINEPS vs IDC reference segmentation — per-vertebra discrepancy</h1>
+<p class="sub">121 cancer patients (55 spine metastases with expert labels, 66 multiple myeloma with nnU-Net labels).
+One line per case. Each axis is a vertebral level; the value is <strong>1&nbsp;&minus;&nbsp;Dice</strong> between the
+reference label and the SPINEPS label of the same name — <strong>0 means perfect agreement</strong>, 1 means no overlap.
+Levels absent from the reference are simply not drawn, so a line covers only the vertebrae that were annotated.</p>
+
+<div class="strip" id="strip"></div>
+
+<div class="bar">
+  <button id="b-all" aria-pressed="true">All cases</button>
+  <button id="b-bad" aria-pressed="false">Has discrepancy (&gt;0.5 at any level)</button>
+  <button id="b-shift" aria-pressed="false">Label shifted</button>
+  <button id="b-mets" aria-pressed="false">Spine mets only</button>
+  <button id="b-mm" aria-pressed="false">Myeloma only</button>
+  <button id="b-reset">Clear axis filters</button>
+  <div class="key">
+    <span><i style="background:var(--mets)"></i>spine mets (expert)</span>
+    <span><i style="background:var(--mm)"></i>myeloma (nnU-Net)</span>
+  </div>
+</div>
+
+<div class="chartbox"><div id="chart"></div></div>
+<p class="hint">A flat line along the bottom is a case where SPINEPS and the reference agree at every annotated level.
+A step up to ~1.0 that persists downward is the signature of an <em>off-by-one label shift</em> — the two segmentations
+describe the same bone under different names. Isolated spikes are usually a single mis-segmented vertebra.
+Drag on any axis to filter; hover a line to preview, click to open the interactive SlicerLive comparison.</p>
+
+<div class="detail">
+  <div class="card">
+    <h2>Selected case</h2>
+    <div id="pane"><p class="empty">Hover or click a line, or a row in the table.</p></div>
+  </div>
+  <div class="card">
+    <h2>Cases &mdash; <span id="cnt" class="mono">0</span></h2>
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>ID</th><th>set</th><th>levels</th><th>bad</th><th>shifted</th><th>worst</th><th>mean</th></tr></thead>
+        <tbody id="tb"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<script type="module">
+const BUCKET = 'https://js2.jetstream-cloud.org:8001/swift/v1/spine-review/';
+const P = await (await fetch(BUCKET + 'payload.json', {cache: 'no-cache'})).json();
+const ZARR_READY = {};   // pid -> bool, filled lazily
+const collOf = c => c.coll === 'mets' ? 'mets' : 'myeloma';
+const LEVELS = P.levels, CASES = P.cases.filter(c=>c.ok);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const chart = echarts.init(document.getElementById('chart'), null, {renderer:'canvas'});
+let mode='all', cur=[];
+
+function subset(){
+  if(mode==='bad')   return CASES.filter(c=>c.n_bad>0);
+  if(mode==='shift') return CASES.filter(c=>c.n_shift>0);
+  if(mode==='mets')  return CASES.filter(c=>c.coll==='mets');
+  if(mode==='mm')    return CASES.filter(c=>c.coll==='myeloma');
+  return CASES;
+}
+
+function strip(){
+  const s=subset();
+  const bad=s.filter(c=>c.n_bad>0).length, sh=s.filter(c=>c.n_shift>0).length;
+  const clean=s.filter(c=>c.n_bad===0).length;
+  const mean=s.length? (s.reduce((a,c)=>a+(c.mean||0),0)/s.length) : 0;
+  document.getElementById('strip').innerHTML=[
+    ['cases in view', s.length],
+    ['fully consistent', clean+' <span style="font-size:12px;color:var(--ink-3)">'+(s.length?(clean/s.length*100).toFixed(0):0)+'%</span>'],
+    ['with discrepancy', bad+' <span style="font-size:12px;color:var(--ink-3)">'+(s.length?(bad/s.length*100).toFixed(0):0)+'%</span>'],
+    ['label shifted', sh],
+    ['mean 1&minus;Dice', mean.toFixed(3)]
+  ].map(([k,v])=>`<div class="stat"><div class="v">${v}</div><div class="k">${k}</div></div>`).join('');
+}
+
+function render(){
+  const s=subset(); cur=s;
+  const mets=[], mm=[];
+  s.forEach(c=>{ const row=c.vals.concat([c.pid]); (c.coll==='mets'?mets:mm).push(row); });
+  const axLab={color:css('--ink-2'),fontSize:10};
+  chart.setOption({
+    backgroundColor:'transparent', animationDuration:300,
+    parallel:{left:52,right:26,top:64,bottom:34,
+      parallelAxisDefault:{type:'value',min:0,max:1,
+        axisLine:{lineStyle:{color:css('--ink-3')}},
+        axisLabel:{show:false},
+        axisTick:{show:false},
+        splitLine:{show:false},
+        nameLocation:'start', nameGap:16,
+        nameTextStyle:{color:css('--ink-2'),fontSize:10,fontWeight:600}}},
+    parallelAxis: LEVELS.map((lv,i)=>({dim:i,name:lv})),
+    tooltip:{trigger:'item',confine:true,enterable:false,
+      backgroundColor:css('--panel'),borderColor:css('--line'),
+      extraCssText:'max-width:420px;box-shadow:0 8px 28px rgba(0,0,0,.45)',
+      textStyle:{color:css('--ink'),fontSize:12},
+      formatter:p=>{
+        const c=CASES.find(x=>x.pid===p.value[LEVELS.length]); if(!c) return '';
+        const chips=LEVELS.map(lv=>{
+          const d=c.detail[lv]; if(!d) return '';
+          const cls=d.d<0.5?'bad':(d.d<0.8?'warn':'ok');
+          return `<span class="lv ${cls}">${lv} ${d.d.toFixed(2)}${d.s?'→'+d.b:''}</span>`;
+        }).join('');
+        const img=c.snap?`<img src="data:image/jpeg;base64,${c.snap}" style="width:100%;border-radius:6px;margin-top:7px">`:'';
+        return `<div style="font-weight:650">${c.pid}
+          <span style="color:${c.coll==='mets'?css('--mets'):css('--mm')}">${c.coll}</span></div>
+          <div style="color:${css('--ink-2')};font-size:11.5px;margin:3px 0 5px">
+            ${c.n_lv} annotated levels · ${c.n_bad} discrepant · ${c.n_shift} shifted ·
+            mean Dice ${c.mdice}</div>
+          <div style="line-height:1.9">${chips}</div>${img}`;
+      }},
+    series:[
+      {name:'myeloma',type:'parallel',data:mm,smooth:false,
+       lineStyle:{color:css('--mm'),width:1.1,opacity:s.length>60?0.30:0.5},
+       emphasis:{lineStyle:{width:3,opacity:1}}},
+      {name:'mets',type:'parallel',data:mets,smooth:false,
+       lineStyle:{color:css('--mets'),width:1.1,opacity:s.length>60?0.34:0.55},
+       emphasis:{lineStyle:{width:3,opacity:1}}}
+    ]
+  }, true);
+  strip(); fill(s);
+}
+
+function fill(list){
+  document.getElementById('cnt').textContent=list.length;
+  const srt=[...list].sort((a,b)=>(b.worst||0)-(a.worst||0));
+  document.getElementById('tb').innerHTML = srt.map(c=>
+    `<tr data-pid="${c.pid}"><td class="mono">${c.pid}</td>
+     <td><span class="pill ${c.coll==='mets'?'mets':'mm'}">${c.coll}</span></td>
+     <td class="mono">${c.n_lv}</td>
+     <td class="mono" ${c.n_bad?'style="color:var(--bad);font-weight:650"':''}>${c.n_bad}</td>
+     <td class="mono" ${c.n_shift?'style="color:var(--flag);font-weight:650"':''}>${c.n_shift}</td>
+     <td class="mono">${(c.worst??0).toFixed(2)}</td>
+     <td class="mono">${(c.mean??0).toFixed(2)}</td></tr>`).join('')
+   || '<tr><td colspan="7" class="empty">Nothing in this selection.</td></tr>';
+}
+
+function chipRow(c){
+  return LEVELS.map(lv=>{
+    const d=c.detail[lv]; if(!d) return '';
+    const cls=d.d<0.5?'bad':(d.d<0.8?'warn':'ok');
+    const arrow=d.s?` <span style="opacity:.85">→${d.b}</span>`:'';
+    return `<button class="lv ${cls}" data-lv="${lv}" title="jump the 3D view to ${lv}">${lv} ${d.d.toFixed(2)}${arrow}</button>`;
+  }).join('');
+}
+function caseHead(c){
+  return `<dl class="kv">
+      <dt>Case</dt><dd class="mono">${c.pid}</dd>
+      <dt>Collection</dt><dd><span class="pill ${c.coll==='mets'?'mets':'mm'}">${c.coll}</span>
+        <span style="color:var(--ink-3);font-size:11.5px">${c.coll==='mets'?'expert (SlicerEditor)':'nnU-Net'} reference</span></dd>
+      <dt>Levels</dt><dd class="mono">${c.n_lv} annotated · ${c.n_bad} discrepant · ${c.n_shift} shifted</dd>
+      <dt>Mean Dice</dt><dd class="mono">${c.mdice}</dd>
+    </dl>`;
+}
+let selectedPid = null;
+function show(pid, {live=false}={}){
+  const c=CASES.find(x=>x.pid===pid); if(!c) return;
+  if(live) selectedPid = pid;
+  const pane=document.getElementById('pane');
+  if(!live && selectedPid) return;   // a live selection stays put; hover only fills before first click
+  const chips=`<div style="margin-top:8px;line-height:2">${chipRow(c)}</div>`;
+  if(!live){
+    pane.innerHTML = caseHead(c) + chips +
+      (c.snap?`<img id="snap" src="data:image/jpeg;base64,${c.snap}" alt="snapshot ${c.pid}">`:'');
+    return;
+  }
+  const coll = collOf(c);
+  pane.innerHTML = caseHead(c) + chips + `
+    <div style="position:relative;margin-top:10px">
+      <iframe id="live" src="spine-compare.html?case=${c.pid}&coll=${coll}&v=20260810c"
+        style="width:100%;height:82vh;border:1px solid var(--line);border-radius:8px;background:#05060a"
+        allow="fullscreen"></iframe>
+    </div>
+    <p style="color:var(--ink-3);font-size:11px;margin:6px 0 0">SlicerLive scene — SPINEPS vs reference rows, linked
+      crosshair (shift+move), linked 3D cameras. Click a level chip above to jump. 
+      <a href="spine-compare.html?case=${c.pid}&coll=${coll}" target="_blank" style="color:var(--mm)">Open full-page ↗</a></p>`;
+  fetch(`${BUCKET}${coll}/${c.pid}/zarr/meta.json`,{method:'HEAD'}).then(r=>{
+    if(!r.ok){ const f=document.getElementById('live');
+      if(f) f.outerHTML = `<div class="empty">No zarr bundle for ${c.pid} yet — the conversion worker hasn\'t reached this case. ${c.snap?'Snapshot instead:':''}</div>` + (c.snap?`<img id="snap" src="data:image/jpeg;base64,${c.snap}">`:''); }
+  });
+}
+document.getElementById('pane').addEventListener('click',e=>{
+  const b=e.target.closest('button.lv'); if(!b) return;
+  const f=document.getElementById('live');
+  if(f) f.contentWindow.postMessage({type:'jumpLevel', name:b.dataset.lv}, '*');
+});
+chart.on('mouseover',p=>{ const id=p.value&&p.value[LEVELS.length]; if(id) show(id); });
+chart.on('click',    p=>{ const id=p.value&&p.value[LEVELS.length]; if(id) show(id,{live:true}); });
+document.getElementById('tb').addEventListener('click',e=>{
+  const tr=e.target.closest('tr'); if(tr&&tr.dataset.pid) show(tr.dataset.pid,{live:true});
+});
+chart.on('axisareaselected',()=>{
+  const ranges={};
+  (chart.getOption().parallelAxis||[]).forEach(ax=>{ if(ax.range) ranges[ax.dim]=ax.range; });
+  const keys=Object.keys(ranges);
+  const s=subset();
+  if(!keys.length) return fill(s);
+  fill(s.filter(c=>keys.every(d=>{
+    const v=c.vals[+d]; if(v===null||v===undefined) return false;
+    const g=ranges[d];
+    if(Array.isArray(g[0])) return g.some(p=>v>=p[0]&&v<=p[1]);
+    return v>=g[0]&&v<=g[1];
+  })));
+});
+
+function setMode(m,id){
+  mode=m;
+  ['b-all','b-bad','b-shift','b-mets','b-mm'].forEach(b=>
+    document.getElementById(b).setAttribute('aria-pressed', b===id?'true':'false'));
+  render();
+}
+document.getElementById('b-all').onclick  =()=>setMode('all','b-all');
+document.getElementById('b-bad').onclick  =()=>setMode('bad','b-bad');
+document.getElementById('b-shift').onclick=()=>setMode('shift','b-shift');
+document.getElementById('b-mets').onclick =()=>setMode('mets','b-mets');
+document.getElementById('b-mm').onclick   =()=>setMode('mm','b-mm');
+document.getElementById('b-reset').onclick=()=>render();
+
+addEventListener('resize',()=>chart.resize());
+const mq=matchMedia('(prefers-color-scheme: dark)');
+if(mq.addEventListener) mq.addEventListener('change',()=>setTimeout(render,60));
+new MutationObserver(()=>setTimeout(render,60))
+  .observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+render();
+</script>
+
+</body>
+</html>

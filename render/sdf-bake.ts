@@ -96,7 +96,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 // attrTex rgba16float (.r = that region's per-segment OPACITY = palette alpha). Opacity comes from the
 // FLOODED region label, so it's non-zero across the whole ±band shell (not just inside voxels).
 const FINAL_WGSL = /* wgsl */ `
-struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
+struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32>, origin : vec4<i32> };
 @group(0) @binding(0) var t_seed_in : texture_3d<f32>;
 @group(0) @binding(1) var t_label : texture_3d<u32>;
 @group(0) @binding(2) var t_out : texture_storage_3d<rgba16float, write>;
@@ -106,9 +106,9 @@ struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
 @group(0) @binding(6) var<uniform> u_mode : array<vec4<f32>, 256>;   // .x = shading mode (0 surface, 1 volume)
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  if (any(gid >= u.dims.xyz)) { return; }
-  let c = vec3<i32>(gid);
-  let p = (u.ijkToRAS * vec4<f32>(vec3<f32>(gid), 1.0)).xyz;
+  let c = vec3<i32>(gid) + u.origin.xyz;   // region-limited dispatch offsets into the grid
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
+  let p = (u.ijkToRAS * vec4<f32>(vec3<f32>(c), 1.0)).xyz;
   let s = textureLoad(t_seed_in, c, 0);
   let valid = s.w > 0.5;
   let dist = select(1e3, distance(p, s.xyz), valid);
@@ -141,15 +141,15 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 // moves the zero level set (silhouette stays crisp) but smooths the gradient. The colour is NOT
 // blurred, so label seams stay crisp.
 const BLUR_WGSL = /* wgsl */ `
-struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4> };
+struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4>, origin : vec4<i32> };
 @group(0) @binding(0) var t_in : texture_3d<f32>;
 @group(0) @binding(1) var t_out : texture_storage_3d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> u : BU;
 fn wt(i : u32) -> f32 { return u.w[i >> 2u][i & 3u]; }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  if (any(gid >= u.dims.xyz)) { return; }
-  let c = vec3<i32>(gid);
+  let c = vec3<i32>(gid) + u.origin.xyz;
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
   let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
   var av = vec3<i32>(0);
   if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
@@ -167,15 +167,15 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 // pass: it pre-blends the voxel-quantized colour seams between neighbouring labels so ray-march
 // samples get a smooth colour transition instead of a staircase — while the geometry (.a) stays put.
 const COLBLUR_WGSL = /* wgsl */ `
-struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4> };
+struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4>, origin : vec4<i32> };
 @group(0) @binding(0) var t_in : texture_3d<f32>;
 @group(0) @binding(1) var t_out : texture_storage_3d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> u : BU;
 fn wt(i : u32) -> f32 { return u.w[i >> 2u][i & 3u]; }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  if (any(gid >= u.dims.xyz)) { return; }
-  let c = vec3<i32>(gid);
+  let c = vec3<i32>(gid) + u.origin.xyz;
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
   let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
   var av = vec3<i32>(0);
   if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
@@ -196,15 +196,15 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 // it abuts a hidden (0-opacity) one. Keeping .r crisp (linear sampling still gives ~1-voxel AA) renders
 // each segment's surface at its own opacity regardless of neighbours. .a is the crisp presence bit.
 const FULLBLUR_WGSL = /* wgsl */ `
-struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4> };
+struct BU { dims : vec4<u32>, axis_r : vec4<u32>, w : array<vec4<f32>, 4>, origin : vec4<i32> };
 @group(0) @binding(0) var t_in : texture_3d<f32>;
 @group(0) @binding(1) var t_out : texture_storage_3d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> u : BU;
 fn wt(i : u32) -> f32 { return u.w[i >> 2u][i & 3u]; }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  if (any(gid >= u.dims.xyz)) { return; }
-  let c = vec3<i32>(gid);
+  let c = vec3<i32>(gid) + u.origin.xyz;
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
   let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
   var av = vec3<i32>(0);
   if (u.axis_r.x == 0u) { av = vec3<i32>(1,0,0); } else if (u.axis_r.x == 1u) { av = vec3<i32>(0,1,0); } else { av = vec3<i32>(0,0,1); }
@@ -234,6 +234,7 @@ export class JfaSdfBaker {
   private sdfTex: GPUTexture;                    // rgba16float: .rgb = per-label colour, .a = signed dist (mm) — sampled by SegmentField
   private attrTex: GPUTexture;                   // rgba16float: .r = per-segment opacity, .g = shading mode — sampled by SegmentField
   private attrScratch: GPUTexture;              // rgba16float attr-blur ping-pong
+  private lastSeed = 0;                          // seed buffer the last sweep finalized from
   private sdfScratch: GPUTexture;               // rgba16float blur ping-pong
   private uni: GPUBuffer;
   private palBuf: GPUBuffer;                     // 256 × vec4 label→colour palette (.a = opacity)
@@ -275,7 +276,7 @@ export class JfaSdfBaker {
     this.attrTex = mk("rgba16float", GPUTextureUsage.COPY_DST);  // .r opacity, .g mode; seam-blurred in refine
     this.attrScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
     this.sdfScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
-    this.uni = dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.uni = dev.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.modeBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const mod = (code: string) => dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code }), entryPoint: "main" } });
@@ -348,12 +349,14 @@ export class JfaSdfBaker {
     this.dev.queue.writeBuffer(this.modeBuf, 0, m);
   }
 
-  private writeUni(step: number) {
-    const ab = new ArrayBuffer(96);
+  private writeUni(step: number, origin: [number, number, number] = [0, 0, 0]) {
+    const ab = new ArrayBuffer(112);
     const f = new Float32Array(ab), u = new Uint32Array(ab);
     f.set(transpose4(this.ijkToRAS), 0);
     u[16] = this.dims[0]; u[17] = this.dims[1]; u[18] = this.dims[2]; u[19] = this.pad;   // dims.w = pad (label is offset by pad; pad region = background)
     f[20] = step; f[21] = this.bmode; f[22] = 0; f[23] = 0;   // params.y = boundary mode (0 outer / 1 any-change)
+    const i32v = new Int32Array(ab);
+    i32v[24] = origin[0]; i32v[25] = origin[1]; i32v[26] = origin[2]; i32v[27] = 0;
     this.dev.queue.writeBuffer(this.uni, 0, ab);
   }
 
@@ -368,6 +371,43 @@ export class JfaSdfBaker {
    *  same σ (dropping it re-introduces Voronoi facets — crispness comes from the render band, not from
    *  under-smoothing). Higher quality lives in the resident texture, so camera renders stay cheap. */
   refine() { this.sweep([2, 1], this.smoothSigma, 1.0); }
+
+  /** ATTR-ONLY rebake for palette/opacity changes (per-segment visibility): the distance field
+   *  doesn't move, so re-run ONLY the finalize (from the last sweep's seed) with its sdf writes
+   *  routed to the scratch texture (discarded — the blurred resident sdfTex stays pristine) and
+   *  re-blur the attribute seams. ~4 passes instead of the ~20-pass init+JFA+blur sweep, which is
+   *  what makes per-vertebra focus switching real-time. */
+  rebakeAttr(blurSeams = false, regionIjk?: { lo: [number, number, number]; hi: [number, number, number] }) {
+    const dev = this.dev, [dx, dy, dz] = this.dims;
+    const region = regionIjk && {
+      lo: [Math.max(0, regionIjk.lo[0]), Math.max(0, regionIjk.lo[1]), Math.max(0, regionIjk.lo[2])] as [number, number, number],
+      hi: [Math.min(dx, regionIjk.hi[0]), Math.min(dy, regionIjk.hi[1]), Math.min(dz, regionIjk.hi[2])] as [number, number, number],
+    };
+    const [gx, gy, gz] = region
+      ? [Math.ceil((region.hi[0] - region.lo[0]) / 4), Math.ceil((region.hi[1] - region.lo[1]) / 4), Math.ceil((region.hi[2] - region.lo[2]) / 4)]
+      : this.g;
+    if (region && (gx <= 0 || gy <= 0 || gz <= 0)) return;
+    this.writeUni(0, region ? region.lo : [0, 0, 0]);
+    const enc = dev.createCommandEncoder();
+    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: this.seed[this.lastSeed].createView() },
+      { binding: 1, resource: this.labelTex.createView() },
+      { binding: 2, resource: this.sdfScratch.createView() },   // sdf writes discarded
+      { binding: 3, resource: { buffer: this.uni } },
+      { binding: 4, resource: { buffer: this.palBuf } },
+      { binding: 5, resource: this.attrTex.createView() },
+      { binding: 6, resource: { buffer: this.modeBuf } },
+    ] });
+    const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(gx, gy, gz); p.end();
+    dev.queue.submit([enc.finish()]);
+    // blurSeams=false: instant (crisp attr) — right while rapidly stepping visibility.
+    // blurSeams=true: the settled quality — still only ~4 passes, no JFA re-sweep.
+    if (blurSeams) this.blurStage(this.fullBlurPipe, 1.0, this.attrTex, this.attrScratch, region);
+  }
+
+  /** Blur the attribute seams of the CURRENT attr texture in place (no re-finalize) — the
+   *  cheapest possible settle after a run of rebakeAttr(false) visibility steps. */
+  blurAttrOnly() { this.blurStage(this.fullBlurPipe, 1.0, this.attrTex, this.attrScratch); }
 
   /** One full sweep: init → JFA (schedule + extra) → finalize → blur .a → optional blur .rgb. */
   private sweep(extraSteps: number[], distSigma: number, colorSigma: number) {
@@ -401,6 +441,7 @@ export class JfaSdfBaker {
       src = dst;
     }
 
+    this.lastSeed = src;   // rebakeAttr() re-finalizes from this seed without re-running JFA
     // finalize: seed[src] + label + palette → sdfTex (.rgb colour, .a signed mm)
     enc = dev.createCommandEncoder();
     const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
@@ -425,26 +466,48 @@ export class JfaSdfBaker {
 
   /** 3 separable Gaussian passes with the given pipeline (which channels it blurs), tex↔scratch,
    *  ending in scratch → copied back to `tex` so its identity stays stable for the renderer. */
-  private blurStage(pipe: GPUComputePipeline, sigma: number, tex: GPUTexture, scratch: GPUTexture) {
-    const dev = this.dev, [gx, gy, gz] = this.g, [dx, dy, dz] = this.dims;
+  private blurStage(pipe: GPUComputePipeline, sigma: number, tex: GPUTexture, scratch: GPUTexture,
+                    region?: { lo: [number, number, number]; hi: [number, number, number] }) {
+    const dev = this.dev, [dx, dy, dz] = this.dims;
     const { radius, w } = gaussHalfKernel(sigma);
     const passes: Array<[GPUTexture, GPUTexture, number]> = [[tex, scratch, 0], [scratch, tex, 1], [tex, scratch, 2]];
     const enc = dev.createCommandEncoder();
+    // Region-limited: pass i is dispatched over the region expanded by (2-i)·radius, so every
+    // tap of the NEXT pass reads freshly-written texels; the final copy restores exactly the
+    // region. (The +radius ring pass 2 writes into tex gets an extra partial blur — invisible,
+    // and it keeps the scheme to 3 passes.) Full-volume when no region is given.
+    let passIdx = 0;
     for (const [srcT, dstT, axis] of passes) {
-      const ab = new ArrayBuffer(96);
-      const u32 = new Uint32Array(ab), f32 = new Float32Array(ab);
+      const expand = region ? (2 - passIdx) * radius : 0;
+      const lo: [number, number, number] = region
+        ? [Math.max(0, region.lo[0] - expand), Math.max(0, region.lo[1] - expand), Math.max(0, region.lo[2] - expand)]
+        : [0, 0, 0];
+      const hi: [number, number, number] = region
+        ? [Math.min(dx, region.hi[0] + expand), Math.min(dy, region.hi[1] + expand), Math.min(dz, region.hi[2] + expand)]
+        : [dx, dy, dz];
+      const ab = new ArrayBuffer(112);
+      const u32 = new Uint32Array(ab), f32 = new Float32Array(ab), i32 = new Int32Array(ab);
       u32[0] = dx; u32[1] = dy; u32[2] = dz; u32[4] = axis; u32[5] = radius;
       f32.set(w, 8);   // w starts at byte 32 = float index 8 (dims 16B + axis_r 16B)
-      const ub = dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      i32[24] = lo[0]; i32[25] = lo[1]; i32[26] = lo[2];
+      const ub = dev.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       dev.queue.writeBuffer(ub, 0, ab);
       const b = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
         { binding: 0, resource: srcT.createView() },
         { binding: 1, resource: dstT.createView() },
         { binding: 2, resource: { buffer: ub } },
       ] });
-      const bp = enc.beginComputePass(); bp.setPipeline(pipe); bp.setBindGroup(0, b); bp.dispatchWorkgroups(gx, gy, gz); bp.end();
+      const bp = enc.beginComputePass(); bp.setPipeline(pipe); bp.setBindGroup(0, b);
+      bp.dispatchWorkgroups(Math.ceil((hi[0] - lo[0]) / 4), Math.ceil((hi[1] - lo[1]) / 4), Math.ceil((hi[2] - lo[2]) / 4));
+      bp.end();
+      passIdx++;
     }
-    enc.copyTextureToTexture({ texture: scratch }, { texture: tex }, this.dims as [number, number, number]);
+    if (region) {
+      const sz: [number, number, number] = [region.hi[0] - region.lo[0], region.hi[1] - region.lo[1], region.hi[2] - region.lo[2]];
+      enc.copyTextureToTexture({ texture: scratch, origin: region.lo }, { texture: tex, origin: region.lo }, sz);
+    } else {
+      enc.copyTextureToTexture({ texture: scratch }, { texture: tex }, this.dims as [number, number, number]);
+    }
     dev.queue.submit([enc.finish()]);
   }
 

@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- spine-compare — vertebra-by-vertebra SPINEPS vs IDC-reference comparison for one
+     spine-review case: two method rows (linked MPR + 3D, one shared slice state), an
+     extent mode (1 vert … full spine), and per-level buttons that FOCUS every view on
+     that bone. ?case=<pid>&coll=<mets|myeloma> -->
+<title>spine-compare — SPINEPS vs reference</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; background: #05060a; color: #d6e2f2;
+               font: 12px -apple-system, system-ui, sans-serif; }
+  #page { display: flex; flex-direction: column; height: 100vh; }
+  header { display: flex; align-items: center; gap: 12px; padding: 5px 12px; background: #0b0e16;
+           border-bottom: 1px solid #1b2740; flex: 0 0 auto; flex-wrap: wrap; }
+  header h1 { font-size: 13px; margin: 0; color: #9fb3d0; font-weight: 700; letter-spacing: .3px; }
+  #info { color: #7d92b5; }
+  #status { margin-left: auto; color: #9fb3d0; }
+  #cols, #extent { display: flex; gap: 4px; }
+  #extent { border-left: 1px solid #1b2740; padding-left: 12px; }
+  .chip { font: 600 11px -apple-system, system-ui, sans-serif; color: #d6e2f2; background: #1b2740;
+          border: 1px solid #33507e; border-radius: 4px; padding: 2px 8px; cursor: pointer; }
+  .chip.on { background: #2b6cb0; border-color: #3f86d0; color: #fff; }
+  #rows { flex: 1; display: flex; flex-direction: column; gap: 2px; min-height: 0; }
+  .mrow { flex: 1; display: flex; gap: 2px; min-height: 0; }
+  .mlabel { writing-mode: vertical-rl; transform: rotate(180deg); text-align: center;
+            font-weight: 700; letter-spacing: .5px; padding: 0 1px; flex: 0 0 16px; }
+  .mrow.spineps .mlabel { color: #f29a33; }
+  .mrow.ref .mlabel { color: #4da6f2; }
+  .cell { position: relative; flex: 1; min-width: 0; min-height: 0; }
+  .cell.hidden { display: none; }
+  .cell canvas { width: 100%; height: 100%; display: block; background: #000; touch-action: none; }
+  .cell .lab { position: absolute; top: 4px; left: 6px; font-weight: 700; font-size: 10px;
+               opacity: .75; pointer-events: none; color: #9fb3d0; }
+  #levels { flex: 0 0 auto; display: flex; gap: 3px; overflow-x: auto; padding: 5px 10px;
+            background: #0b0e16; border-top: 1px solid #1b2740; }
+  #levels button.lvl { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 1px;
+            font: 700 11px -apple-system, system-ui, sans-serif; color: #d6e2f2; background: #131a2a;
+            border: 1px solid #33507e; border-radius: 5px; padding: 3px 7px; cursor: pointer; }
+  #levels button.lvl span { font-weight: 400; font-size: 10px; }
+  #levels button.lvl em { font-style: normal; font-size: 9px; color: #ffb0b8; }
+  #levels button.good span { color: #5ad07a; }
+  #levels button.warn span { color: #f0d24a; }
+  #levels button.bad span { color: #f05a5a; }
+  #levels button.nodata { opacity: .5; }
+  #levels button.sel { background: #2b6cb0; border-color: #3f86d0; }
+  #levels button.lvlnav { flex: 0 0 auto; align-self: stretch; font: 700 13px -apple-system, system-ui, sans-serif;
+            color: #9fb3d0; background: #1b2740; border: 1px solid #33507e; border-radius: 5px;
+            padding: 0 10px; cursor: pointer; }
+  #levels button.lvlnav:hover { color: #fff; background: #24365a; }
+  /* double-click-to-maximize: one cell fills the rows area, its row label stays */
+  #rows.maxmode .mrow { display: none; }
+  #rows.maxmode .mrow.hasmax { display: flex; flex: 1; }
+  #rows.maxmode .mrow.hasmax .cell { display: none; }
+  #rows.maxmode .mrow.hasmax .cell.max { display: block; flex: 1; }
+  #case-btn { font-weight: 700; }
+  #case-panel[hidden] { display: none; }   /* display:flex below would defeat the hidden attribute */
+  #case-panel { position: fixed; top: 34px; right: 8px; z-index: 20; width: 340px; max-height: 70vh;
+                display: flex; flex-direction: column; background: #0b0e16; border: 1px solid #33507e;
+                border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,.6); overflow: hidden; }
+  #case-search { margin: 8px; padding: 5px 8px; font: 12px -apple-system, system-ui, sans-serif;
+                 color: #d6e2f2; background: #131a2a; border: 1px solid #33507e; border-radius: 5px; outline: none; }
+  #case-list { overflow-y: auto; padding: 0 6px 6px; }
+  #case-list .crow { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+                background: none; border: none; border-radius: 5px; padding: 4px 6px; cursor: pointer;
+                font: 12px -apple-system, system-ui, sans-serif; color: #d6e2f2; }
+  #case-list .crow:hover { background: #1b2740; }
+  #case-list .crow.cur { background: #2b6cb0; }
+  #case-list .crow .pid { font-weight: 700; min-width: 72px; font-variant-numeric: tabular-nums; }
+  #case-list .crow .pill { font-size: 10px; padding: 0 6px; border-radius: 8px; border: 1px solid currentColor; }
+  #case-list .crow .pill.mets { color: #f29a33; }
+  #case-list .crow .pill.myeloma { color: #4da6f2; }
+  #case-list .crow .st { margin-left: auto; color: #9fb3d0; font-variant-numeric: tabular-nums; }
+  #case-list .crow .st.bad { color: #f05a5a; }
+  #case-list .crow .st.warn { color: #f0d24a; }
+  #case-list .crow .st.good { color: #5ad07a; }
+</style>
+</head>
+<body>
+  <div id="page">
+    <header>
+      <h1>spine-compare</h1>
+      <span id="info"></span>
+      <div id="cols">
+        <button id="col-axial" class="chip on">Axial</button>
+        <button id="col-sagittal" class="chip on">Sagittal</button>
+        <button id="col-coronal" class="chip on">Coronal</button>
+        <button id="col-threeD" class="chip on">3D</button>
+      </div>
+      <div id="extent">
+        <button id="ext-one" class="chip">1 vert</button>
+        <button id="ext-pm1" class="chip">±1</button>
+        <button id="ext-pm3" class="chip">±3</button>
+        <button id="ext-full" class="chip on">full spine</button>
+      </div>
+      <span id="status">loading…</span>
+      <button id="case-btn" class="chip" title="choose a case">case ▾</button>
+    </header>
+    <div id="case-panel" hidden>
+      <input id="case-search" type="search" placeholder="filter by id…" autocomplete="off">
+      <div id="case-list"></div>
+    </div>
+    <div id="rows">
+      <div class="mrow spineps">
+        <div class="mlabel">SPINEPS</div>
+        <div class="cell"><canvas id="c-spineps-axial"></canvas><div class="lab">Axial</div></div>
+        <div class="cell"><canvas id="c-spineps-sagittal"></canvas><div class="lab">Sagittal</div></div>
+        <div class="cell"><canvas id="c-spineps-coronal"></canvas><div class="lab">Coronal</div></div>
+        <div class="cell"><canvas id="c-spineps-threeD"></canvas><div class="lab">3D</div></div>
+      </div>
+      <div class="mrow ref">
+        <div class="mlabel">REFERENCE</div>
+        <div class="cell"><canvas id="c-ref-axial"></canvas><div class="lab">Axial</div></div>
+        <div class="cell"><canvas id="c-ref-sagittal"></canvas><div class="lab">Sagittal</div></div>
+        <div class="cell"><canvas id="c-ref-coronal"></canvas><div class="lab">Coronal</div></div>
+        <div class="cell"><canvas id="c-ref-threeD"></canvas><div class="lab">3D</div></div>
+      </div>
+    </div>
+    <div id="levels"></div>
+  </div>
+  <script type="module" src="spine-compare.js?v=20260810e"></script>   <!-- bump per deploy: stale cached bundles caused phantom-behaviour reports -->
+</body>
+</html>
