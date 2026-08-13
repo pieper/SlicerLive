@@ -206,7 +206,7 @@ rendering and jump-flooding distance transforms to the ecosystem of open DICOM t
 * More field types for different interactive controls should be added.
 * More of Slicer's core functionality exposed.
 * A mode like [OHIF's local viewer](https://viewer.ohif.org/local) or [SliceDrop](https://slicedrop.com/) so you can drag and drop data.
-* Integration with [dicom-curate](https://github.com/clintools/dicom-curate) to handle deidentificaion and cloud data sync.
+* Integration with [dicom-curate](https://github.com/clintools/dicom-curate) to handle deidentification and cloud data sync.
 * A native app using deno to access resources the browser is sandboxed from.
 * Polish the remote rendering service (either local app or remote/cloud service) for on-demand scale up when the data is too big for the browser.
 * Better examples of real applications (bridges to data acquisition and device control for example).
