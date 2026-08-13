@@ -170,7 +170,10 @@ SlicerLive continues a line of experiments in GPU-accelerated medical imaging:
 - <a href="https://github.com/pieper/SlicerCL" target="_blank" rel="noopener"><b>SlicerCL</b></a> —
   3D Slicer extensions written in OpenCL through pyopencl, including a GPU-accelerated GrowCut effect for
   Slicer's segmentation editor. It contributed the core idea behind `algorithms/`: interactive segmentation
-  editing expressed as GPU compute kernels, driven live from an editor UI.
+  editing expressed as GPU compute kernels, driven live from an editor UI. It also introduced the
+  compositing renderer that `render/` follows — multiple pieces of content composited in a single
+  ray-cast pass — along with analytic signed-distance-field compositing and ray marching through
+  nonlinear transforms, the direct ancestors of today's Fields, SDF shells, and `TransformField`.
 - <a href="https://github.com/pieper/step" target="_blank" rel="noopener"><b>step</b></a> — GPU medical
   image computing in the browser with JavaScript and WebGL 2.0, working directly from DICOM-native data
   structures. It contributed the everything-in-the-browser premise, the patient/pixel/texture coordinate
