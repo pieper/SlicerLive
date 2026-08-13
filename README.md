@@ -200,11 +200,24 @@ rendering and jump-flooding distance transforms to the ecosystem of open DICOM t
   <a href="docs/ARCHITECTURE-2026-08-02.md" target="_blank" rel="noopener"><code>docs/ARCHITECTURE-2026-08-02.md</code></a>,
   roadmap in <a href="docs/SLICERLIVE.md" target="_blank" rel="noopener"><code>docs/SLICERLIVE.md</code></a>.
 
-## Acknowledgments
+## Plans
 
-Thanks to **Andrey Fedorov** for his valuable testing and feedback, which shaped the SEGRoulette viewer
-and its IDC integration.
+* This repo is a mix of code for testing convenience, but it will be refactored at some point.  The LiveStory Slicer scripted module obviously doesn't belong here.
+* More field types for different interactive controls should be added.
+* More of Slicer's core functionality exposed.
+* A mode like [OHIF's local viewer](https://viewer.ohif.org/local) or [SliceDrop](https://slicedrop.com/) so you can drag and drop data.
+* Integration with [dicom-curate](https://github.com/clintools/dicom-curate) to handle deidentificaion and cloud data sync.
+* A native app using deno to access resources the browser is sandboxed from.
+* Polish the remote rendering service (either local app or remote/cloud service) for on-demand scale up when the data is too big for the browser.
+* Better examples of real applications (bridges to data acquisition and device control for example).
+* Recipes for making custom apps.
+* Backward compatibility so existing Slicer extensions can leverage this code.  This basically already exists, in the sense that the LiveSync allows any Slicer Module's GUI and Logic to manipulate MRML and LiveSync will mirror (most of) that to SlicerLive, but we also want to look at using wasm and pyodide to port those to run in the browser unchanged (probably by making a mock-Qt in typescript).  Plus a migration guide to make native extensions in typescript directly.
+
+## Acknowledgments
 
 This work is being developed under the NIH grant
 <a href="https://reporter.nih.gov/search/NqGZkegLQkaxQEbLxCXMdw/project-details/11343589#description" target="_blank" rel="noopener"><b>R01 CA310962</b>,
 <i>3D Slicer: A unified open-source platform for advanced cancer imaging research</i></a>.
+
+Thanks to **Andrey Fedorov** for his valuable testing and feedback, which shaped the SEGRoulette viewer
+and its IDC integration.
