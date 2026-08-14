@@ -36,12 +36,12 @@
   .mrow.empty { flex: 0 0 34px; opacity: .62; }
   .mrow.loading { opacity: .95; }
   .mrow.failed { border-left-color: #f05a5a; }
-  .mlabel { flex: 0 0 132px; padding: 4px 7px; cursor: pointer; overflow: hidden; min-width: 0;
+  .mlabel { flex: 0 0 152px; padding: 4px 8px; cursor: pointer; overflow: hidden; min-width: 0;
             display: flex; flex-direction: column; gap: 1px; user-select: none; }
   .mlabel:hover { background: #101725; }
   .mlabel .tp { font: 800 9.5px -apple-system, system-ui, sans-serif; letter-spacing: .08em;
                 color: var(--accent, #9fb3d0); }
-  .mlabel .seq { font-weight: 700; font-size: 11.5px; color: #d6e2f2; overflow-wrap: anywhere; line-height: 1.25; }
+  .mlabel .seq { font-weight: 700; font-size: 11px; color: #d6e2f2; overflow-wrap: anywhere; line-height: 1.22; }
   .mlabel .det { font-size: 10px; color: #7d92b5; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .mlabel .segs { font-size: 10px; color: #f0a8b0; overflow-wrap: anywhere; }
   /* an unloaded row collapses to a single clickable line — its name, cost and labels stay
@@ -69,6 +69,47 @@
   #rows.maxmode .mrow.hasmax .cell { display: none; }
   #rows.maxmode .mrow.hasmax .cell.max { display: block; flex: 1; }
 
+  /* ── empty state: nothing is fetched until asked for ────────────────────── */
+  #hint { margin: auto; text-align: center; padding: 24px; max-width: 560px; }
+  #hint .h1 { font-size: 15px; font-weight: 700; color: #9fb3d0; }
+  #hint .h2 { font-size: 12px; color: #7d92b5; margin: 7px 0 14px; line-height: 1.6; }
+  #hint .chip { padding: 6px 14px; font-size: 12px; }
+
+  /* ── the COMPARE row: A and B stacked, blended by B's alpha ─────────────── */
+  .mrow.compare { border-left-color: #f0d24a; }
+  .mrow.compare[hidden] { display: none; }
+  .mrow.compare .mlabel .tp { color: #f0d24a; }
+  .cell canvas.aside, .cell canvas.bside { position: absolute; inset: 0; }
+  .cell canvas.bside { z-index: 1; }        /* B is on top; its opacity IS the blend */
+  .cmpbar { height: 3px; background: #1b2740; border-radius: 2px; overflow: hidden; margin: 3px 0; }
+  .cmpbar i { display: block; height: 100%; background: #f0d24a; }
+  #cmpbar { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 5px 10px;
+            background: #0b0e16; border-top: 1px solid #1b2740; font-size: 11px; color: #7d92b5; }
+  #cmpbar.dim { opacity: .55; }
+  #cmpbar .cmplabel { font: 800 9.5px -apple-system, system-ui, sans-serif; letter-spacing: .08em; color: #f0d24a; }
+  #cmpbar select { max-width: 210px; }
+  #cmp-fade { width: 160px; }
+  #cmp-note { font-variant-numeric: tabular-nums; }
+  select, input[type=range] { font: 11px -apple-system, system-ui, sans-serif; color: #d6e2f2;
+            background: #131a2a; border: 1px solid #33507e; border-radius: 4px; padding: 2px 4px; accent-color: #3f86d0; }
+
+  /* ── transfer-function panel ────────────────────────────────────────────── */
+  #tf-panel[hidden] { display: none; }
+  /* clear of the shared chrome's fixed logo (top-right, ~110x92) */
+  #tf-panel { position: fixed; top: 108px; right: 8px; z-index: 21; width: 300px; padding: 9px 10px 10px;
+              display: flex; flex-direction: column; gap: 6px; background: #0b0e16;
+              border: 1px solid #33507e; border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,.6); }
+  #tf-panel.dim { opacity: .5; pointer-events: none; }
+  #tf-panel .tfhead { display: flex; align-items: center; gap: 7px; font: 800 9.5px -apple-system, system-ui, sans-serif;
+              letter-spacing: .08em; color: #9fb3d0; }
+  #tf-panel .tfhead select { flex: 1; min-width: 0; font-weight: 400; letter-spacing: 0; }
+  #tf-curve { width: 100%; height: 96px; display: block; background: #05070d;
+              border: 1px solid #1b2740; border-radius: 5px; cursor: crosshair; touch-action: none; }
+  #tf-panel .tfrow { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #7d92b5; }
+  #tf-panel .tfrow label { flex: 0 0 46px; }
+  #tf-panel .tfrow select, #tf-panel .tfrow input { flex: 1; min-width: 0; }
+  #tf-panel .tfwl { flex: 1; font-variant-numeric: tabular-nums; color: #9fb3d0; }
+
   /* ── the timeline strip = the row switchboard ───────────────────────────── */
   #strip { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
            padding: 6px 10px; background: #0b0e16; border-top: 1px solid #1b2740; }
@@ -82,6 +123,8 @@
   .chip.series em { font-style: normal; font-size: 9px; color: #f0a8b0; }
   .chip.series.on { background: color-mix(in srgb, var(--accent) 32%, #101725); border-color: var(--accent); color: #fff; }
   .chip.series.busy { border-style: dashed; }
+  /* the three the viewer would have chosen — marked, never auto-fetched */
+  .chip.series.sugg { box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent) 70%, transparent); }
   .chip.series.failed { border-color: #f05a5a; color: #ffb0b8; }
   .chip.jump { flex: 0 0 auto; border-color: var(--accent); color: var(--accent); background: #101725; }
   #jumps { flex: 0 0 auto; display: flex; gap: 4px; padding-left: 10px; border-left: 1px solid #1b2740; }
@@ -115,8 +158,10 @@
         <button id="col-coronal" class="chip on">Coronal</button>
         <button id="col-threeD" class="chip on">3D</button>
       </div>
+      <button id="col-link" class="chip on" title="link the 3D camera to the slice zoom/pan (orbit is never linked)">Link 3D</button>
       <div id="hdr-right">
         <span id="status">loading…</span>
+        <button id="tf-btn" class="chip" title="transfer function / window-level for the volume rendering">TF ▾</button>
         <button id="case-btn" class="chip" title="choose a case">case ▾</button>
       </div>
     </header>
@@ -124,7 +169,29 @@
       <input id="case-search" type="search" placeholder="filter by id…" autocomplete="off">
       <div id="case-list"></div>
     </div>
+    <div id="tf-panel" hidden>
+      <div class="tfhead">Transfer function
+        <select id="tf-row" title="which loaded series to edit"></select>
+      </div>
+      <canvas id="tf-curve" title="drag a handle to reshape the opacity curve · click to add a point · alt/right-click to remove"></canvas>
+      <div class="tfrow"><label>ramp</label><select id="tf-ramp"></select></div>
+      <div class="tfrow"><label>window</label><input id="tf-win" type="range" min="-1" max="1" step="0.01" value="0"></div>
+      <div class="tfrow"><label>level</label><input id="tf-lev" type="range" min="-1" max="1" step="0.01" value="0"></div>
+      <div class="tfrow"><span id="tf-wl" class="tfwl"></span><button id="tf-reset" class="chip">reset</button></div>
+    </div>
     <div id="rows"></div>
+    <div id="cmpbar">
+      <span class="cmplabel">Compare</span>
+      <select id="cmp-a" title="volume A (under)"></select>
+      <button id="cmp-swap" class="chip" title="swap A and B">⇄</button>
+      <select id="cmp-b" title="volume B (over)"></select>
+      <button class="chip" data-mode="off">off</button>
+      <button class="chip" data-mode="fade">fade</button>
+      <button class="chip" data-mode="rock">rock</button>
+      <button class="chip" data-mode="toggle">toggle</button>
+      <input id="cmp-fade" type="range" min="0" max="100" value="50" title="blend A ⇄ B">
+      <span id="cmp-note"></span>
+    </div>
     <div id="strip"><div id="series"></div><div id="jumps"></div></div>
   </div>
   <script type="module" src="remind-compare.js?v=20260814a"></script>   <!-- bump per deploy: stale cached bundles read as phantom behaviour -->

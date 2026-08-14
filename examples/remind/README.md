@@ -45,10 +45,48 @@ checked rather than assumed by `worker/build_index.py`:
   are fetched until you click a case, which opens the viewer in a drilldown.
 - **`remind-compare.html`** + **`remind-compare-{browser,scene}.ts`** — the
   viewer: **one row per acquisition**, ordered along the timeline, × selectable
-  {axial, sagittal, coronal, 3D} columns. Rows are toggleable from the strip
-  along the bottom (or by clicking the row label), because they are expensive —
-  each carries its size, and one ultrasound series is up to 197 MB.
-  `?case=<pid>&rows=all|none|<uuid,…>`.
+  {axial, sagittal, coronal, 3D} columns.
+
+  **Nothing is downloaded until you ask for it.** The page opens having fetched
+  the index and not one voxel; every row is collapsed to a line stating what it
+  would cost, and the timeline strip along the bottom is the switchboard. Three
+  rows are *marked* suggested (the pre-op MR carrying the tumour, the
+  post-dura ultrasound, the intra-op MR) and offered as one explicit click with
+  its price attached — never auto-fetched. Switching a row off frees its GPU
+  objects. `?case=<pid>&rows=all|suggested|<uuid,…>`.
+
+### Navigating it
+
+- **Slice gestures** are the shared SlicerLive ones — `attachSliceControls`
+  owns them for every MPR demo in the repo, so this one does not invent a second
+  dialect: wheel = scroll, left-drag = scroll, middle/shift+left = pan,
+  right-drag or ctrl/⌘+wheel = zoom, shift+move = crosshair, double-click =
+  maximize.
+- **Everything is linked in patient space.** A gesture drives the row under the
+  cursor; the resulting frame is then read back *out* of that renderer as a RAS
+  centre and a field of view in millimetres and pushed to every other row. Read-back
+  rather than re-derivation is the point: the plane basis and the radiological
+  sign convention stay single-sourced in `SliceRenderer`, and rows on different
+  grids stay registered.
+- **Slice ↔ 3D** are two expressions of the same thing — a centre and a span —
+  so zooming a slice dollies the 3D camera and dollying the 3D zooms the slices
+  (`Link 3D`, on by default). Orbiting is deliberately *not* coupled: it changes
+  direction, not extent.
+- **Compare (rock / fade / toggle)** over any two loaded volumes. A and B are
+  drawn to two *stacked canvases* — both already render the same patient-space
+  frame, so they are pixel-registered by construction — and the blend is B's
+  alpha. Nothing in the slice or volume shaders has to learn about a second
+  volume, and because both canvases keep their last render, rocking animates by
+  touching one opacity per frame: no re-render, no GPU work between view changes.
+  The compare row is *added* to the timeline rather than replacing it, so the
+  other stages stay on screen while two of them rock against each other.
+- **Transfer functions are per row**, because the rows are not comparable in
+  scalar units (raw MR next to 8-bit ultrasound). The `TF` panel shows that row's
+  own intensity histogram with draggable opacity control points (click to add,
+  alt/right-click to remove), a colour ramp, and window/level. Dragging a handle
+  rewrites 256 LUT entries in place via the repo's `lutFromTransferFunctions` —
+  no pipeline rebuild, so it is interactive. Ultrasound defaults to the warm
+  `amber` ramp; MR to `grey`.
 
 ### What makes this different from spine-compare
 

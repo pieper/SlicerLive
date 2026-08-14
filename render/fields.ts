@@ -115,6 +115,11 @@ export class ImageField implements Field {
     this.dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
   }
 
+  /** The scalar range the LUT spans — window/level for the volume rendering. Re-packed into
+   *  the material uniform on the next syncUniforms()/render, so no pipeline rebuild. */
+  setClim(lo: number, hi: number) { this.clim = [lo, hi]; }
+  getClim(): [number, number] { return [this.clim[0], this.clim[1]]; }
+
   private origP2t?: Mat4;                // sampling matrix + box at identity, for setWorldTransform
   private origBox?: [Vec3, Vec3];
 

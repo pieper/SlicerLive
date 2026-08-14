@@ -22,6 +22,7 @@ import { bakeColorizeRGBA } from "../../render/bake.ts";
 import { EditableSegmentation } from "../../algorithms/editable-segmentation.ts";
 import { resampleIsotropic } from "../../algorithms/geom.ts";
 import { SegmentationLogic } from "../../logic/segmentation-logic.ts";
+import { lutFromTransferFunctions, type TF } from "../../render/scene-volume.ts";
 import type { Vec3 } from "../../render/mat4.ts";
 import {
   loadSeg, loadVolume, type CaseEntry, type LoadedVolume, type SeriesEntry,
@@ -59,6 +60,12 @@ export interface Row {
   rasHi?: Vec3;
   center?: Vec3;
   radius?: number;
+  /** This row's own volume-rendering transfer function + display window. */
+  tf?: RowTF;
+  win?: number;
+  lev?: number;
+  /** Cached intensity histogram over [lev±win/2] — built once, for the TF editor. */
+  hist?: Float32Array;
 }
 
 export interface RemindSceneOpts {
@@ -72,19 +79,34 @@ export interface RemindSceneOpts {
   onRedraw?: () => void;               // a row's shell finished refining
 }
 
-/** A greyscale VR ramp: opacity climbs quadratically above the window's midpoint, so a
- *  post-contrast MR shows the head surface and an ultrasound block shows its bright
- *  interfaces without either drowning in noise. */
-function rampLUT(maxAlpha: number): Uint8Array {
-  const lut = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256; i++) {
-    const t = i / 255;
-    let a = Math.max(0, (t - 0.45) / 0.55);
-    a *= a;
-    lut[i * 4] = lut[i * 4 + 1] = lut[i * 4 + 2] = Math.round(t * 255);
-    lut[i * 4 + 3] = Math.round(Math.min(maxAlpha, a) * 255);
-  }
-  return lut;
+// ── transfer functions ───────────────────────────────────────────────────────
+// Per ROW, not global: ReMIND rows are raw MR scanner units next to 8-bit ultrasound, so a
+// single shared transfer function is meaningless. Each row keeps its own opacity curve
+// (control points in normalised 0..1 across that row's window) and a colour ramp, and the
+// 256-entry LUT is rebuilt with the repo's own lutFromTransferFunctions and written in
+// place — no pipeline rebuild, so dragging a control point is interactive.
+
+/** Colour ramps, as control points in normalised intensity. */
+export const RAMPS: Record<string, [number, number, number, number][]> = {
+  grey: [[0, 0, 0, 0], [1, 1, 1, 1]],
+  // ultrasound is conventionally read on a warm/sepia ramp — and it separates a US row from
+  // an MR row at a glance when both are on screen
+  amber: [[0, 0.03, 0.01, 0], [0.45, 0.55, 0.33, 0.12], [1, 1, 0.93, 0.78]],
+  hot: [[0, 0, 0, 0], [0.35, 0.62, 0.06, 0.02], [0.7, 0.96, 0.62, 0.05], [1, 1, 1, 0.86]],
+  cool: [[0, 0.02, 0.02, 0.08], [0.5, 0.16, 0.45, 0.72], [1, 0.85, 0.96, 1]],
+};
+export const RAMP_NAMES = Object.keys(RAMPS);
+
+/** The default opacity curve — the quadratic foot the demo shipped with, as control points:
+ *  transparent to the window midpoint, then climbing, so a post-contrast MR shows the head
+ *  surface and an ultrasound block shows its bright interfaces without drowning in noise. */
+export const DEFAULT_TF_POINTS: [number, number][] =
+  [[0, 0], [0.45, 0], [0.6, 0.07], [0.75, 0.3], [0.9, 0.66], [1, 1]];
+
+export interface RowTF {
+  ramp: string;
+  /** [t, alpha] control points, t and alpha both 0..1; alpha is scaled by the global VR opacity. */
+  points: [number, number][];
 }
 
 export class RemindScene {
@@ -183,9 +205,67 @@ export class RemindScene {
     this.opts.onRowChange?.(row);
   }
 
+  /** Build this row's 256-entry LUT from its own TF, scaled by the global VR opacity. */
+  private lutFor(row: Row): Uint8Array {
+    const tf = row.tf!;
+    const lo = row.lev! - row.win! / 2, hi = row.lev! + row.win! / 2;
+    const s = (t: number) => lo + t * (hi - lo);
+    const color: TF = (RAMPS[tf.ramp] ?? RAMPS.grey).map(([t, r, g, b]) => [s(t), r, g, b]);
+    const opacity: TF = tf.points.map(([t, a]) => [s(t), a * this.volOpacity]);
+    return lutFromTransferFunctions(color, opacity, [lo, hi]);
+  }
+
+  /** Replace a row's transfer function (ramp and/or control points) and repaint its LUT. */
+  setRowTF(key: string, patch: Partial<RowTF>) {
+    const row = this.row(key);
+    if (!row || row.state !== "ready") return;
+    row.tf = { ...row.tf!, ...patch };
+    row.field!.setLUT(this.lutFor(row));
+    row.scene!.syncUniforms();
+  }
+
+  /** Display window for a row — drives the MPR *and* the range the VR's LUT spans. */
+  setRowWindowLevel(key: string, win: number, lev: number) {
+    const row = this.row(key);
+    if (!row || row.state !== "ready") return;
+    row.win = Math.max(1e-6, win);
+    row.lev = lev;
+    row.slice!.setWindowLevel(row.win, row.lev);
+    row.field!.setClim(row.lev - row.win / 2, row.lev + row.win / 2);
+    row.field!.setLUT(this.lutFor(row));
+    row.scene!.syncUniforms();
+  }
+
+  /** Intensity histogram (128 bins over the row's current window), log-compressed for display. */
+  histogram(key: string, bins = 128): Float32Array | undefined {
+    const row = this.row(key);
+    if (!row || row.state !== "ready") return undefined;
+    if (row.hist && row.hist.length === bins) return row.hist;
+    const v = row.vol!.vol;
+    const lo = row.lev! - row.win! / 2, hi = row.lev! + row.win! / 2;
+    const h = new Float32Array(bins);
+    const sc = bins / Math.max(1e-9, hi - lo);
+    const stride = Math.max(1, Math.floor(v.length / 400000));
+    for (let i = 0; i < v.length; i += stride) {
+      const b = Math.floor((v[i] - lo) * sc);
+      if (b >= 0 && b < bins) h[b]++;
+    }
+    let max = 0;
+    for (let i = 0; i < bins; i++) { h[i] = Math.log1p(h[i]); if (h[i] > max) max = h[i]; }
+    if (max > 0) for (let i = 0; i < bins; i++) h[i] /= max;
+    row.hist = h;
+    return h;
+  }
+
   private buildRow(row: Row, vol: LoadedVolume) {
     const dev = this.gpu.device;
-    const field = new ImageField(dev, vol.vol, vol.dims, [1, 1, 1], rampLUT(this.volOpacity), {
+    row.win = vol.win;
+    row.lev = vol.lev;
+    // ultrasound gets the warm ramp by default — it reads the way sonographers expect, and
+    // it tells a US row apart from an MR row at a glance in the 3D column
+    row.tf = { ramp: row.entry.m === "US" ? "amber" : "grey", points: [...DEFAULT_TF_POINTS] };
+    row.vol = vol;
+    const field = new ImageField(dev, vol.vol, vol.dims, [1, 1, 1], this.lutFor(row), {
       clim: [vol.lev - vol.win / 2, vol.lev + vol.win / 2],
       ijkToRAS: vol.ijkToRAS,
       shade: [0.3, 0.7, 0.4, 20],
@@ -293,9 +373,8 @@ export class RemindScene {
   setVolumeOpacity(o: number) {
     const was = this.volOpacity > 0.001;
     this.volOpacity = Math.max(0, Math.min(1, o));
-    const lut = rampLUT(this.volOpacity);
     for (const r of this.readyRows()) {
-      r.field!.setLUT(lut);
+      r.field!.setLUT(this.lutFor(r));            // per row: each keeps its own TF shape
       if (was !== (this.volOpacity > 0.001)) this.rebuildScene(r);
     }
   }

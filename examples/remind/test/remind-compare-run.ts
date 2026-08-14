@@ -51,29 +51,48 @@ const evalJson = async (expr: string): Promise<unknown> => {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface DbgRow {
-  key: string; tp: string; desc: string; state: string; error?: string;
+  key: string; tp: string; desc: string; m: string; state: string; error?: string; nSegs: number;
   dims?: [number, number, number]; vox?: number; win?: number; lev?: number;
   ijkToRAS?: number[]; rasLo?: number[]; rasHi?: number[];
   segs: { structure: string; voxels: number; centroid: number[] | null }[];
 }
 const rows = () => evalJson("__remindDbg.rows()") as Promise<DbgRow[]>;
 
-// The page is fetching hundreds of MB from IDC's public bucket — give it real time.
 let present = false;
 for (let i = 0; i < 60 && !present; i++) {
   present = (await evalJson("!!globalThis.__remindDbg")) === true;
   if (!present) await sleep(500);
 }
-let loaded = 0;
-for (let i = 0; i < 900 && present; i++) {          // up to ~7.5 min for the default rows
-  const rs = await rows();
-  loaded = rs.filter((r) => r.state === "ready").length;
-  if (!rs.some((r) => r.state === "loading") && loaded > 0) break;
-  await sleep(500);
-}
 
 const results: [string, boolean, string][] = [];
 const check = (name: string, ok: boolean, detail = "") => { results.push([name, ok, detail]); };
+
+// NOTHING may be fetched before the user asks. Give the page a few seconds to misbehave,
+// then assert it did not: every row idle, no bytes spent.
+if (present) {
+  await sleep(4000);
+  const idle = (await rows()).every((r) => r.state === "idle");
+  check("opens without downloading anything", idle,
+    (await rows()).map((r) => r.state).join(","));
+}
+
+// now ask for the rows this driver needs, explicitly
+if (present) {
+  const rs0 = await rows();
+  const wanted = [
+    // pick a segmented pre-op row from the INDEX's seg count — `segs` is only populated
+    // once a row is loaded, and at this point nothing is
+    rs0.find((r) => r.tp === "preop" && r.nSegs > 0) ?? rs0.find((r) => r.tp === "preop"),
+    rs0.find((r) => ["pre_dura", "post_dura", "pre_imri"].includes(r.tp)),
+    rs0.find((r) => r.tp === "intraop"),
+  ].filter(Boolean) as DbgRow[];
+  for (const w of wanted) await evalJson(`__remindDbg.toggleRow(${JSON.stringify(w.key)})`);
+  for (let i = 0; i < 900; i++) {                  // up to ~7.5 min for the requested rows
+    const rs = await rows();
+    if (!rs.some((r) => r.state === "loading")) break;
+    await sleep(500);
+  }
+}
 const inBox = (p: number[], lo: number[], hi: number[], pad = 0) =>
   p.every((v, i) => v >= lo[i] - pad && v <= hi[i] + pad);
 const extent = (r: DbgRow) => r.rasLo!.map((v, i) => r.rasHi![i] - v);
@@ -163,7 +182,88 @@ if (present) {
       `worst ${worst.toFixed(3)} mm` + (worst >= 0.5 ? ` (${JSON.stringify(back)})` : ""));
   }
 
-  // toggling a row off frees it; toggling back reloads it
+  // ── linked zoom, and the slice ↔ 3D coupling ──────────────────────────────
+  // The invariant is not "the distance halves" — the camera starts at whatever framing put
+  // it there, and the first coupled gesture SNAPS it into agreement. What must hold is that
+  // after a coupled gesture the 3D view spans the same millimetres of patient as the slice
+  // views do; only then does a further zoom halve the distance.
+  const fov0 = await evalJson("__remindDbg.fov()") as number;
+  await evalJson("__remindDbg.zoomSlice('axial', 2)");
+  const fov1 = await evalJson("__remindDbg.fov()") as number;
+  const cam1 = await evalJson("__remindDbg.camera()") as { dist: number; fovAtFocus: number };
+  check("zooming one slice halves the SHARED field of view", Math.abs(fov1 - fov0 / 2) < fov0 * 0.02,
+    `${fov0.toFixed(1)} → ${fov1.toFixed(1)} mm`);
+  check("the 3D view then spans the same mm as the slices", Math.abs(cam1.fovAtFocus - fov1) < fov1 * 0.01,
+    `3D ${cam1.fovAtFocus.toFixed(1)} vs slice ${fov1.toFixed(1)} mm`);
+  await evalJson("__remindDbg.zoomSlice('axial', 2)");
+  const cam2 = await evalJson("__remindDbg.camera()") as { dist: number; fovAtFocus: number };
+  check("once coupled, a further zoom halves the camera distance", Math.abs(cam2.dist - cam1.dist / 2) < cam1.dist * 0.02,
+    `${cam1.dist.toFixed(1)} → ${cam2.dist.toFixed(1)} mm`);
+  await evalJson("__remindDbg.zoomSlice('axial', 0.5)");
+
+  const offs2 = await evalJson("__remindDbg.offsets()") as { key: string }[];
+  check("every loaded row shares that zoom", offs2.length === ready.length, `${offs2.length} rows linked`);
+
+  await evalJson("__remindDbg.setLink3d(false)");
+  const camPre = await evalJson("__remindDbg.camera()") as { dist: number };
+  await evalJson("__remindDbg.zoomSlice('axial', 2)");
+  const camPost = await evalJson("__remindDbg.camera()") as { dist: number };
+  check("Link 3D off leaves the camera alone", Math.abs(camPost.dist - camPre.dist) < 1e-6,
+    `${camPre.dist.toFixed(1)} → ${camPost.dist.toFixed(1)} mm`);
+  await evalJson("__remindDbg.setLink3d(true)");
+  await evalJson("__remindDbg.zoomSlice('axial', 0.25)");
+
+  // ── compare: rock / fade / toggle over any two loaded volumes ─────────────
+  if (ready.length >= 2) {
+    const a = ready[0].key, b = ready[1].key;
+    const cmp = await evalJson(`__remindDbg.setCompare(${JSON.stringify(a)}, ${JSON.stringify(b)}, 'fade')`) as { live: boolean; mode: string };
+    check("compare pairs two loaded volumes", cmp.live && cmp.mode === "fade", `${ready[0].tp} ⇄ ${ready[1].tp}`);
+    await evalJson("__remindDbg.setBlend(0.25)");
+    const st = await evalJson("__remindDbg.compare()") as { blend: number; hidden: boolean };
+    check("fade blend is settable and the compare row is shown", Math.abs(st.blend - 0.25) < 1e-6 && !st.hidden,
+      `blend ${st.blend}`);
+    const opa = await evalJson("getComputedStyle(document.querySelector('#c-cmp\\\\|axial\\\\|b')).opacity") as string;
+    check("the blend reaches the B canvas", Math.abs(Number(opa) - 0.25) < 0.02, `opacity ${opa}`);
+
+    await evalJson("__remindDbg.setCompare(null, null, 'rock')");
+    await sleep(120);
+    const r1 = (await evalJson("__remindDbg.compare()") as { blend: number }).blend;
+    await sleep(450);
+    const r2 = (await evalJson("__remindDbg.compare()") as { blend: number }).blend;
+    check("rock animates the blend", Math.abs(r2 - r1) > 0.05, `${r1.toFixed(2)} → ${r2.toFixed(2)}`);
+
+    await evalJson("__remindDbg.setCompare(null, null, 'toggle')");
+    await sleep(200);
+    const t1 = (await evalJson("__remindDbg.compare()") as { blend: number }).blend;
+    check("toggle is a hard A/B flip", t1 === 0 || t1 === 1, `blend ${t1}`);
+    await evalJson("__remindDbg.setCompare(null, null, 'off')");
+    const off = await evalJson("__remindDbg.compare()") as { hidden: boolean };
+    check("compare off hides the row", off.hidden === true);
+  }
+
+  // ── transfer function ─────────────────────────────────────────────────────
+  const tfKey = ready[0].key;
+  const tf0 = await evalJson(`__remindDbg.tf(${JSON.stringify(tfKey)})`) as { ramp: string; points: number[][] };
+  check("each row carries its own transfer function", !!tf0 && tf0.points.length >= 2,
+    `${tf0?.ramp}, ${tf0?.points.length} points`);
+  const usRow = ready.find((r) => r.m === "US");
+  if (usRow) {
+    const utf = await evalJson(`__remindDbg.tf(${JSON.stringify(usRow.key)})`) as { ramp: string };
+    check("ultrasound defaults to the warm ramp", utf.ramp === "amber", utf.ramp);
+  }
+  await evalJson(`__remindDbg.setTF(${JSON.stringify(tfKey)}, {points: [[0,0],[0.3,0.8],[1,1]], ramp: 'hot'})`);
+  const tf1 = await evalJson(`__remindDbg.tf(${JSON.stringify(tfKey)})`) as { ramp: string; points: number[][] };
+  const alpha = await evalJson(`__remindDbg.lutAlphaAt(${JSON.stringify(tfKey)}, 0.3)`) as number;
+  check("editing the curve takes effect", tf1.ramp === "hot" && Math.abs(alpha - 0.8) < 1e-6,
+    `ramp ${tf1.ramp}, alpha(0.3) = ${alpha}`);
+
+  const row0 = ready[0];
+  await evalJson(`__remindDbg.setWindowLevel(${JSON.stringify(tfKey)}, ${row0.win! * 0.5}, ${row0.lev})`);
+  const tf2 = await evalJson(`__remindDbg.tf(${JSON.stringify(tfKey)})`) as { win: number };
+  check("window/level is settable per row", Math.abs(tf2.win - row0.win! * 0.5) < 1e-3,
+    `win ${row0.win!.toFixed(0)} → ${tf2.win.toFixed(0)}`);
+
+  // toggling a row off frees it
   const victim = ready[ready.length - 1];
   await evalJson(`__remindDbg.toggleRow(${JSON.stringify(victim.key)})`);
   await sleep(300);

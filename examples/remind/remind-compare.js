@@ -483,6 +483,154 @@ function framedCamera(center, radius, distMul = 2.6) {
   ], 30);
 }
 
+// render/demos/slice-control.ts
+function attachSliceControls(canvas, cfg) {
+  const SCROLL_PX = cfg.scrollPx ?? 7;
+  const h = cfg.hooks ?? {};
+  const uv = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return {
+      u: (e.clientX - r.left) / r.width,
+      v: (e.clientY - r.top) / r.height,
+      w: r.width,
+      h: r.height
+    };
+  };
+  let lastDown = 0, lastX = 0, lastY = 0;
+  let view = null;
+  let scroll = null;
+  let grabbed = null;
+  const onContext = (e) => e.preventDefault();
+  const onWheel = (e) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      const { u, v, w, h: hh } = uv(e);
+      cfg.getSlice().zoomAbout(cfg.orient, Math.exp(-e.deltaY * 15e-4), u, v, w, hh);
+      cfg.redraw();
+      h.onZoom?.();
+      return;
+    }
+    cfg.step(e.deltaY < 0);
+    cfg.redraw();
+    h.onScroll?.(e.deltaY < 0);
+  };
+  const onDown = (e) => {
+    if (e.button === 0) {
+      const now = e.timeStamp, dbl = now - lastDown < 350 && Math.hypot(e.clientX - lastX, e.clientY - lastY) < 6;
+      lastDown = dbl ? 0 : now;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (dbl && h.onDoubleClick?.()) {
+        e.preventDefault();
+        return;
+      }
+    }
+    const wantPan = e.button === 1 || e.button === 0 && e.shiftKey;
+    const wantZoom = e.button === 2;
+    if (wantPan || wantZoom) {
+      e.preventDefault();
+      const { u: u2, v: v2 } = uv(e);
+      view = {
+        mode: wantZoom ? "zoom" : "pan",
+        x: e.clientX,
+        y: e.clientY,
+        pu: u2,
+        pv: v2
+      };
+      canvas.style.cursor = wantZoom ? "ns-resize" : "grabbing";
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const { u, v, w, h: hh } = uv(e);
+    if (h.onLeftGrab?.(u, v, w, hh)) {
+      grabbed = {
+        moved: 0
+      };
+    } else scroll = {
+      x: e.clientX,
+      y: e.clientY,
+      acc: 0
+    };
+    canvas.setPointerCapture(e.pointerId);
+  };
+  const onMove = (e) => {
+    if (view) {
+      const dx = e.clientX - view.x, dy = e.clientY - view.y;
+      const r = canvas.getBoundingClientRect();
+      if (view.mode === "pan") cfg.getSlice().panByPixels(cfg.orient, dx, dy, r.width, r.height);
+      else cfg.getSlice().zoomAbout(cfg.orient, Math.exp(dy * 6e-3), view.pu, view.pv, r.width, r.height);
+      view.x = e.clientX;
+      view.y = e.clientY;
+      cfg.redraw();
+      return;
+    }
+    if (grabbed) {
+      grabbed.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
+      const { u, v, w, h: hh } = uv(e);
+      h.onLeftDrag?.(u, v, w, hh);
+      return;
+    }
+    if (scroll) {
+      scroll.acc += e.clientX - scroll.x - (e.clientY - scroll.y);
+      scroll.x = e.clientX;
+      scroll.y = e.clientY;
+      while (Math.abs(scroll.acc) >= SCROLL_PX) {
+        const f = scroll.acc > 0;
+        cfg.step(f);
+        scroll.acc -= f ? SCROLL_PX : -SCROLL_PX;
+      }
+      cfg.redraw();
+      return;
+    }
+    if (e.buttons === 0 && h.onHover) {
+      const { u, v, w, h: hh } = uv(e);
+      h.onHover(u, v, w, hh);
+    }
+  };
+  const onUp = (e) => {
+    try {
+      canvas.releasePointerCapture(e.pointerId);
+    } catch {
+    }
+    if (view) {
+      view = null;
+      canvas.style.cursor = "default";
+      return;
+    }
+    if (grabbed) {
+      const m = grabbed.moved;
+      grabbed = null;
+      h.onLeftDrop?.(m);
+      return;
+    }
+    scroll = null;
+  };
+  canvas.addEventListener("contextmenu", onContext);
+  canvas.addEventListener("wheel", onWheel, {
+    passive: false
+  });
+  canvas.addEventListener("pointerdown", onDown);
+  canvas.addEventListener("pointermove", onMove);
+  canvas.addEventListener("pointerup", onUp);
+  canvas.addEventListener("pointercancel", onUp);
+  return {
+    resetView() {
+      cfg.getSlice().resetView(cfg.orient);
+      cfg.redraw();
+    },
+    detach() {
+      canvas.removeEventListener("contextmenu", onContext);
+      canvas.removeEventListener("wheel", onWheel);
+      canvas.removeEventListener("pointerdown", onDown);
+      canvas.removeEventListener("pointermove", onMove);
+      canvas.removeEventListener("pointerup", onUp);
+      canvas.removeEventListener("pointercancel", onUp);
+    }
+  };
+}
+
 // render/demos/view-grid.ts
 function attachDoubleClick(canvas, onDbl) {
   let last = 0, lx = 0, ly = 0;
@@ -3268,6 +3416,20 @@ var ImageField = class {
       1
     ]);
   }
+  /** The scalar range the LUT spans — window/level for the volume rendering. Re-packed into
+   *  the material uniform on the next syncUniforms()/render, so no pipeline rebuild. */
+  setClim(lo, hi) {
+    this.clim = [
+      lo,
+      hi
+    ];
+  }
+  getClim() {
+    return [
+      this.clim[0],
+      this.clim[1]
+    ];
+  }
   origP2t;
   origBox;
   uniformFloats() {
@@ -5544,6 +5706,37 @@ var SegmentationLogic = class {
   }
 };
 
+// render/scene-volume.ts
+function interpTF(tf, s, comps) {
+  if (!tf.length) return new Array(comps).fill(0);
+  if (s <= tf[0][0]) return tf[0].slice(1, 1 + comps);
+  const last = tf[tf.length - 1];
+  if (s >= last[0]) return last.slice(1, 1 + comps);
+  for (let i = 1; i < tf.length; i++) {
+    if (s <= tf[i][0]) {
+      const a = tf[i - 1], b = tf[i];
+      const u = (s - a[0]) / Math.max(b[0] - a[0], 1e-9);
+      return Array.from({
+        length: comps
+      }, (_, c) => a[1 + c] + u * (b[1 + c] - a[1 + c]));
+    }
+  }
+  return last.slice(1, 1 + comps);
+}
+function lutFromTransferFunctions(colorTF, opacityTF, clim) {
+  const lut = new Uint8Array(256 * 4);
+  for (let i = 0; i < 256; i++) {
+    const s = clim[0] + i / 255 * (clim[1] - clim[0]);
+    const [r, g, b] = interpTF(colorTF, s, 3);
+    const [a] = interpTF(opacityTF, s, 1);
+    lut[i * 4 + 0] = Math.round(Math.max(0, Math.min(1, r)) * 255);
+    lut[i * 4 + 1] = Math.round(Math.max(0, Math.min(1, g)) * 255);
+    lut[i * 4 + 2] = Math.round(Math.max(0, Math.min(1, b)) * 255);
+    lut[i * 4 + 3] = Math.round(Math.max(0, Math.min(1, a)) * 255);
+  }
+  return lut;
+}
+
 // examples/remind/remind-data.ts
 var hex = (h) => [
   parseInt(h.slice(1, 3), 16) / 255,
@@ -5693,17 +5886,117 @@ function loadSeg(g, grid, opts) {
 
 // examples/remind/remind-compare-scene.ts
 var SEG_MAX_DIM = 192;
-function rampLUT(maxAlpha) {
-  const lut = new Uint8Array(256 * 4);
-  for (let i = 0; i < 256; i++) {
-    const t = i / 255;
-    let a = Math.max(0, (t - 0.45) / 0.55);
-    a *= a;
-    lut[i * 4] = lut[i * 4 + 1] = lut[i * 4 + 2] = Math.round(t * 255);
-    lut[i * 4 + 3] = Math.round(Math.min(maxAlpha, a) * 255);
-  }
-  return lut;
-}
+var RAMPS = {
+  grey: [
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      1,
+      1,
+      1,
+      1
+    ]
+  ],
+  // ultrasound is conventionally read on a warm/sepia ramp — and it separates a US row from
+  // an MR row at a glance when both are on screen
+  amber: [
+    [
+      0,
+      0.03,
+      0.01,
+      0
+    ],
+    [
+      0.45,
+      0.55,
+      0.33,
+      0.12
+    ],
+    [
+      1,
+      1,
+      0.93,
+      0.78
+    ]
+  ],
+  hot: [
+    [
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0.35,
+      0.62,
+      0.06,
+      0.02
+    ],
+    [
+      0.7,
+      0.96,
+      0.62,
+      0.05
+    ],
+    [
+      1,
+      1,
+      1,
+      0.86
+    ]
+  ],
+  cool: [
+    [
+      0,
+      0.02,
+      0.02,
+      0.08
+    ],
+    [
+      0.5,
+      0.16,
+      0.45,
+      0.72
+    ],
+    [
+      1,
+      0.85,
+      0.96,
+      1
+    ]
+  ]
+};
+var RAMP_NAMES = Object.keys(RAMPS);
+var DEFAULT_TF_POINTS = [
+  [
+    0,
+    0
+  ],
+  [
+    0.45,
+    0
+  ],
+  [
+    0.6,
+    0.07
+  ],
+  [
+    0.75,
+    0.3
+  ],
+  [
+    0.9,
+    0.66
+  ],
+  [
+    1,
+    1
+  ]
+];
 var RemindScene = class {
   kase;
   rows;
@@ -5840,13 +6133,87 @@ var RemindScene = class {
     };
     this.opts.onRowChange?.(row);
   }
+  /** Build this row's 256-entry LUT from its own TF, scaled by the global VR opacity. */
+  lutFor(row) {
+    const tf = row.tf;
+    const lo = row.lev - row.win / 2, hi = row.lev + row.win / 2;
+    const s = (t) => lo + t * (hi - lo);
+    const color = (RAMPS[tf.ramp] ?? RAMPS.grey).map(([t, r, g, b]) => [
+      s(t),
+      r,
+      g,
+      b
+    ]);
+    const opacity = tf.points.map(([t, a]) => [
+      s(t),
+      a * this.volOpacity
+    ]);
+    return lutFromTransferFunctions(color, opacity, [
+      lo,
+      hi
+    ]);
+  }
+  /** Replace a row's transfer function (ramp and/or control points) and repaint its LUT. */
+  setRowTF(key, patch) {
+    const row = this.row(key);
+    if (!row || row.state !== "ready") return;
+    row.tf = {
+      ...row.tf,
+      ...patch
+    };
+    row.field.setLUT(this.lutFor(row));
+    row.scene.syncUniforms();
+  }
+  /** Display window for a row — drives the MPR *and* the range the VR's LUT spans. */
+  setRowWindowLevel(key, win, lev) {
+    const row = this.row(key);
+    if (!row || row.state !== "ready") return;
+    row.win = Math.max(1e-6, win);
+    row.lev = lev;
+    row.slice.setWindowLevel(row.win, row.lev);
+    row.field.setClim(row.lev - row.win / 2, row.lev + row.win / 2);
+    row.field.setLUT(this.lutFor(row));
+    row.scene.syncUniforms();
+  }
+  /** Intensity histogram (128 bins over the row's current window), log-compressed for display. */
+  histogram(key, bins = 128) {
+    const row = this.row(key);
+    if (!row || row.state !== "ready") return void 0;
+    if (row.hist && row.hist.length === bins) return row.hist;
+    const v = row.vol.vol;
+    const lo = row.lev - row.win / 2, hi = row.lev + row.win / 2;
+    const h = new Float32Array(bins);
+    const sc = bins / Math.max(1e-9, hi - lo);
+    const stride = Math.max(1, Math.floor(v.length / 4e5));
+    for (let i = 0; i < v.length; i += stride) {
+      const b = Math.floor((v[i] - lo) * sc);
+      if (b >= 0 && b < bins) h[b]++;
+    }
+    let max = 0;
+    for (let i = 0; i < bins; i++) {
+      h[i] = Math.log1p(h[i]);
+      if (h[i] > max) max = h[i];
+    }
+    if (max > 0) for (let i = 0; i < bins; i++) h[i] /= max;
+    row.hist = h;
+    return h;
+  }
   buildRow(row, vol) {
     const dev = this.gpu.device;
+    row.win = vol.win;
+    row.lev = vol.lev;
+    row.tf = {
+      ramp: row.entry.m === "US" ? "amber" : "grey",
+      points: [
+        ...DEFAULT_TF_POINTS
+      ]
+    };
+    row.vol = vol;
     const field = new ImageField(dev, vol.vol, vol.dims, [
       1,
       1,
       1
-    ], rampLUT(this.volOpacity), {
+    ], this.lutFor(row), {
       clim: [
         vol.lev - vol.win / 2,
         vol.lev + vol.win / 2
@@ -5979,9 +6346,8 @@ var RemindScene = class {
   setVolumeOpacity(o) {
     const was = this.volOpacity > 1e-3;
     this.volOpacity = Math.max(0, Math.min(1, o));
-    const lut = rampLUT(this.volOpacity);
     for (const r of this.readyRows()) {
-      r.field.setLUT(lut);
+      r.field.setLUT(this.lutFor(r));
       if (was !== this.volOpacity > 1e-3) this.rebuildScene(r);
     }
   }
@@ -6042,7 +6408,7 @@ var status = (msg, err = false) => {
   }
 };
 var mb = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
-function defaultRows(kase) {
+function suggestedRows(kase) {
   const pick = [];
   const tumorMR = kase.series.find((e) => e.tp === "preop" && e.segs.some((g) => g.s === "tumor")) ?? kase.series.find((e) => e.tp === "preop");
   const us = kase.series.find((e) => e.tp === "post_dura") ?? kase.series.find((e) => e.m === "US");
@@ -6124,20 +6490,97 @@ async function main() {
       label
     });
   }
+  const configureCanvas = (id) => {
+    if (cx.has(id)) return;
+    const ctx = cv.get(id).getContext("webgpu");
+    ctx.configure({
+      device: gpu.device,
+      format: preferred,
+      viewFormats: [
+        srgb
+      ],
+      alphaMode: "opaque"
+    });
+    cx.set(id, ctx);
+  };
   const configure = (row) => {
+    for (const c of CELLS) configureCanvas(cellId(row, c));
+  };
+  const CMP = "cmp";
+  const cmpRoot = document.createElement("div");
+  cmpRoot.className = "mrow compare";
+  cmpRoot.hidden = true;
+  const cmpLabel = document.createElement("div");
+  cmpLabel.className = "mlabel";
+  cmpRoot.appendChild(cmpLabel);
+  for (const c of CELLS) {
+    const cell = document.createElement("div");
+    cell.className = "cell";
+    cell.dataset.cell = c;
+    for (const side of [
+      "a",
+      "b"
+    ]) {
+      const canvas = document.createElement("canvas");
+      canvas.id = `c-${CMP}|${c}|${side}`;
+      canvas.className = side === "b" ? "bside" : "aside";
+      cell.appendChild(canvas);
+      cv.set(`${CMP}|${c}|${side}`, canvas);
+    }
+    const lab = document.createElement("div");
+    lab.className = "lab";
+    lab.textContent = c === "threeD" ? "3D" : c[0].toUpperCase() + c.slice(1);
+    cell.appendChild(lab);
+    const ov = document.createElement("canvas");
+    ov.className = "xh";
+    cell.appendChild(ov);
+    overlays.set(`${CMP}|${c}`, {
+      c: ov,
+      g: ov.getContext("2d")
+    });
+    cmpRoot.appendChild(cell);
+  }
+  rowsEl.appendChild(cmpRoot);
+  let cmpA = null, cmpB = null;
+  let cmpMode = "off";
+  let blend = 0.5;
+  const ROCK_MS = 1600;
+  const rowA = () => cmpA ? sc.row(cmpA) : void 0;
+  const rowB = () => cmpB ? sc.row(cmpB) : void 0;
+  const cmpLive = () => cmpMode !== "off" && rowA()?.state === "ready" && rowB()?.state === "ready";
+  const applyBlend = () => {
     for (const c of CELLS) {
-      const id = cellId(row, c);
-      if (cx.has(id)) continue;
-      const ctx = cv.get(id).getContext("webgpu");
-      ctx.configure({
-        device: gpu.device,
-        format: preferred,
-        viewFormats: [
-          srgb
-        ],
-        alphaMode: "opaque"
-      });
-      cx.set(id, ctx);
+      const b = cv.get(`${CMP}|${c}|b`);
+      if (b) b.style.opacity = String(blend);
+    }
+    const fade = el("cmp-fade");
+    if (fade && document.activeElement !== fade) fade.value = String(Math.round(blend * 100));
+    const a = rowA(), bb = rowB();
+    if (a && bb) {
+      cmpLabel.innerHTML = `<div class="tp">COMPARE</div><div class="seq">${seriesLabel(a.entry)}</div><div class="det" style="color:${rgbCss(TIMEPOINTS[a.entry.tp].color)}">${TIMEPOINTS[a.entry.tp].short}</div><div class="cmpbar"><i style="width:${Math.round(blend * 100)}%"></i></div><div class="det" style="color:${rgbCss(TIMEPOINTS[bb.entry.tp].color)}">${TIMEPOINTS[bb.entry.tp].short}</div><div class="seq">${seriesLabel(bb.entry)}</div>`;
+    }
+  };
+  let animRaf = 0, animT0 = 0;
+  const animate = (t) => {
+    if (!cmpLive() || cmpMode !== "rock" && cmpMode !== "toggle") {
+      animRaf = 0;
+      return;
+    }
+    if (!animT0) animT0 = t;
+    const phase = (t - animT0) % ROCK_MS / ROCK_MS;
+    blend = cmpMode === "rock" ? (1 - Math.cos(phase * 2 * Math.PI)) / 2 : phase < 0.5 ? 0 : 1;
+    applyBlend();
+    animRaf = requestAnimationFrame(animate);
+  };
+  const syncAnim = () => {
+    const want2 = cmpLive() && (cmpMode === "rock" || cmpMode === "toggle");
+    if (want2 && !animRaf) {
+      animT0 = 0;
+      animRaf = requestAnimationFrame(animate);
+    }
+    if (!want2 && animRaf) {
+      cancelAnimationFrame(animRaf);
+      animRaf = 0;
     }
   };
   let focus = [
@@ -6195,9 +6638,37 @@ async function main() {
   const applyFrames = () => {
     for (const o of ORIENTS) sc.applyFrame(o, viewCenter, fovMm);
   };
+  let link3d = true;
+  const camDist = () => Math.hypot(camera.focalPoint[0] - camera.position[0], camera.focalPoint[1] - camera.position[1], camera.focalPoint[2] - camera.position[2]);
+  const fovAtDist = (d) => 2 * d * Math.tan(camera.viewAngle / 2 * Math.PI / 180);
+  const syncCameraToFov = () => {
+    if (!link3d) return;
+    const d = camDist() || 1;
+    const want2 = fovMm / (2 * Math.tan(camera.viewAngle / 2 * Math.PI / 180));
+    const dir = [
+      (camera.position[0] - camera.focalPoint[0]) / d,
+      (camera.position[1] - camera.focalPoint[1]) / d,
+      (camera.position[2] - camera.focalPoint[2]) / d
+    ];
+    camera.focalPoint = [
+      ...viewCenter
+    ];
+    camera.position = [
+      viewCenter[0] + dir[0] * want2,
+      viewCenter[1] + dir[1] * want2,
+      viewCenter[2] + dir[2] * want2
+    ];
+  };
+  const syncFovToCamera = () => {
+    if (!link3d) return;
+    viewCenter = [
+      ...camera.focalPoint
+    ];
+    fovMm = Math.max(10, Math.min(900, fovAtDist(camDist())));
+    applyFrames();
+  };
   let fast3d = false, settleTimer = 0;
-  const drawSlice = (row, o) => {
-    const id = cellId(row, o);
+  const drawSliceTo = (row, o, id) => {
     const c = cv.get(id);
     if (!c.width || row.state !== "ready" || !shown[o]) return;
     row.slice.setPlane(o, sc.offset01(row, o, focus));
@@ -6205,8 +6676,7 @@ async function main() {
       format: srgb
     }), c.width, c.height);
   };
-  const draw3d = (row) => {
-    const id = cellId(row, "threeD");
+  const draw3dTo = (row, id) => {
     const c = cv.get(id);
     if (!c.width || row.state !== "ready" || !shown.threeD) return;
     const view = cx.get(id).getCurrentTexture().createView({
@@ -6222,11 +6692,29 @@ async function main() {
       scene.renderToView(view, c.width, c.height);
     }
   };
+  const drawCompare = () => {
+    if (!cmpLive()) return;
+    for (const [side, row] of [
+      [
+        "a",
+        rowA()
+      ],
+      [
+        "b",
+        rowB()
+      ]
+    ]) {
+      for (const o of ORIENTS) drawSliceTo(row, o, `${CMP}|${o}|${side}`);
+      draw3dTo(row, `${CMP}|threeD|${side}`);
+    }
+    applyBlend();
+  };
   const drawAll = () => {
     for (const row of sc.readyRows()) {
-      for (const o of ORIENTS) drawSlice(row, o);
-      draw3d(row);
+      for (const o of ORIENTS) drawSliceTo(row, o, cellId(row, o));
+      draw3dTo(row, cellId(row, "threeD"));
     }
+    drawCompare();
     xhairRedraw();
   };
   const touch3d = () => {
@@ -6246,31 +6734,33 @@ async function main() {
     });
   };
   const xhair = createCrosshair(false);
-  const xhairRedraw = () => {
+  const xhairCell = (overlayKey, canvasKey, row, k) => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
-    for (const row of sc.rows) {
-      for (const k of CELLS) {
-        const id = cellId(row, k);
-        const o = overlays.get(id);
-        const host = cv.get(id);
-        const w = host.clientWidth, h = host.clientHeight;
-        if (!w || !h) continue;
-        if (o.c.width !== Math.floor(w * dpr)) {
-          o.c.width = Math.floor(w * dpr);
-          o.c.height = Math.floor(h * dpr);
-        }
-        o.g.setTransform(o.c.width / w, 0, 0, o.c.height / h, 0, 0);
-        o.g.clearRect(0, 0, w, h);
-        if (!xhair.visible || !xhair.ras || row.state !== "ready") continue;
-        if (k === "threeD") {
-          const s = rasToScreen3D(camera, xhair.ras, w, h);
-          if (s) drawCross(o.g, s.x * w, s.y * h);
-        } else {
-          const pr = row.slice.rasToView(k, sc.offset01(row, k, focus), xhair.ras, w / h);
-          if (pr.u >= 0 && pr.u <= 1 && pr.v >= 0 && pr.v <= 1) drawCross(o.g, pr.u * w, pr.v * h);
-        }
-      }
+    const o = overlays.get(overlayKey);
+    const host = cv.get(canvasKey);
+    if (!o || !host) return;
+    const w = host.clientWidth, h = host.clientHeight;
+    if (!w || !h) return;
+    if (o.c.width !== Math.floor(w * dpr)) {
+      o.c.width = Math.floor(w * dpr);
+      o.c.height = Math.floor(h * dpr);
     }
+    o.g.setTransform(o.c.width / w, 0, 0, o.c.height / h, 0, 0);
+    o.g.clearRect(0, 0, w, h);
+    if (!xhair.visible || !xhair.ras || row?.state !== "ready") return;
+    if (k === "threeD") {
+      const s = rasToScreen3D(camera, xhair.ras, w, h);
+      if (s) drawCross(o.g, s.x * w, s.y * h);
+    } else {
+      const pr = row.slice.rasToView(k, sc.offset01(row, k, focus), xhair.ras, w / h);
+      if (pr.u >= 0 && pr.u <= 1 && pr.v >= 0 && pr.v <= 1) drawCross(o.g, pr.u * w, pr.v * h);
+    }
+  };
+  const xhairRedraw = () => {
+    for (const row of sc.rows) {
+      for (const k of CELLS) xhairCell(cellId(row, k), cellId(row, k), row, k);
+    }
+    for (const k of CELLS) xhairCell(`${CMP}|${k}`, `${CMP}|${k}|b`, rowA(), k);
   };
   const hideXhair = () => {
     if (xhair.visible) {
@@ -6301,66 +6791,59 @@ async function main() {
     };
   };
   const isShiftHover = (e) => e.shiftKey && e.buttons === 0;
+  const aspectOf = (c) => {
+    const r = c.getBoundingClientRect();
+    return r.height > 0 ? r.width / r.height : 1;
+  };
+  const adoptFrame = (row, o, canvas) => {
+    const aspect = aspectOf(canvas);
+    const off = sc.offset01(row, o, focus);
+    viewCenter = row.slice.viewToRas(o, off, 0.5, 0.5, aspect);
+    fovMm = row.slice.spanMmFor(o) / Math.max(1e-6, row.slice.zoom(o));
+    applyFrames();
+    syncCameraToFov();
+  };
   for (const row of sc.rows) {
     for (const o of ORIENTS) {
       const canvas = cv.get(cellId(row, o));
-      canvas.addEventListener("wheel", (ev) => {
-        const e = ev;
-        if (row.state !== "ready") return;
-        e.preventDefault();
-        const axis = o === "axial" ? 2 : o === "coronal" ? 1 : 0;
-        const step = Math.max(0.2, row.vol.vox) * (e.deltaY > 0 ? -1 : 1);
-        const f = [
-          ...focus
-        ];
-        f[axis] = Math.max(row.rasLo[axis], Math.min(row.rasHi[axis], f[axis] + step));
-        jumpTo(f);
-      }, {
-        passive: false
-      });
-      let dragging = false, lx = 0, ly = 0;
-      canvas.addEventListener("pointerdown", (e) => {
-        if (e.button !== 0 || e.shiftKey || row.state !== "ready") return;
-        dragging = true;
-        lx = e.clientX;
-        ly = e.clientY;
-        canvas.setPointerCapture(e.pointerId);
-      });
-      canvas.addEventListener("pointerup", (e) => {
-        dragging = false;
-        canvas.releasePointerCapture?.(e.pointerId);
+      attachSliceControls(canvas, {
+        orient: o,
+        getSlice: () => row.slice,
+        step: (fwd) => {
+          if (row.state !== "ready") return;
+          const axis = o === "axial" ? 2 : o === "coronal" ? 1 : 0;
+          const f = [
+            ...focus
+          ];
+          f[axis] = Math.max(row.rasLo[axis], Math.min(row.rasHi[axis], f[axis] + Math.max(0.2, row.vol.vox) * (fwd ? 1 : -1)));
+          focus = f;
+        },
+        redraw: () => {
+          if (row.state !== "ready") return;
+          adoptFrame(row, o, canvas);
+          requestDraw();
+        },
+        hooks: {
+          onDoubleClick: () => {
+            toggleMax(cellId(row, o));
+            return true;
+          }
+        }
       });
       canvas.addEventListener("pointermove", (e) => {
-        if (row.state !== "ready") return;
-        if (isShiftHover(e)) {
-          if (!xhair.visible) xhair.toggle(true);
-          const { u, v, aspect } = uvOf(canvas, e);
-          const ras = row.slice.viewToRas(o, sc.offset01(row, o, focus), u, v, aspect);
-          xhair.set(ras);
-          jumpTo(ras);
-          return;
-        }
-        if (!dragging) return;
-        const r = canvas.getBoundingClientRect();
-        const off = sc.offset01(row, o, focus);
-        const a = row.slice.viewToRas(o, off, 0.5, 0.5, r.width / r.height);
-        const b = row.slice.viewToRas(o, off, 0.5 + (e.clientX - lx) / r.width, 0.5 + (e.clientY - ly) / r.height, r.width / r.height);
-        viewCenter = [
-          viewCenter[0] - (b[0] - a[0]),
-          viewCenter[1] - (b[1] - a[1]),
-          viewCenter[2] - (b[2] - a[2])
-        ];
-        lx = e.clientX;
-        ly = e.clientY;
-        applyFrames();
-        requestDraw();
+        if (!isShiftHover(e) || row.state !== "ready") return;
+        if (!xhair.visible) xhair.toggle(true);
+        const { u, v, aspect } = uvOf(canvas, e);
+        const ras = row.slice.viewToRas(o, sc.offset01(row, o, focus), u, v, aspect);
+        xhair.set(ras);
+        jumpTo(ras);
       });
-      canvas.addEventListener("dblclick", () => toggleMax(cellId(row, o)));
     }
     const c3 = cv.get(cellId(row, "threeD"));
     attachCameraControls(c3, camera, {
       onChange: () => {
         touch3d();
+        syncFovToCamera();
         requestDraw();
       }
     });
@@ -6391,30 +6874,13 @@ async function main() {
       else pick(u, v);
     });
   }
-  rowsEl.addEventListener("wheel", (ev) => {
-    const e = ev;
-    if (!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
-    fovMm = Math.max(15, Math.min(600, fovMm * (e.deltaY > 0 ? 1.1 : 1 / 1.1)));
-    applyFrames();
-    requestDraw();
-  }, {
-    passive: false
-  });
   let maxed = null;
   const toggleMax = (id) => {
     maxed = maxed === id ? null : id;
     rowsEl.classList.toggle("maxmode", !!maxed);
-    for (const row of sc.rows) {
-      const re = rowEls.get(row.key);
-      let has = false;
-      for (const c of CELLS) {
-        const on = maxed === cellId(row, c);
-        cv.get(cellId(row, c)).parentElement.classList.toggle("max", on);
-        has = has || on;
-      }
-      re.root.classList.toggle("hasmax", has);
-    }
+    const target = maxed ? cv.get(maxed)?.parentElement : null;
+    for (const cell of rowsEl.querySelectorAll(".cell")) cell.classList.toggle("max", cell === target);
+    for (const r of rowsEl.querySelectorAll(".mrow")) r.classList.toggle("hasmax", !!target && r.contains(target));
     resize();
   };
   function syncRowChrome(row) {
@@ -6435,6 +6901,7 @@ async function main() {
       chip.classList.toggle("failed", row.state === "error");
     }
   }
+  const suggested = suggestedRows(kase);
   const strip = el("series");
   let stripGroup = "";
   for (const row of sc.rows) {
@@ -6447,22 +6914,145 @@ async function main() {
       g.textContent = TIMEPOINTS[e.tp].short;
       strip.appendChild(g);
     }
+    const isSugg = suggested.includes(row.key);
     const b = document.createElement("button");
-    b.className = "chip series";
+    b.className = "chip series" + (isSugg ? " sugg" : "");
     b.dataset.key = row.key;
     b.style.setProperty("--accent", rgbCss(TIMEPOINTS[e.tp].color));
     b.innerHTML = `${seriesLabel(e)}<span>${mb(e.b)}</span>` + (e.segs.length ? `<em>${e.segs.length} seg</em>` : "");
-    b.title = `${e.m} \xB7 ${e.d} \xB7 series ${e.sn} \xB7 ${e.n} instance(s) \xB7 ${mb(e.b)}` + (e.segs.length ? `
+    b.title = `${e.m} \xB7 ${e.d} \xB7 series ${e.sn} \xB7 ${e.n} instance(s)
+click to download ${mb(e.b)} from IDC` + (isSugg ? " (suggested)" : "") + (e.segs.length ? `
 segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
     b.addEventListener("click", () => toggleRow(row.key));
     strip.appendChild(b);
   }
+  const hint = document.createElement("div");
+  hint.id = "hint";
+  const suggBytes = suggested.reduce((n, k) => n + (sc.row(k)?.entry.b ?? 0), 0);
+  hint.innerHTML = `<div class="h1">Nothing downloaded yet</div><div class="h2">This case is ${mb(kase.bytes)} in IDC. Pick a series from the timeline below and it streams straight from the public bucket \u2014 one row at a time, only what you ask for.</div><button id="hint-sugg" class="chip">Load the suggested three \xB7 ${mb(suggBytes)}</button>`;
+  rowsEl.appendChild(hint);
+  el("hint-sugg").addEventListener("click", () => {
+    for (const k of suggested) toggleRow(k);
+  });
+  const syncHint = () => {
+    hint.style.display = sc.rows.some((r) => r.state !== "idle") ? "none" : "";
+  };
+  const selA = el("cmp-a");
+  const selB = el("cmp-b");
+  const fadeEl = el("cmp-fade");
+  const fillSel = (sel, cur) => {
+    const ready = sc.readyRows();
+    sel.innerHTML = `<option value="">\u2014</option>` + ready.map((r) => `<option value="${r.key}"${r.key === cur ? " selected" : ""}>${TIMEPOINTS[r.entry.tp].short} \xB7 ${seriesLabel(r.entry)}</option>`).join("");
+    sel.disabled = ready.length < 2;
+  };
+  const setMode = (m) => {
+    cmpMode = m;
+    for (const b of el("cmpbar").querySelectorAll("[data-mode]")) {
+      b.classList.toggle("on", b.dataset.mode === m);
+    }
+    syncCompare();
+  };
+  function syncCompare() {
+    const ready = sc.readyRows();
+    if (ready.length >= 2) {
+      if (!rowA() || rowA().state !== "ready") cmpA = ready[0].key;
+      if (!rowB() || rowB().state !== "ready" || cmpB === cmpA) {
+        cmpB = (ready.find((r) => r.key !== cmpA) ?? ready[1]).key;
+      }
+    } else {
+      cmpA = cmpA && sc.row(cmpA)?.state === "ready" ? cmpA : null;
+      cmpB = null;
+    }
+    fillSel(selA, cmpA);
+    fillSel(selB, cmpB);
+    const live = cmpLive();
+    cmpRoot.hidden = !live;
+    el("cmpbar").classList.toggle("dim", ready.length < 2);
+    el("cmp-note").textContent = ready.length < 2 ? "load two series to compare them" : cmpMode === "off" ? "" : `${Math.round((1 - blend) * 100)}% / ${Math.round(blend * 100)}%`;
+    if (live) for (const c of CELLS) for (const s of [
+      "a",
+      "b"
+    ]) configureCanvas(`${CMP}|${c}|${s}`);
+    syncAnim();
+    resize();
+  }
+  selA.addEventListener("change", () => {
+    cmpA = selA.value || null;
+    syncCompare();
+  });
+  selB.addEventListener("change", () => {
+    cmpB = selB.value || null;
+    syncCompare();
+  });
+  fadeEl.addEventListener("input", () => {
+    blend = Number(fadeEl.value) / 100;
+    if (cmpMode === "off") setMode("fade");
+    else if (cmpMode !== "fade") setMode("fade");
+    applyBlend();
+    el("cmp-note").textContent = `${Math.round((1 - blend) * 100)}% / ${Math.round(blend * 100)}%`;
+  });
+  for (const b of el("cmpbar").querySelectorAll("[data-mode]")) {
+    b.addEventListener("click", () => setMode(b.dataset.mode));
+  }
+  el("cmp-swap").addEventListener("click", () => {
+    const t = cmpA;
+    cmpA = cmpB;
+    cmpB = t;
+    blend = 1 - blend;
+    syncCompare();
+    requestDraw();
+  });
+  for (const o of ORIENTS) {
+    const canvas = cv.get(`${CMP}|${o}|b`);
+    attachSliceControls(canvas, {
+      orient: o,
+      getSlice: () => (rowA() ?? sc.readyRows()[0]).slice,
+      step: (fwd) => {
+        const r = rowA();
+        if (!r || r.state !== "ready") return;
+        const axis = o === "axial" ? 2 : o === "coronal" ? 1 : 0;
+        const f = [
+          ...focus
+        ];
+        f[axis] = Math.max(r.rasLo[axis], Math.min(r.rasHi[axis], f[axis] + Math.max(0.2, r.vol.vox) * (fwd ? 1 : -1)));
+        focus = f;
+      },
+      redraw: () => {
+        const r = rowA();
+        if (r?.state === "ready") adoptFrame(r, o, canvas);
+        requestDraw();
+      },
+      hooks: {
+        onDoubleClick: () => {
+          toggleMax(`${CMP}|${o}|b`);
+          return true;
+        }
+      }
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      const r = rowA();
+      if (!isShiftHover(e) || r?.state !== "ready") return;
+      if (!xhair.visible) xhair.toggle(true);
+      const { u, v, aspect } = uvOf(canvas, e);
+      const ras = r.slice.viewToRas(o, sc.offset01(r, o, focus), u, v, aspect);
+      xhair.set(ras);
+      jumpTo(ras);
+    });
+  }
+  attachCameraControls(cv.get(`${CMP}|threeD|b`), camera, {
+    onChange: () => {
+      touch3d();
+      syncFovToCamera();
+      requestDraw();
+    }
+  });
+  attachDoubleClick(cv.get(`${CMP}|threeD|b`), () => toggleMax(`${CMP}|threeD|b`));
   async function toggleRow(key) {
     const row = sc.row(key);
     if (row.state === "ready") {
       sc.releaseRow(key);
       syncRowChrome(row);
-      resize();
+      syncCompare();
       return;
     }
     if (row.state === "loading") return;
@@ -6473,7 +7063,8 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
     if (!framed && loaded.state === "ready") frameToBounds();
     applyFrames();
     syncRowChrome(row);
-    resize();
+    syncCompare();
+    renderTF();
     status(statusLine());
   }
   const statusLine = () => {
@@ -6485,6 +7076,7 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
     for (const row of sc.rows) {
       for (const c of CELLS) cv.get(cellId(row, c)).parentElement.classList.toggle("hidden", !shown[c]);
     }
+    for (const c of CELLS) cv.get(`${CMP}|${c}|b`).parentElement.classList.toggle("hidden", !shown[c]);
     resize();
   };
   for (const c of CELLS) {
@@ -6609,6 +7201,202 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
   installChrome({
     controls
   });
+  const tfSel = el("tf-row");
+  const tfRamp = el("tf-ramp");
+  const tfCanvas = el("tf-curve");
+  const tfWin = el("tf-win");
+  const tfLev = el("tf-lev");
+  const tfg = tfCanvas.getContext("2d");
+  let tfKey = null;
+  const tfRow = () => tfKey ? sc.row(tfKey) : void 0;
+  tfRamp.innerHTML = RAMP_NAMES.map((n) => `<option value="${n}">${n}</option>`).join("");
+  const drawTFCurve = () => {
+    const row = tfRow();
+    const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
+    const w = tfCanvas.clientWidth || 260, h = tfCanvas.clientHeight || 96;
+    if (tfCanvas.width !== Math.floor(w * dpr)) {
+      tfCanvas.width = Math.floor(w * dpr);
+      tfCanvas.height = Math.floor(h * dpr);
+    }
+    tfg.setTransform(tfCanvas.width / w, 0, 0, tfCanvas.height / h, 0, 0);
+    tfg.clearRect(0, 0, w, h);
+    if (!row || row.state !== "ready") return;
+    const hist = sc.histogram(row.key);
+    tfg.fillStyle = "rgba(159,179,208,.28)";
+    const bw = w / hist.length;
+    for (let i = 0; i < hist.length; i++) tfg.fillRect(i * bw, h - hist[i] * h, Math.max(1, bw - 0.5), hist[i] * h);
+    const ramp = RAMPS[row.tf.ramp] ?? RAMPS.grey;
+    for (let x = 0; x < w; x++) {
+      const t = x / w;
+      let c = ramp[0];
+      for (let i = 1; i < ramp.length; i++) {
+        if (t <= ramp[i][0]) {
+          const a = ramp[i - 1], b = ramp[i], u = (t - a[0]) / Math.max(1e-9, b[0] - a[0]);
+          c = [
+            t,
+            a[1] + u * (b[1] - a[1]),
+            a[2] + u * (b[2] - a[2]),
+            a[3] + u * (b[3] - a[3])
+          ];
+          break;
+        }
+        c = ramp[i];
+      }
+      tfg.fillStyle = `rgb(${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},${Math.round(c[3] * 255)})`;
+      tfg.fillRect(x, h - 6, 1, 6);
+    }
+    const pts = row.tf.points;
+    tfg.strokeStyle = "#f0d24a";
+    tfg.lineWidth = 2;
+    tfg.beginPath();
+    pts.forEach(([t, a], i) => i ? tfg.lineTo(t * w, (1 - a) * h) : tfg.moveTo(t * w, (1 - a) * h));
+    tfg.stroke();
+    tfg.fillStyle = "#f0d24a";
+    for (const [t, a] of pts) {
+      tfg.beginPath();
+      tfg.arc(t * w, (1 - a) * h, 4, 0, Math.PI * 2);
+      tfg.fill();
+    }
+  };
+  const renderTF = () => {
+    const ready = sc.readyRows();
+    tfSel.innerHTML = ready.map((r) => `<option value="${r.key}"${r.key === tfKey ? " selected" : ""}>${TIMEPOINTS[r.entry.tp].short} \xB7 ${seriesLabel(r.entry)}</option>`).join("");
+    if (!tfRow() || tfRow().state !== "ready") tfKey = ready[0]?.key ?? null;
+    tfSel.value = tfKey ?? "";
+    const row = tfRow();
+    el("tf-panel").classList.toggle("dim", !row);
+    if (row?.state === "ready") {
+      tfRamp.value = row.tf.ramp;
+      tfWin.value = String(row.win.toFixed(3));
+      tfLev.value = String(row.lev.toFixed(3));
+      el("tf-wl").textContent = `W ${row.win.toFixed(0)} \xB7 L ${row.lev.toFixed(0)}`;
+    }
+    drawTFCurve();
+  };
+  tfSel.addEventListener("change", () => {
+    tfKey = tfSel.value || null;
+    renderTF();
+  });
+  tfRamp.addEventListener("change", () => {
+    if (!tfKey) return;
+    sc.setRowTF(tfKey, {
+      ramp: tfRamp.value
+    });
+    drawTFCurve();
+    requestDraw();
+  });
+  const wlInput = () => {
+    const row = tfRow();
+    if (!row) return;
+    const base = row.vol;
+    const win = base.win * Math.pow(4, Number(tfWin.value));
+    const lev = base.lev + base.win * Number(tfLev.value);
+    sc.setRowWindowLevel(row.key, win, lev);
+    row.hist = void 0;
+    el("tf-wl").textContent = `W ${win.toFixed(0)} \xB7 L ${lev.toFixed(0)}`;
+    drawTFCurve();
+    requestDraw();
+  };
+  tfWin.addEventListener("input", wlInput);
+  tfLev.addEventListener("input", wlInput);
+  el("tf-reset").addEventListener("click", () => {
+    const row = tfRow();
+    if (!row) return;
+    tfWin.value = "0";
+    tfLev.value = "0";
+    sc.setRowWindowLevel(row.key, row.vol.win, row.vol.lev);
+    row.hist = void 0;
+    sc.setRowTF(row.key, {
+      points: [
+        ...DEFAULT_TF_POINTS
+      ],
+      ramp: row.entry.m === "US" ? "amber" : "grey"
+    });
+    renderTF();
+    requestDraw();
+  });
+  let dragPt = -1;
+  const tfAt = (e) => {
+    const r = tfCanvas.getBoundingClientRect();
+    return {
+      t: Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)),
+      a: Math.max(0, Math.min(1, 1 - (e.clientY - r.top) / r.height)),
+      r
+    };
+  };
+  const nearest = (t, a, r) => {
+    const pts = tfRow()?.tf?.points ?? [];
+    let best = -1, bd = 1e9;
+    pts.forEach(([pt, pa], i) => {
+      const d = Math.hypot((pt - t) * r.width, (pa - a) * r.height);
+      if (d < bd) {
+        bd = d;
+        best = i;
+      }
+    });
+    return bd < 12 ? best : -1;
+  };
+  tfCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  tfCanvas.addEventListener("pointerdown", (e) => {
+    const row = tfRow();
+    if (!row || row.state !== "ready") return;
+    const { t, a, r } = tfAt(e);
+    const hit = nearest(t, a, r);
+    const pts = row.tf.points;
+    if ((e.button === 2 || e.altKey) && hit >= 0 && pts.length > 2) {
+      pts.splice(hit, 1);
+      sc.setRowTF(row.key, {
+        points: pts
+      });
+      drawTFCurve();
+      requestDraw();
+      return;
+    }
+    if (hit >= 0) dragPt = hit;
+    else {
+      const i = pts.findIndex(([pt]) => pt > t);
+      const at = i < 0 ? pts.length : i;
+      pts.splice(at, 0, [
+        t,
+        a
+      ]);
+      dragPt = at;
+      sc.setRowTF(row.key, {
+        points: pts
+      });
+    }
+    tfCanvas.setPointerCapture(e.pointerId);
+    drawTFCurve();
+    requestDraw();
+  });
+  tfCanvas.addEventListener("pointermove", (e) => {
+    const row = tfRow();
+    if (dragPt < 0 || !row) return;
+    const { t, a } = tfAt(e);
+    const pts = row.tf.points;
+    const lo = dragPt > 0 ? pts[dragPt - 1][0] : 0, hi = dragPt < pts.length - 1 ? pts[dragPt + 1][0] : 1;
+    pts[dragPt] = [
+      Math.max(lo, Math.min(hi, t)),
+      a
+    ];
+    sc.setRowTF(row.key, {
+      points: pts
+    });
+    drawTFCurve();
+    requestDraw();
+  });
+  const endDrag = () => {
+    dragPt = -1;
+  };
+  tfCanvas.addEventListener("pointerup", endDrag);
+  tfCanvas.addEventListener("pointercancel", endDrag);
+  const tfBtn = el("tf-btn");
+  tfBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const p = el("tf-panel");
+    p.hidden = !p.hidden;
+    if (!p.hidden) renderTF();
+  });
   const jumps = el("jumps");
   const renderJumps = () => {
     jumps.innerHTML = "";
@@ -6629,26 +7417,43 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
   };
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
+    const fit = (canvas) => {
+      const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
+      if (w && h && (canvas.width !== w || canvas.height !== h)) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+    };
     for (const row of sc.rows) {
       rowEls.get(row.key).root.classList.toggle("empty", row.state === "idle");
-      for (const c of CELLS) {
-        const canvas = cv.get(cellId(row, c));
-        const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
-        if (w && h && (canvas.width !== w || canvas.height !== h)) {
-          canvas.width = w;
-          canvas.height = h;
-        }
-      }
+      for (const c of CELLS) fit(cv.get(cellId(row, c)));
     }
+    for (const c of CELLS) for (const s of [
+      "a",
+      "b"
+    ]) fit(cv.get(`${CMP}|${c}|${s}`));
+    syncHint();
     renderJumps();
     requestDraw();
   };
   globalThis.addEventListener("resize", resize);
   for (const row of sc.rows) syncRowChrome(row);
   applyColumns();
+  syncCompare();
+  renderTF();
+  el("col-link").addEventListener("click", () => {
+    link3d = !link3d;
+    el("col-link").classList.toggle("on", link3d);
+    if (link3d) syncCameraToFov();
+    requestDraw();
+  });
+  document.addEventListener("click", (e) => {
+    const p = el("tf-panel");
+    if (!p.hidden && !p.contains(e.target) && e.target !== tfBtn) p.hidden = true;
+  });
   const want = PARAMS.get("rows");
-  const startKeys = want === "all" ? sc.rows.map((r) => r.key) : want === "none" ? [] : want ? want.split(",").filter((k) => sc.row(k)) : defaultRows(kase);
-  status(startKeys.length ? `${kase.pid} \u2014 loading ${startKeys.length} series from IDC\u2026` : `${kase.pid} \u2014 pick a series below`);
+  const startKeys = want === "all" ? sc.rows.map((r) => r.key) : want === "suggested" ? suggested : want && want !== "none" ? want.split(",").filter((k) => sc.row(k)) : [];
+  status(startKeys.length ? `${kase.pid} \u2014 loading ${startKeys.length} series from IDC\u2026` : `${kase.pid} \u2014 nothing downloaded yet`);
   for (const k of startKeys) toggleRow(k);
   globalThis.__remindDbg = {
     ready: () => sc.readyRows().length,
@@ -6657,6 +7462,7 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
       key: r.key,
       tp: r.entry.tp,
       desc: r.entry.d,
+      m: r.entry.m,
       state: r.state,
       error: r.error,
       dims: r.vol?.dims,
@@ -6666,6 +7472,7 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
       ijkToRAS: r.vol?.ijkToRAS,
       rasLo: r.rasLo,
       rasHi: r.rasHi,
+      nSegs: r.entry.segs.length,
       segs: r.segs.map((s) => ({
         structure: s.structure,
         voxels: s.voxels,
@@ -6692,7 +7499,10 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
       ],
       focalPoint: [
         ...camera.focalPoint
-      ]
+      ],
+      dist: camDist(),
+      viewAngle: camera.viewAngle,
+      fovAtFocus: fovAtDist(camDist())
     }),
     jumpTo: (ras) => jumpTo(ras, true),
     toggleRow: (k) => toggleRow(k),
@@ -6700,6 +7510,74 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
       shown[c] = on;
       el(`col-${c}`)?.classList.toggle("on", on);
       applyColumns();
+    },
+    // linked navigation + compare + TF, for the driver to exercise without synthetic input
+    zoomSlice: (o, factor) => {
+      const r = sc.readyRows()[0];
+      if (!r) return;
+      const c = cv.get(cellId(r, o));
+      r.slice.zoomAbout(o, factor, 0.5, 0.5, c.clientWidth, c.clientHeight);
+      adoptFrame(r, o, c);
+      requestDraw();
+    },
+    link3d: () => link3d,
+    setLink3d: (on) => {
+      link3d = on;
+      el("col-link")?.classList.toggle("on", on);
+    },
+    compare: () => ({
+      mode: cmpMode,
+      a: cmpA,
+      b: cmpB,
+      blend,
+      live: cmpLive(),
+      hidden: cmpRoot.hidden
+    }),
+    setCompare: (a, b, mode) => {
+      cmpA = a;
+      cmpB = b;
+      setMode(mode);
+      return {
+        a: cmpA,
+        b: cmpB,
+        mode: cmpMode,
+        live: cmpLive()
+      };
+    },
+    setBlend: (v) => {
+      blend = v;
+      applyBlend();
+    },
+    tf: (k) => {
+      const r = k ? sc.row(k) : tfRow();
+      return r?.state === "ready" ? {
+        key: r.key,
+        ramp: r.tf.ramp,
+        points: r.tf.points,
+        win: r.win,
+        lev: r.lev
+      } : null;
+    },
+    setTF: (k, patch) => {
+      sc.setRowTF(k, patch);
+      requestDraw();
+    },
+    setWindowLevel: (k, win, lev) => {
+      sc.setRowWindowLevel(k, win, lev);
+      requestDraw();
+    },
+    lutAlphaAt: (k, t) => {
+      const r = sc.row(k);
+      if (r?.state !== "ready") return null;
+      const pts = r.tf.points;
+      if (t <= pts[0][0]) return pts[0][1];
+      for (let i = 1; i < pts.length; i++) {
+        if (t <= pts[i][0]) {
+          const [t0, a0] = pts[i - 1], [t1, a1] = pts[i];
+          return a0 + (a1 - a0) * (t - t0) / Math.max(1e-9, t1 - t0);
+        }
+      }
+      return pts[pts.length - 1][1];
     }
   };
 }
