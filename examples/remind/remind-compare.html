@@ -6,9 +6,9 @@
 <!-- ReMINDer compare — one row per acquisition in a ReMIND case, ordered along the surgical
      timeline (pre-op MRI -> iUS pre-dura -> iUS post-dura -> iUS pre-iMRI -> intra-op MRI),
      x selectable {axial, sagittal, coronal, 3D} columns. Every row is a different grid; the
-     linking is in patient space. Pixels stream straight from IDC's public bucket, so rows are
-     loaded on demand from the timeline strip along the bottom.
-     ?case=<pid>&rows=all|none|<uuid,...> -->
+     linking is in patient space. Pixels stream straight from IDC's public bucket, and NOTHING
+     is fetched until asked for — the timeline strip along the bottom is the switchboard.
+     ?case=<pid>&rows=all|suggested|<uuid,...> -->
 <title>ReMINDer — case timeline</title>
 <style>
   :root { color-scheme: dark; }
@@ -194,6 +194,6 @@
     </div>
     <div id="strip"><div id="series"></div><div id="jumps"></div></div>
   </div>
-  <script type="module" src="remind-compare.js?v=20260814a"></script>   <!-- bump per deploy: stale cached bundles read as phantom behaviour -->
+  <script type="module" src="remind-compare.js?v=20260814b"></script>   <!-- bump per deploy: stale cached bundles read as phantom behaviour -->
 </body>
 </html>
