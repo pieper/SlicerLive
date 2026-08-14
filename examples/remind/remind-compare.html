@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- ReMINDer compare — one row per acquisition in a ReMIND case, ordered along the surgical
+     timeline (pre-op MRI -> iUS pre-dura -> iUS post-dura -> iUS pre-iMRI -> intra-op MRI),
+     x selectable {axial, sagittal, coronal, 3D} columns. Every row is a different grid; the
+     linking is in patient space. Pixels stream straight from IDC's public bucket, so rows are
+     loaded on demand from the timeline strip along the bottom.
+     ?case=<pid>&rows=all|none|<uuid,...> -->
+<title>ReMINDer — case timeline</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; background: #05060a; color: #d6e2f2;
+               font: 12px -apple-system, system-ui, sans-serif; }
+  #page { display: flex; flex-direction: column; height: 100vh; }
+  /* the shared demo chrome parks a fixed "?" at top-left and the SlicerLive logo at
+     top-right — leave both their gutters free so the header never sits under them */
+  header { display: flex; align-items: center; gap: 12px; padding: 5px 132px 5px 52px; background: #0b0e16;
+           border-bottom: 1px solid #1b2740; flex: 0 0 auto; flex-wrap: wrap; min-height: 34px; }
+  header h1 { font-size: 13px; margin: 0; color: #9fb3d0; font-weight: 700; letter-spacing: .3px; }
+  #info { color: #7d92b5; }
+  #info b { color: #d6e2f2; }
+  #hdr-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  #status { color: #9fb3d0; }
+  #cols { display: flex; gap: 4px; }
+  .chip { font: 600 11px -apple-system, system-ui, sans-serif; color: #d6e2f2; background: #1b2740;
+          border: 1px solid #33507e; border-radius: 4px; padding: 2px 8px; cursor: pointer; }
+  .chip.on { background: #2b6cb0; border-color: #3f86d0; color: #fff; }
+
+  /* ── rows: one acquisition each ─────────────────────────────────────────── */
+  #rows { flex: 1; display: flex; flex-direction: column; gap: 2px; min-height: 0; padding: 2px; }
+  .mrow { flex: 1; display: flex; gap: 2px; min-height: 0; border-left: 3px solid var(--accent, #33507e);
+          background: #080b12; border-radius: 3px; }
+  .mrow.empty { flex: 0 0 34px; opacity: .62; }
+  .mrow.loading { opacity: .95; }
+  .mrow.failed { border-left-color: #f05a5a; }
+  .mlabel { flex: 0 0 132px; padding: 4px 7px; cursor: pointer; overflow: hidden; min-width: 0;
+            display: flex; flex-direction: column; gap: 1px; user-select: none; }
+  .mlabel:hover { background: #101725; }
+  .mlabel .tp { font: 800 9.5px -apple-system, system-ui, sans-serif; letter-spacing: .08em;
+                color: var(--accent, #9fb3d0); }
+  .mlabel .seq { font-weight: 700; font-size: 11.5px; color: #d6e2f2; overflow-wrap: anywhere; line-height: 1.25; }
+  .mlabel .det { font-size: 10px; color: #7d92b5; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .mlabel .segs { font-size: 10px; color: #f0a8b0; overflow-wrap: anywhere; }
+  /* an unloaded row collapses to a single clickable line — its name, cost and labels stay
+     legible (the 132px stack is for loaded rows, where the cells need the width) */
+  .mrow.empty .mlabel { flex: 1 1 auto; flex-direction: row; align-items: center; gap: 10px;
+                        white-space: nowrap; padding: 0 10px; }
+  .mrow.empty .mlabel > * { overflow-wrap: normal; white-space: nowrap; }
+  .mrow.empty .mlabel .seq { font-weight: 600; }
+  .mrow.empty .mlabel .segs { color: #8d7080; }
+  .mrow.empty .mlabel::after { content: "click to load"; margin-left: auto; color: #4d5c78; font-size: 10px; }
+  .mbar { margin-top: auto; height: 2px; background: #1b2740; border-radius: 2px; overflow: hidden; }
+  .mbar i { display: block; height: 100%; background: var(--accent, #3f86d0); transition: width .2s; }
+  .mrow:not(.loading) .mbar { visibility: hidden; }
+  .mrow.empty .mbar { display: none; }
+  .cell { position: relative; flex: 1; min-width: 0; min-height: 0; }
+  .mrow.empty .cell { display: none; }
+  .cell.hidden { display: none; }
+  .cell canvas { width: 100%; height: 100%; display: block; background: #000; touch-action: none; }
+  .cell canvas.xh { position: absolute; inset: 0; background: transparent; pointer-events: none; }
+  .cell .lab { position: absolute; top: 4px; left: 6px; font-weight: 700; font-size: 10px;
+               opacity: .7; pointer-events: none; color: #9fb3d0; }
+  /* double-click a cell to maximize it */
+  #rows.maxmode .mrow { display: none; }
+  #rows.maxmode .mrow.hasmax { display: flex; flex: 1; }
+  #rows.maxmode .mrow.hasmax .cell { display: none; }
+  #rows.maxmode .mrow.hasmax .cell.max { display: block; flex: 1; }
+
+  /* ── the timeline strip = the row switchboard ───────────────────────────── */
+  #strip { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+           padding: 6px 10px; background: #0b0e16; border-top: 1px solid #1b2740; }
+  #series { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; }
+  .tpgroup { flex: 0 0 auto; font: 800 9px -apple-system, system-ui, sans-serif; letter-spacing: .08em;
+             padding: 0 4px 0 10px; border-left: 1px solid #1b2740; }
+  .tpgroup:first-child { border-left: none; padding-left: 2px; }
+  .chip.series { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 0;
+                 border-color: color-mix(in srgb, var(--accent) 55%, #1b2740); background: #101725; padding: 3px 8px; }
+  .chip.series span { font-weight: 400; font-size: 9.5px; color: #7d92b5; }
+  .chip.series em { font-style: normal; font-size: 9px; color: #f0a8b0; }
+  .chip.series.on { background: color-mix(in srgb, var(--accent) 32%, #101725); border-color: var(--accent); color: #fff; }
+  .chip.series.busy { border-style: dashed; }
+  .chip.series.failed { border-color: #f05a5a; color: #ffb0b8; }
+  .chip.jump { flex: 0 0 auto; border-color: var(--accent); color: var(--accent); background: #101725; }
+  #jumps { flex: 0 0 auto; display: flex; gap: 4px; padding-left: 10px; border-left: 1px solid #1b2740; }
+  #jumps:empty { display: none; }
+
+  /* ── case picker ────────────────────────────────────────────────────────── */
+  #case-panel[hidden] { display: none; }
+  #case-panel { position: fixed; top: 34px; right: 8px; z-index: 20; width: 330px; max-height: 70vh;
+                display: flex; flex-direction: column; background: #0b0e16; border: 1px solid #33507e;
+                border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,.6); overflow: hidden; }
+  #case-search { margin: 8px; padding: 5px 8px; font: 12px -apple-system, system-ui, sans-serif;
+                 color: #d6e2f2; background: #131a2a; border: 1px solid #33507e; border-radius: 5px; outline: none; }
+  #case-list { overflow-y: auto; padding: 0 6px 6px; }
+  #case-list .crow { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+                background: none; border: none; border-radius: 5px; padding: 4px 6px; cursor: pointer;
+                font: 12px -apple-system, system-ui, sans-serif; color: #d6e2f2; }
+  #case-list .crow:hover { background: #1b2740; }
+  #case-list .crow.cur { background: #2b6cb0; }
+  #case-list .crow .pid { font-weight: 700; min-width: 86px; font-variant-numeric: tabular-nums; }
+  #case-list .crow .st { margin-left: auto; color: #7d92b5; font-size: 11px; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+  <div id="page">
+    <header>
+      <h1>ReMINDer</h1>
+      <span id="info"></span>
+      <div id="cols">
+        <button id="col-axial" class="chip on">Axial</button>
+        <button id="col-sagittal" class="chip on">Sagittal</button>
+        <button id="col-coronal" class="chip on">Coronal</button>
+        <button id="col-threeD" class="chip on">3D</button>
+      </div>
+      <div id="hdr-right">
+        <span id="status">loading…</span>
+        <button id="case-btn" class="chip" title="choose a case">case ▾</button>
+      </div>
+    </header>
+    <div id="case-panel" hidden>
+      <input id="case-search" type="search" placeholder="filter by id…" autocomplete="off">
+      <div id="case-list"></div>
+    </div>
+    <div id="rows"></div>
+    <div id="strip"><div id="series"></div><div id="jumps"></div></div>
+  </div>
+  <script type="module" src="remind-compare.js?v=20260814a"></script>   <!-- bump per deploy: stale cached bundles read as phantom behaviour -->
+</body>
+</html>

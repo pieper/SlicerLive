@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- ReMINDer — what is in the IDC `remind` collection (Brain Resection Multimodal Imaging
+     Database), and a drilldown into any one case's surgical timeline.
+     Everything on this page is METADATA: it is built from remind-index.json, which
+     worker/build_index.py derives from the IDC public API. No pixels are touched until you
+     open a case, at which point remind-compare.html streams that case's series straight
+     out of IDC's public bucket. -->
+<title>ReMINDer — the ReMIND collection at a glance</title>
+<style>
+:root{
+  color-scheme: dark;
+  --bg:#0d1014; --panel:#141922; --panel-2:#1a2029; --line:#262e39;
+  --ink:#e9eef5; --ink-2:#98a5b6; --ink-3:#647184;
+  /* two ordinal ramps: blue = MR, orange = US, each running light -> dark forward in time */
+  --preop:#9ec5f4; --intraop:#3987e5;
+  --predura:#f0a276; --postdura:#d95926; --preimri:#a03d13;
+  /* structures — the same values the viewer paints the segmentations with */
+  --s-tumor:#e34948; --s-residual:#eda100; --s-target:#e87ba4;
+  --s-cavity:#1baf7a; --s-ventricles:#3987e5; --s-cerebrum:#c3c2b7;
+  --grid-empty:#20262f;
+}
+@media (prefers-color-scheme: light){
+  :root:where(:not([data-theme="dark"])){
+    color-scheme: light;
+    --bg:#f3f6fa; --panel:#fff; --panel-2:#e9eff6; --line:#d3dce8;
+    --ink:#101720; --ink-2:#48566a; --ink-3:#78879b;
+    --preop:#86b6ef; --intraop:#256abf;
+    --predura:#f2a07a; --postdura:#d95926; --preimri:#a03d13;
+    --s-ventricles:#2a78d6; --s-cerebrum:#8f8e86;
+    --grid-empty:#e4e9f0;
+  }
+}
+:root[data-theme="light"]{
+  color-scheme: light;
+  --bg:#f3f6fa; --panel:#fff; --panel-2:#e9eff6; --line:#d3dce8;
+  --ink:#101720; --ink-2:#48566a; --ink-3:#78879b;
+  --preop:#86b6ef; --intraop:#256abf;
+  --predura:#f2a07a; --postdura:#d95926; --preimri:#a03d13;
+  --s-ventricles:#2a78d6; --s-cerebrum:#8f8e86;
+  --grid-empty:#e4e9f0;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.mono{font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+.wrap{max-width:1500px;margin:0 auto;padding:20px 22px 48px}
+h1{font-size:19px;margin:0;letter-spacing:-.01em;font-weight:650}
+.sub{color:var(--ink-2);font-size:12.5px;margin:5px 0 0;max-width:88ch}
+.sub a{color:inherit}
+a{color:var(--intraop)}
+.prov{color:var(--ink-3);font-size:11.5px;margin:6px 0 0}
+
+/* stat tiles — where the number IS the chart */
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(124px,1fr));gap:9px;margin:16px 0 14px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+.stat .v{font-size:21px;font-weight:650;letter-spacing:-.02em}
+.stat .k{font-size:10.5px;color:var(--ink-3);text-transform:uppercase;letter-spacing:.07em;margin-top:2px}
+.stat .n{font-size:11px;color:var(--ink-2);margin-top:3px}
+
+section{margin-top:20px}
+h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-3);margin:0 0 9px;font-weight:600}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:14px 16px;min-width:0}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
+@media (max-width:940px){.cols{grid-template-columns:1fr}}
+.note{color:var(--ink-3);font-size:11.5px;margin:9px 2px 0;max-width:96ch}
+
+/* filter row — one row, above everything it scopes */
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:14px 0 4px}
+button{font:inherit;font-size:12.5px;background:var(--panel);color:var(--ink-2);
+  border:1px solid var(--line);border-radius:7px;padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-3)}
+button[aria-pressed="true"]{background:var(--panel-2);color:var(--ink);border-color:var(--ink-3)}
+button:focus-visible{outline:2px solid var(--intraop);outline-offset:2px}
+.count{margin-left:auto;color:var(--ink-2);font-size:12.5px}
+
+/* the surgical timeline: five stages, each a labelled coverage bar */
+.tl{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+@media (max-width:820px){.tl{grid-template-columns:1fr 1fr}}
+.stage{background:var(--panel-2);border-radius:9px;padding:10px 11px;position:relative}
+.stage .nm{font-size:10px;text-transform:uppercase;letter-spacing:.07em;font-weight:700;color:var(--sc)}
+.stage .lb{font-size:11.5px;color:var(--ink-2);margin-top:1px;min-height:2.6em}
+.stage .v{font-size:19px;font-weight:650;letter-spacing:-.02em;margin-top:5px}
+.stage .v small{font-size:11.5px;font-weight:400;color:var(--ink-3);letter-spacing:0}
+.stage .track{height:6px;border-radius:3px;background:var(--grid-empty);margin-top:7px;overflow:hidden}
+.stage .track i{display:block;height:100%;background:var(--sc);border-radius:3px}
+.stage .ser{font-size:11px;color:var(--ink-3);margin-top:5px}
+
+/* coverage grid: one row per case, one cell per stage + one per structure */
+.gridwrap{overflow:auto;max-height:520px;border:1px solid var(--line);border-radius:9px}
+table.cov{border-collapse:separate;border-spacing:0;width:100%;font-size:12px}
+table.cov th{position:sticky;top:0;z-index:1;background:var(--panel);color:var(--ink-3);
+  font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;
+  padding:7px 4px;text-align:center;border-bottom:1px solid var(--line);white-space:nowrap}
+table.cov th.pid,table.cov td.pid{text-align:left;padding-left:11px;position:sticky;left:0;background:var(--panel);z-index:2}
+table.cov th.pid{z-index:3}
+table.cov td{padding:0 4px;border-bottom:1px solid var(--bg)}
+table.cov tbody tr{cursor:pointer}
+table.cov tbody tr:hover td{background:var(--panel-2)}
+table.cov tbody tr:hover td.pid{background:var(--panel-2)}
+table.cov td.pid{font-size:11.5px;font-weight:600;padding:2px 4px 2px 11px}
+table.cov .sep{border-left:1px solid var(--line)}
+.cell{display:block;height:11px;border-radius:2px;background:var(--grid-empty);margin:2px auto;width:100%;max-width:34px}
+.cell.on{background:var(--c)}
+.cell.n{position:relative}
+td.num{text-align:right;color:var(--ink-2);font-variant-numeric:tabular-nums;padding-right:11px;font-size:11.5px}
+
+/* histograms: one hue, direct-labelled, thin marks */
+.hist{display:flex;flex-direction:column;gap:5px}
+.hrow{display:grid;grid-template-columns:minmax(96px,auto) 1fr auto;gap:9px;align-items:center;font-size:12px}
+.hrow .nm{color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hrow .tr{height:9px;background:var(--grid-empty);border-radius:2px;overflow:hidden}
+.hrow .tr i{display:block;height:100%;background:var(--c,var(--intraop));border-radius:0 3px 3px 0}
+.hrow .v{color:var(--ink);font-variant-numeric:tabular-nums;font-size:11.5px;min-width:3.4em;text-align:right}
+.hrow .v em{font-style:normal;color:var(--ink-3);font-size:10.5px}
+.swatch{display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--c);margin-right:6px;vertical-align:-1px}
+
+/* legend */
+.key{display:flex;flex-wrap:wrap;gap:14px;font-size:11.5px;color:var(--ink-2);margin-top:10px}
+.key span{display:inline-flex;align-items:center;gap:6px}
+.key i{width:16px;height:8px;border-radius:2px;background:var(--c);display:inline-block}
+
+/* tooltip */
+#tip{position:fixed;z-index:60;pointer-events:none;background:var(--panel);border:1px solid var(--line);
+  border-radius:7px;padding:7px 10px;font-size:11.5px;color:var(--ink);box-shadow:0 8px 26px rgba(0,0,0,.4);
+  max-width:280px;line-height:1.45}
+#tip[hidden]{display:none}
+#tip b{font-weight:650}
+#tip .r{color:var(--ink-2)}
+
+/* drilldown */
+#drill[hidden]{display:none}
+#drill{position:fixed;inset:0;z-index:50;background:rgba(4,6,10,.72);backdrop-filter:blur(3px);
+  display:flex;align-items:center;justify-content:center}
+#drill-panel{width:min(97vw,1780px);height:95vh;display:flex;flex-direction:column;
+  background:var(--bg);border:1px solid var(--line);border-radius:12px;overflow:hidden;
+  box-shadow:0 24px 80px rgba(0,0,0,.65)}
+#drill-head{display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--line);flex:0 0 auto}
+#drill-title{display:flex;align-items:center;gap:9px;font-size:13px;min-width:0;flex-wrap:wrap}
+#drill-title b{font-size:14px}
+#drill-close{margin-left:auto;font-size:15px;line-height:1;padding:5px 10px}
+#drill-body{flex:1;min-height:0;display:flex}
+#drill-body iframe{flex:1;border:none;background:#05060a}
+.pill{font-size:10.5px;padding:1px 8px;border-radius:9px;border:1px solid var(--c);color:var(--c);font-weight:600}
+#err{color:#e0475a;font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ReMINDer — the ReMIND collection at a glance</h1>
+  <p class="sub" id="blurb">Loading the collection index…</p>
+  <p class="prov" id="prov"></p>
+  <p id="err"></p>
+
+  <div class="strip" id="strip"></div>
+
+  <section>
+    <h2>The surgical timeline — how many of the <span id="ncases">…</span> cases reach each stage</h2>
+    <div class="card">
+      <div class="tl" id="timeline"></div>
+      <p class="note">Every patient has exactly two studies. The one containing ultrasound is the
+      intra-operative study; the other is the pre-operative MRI. Within the operation the stage is
+      named by the series itself (<span class="mono">US_pre_dura</span>,
+      <span class="mono">US_post_dura</span>, <span class="mono">US_pre_imri</span>). Bar colour
+      encodes modality — blue for MR, orange for ultrasound — and gets darker as the operation
+      progresses.</p>
+    </div>
+  </section>
+
+  <div class="bar" id="filters">
+    <button data-f="all" aria-pressed="true">All cases</button>
+    <button data-f="us3" aria-pressed="false">All three ultrasound stages</button>
+    <button data-f="gap" aria-pressed="false">Missing an ultrasound stage</button>
+    <button data-f="residual" aria-pressed="false">Has residual-tumour label</button>
+    <button data-f="cavity" aria-pressed="false">Re-operation (previous cavity)</button>
+    <span class="count" id="count"></span>
+  </div>
+
+  <section>
+    <h2>Per-case coverage — click any row to open its timeline</h2>
+    <div class="gridwrap"><table class="cov" id="cov"></table></div>
+    <div class="key" id="covkey"></div>
+    <p class="note">One row per case; a filled cell means that acquisition (or that segmented
+    structure) exists in IDC for that case. Sorted by coverage, so the incomplete cases sit at the
+    top. The row also carries the numbers — series count and total size — so nothing here is
+    readable only by colour.</p>
+  </section>
+
+  <section class="cols">
+    <div class="card">
+      <h2>MR sequences (series across the collection)</h2>
+      <div class="hist" id="seqhist"></div>
+      <p class="note">Post-contrast T1 and T2 BLADE dominate: the pre-op planning scan and the
+      intra-operative sequence that survives a patient in a head clamp.</p>
+    </div>
+    <div class="card">
+      <h2>Segmented structures</h2>
+      <div class="hist" id="structhist"></div>
+      <p class="note">Bar colour is the colour the viewer paints that structure with, in 2D fill and
+      3D shell alike. <span class="mono">tumor_residual</span> is annotated on the intra-operative
+      MRI — pairing it with the pre-operative <span class="mono">tumor</span> label is what makes
+      extent of resection legible.</p>
+    </div>
+  </section>
+</div>
+
+<div id="tip" hidden></div>
+
+<div id="drill" hidden>
+  <div id="drill-panel">
+    <div id="drill-head">
+      <div id="drill-title"></div>
+      <button id="drill-close" title="close (Esc)">✕</button>
+    </div>
+    <div id="drill-body"></div>
+  </div>
+</div>
+
+<script type="module">
+const $ = (s) => document.querySelector(s);
+const fmtB = (b) => b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : Math.round(b / 1e6) + " MB";
+const num = (n) => n.toLocaleString();
+
+const STAGES = [
+  { key: "preop",     nm: "PRE-OP",    lb: "pre-operative MRI",        v: "--preop" },
+  { key: "pre_dura",  nm: "PRE-DURA",  lb: "iUS before dura opening",  v: "--predura" },
+  { key: "post_dura", nm: "POST-DURA", lb: "iUS after dura opening",   v: "--postdura" },
+  { key: "pre_imri",  nm: "PRE-iMRI",  lb: "iUS before intra-op MRI",  v: "--preimri" },
+  { key: "intraop",   nm: "INTRA-OP",  lb: "intra-operative MRI",      v: "--intraop" },
+];
+// `short` keeps the coverage-grid columns even; the full name still rides the tooltip and
+// the legend, so nothing is identified by an abbreviation alone.
+const STRUCTS = [
+  { key: "tumor", short: "tumour", v: "--s-tumor" },
+  { key: "tumor_residual", short: "residual", v: "--s-residual" },
+  { key: "ventricles", short: "ventricles", v: "--s-ventricles" },
+  { key: "cerebrum", short: "cerebrum", v: "--s-cerebrum" },
+  { key: "previous_resection_cavity", short: "prev. cavity", v: "--s-cavity" },
+  { key: "tumor_target", short: "target", v: "--s-target" },
+];
+
+let INDEX = null, ROWS = [], filter = "all";
+
+/** One derived record per case — everything the grid, the filters and the table need. */
+function derive(index) {
+  return index.cases.map((c) => {
+    const stages = {}, structs = {};
+    for (const s of STAGES) stages[s.key] = 0;
+    for (const e of c.series) {
+      stages[e.tp] = (stages[e.tp] || 0) + 1;
+      for (const g of e.segs) structs[g.s] = (structs[g.s] || 0) + 1;
+    }
+    const usStages = ["pre_dura", "post_dura", "pre_imri"].filter((k) => stages[k]).length;
+    return {
+      pid: c.pid, stages, structs, usStages, bytes: c.bytes,
+      series: c.series.length,
+      segs: c.series.reduce((n, e) => n + e.segs.length, 0),
+      covered: STAGES.filter((s) => stages[s.key]).length,
+    };
+  });
+}
+
+const matches = (r) => ({
+  all: true,
+  us3: r.usStages === 3,
+  gap: r.usStages < 3,
+  residual: !!r.structs.tumor_residual,
+  cavity: !!r.structs.previous_resection_cavity,
+}[filter]);
+
+function renderHeader() {
+  const s = INDEX.stats, src = INDEX.source;
+  $("#blurb").innerHTML =
+    `The <b>Brain Resection Multimodal Imaging Database</b> — ${s.cases} patients treated with ` +
+    `image-guided tumour resection, each imaged before the operation and again during it. ` +
+    `Pre-operative MRI, up to three 3D intra-operative ultrasound acquisitions at defined surgical ` +
+    `moments, intra-operative MRI, and expert segmentations. Published through the ` +
+    `<a href="${src.portal}" target="_blank" rel="noopener">Imaging Data Commons</a>` +
+    (src.doi ? ` · <a href="https://doi.org/${src.doi}" target="_blank" rel="noopener">DOI ${src.doi}</a>` : "") + `.`;
+  $("#prov").textContent =
+    `Index built from the IDC public API — data version ${INDEX.idc_version}, generated ${INDEX.generated}. ` +
+    `This page reads metadata only; opening a case streams its images from ${src.bucket}`;
+  $("#ncases").textContent = s.cases;
+
+  const tiles = [
+    { v: num(s.cases), k: "patients", n: `${s.studies} studies` },
+    { v: num(s.series), k: "series", n: `${s.modalities.MR} MR · ${s.modalities.US} US · ${s.modalities.SEG} SEG` },
+    { v: num(s.modalities.US), k: "3D ultrasound", n: "one volume per acquisition" },
+    { v: num(s.modalities.SEG), k: "segmentations", n: `${Object.keys(s.structures).length} distinct structures` },
+    { v: fmtB(s.bytes), k: "total in IDC", n: `median ${fmtB(median(ROWS.map((r) => r.bytes)))} per case` },
+  ];
+  $("#strip").innerHTML = tiles.map((t) =>
+    `<div class="stat"><div class="v">${t.v}</div><div class="k">${t.k}</div><div class="n">${t.n}</div></div>`).join("");
+}
+
+const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+
+function renderTimeline() {
+  const byKey = Object.fromEntries(INDEX.stats.timeline.map((t) => [t.key, t]));
+  const total = INDEX.stats.cases;
+  $("#timeline").innerHTML = STAGES.map((s) => {
+    const t = byKey[s.key];
+    const pct = Math.round(100 * t.cases / total);
+    return `<div class="stage" style="--sc:var(${s.v})">` +
+      `<div class="nm">${s.nm}</div><div class="lb">${s.lb}</div>` +
+      `<div class="v">${t.cases}<small> / ${total} cases</small></div>` +
+      `<div class="track"><i style="width:${pct}%"></i></div>` +
+      `<div class="ser">${t.series} series</div></div>`;
+  }).join("");
+}
+
+function renderGrid() {
+  const rows = ROWS.filter(matches).sort((a, b) =>
+    a.covered - b.covered || a.usStages - b.usStages || a.pid.localeCompare(b.pid));
+  $("#count").textContent = `${rows.length} of ${ROWS.length} cases`;
+  const head =
+    `<thead><tr><th class="pid">case</th>` +
+    STAGES.map((s, i) => `<th${i === 0 ? "" : ""}>${s.nm}</th>`).join("") +
+    STRUCTS.map((s, i) => `<th class="${i === 0 ? "sep" : ""}" title="${s.key}">${s.short}</th>`).join("") +
+    `<th class="sep">series</th><th>size</th></tr></thead>`;
+  const body = rows.map((r) =>
+    `<tr data-pid="${r.pid}">` +
+    `<td class="pid">${r.pid}</td>` +
+    STAGES.map((s) =>
+      `<td><i class="cell${r.stages[s.key] ? " on" : ""}" style="--c:var(${s.v})" ` +
+      `data-t="${s.nm} — ${r.stages[s.key] ? r.stages[s.key] + " series" : "not in this case"}"></i></td>`).join("") +
+    STRUCTS.map((s, i) =>
+      `<td class="${i === 0 ? "sep" : ""}"><i class="cell${r.structs[s.key] ? " on" : ""}" style="--c:var(${s.v})" ` +
+      `data-t="${s.key} — ${r.structs[s.key] ? r.structs[s.key] + " SEG series" : "not segmented"}"></i></td>`).join("") +
+    `<td class="num sep">${r.series}</td><td class="num">${fmtB(r.bytes)}</td></tr>`).join("");
+  $("#cov").innerHTML = head + `<tbody>${body}</tbody>`;
+
+  $("#covkey").innerHTML =
+    STAGES.map((s) => `<span style="--c:var(${s.v})"><i></i>${s.nm}</span>`).join("") +
+    STRUCTS.map((s) => `<span style="--c:var(${s.v})" class="mono"><i></i>${s.key}</span>`).join("");
+}
+
+function renderHists() {
+  const seq = Object.entries(INDEX.stats.sequences);
+  const top = seq.slice(0, 10);
+  const rest = seq.slice(10).reduce((n, [, v]) => n + v, 0);
+  const max = top[0][1];
+  $("#seqhist").innerHTML = top.map(([k, v]) =>
+    `<div class="hrow" style="--c:var(--intraop)"><div class="nm mono" title="${k}">${k}</div>` +
+    `<div class="tr"><i style="width:${Math.round(100 * v / max)}%"></i></div>` +
+    `<div class="v">${v}</div></div>`).join("") +
+    (rest ? `<div class="hrow"><div class="nm">${seq.length - 10} other sequences</div>` +
+      `<div class="tr"><i style="width:${Math.round(100 * rest / max)}%;background:var(--ink-3)"></i></div>` +
+      `<div class="v">${rest}</div></div>` : "");
+
+  const st = INDEX.stats.structures;
+  const smax = Math.max(...Object.values(st).map((s) => s.series));
+  const order = STRUCTS.filter((s) => st[s.key]);
+  $("#structhist").innerHTML = order.map((s) => {
+    const e = st[s.key];
+    return `<div class="hrow" style="--c:var(${s.v})">` +
+      `<div class="nm mono"><i class="swatch"></i>${s.key}</div>` +
+      `<div class="tr"><i style="width:${Math.round(100 * e.series / smax)}%"></i></div>` +
+      `<div class="v">${e.series} <em>· ${e.cases} cases</em></div></div>`;
+  }).join("");
+}
+
+// ── tooltip over the coverage cells ────────────────────────────────────────
+const tip = $("#tip");
+document.addEventListener("mousemove", (e) => {
+  const cell = e.target.closest?.(".cell");
+  const tr = e.target.closest?.("tr[data-pid]");
+  if (!cell && !tr) { tip.hidden = true; return; }
+  const r = ROWS.find((x) => x.pid === tr?.dataset.pid);
+  tip.innerHTML = (r ? `<b>${r.pid}</b> <span class="r">· ${r.series} series · ${r.segs} SEG · ${fmtB(r.bytes)}</span><br>` : "") +
+    (cell ? cell.dataset.t : `<span class="r">click to open the timeline</span>`);
+  tip.hidden = false;
+  const pad = 14;
+  tip.style.left = Math.min(e.clientX + pad, innerWidth - tip.offsetWidth - 8) + "px";
+  tip.style.top = Math.min(e.clientY + pad, innerHeight - tip.offsetHeight - 8) + "px";
+});
+
+// ── drilldown ──────────────────────────────────────────────────────────────
+function openCase(pid) {
+  const r = ROWS.find((x) => x.pid === pid);
+  $("#drill-title").innerHTML =
+    `<b>${pid}</b>` +
+    STAGES.filter((s) => r.stages[s.key]).map((s) =>
+      `<span class="pill" style="--c:var(${s.v})">${s.nm}</span>`).join("") +
+    `<span style="color:var(--ink-2)">${r.series} series · ${r.segs} segmentations · ${fmtB(r.bytes)} in IDC</span>`;
+  $("#drill-body").innerHTML = `<iframe src="remind-compare.html?case=${encodeURIComponent(pid)}" title="${pid} timeline"></iframe>`;
+  $("#drill").hidden = false;
+  location.hash = pid;
+}
+function closeDrill() {
+  $("#drill").hidden = true;
+  $("#drill-body").innerHTML = "";          // stop the viewer's GPU work and its IDC transfers
+  if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+}
+$("#drill-close").addEventListener("click", closeDrill);
+$("#drill").addEventListener("mousedown", (e) => { if (e.target.id === "drill") closeDrill(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrill(); });
+addEventListener("message", (e) => { if (e.data?.type === "closeDrill") closeDrill(); });
+document.addEventListener("click", (e) => {
+  const tr = e.target.closest?.("tr[data-pid]");
+  if (tr) openCase(tr.dataset.pid);
+});
+$("#filters").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-f]");
+  if (!b) return;
+  filter = b.dataset.f;
+  for (const x of $("#filters").querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
+  renderGrid();
+});
+
+// ── go ─────────────────────────────────────────────────────────────────────
+try {
+  INDEX = await (await fetch("remind-index.json", { cache: "no-cache" })).json();
+  ROWS = derive(INDEX);
+  renderHeader();
+  renderTimeline();
+  renderGrid();
+  renderHists();
+  const want = decodeURIComponent(location.hash.slice(1));
+  if (want && ROWS.some((r) => r.pid === want)) openCase(want);
+} catch (e) {
+  $("#err").textContent = "Could not load remind-index.json — " + (e?.message ?? e) +
+    ". Rebuild it with: python3 examples/remind/worker/build_index.py";
+  $("#blurb").textContent = "";
+}
+</script>
+</body>
+</html>
