@@ -75,7 +75,8 @@ export class LiveSync {
 
   private onOpen(): void {
     this.attempt = 0;
-    this.transport.send({ op: "subscribe", types: this.scene.subscribedTypes() });   // peer re-sends state
+    // localBulk: types this scene reproduces locally → peer skips re-streaming their bulk updates.
+    this.transport.send({ op: "subscribe", types: this.scene.subscribedTypes(), localBulk: this.scene.localBulk() });   // peer re-sends state
     this.unsub?.();
     this.unsub = this.scene.subscribe((c) => this.onLocalChange(c));                  // start replicating out
     this.emit({ state: "connected" });

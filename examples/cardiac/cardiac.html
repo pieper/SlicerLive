@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>SlicerLive · cardiac volume rendering</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column;
+         background: #0b0d14; color: #dde3ee; overscroll-behavior: none;
+         font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  /* left padding clears the fixed "?" help button that installChrome pins at top-left */
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+           padding: 8px 12px 8px 54px; border-bottom: 1px solid #1e2434; background: #0e1119; }
+  h1 { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: .2px; }
+  h1 small { font-weight: 400; opacity: .55; margin-left: 6px; }
+  .group { display: flex; align-items: center; gap: 6px; }
+  button, select { font: inherit; color: #dde3ee; background: #1a2030; cursor: pointer;
+                   border: 1px solid #2b3346; border-radius: 6px; padding: 4px 10px; }
+  button:hover, select:hover { background: #222a3d; }
+  button.on { background: #2f5fbf; border-color: #3f74d8; }
+  #blurb { opacity: .6; font-size: 12px; flex: 1 1 260px; min-width: 0; }
+  #transport { display: none; align-items: center; gap: 8px; }
+  input[type=range] { accent-color: #4a86e8; }
+  #scrub { width: 190px; } #fps { width: 90px; }
+  #frameLbl, #fpsLbl { font-variant-numeric: tabular-nums; opacity: .7; min-width: 44px; }
+  main { flex: 1; min-height: 0; padding: 6px; }
+  #grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+          gap: 4px; width: 100%; height: 100%; }
+  #grid.has-max .cell { display: none; }
+  #grid.has-max .cell.max { display: block; grid-area: 1 / 1 / 3 / 3; }
+  .cell { position: relative; min-width: 0; min-height: 0; }
+  .cell canvas { width: 100%; height: 100%; display: block; border-radius: 6px;
+                 background: #000; touch-action: none; }
+  .lab { position: absolute; top: 6px; left: 8px; font-size: 11px; font-weight: 700;
+         letter-spacing: .3px; opacity: .8; pointer-events: none; text-shadow: 0 1px 3px #000; }
+  .lab.axial { color: #f2726f; } .lab.coronal { color: #7fd67f; }
+  .lab.sagittal { color: #f0d264; } .lab.threeD { color: #9db4e8; }
+  #status { padding: 5px 12px; border-top: 1px solid #1e2434; background: #0e1119;
+            font-size: 12px; opacity: .75; }
+</style>
+
+<header>
+  <h1>SlicerLive · cardiac<small>volume rendering of public Slicer sample data</small></h1>
+  <div class="group">
+    <button id="mode-cta">CTA</button>
+    <button id="mode-cine">4D cine</button>
+    <button id="flyBtn">fly inside</button>
+  </div>
+  <div class="group">
+    <label for="preset" style="opacity:.6">preset</label>
+    <select id="preset"></select>
+  </div>
+  <div id="transport">
+    <button id="playBtn">▶ play</button>
+    <input type="range" id="scrub" min="0" max="9" step="1" value="0">
+    <span id="frameLbl">1/10</span>
+    <input type="range" id="fps" min="1" max="30" step="1" value="10">
+    <span id="fpsLbl">10 fps</span>
+  </div>
+  <div id="blurb"></div>
+</header>
+
+<main>
+  <div id="grid">
+    <div class="cell" data-cell="axial"><canvas id="c-axial"></canvas><div class="lab axial">R · Axial</div></div>
+    <div class="cell" data-cell="threeD"><canvas id="c-threeD"></canvas><div class="lab threeD">3D · volume rendering</div></div>
+    <div class="cell" data-cell="coronal"><canvas id="c-coronal"></canvas><div class="lab coronal">G · Coronal</div></div>
+    <div class="cell" data-cell="sagittal"><canvas id="c-sagittal"></canvas><div class="lab sagittal">Y · Sagittal</div></div>
+  </div>
+</main>
+
+<div id="status">loading…</div>
+
+<script type="module" src="cardiac.js?v=20260813a"></script>

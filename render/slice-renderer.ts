@@ -297,6 +297,19 @@ export class SliceRenderer {
   /** Reset pan/zoom for an orientation to the fitted view. */
   resetView(orient: Orientation) { this.viewState[orient] = { panU: 0, panV: 0, zoom: 1 }; }
 
+  /** Snapshot per-orientation pan+zoom (e.g. to persist a view across reloads). */
+  getViewState(): Record<Orientation, { panU: number; panV: number; zoom: number }> {
+    return structuredClone(this.viewState);
+  }
+
+  /** Restore a (possibly partial) snapshot from getViewState(). */
+  setViewState(vs: Partial<Record<Orientation, { panU: number; panV: number; zoom: number }>>): void {
+    for (const k of Object.keys(vs) as Orientation[]) {
+      const v = vs[k];
+      if (v && Number.isFinite(v.zoom) && v.zoom > 0) this.viewState[k] = { ...v };
+    }
+  }
+
   /** Mirror Slicer's in-plane navigation for an orientation: drive pan + zoom from the slice
    *  node's RAS centre and field of view (mm). zoom = extent/FOV on the limiting axis (== 1 when
    *  Slicer is fitted, per FitSliceToBackground's no-margin fit), so SlicerLive tracks Slicer's

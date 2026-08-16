@@ -143,28 +143,42 @@ export class SegmentationLogic {
    *  With `regionRAS` (the bbox of the labels whose opacity changed): the finalize AND the
    *  seam blur run region-limited in one shot — full settled quality lands immediately, no
    *  two-phase. Without it: full-volume fast pass + a debounced full-volume seam blur. */
+  /** RAS bbox → padded-SDF-grid ijk bbox with an M-voxel margin (shell band + blur radii). */
+  private regionToIjk(regionRAS: { lo: [number, number, number]; hi: [number, number, number] }, M = 8) {
+    const inv = invertAffine(this.sdf!.sdfIjkToRAS());
+    const lo: [number, number, number] = [Infinity, Infinity, Infinity];
+    const hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+    for (const x of [regionRAS.lo[0], regionRAS.hi[0]]) for (const y of [regionRAS.lo[1], regionRAS.hi[1]]) for (const z of [regionRAS.lo[2], regionRAS.hi[2]]) {
+      const i = inv[0] * x + inv[1] * y + inv[2] * z + inv[3];
+      const j = inv[4] * x + inv[5] * y + inv[6] * z + inv[7];
+      const k = inv[8] * x + inv[9] * y + inv[10] * z + inv[11];
+      lo[0] = Math.min(lo[0], i); lo[1] = Math.min(lo[1], j); lo[2] = Math.min(lo[2], k);
+      hi[0] = Math.max(hi[0], i); hi[1] = Math.max(hi[1], j); hi[2] = Math.max(hi[2], k);
+    }
+    return {
+      lo: [Math.floor(lo[0]) - M, Math.floor(lo[1]) - M, Math.floor(lo[2]) - M] as [number, number, number],
+      hi: [Math.ceil(hi[0]) + M, Math.ceil(hi[1]) + M, Math.ceil(hi[2]) + M] as [number, number, number],
+    };
+  }
+
+  /** REGION-LIMITED settle-refine after a labelmap edit confined to `regionRAS` (e.g. a
+   *  per-vertebra visibility flip written via EditableSegmentation.writeLabelRegion): the full
+   *  refine quality — JFA re-flood, finalize, seam blurs — over just the region, immediately.
+   *  Small regions bake in ~ms, so stepping through per-label visibility stays real-time. */
+  rebakeShellRegion(regionRAS: { lo: [number, number, number]; hi: [number, number, number] }) {
+    if (!this.sdf) { this.rebake(); return; }
+    if (this.refineTimer !== undefined) { clearTimeout(this.refineTimer); this.refineTimer = undefined; }
+    this.sdf.setPalette(this.palette);
+    this.sdf.setModePalette(this.modePalette);
+    this.sdf.refineRegion(this.regionToIjk(regionRAS));
+    for (const cb of this.redrawCbs) cb();
+  }
+
   refreshOpacity(regionRAS?: { lo: [number, number, number]; hi: [number, number, number] }) {
     if (!this.sdf) { this.rebake(); return; }
     this.sdf.setPalette(this.palette);
     if (regionRAS) {
-      const dims = this.sdf.sdfDims();
-      const inv = invertAffine(this.sdf.sdfIjkToRAS());
-      const lo: [number, number, number] = [Infinity, Infinity, Infinity];
-      const hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
-      for (const x of [regionRAS.lo[0], regionRAS.hi[0]]) for (const y of [regionRAS.lo[1], regionRAS.hi[1]]) for (const z of [regionRAS.lo[2], regionRAS.hi[2]]) {
-        const i = inv[0] * x + inv[1] * y + inv[2] * z + inv[3];
-        const j = inv[4] * x + inv[5] * y + inv[6] * z + inv[7];
-        const k = inv[8] * x + inv[9] * y + inv[10] * z + inv[11];
-        lo[0] = Math.min(lo[0], i); lo[1] = Math.min(lo[1], j); lo[2] = Math.min(lo[2], k);
-        hi[0] = Math.max(hi[0], i); hi[1] = Math.max(hi[1], j); hi[2] = Math.max(hi[2], k);
-      }
-      const M = 8;   // shell band + blur radius margin, in grid voxels
-      const region = {
-        lo: [Math.floor(lo[0]) - M, Math.floor(lo[1]) - M, Math.floor(lo[2]) - M] as [number, number, number],
-        hi: [Math.ceil(hi[0]) + M, Math.ceil(hi[1]) + M, Math.ceil(hi[2]) + M] as [number, number, number],
-      };
-      void dims;
-      this.sdf.rebakeAttr(true, region);      // finalize + seam blur, region-limited: settled instantly
+      this.sdf.rebakeAttr(true, this.regionToIjk(regionRAS));   // finalize + seam blur, region-limited: settled instantly
       for (const cb of this.redrawCbs) cb();
       return;
     }

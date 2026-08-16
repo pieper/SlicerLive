@@ -16,7 +16,9 @@ export async function initDevice(): Promise<Gpu> {
   // timestamp-query is opt-in profiling infra (SceneRenderer.timePass); harmless when
   // absent. It gives exact GPU pass duration — the honest signal that the async
   // performance.now() around submit() cannot provide.
-  const want = ["float32-filterable", "timestamp-query"]
+  // shader-f16 lets compute users (the livecodec WGSL decoder) share this device;
+  // optional — consumers check gpu.features and fall back to f32 kernels without it.
+  const want = ["float32-filterable", "timestamp-query", "shader-f16"]
     .filter((f) => adapter.features.has(f)) as GPUFeatureName[];
 
   // Real medical volumes are large: CTACardio is 512x512x321 -> a 336 MB r32float

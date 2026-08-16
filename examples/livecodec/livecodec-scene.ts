@@ -1,6 +1,7 @@
 // SlicerLive livecodec scene: a download-speed RACE between two volume codecs on
-// the SAME CT scan — "LiveCodec neural" (tiny FSQ latents decoded by a 2.5 MB ONNX
-// model) vs HTJ2K (per-slice OpenJPH HT codestreams). Two codec ROWS × (axial /
+// the SAME CT scan — "LiveCodec neural" (tiny FSQ latents decoded by a ~0.8 MB
+// model on hand-written WebGPU compute kernels, see wgpu-net.js) vs HTJ2K
+// (per-slice OpenJPH HT codestreams). Two codec ROWS × (axial /
 // sagittal / coronal / 3D), spine-compare-style: ONE SliceRenderer shared by both
 // rows (the scalar texture is swapped per draw, geometry is identical), one camera
 // links the 3D cells, and each row hot-swaps coarse→fine content IN PLACE via
@@ -13,22 +14,43 @@
 //   scans/<id>/meta.json           — FSQ levels, chunk_z, latent shapes
 //   scans/<id>/coarse.gz|fine.gz   — gzip uint8 codes [chunks, C, D, H', W']
 //   scans/<id>/dc.gz               — gzip int8 mean-error/4-HU grid [zb, yb, xb]
-//   scans/<id>/index.json + slices.bin — HTJ2K per-slice codestreams (uint16 = HU+1024)
-//   model/decoder.onnx + decoder.json  — the neural decoder + dequant constants
+//   scans/<id>/index.json + slices.bin — HTJ2K codestreams (uint16 = HU+1024);
+//     res-progressive layout (see ResProgressiveIndex) or legacy flat per-slice array
+//   model/decoder25.graph.json + decoder25.weights.bin — the WGSL neural decoder
+//     (LiveCodec scripts/dump_graph25.py exports); model/decoder.json — dequant constants
 import type { Gpu } from "../../render/device.ts";
 import { SceneRenderer } from "../../render/scene-renderer.ts";
 import { SliceRenderer } from "../../render/slice-renderer.ts";
 import { ImageField } from "../../render/fields.ts";
 import type { Vec3 } from "../../render/mat4.ts";
 
-export const BUCKET = "https://js2.jetstream-cloud.org:8001/livecodec-demo/";
+// ?bucket=<url> overrides the data bucket wholesale (local mocks / portability).
+const DEFAULT_BUCKET = "https://js2.jetstream-cloud.org:8001/livecodec-demo/";
+const bucketParam = typeof location !== "undefined"
+  ? new URLSearchParams(location.search).get("bucket")
+  : null;
+export const BUCKET = bucketParam
+  ? (bucketParam.endsWith("/") ? bucketParam : bucketParam + "/")
+  : DEFAULT_BUCKET;
 
 export interface ScanEntry {
   id: string;
-  heldout: boolean;
+  heldout?: boolean;                     // legacy scans.json
+  source?: string;                       // ood-scans.json provenance hint
   shape: [number, number, number];       // [Z, Y, X]
   spacing: [number, number, number];     // [z, y, x] mm
-  bytes: { raw: number; coarse: number; fine: number; dc: number; htj2k: number };
+  // legacy scans.json carries all byte budgets; ood-scans.json only raw + htj2k
+  // (neural budgets come from the checkpoint's per-scan meta.json).
+  bytes: { raw: number; htj2k: number; coarse?: number; fine?: number; dc?: number; residual?: number };
+}
+
+/** One training-effort checkpoint in versions.json (sorted by steps). */
+export interface VersionEntry {
+  tag: string;                           // e.g. "big-025k"
+  steps: number;
+  params: number | string;               // parameter count (e.g. 28.6e6) or preformatted
+  note?: string;
+  heads?: string[];                      // decoder heads published ("full", "preview")
 }
 
 export interface ScanMeta {
@@ -42,6 +64,8 @@ export interface ScanMeta {
 
 export interface DecoderMeta {
   levels: number[];
+  /** false -> feed the coarse latent at its own grid (prior-style decoders) */
+  coarse_upsampled?: boolean;
   offset: number[];                      // per-channel dequant offset
   half: number[];                        // per-channel dequant half-range
   hu_min: number;
@@ -50,15 +74,91 @@ export interface DecoderMeta {
 
 export interface SliceIndexEntry { z: number; offset: number; bytes: number }
 
-// ── streaming fetch + gzip ───────────────────────────────────────────────────
+/** Resolution-progressive HTJ2K index (index.json, new layout): slices.bin is
+ *  resolution-MAJOR — round 0 holds every slice's (main header + lowest-res
+ *  tile-part), round 1 every slice's next tile-part, … Concatenating slice z's
+ *  parts[0..k] in order yields a valid truncated HT codestream decodable at
+ *  parts.length-1-k reduced resolution levels (openjph decodeSubResolution). */
+export interface ResProgressiveSlice { z: number; parts: [number, number][] }  // [offset, bytes]
+export interface ResProgressiveIndex {
+  layout: "res-progressive";
+  rounds: number;
+  slices: ResProgressiveSlice[];
+}
+
+// ── streaming fetch + gzip + simulated network ───────────────────────────────
+
+let simBps: number | null = null;
+
+/** Simulate a link speed (bits/s) for the race, or null for unthrottled. */
+export function setSimulatedBandwidth(bitsPerSec: number | null): void {
+  simBps = bitsPerSec;
+}
+
+/** One simulated link per codec row: all of a row's concurrent fetches share it,
+ *  so each method receives bytes exactly as fast as the chosen network would
+ *  deliver them if it were used alone. Bytes are admitted no earlier than their
+ *  scheduled arrival time; the clock starts at the row's first byte. */
+export class LinkPacer {
+  private t0 = 0;
+  private bytes = 0;
+
+  async admit(n: number): Promise<void> {
+    if (simBps == null) return;
+    if (!this.t0) this.t0 = performance.now();
+    this.bytes += n;
+    const due = this.t0 + (this.bytes * 8 / simBps) * 1000;
+    const wait = due - performance.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  }
+}
+
+/** Measured throughput per stream, aggregated per row. Streams record first-
+ *  request to last-byte wall time; the row summary unions overlapping intervals
+ *  (fine.gz + dc.gz download in parallel) so time is never double-counted. */
+export interface StreamStat { name: string; bytes: number; t0: number; t1: number }
+
+export class BandwidthMeter {
+  stats: StreamStat[] = [];
+
+  begin(name: string) {
+    const s: StreamStat = { name, bytes: 0, t0: performance.now(), t1: performance.now() };
+    this.stats.push(s);
+    return {
+      at: (cumulative: number) => { s.bytes = cumulative; s.t1 = performance.now(); },
+      add: (n: number) => { s.bytes += n; s.t1 = performance.now(); },
+    };
+  }
+
+  summary(): { bytes: number; seconds: number; mbps: number; streams: StreamStat[] } {
+    const iv = this.stats.map((s) => [s.t0, s.t1] as [number, number]).sort((a, b) => a[0] - b[0]);
+    let seconds = 0, end = -Infinity;
+    for (const [a, b] of iv) {
+      seconds += Math.max(0, b - Math.max(a, end));
+      end = Math.max(end, b);
+    }
+    seconds /= 1000;
+    const bytes = this.stats.reduce((t, s) => t + s.bytes, 0);
+    return { bytes, seconds, mbps: seconds > 0 ? bytes * 8 / seconds / 1e6 : 0, streams: this.stats };
+  }
+}
 
 /** Fetch a URL with a body reader so onBytes(cumulativeTotal) reports progress
- *  DURING the download (the progress bars are the whole point of this demo). */
-export async function streamFetch(url: string, onBytes?: (total: number) => void): Promise<Uint8Array> {
-  const resp = await fetch(url);
+ *  DURING the download (the progress bars are the whole point of this demo).
+ *  If a pacer is given, bytes are admitted at the simulated link speed. */
+export async function streamFetch(
+  url: string,
+  onBytes?: (total: number) => void,
+  pacer?: LinkPacer,
+): Promise<Uint8Array> {
+  // no-store: scan data is never served from the HTTP cache, so every race is a
+  // real download (codec runtimes — decoder weights, wasm — may cache; both
+  // rows benefit symmetrically, as deployed static assets would).
+  const resp = await fetch(url, { cache: "no-store" });
   if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
   if (!resp.body) {
     const buf = new Uint8Array(await resp.arrayBuffer());
+    await pacer?.admit(buf.byteLength);
     onBytes?.(buf.byteLength);
     return buf;
   }
@@ -68,6 +168,7 @@ export async function streamFetch(url: string, onBytes?: (total: number) => void
   for (;;) {
     const { done, value } = await rd.read();
     if (done) break;
+    await pacer?.admit(value.byteLength);
     parts.push(value);
     total += value.byteLength;
     onBytes?.(total);
@@ -111,6 +212,25 @@ export function latentShapes(meta: ScanMeta): LatentShapes {
 /** Dequantize ONE chunk's coarse codes and upsample 2x NEAREST to the fine grid:
  *  zc_up[c,z,y,x] = (code[c, z>>1, y>>1, x>>1] - offset[c]) / half[c].  Output is
  *  [C, Df, Hf, Wf] flat — ready for an ort tensor of dims [1, C, Df, Hf, Wf]. */
+/** Dequantize ONE chunk's coarse codes at their NATIVE grid (no upsample):
+ *  [C, Dc, Hc, Wc] flat. Decoders whose decoder.json says coarse_upsampled=false
+ *  (the coarse-grid prior decoder) run their prior stack at this resolution, so
+ *  upsampling first would only waste work — and slicing it back down inside the
+ *  graph exports as an op the WGSL runtime has no kernel for. */
+export function dequantCoarseNative(codes: Uint8Array, chunk: number, s: LatentShapes, dec: DecoderMeta): Float32Array {
+  const { C, Dc, Hc, Wc } = s;
+  const per = Dc * Hc * Wc;
+  const src = chunk * C * per;
+  const out = new Float32Array(C * per);
+  let o = 0;
+  for (let c = 0; c < C; c++) {
+    const off = dec.offset[c], inv = 1 / dec.half[c];
+    const cb = src + c * per;
+    for (let i = 0; i < per; i++) out[o++] = (codes[cb + i] - off) * inv;
+  }
+  return out;
+}
+
 export function dequantCoarseUp(codes: Uint8Array, chunk: number, s: LatentShapes, dec: DecoderMeta): Float32Array {
   const { C, Dc, Hc, Wc, Df, Hf, Wf } = s;
   const src = chunk * C * Dc * Hc * Wc;
@@ -145,14 +265,35 @@ export function dequantFine(codes: Uint8Array, chunk: number, s: LatentShapes, d
   return out;
 }
 
-/** Map one chunk's decoder output ([-1,1] units, [1,1,chunkZ,H,W]) to HU and write
- *  it into the full volume at z0, trimming the padded z tail past Z. */
-export function mapOutputToHU(out: Float32Array, vol: Float32Array, z0: number, Z: number, s: LatentShapes, dec: DecoderMeta): void {
-  const sliceSize = s.H * s.W;
+/** Map one chunk's decoder output ([-1,1] units, [1,1,chunkZ,H/scale,W/scale]) to HU
+ *  and write it into the full volume at z0, trimming the padded z tail past Z.
+ *
+ *  scale > 1 is the v3 PREVIEW head: it decodes the coarse tier at 1/scale
+ *  resolution (a ~3000:1 blur costs no detail there) and this nearest-upsamples
+ *  it by `scale` on the way into the volume — the same picture the full head
+ *  would produce, for a fraction of the compute. */
+export function mapOutputToHU(
+  out: Float32Array, vol: Float32Array, z0: number, Z: number, s: LatentShapes, dec: DecoderMeta, scale = 1,
+): void {
   const zw = Math.min(s.chunkZ, Z - z0);
-  const scale = (dec.hu_max - dec.hu_min) / 2;
-  const n = zw * sliceSize, base = z0 * sliceSize;
-  for (let i = 0; i < n; i++) vol[base + i] = (out[i] + 1) * scale + dec.hu_min;
+  const hu = (dec.hu_max - dec.hu_min) / 2;
+  if (scale === 1) {
+    const n = zw * s.H * s.W, base = z0 * s.H * s.W;
+    for (let i = 0; i < n; i++) vol[base + i] = (out[i] + 1) * hu + dec.hu_min;
+    return;
+  }
+  const w = Math.floor(s.W / scale), h = Math.floor(s.H / scale);
+  for (let z = 0; z < zw; z++) {
+    const sb = z * h * w, zb = (z0 + z) * s.H * s.W;
+    for (let sy = 0; sy < h; sy++) {
+      const srow = sb + sy * w, drow = zb + sy * scale * s.W;
+      for (let sx = 0; sx < w; sx++) {
+        const v = (out[srow + sx] + 1) * hu + dec.hu_min, x0 = drow + sx * scale;
+        for (let k = 0; k < scale; k++) vol[x0 + k] = v;
+      }
+      for (let k = 1; k < scale; k++) vol.copyWithin(drow + k * s.W, drow, drow + s.W);
+    }
+  }
 }
 
 /** The dc grid dims for a volume shape: zb = floor(Z/min(64,Z)), yb = floor(Y/64),
@@ -220,14 +361,15 @@ function vrLUT(): Uint8Array {
   return lut;
 }
 
-/** Axial identity scaled by spacing, volume centred at the origin (orientation
- *  niceties are out of scope — both rows share the exact same grid). Row-major. */
+/** DICOM axial voxel axes are LPS (+x patient-left, +y posterior); RAS needs both
+ *  negated (diag(-sx, -sy, sz)) or axials render mirrored. Centred at the origin;
+ *  both rows share the exact same grid. Row-major. */
 export function ijkToRASFromSpacing(shape: [number, number, number], spacing: [number, number, number]): number[] {
   const [Z, Y, X] = shape;
   const sx = spacing[2], sy = spacing[1], sz = spacing[0];
   return [
-    sx, 0, 0, -sx * (X - 1) / 2,
-    0, sy, 0, -sy * (Y - 1) / 2,
+    -sx, 0, 0, sx * (X - 1) / 2,
+    0, -sy, 0, sy * (Y - 1) / 2,
     0, 0, sz, -sz * (Z - 1) / 2,
     0, 0, 0, 1,
   ];
@@ -316,23 +458,46 @@ export function makeLiveCodecScene(
   };
 }
 
-/** Load the case list. */
+/** Load the legacy case list (scans.json). */
 export async function loadScans(): Promise<ScanEntry[]> {
   const r = await fetch(BUCKET + "scans.json", { cache: "no-cache" });
   if (!r.ok) throw new Error(`scans.json HTTP ${r.status}`);
   return await r.json() as ScanEntry[];
 }
 
-/** Load one scan's meta.json. */
-export async function loadScanMeta(id: string): Promise<ScanMeta> {
-  const r = await fetch(`${BUCKET}scans/${id}/meta.json`);
-  if (!r.ok) throw new Error(`meta.json HTTP ${r.status} for scan ${id}`);
+/** Load the fixed out-of-distribution case list (ood-scans.json, versioned layout). */
+export async function loadOodScans(): Promise<ScanEntry[]> {
+  const r = await fetch(BUCKET + "ood-scans.json", { cache: "no-cache" });
+  if (!r.ok) throw new Error(`ood-scans.json HTTP ${r.status}`);
+  return await r.json() as ScanEntry[];
+}
+
+/** Load the training-effort checkpoint list. Returns [] when versions.json is
+ *  absent or malformed (the versioned layout is published incrementally — the
+ *  demo must keep working from the legacy layout alone). */
+export async function loadVersions(): Promise<VersionEntry[]> {
+  try {
+    const r = await fetch(BUCKET + "versions.json", { cache: "no-cache" });
+    if (!r.ok) return [];
+    const v = await r.json();
+    return Array.isArray(v) ? v.filter((e) => e && typeof e.tag === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Load one scan's meta.json from a resolved neural base URL (…/scans/<id>/ or
+ *  …/versions/<tag>/<id>/). */
+export async function loadScanMeta(neuralBase: string): Promise<ScanMeta> {
+  const r = await fetch(neuralBase + "meta.json");
+  if (!r.ok) throw new Error(`meta.json HTTP ${r.status} at ${neuralBase}`);
   return await r.json() as ScanMeta;
 }
 
-/** Load the neural decoder's dequant constants. */
-export async function loadDecoderMeta(): Promise<DecoderMeta> {
-  const r = await fetch(BUCKET + "model/decoder.json");
-  if (!r.ok) throw new Error(`decoder.json HTTP ${r.status}`);
+/** Load the neural decoder's dequant constants from a resolved model base URL
+ *  (…/model/ or …/versions/<tag>/model/). */
+export async function loadDecoderMeta(modelBase: string): Promise<DecoderMeta> {
+  const r = await fetch(modelBase + "decoder.json");
+  if (!r.ok) throw new Error(`decoder.json HTTP ${r.status} at ${modelBase}`);
   return await r.json() as DecoderMeta;
 }

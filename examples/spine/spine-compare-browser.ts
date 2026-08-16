@@ -66,6 +66,10 @@ async function main() {
   const sc: SpineCompareScene = await buildSpineCompareScene(gpu, srgb, meta, base, (msg, n) => {
     bytes += n;
     status(`${coll}/${pid}: ${msg} — ${(bytes / 1e6).toFixed(1)} MB`);
+  }, {
+    // ?shell=all restores the soft multi-material interface shell; ?band=<voxels> overrides the band.
+    shell: PARAMS.get("shell") === "all" ? "all" : "outer",
+    bandVox: PARAMS.get("band") ? Number(PARAMS.get("band")) : undefined,
   });
   sc.upgraded.then(() => { drawAll(); status(`${coll}/${pid} — full-res CT loaded`); })
     .catch(() => status(`${coll}/${pid} — full-res CT failed to load (showing preview res)`, true));
@@ -139,7 +143,9 @@ async function main() {
   for (const k of keys) rowOf(k).logic.onRedraw(requestDraw);
 
   // ── shared crosshair across all 8 cells ────────────────────────────────────
-  const xhair = createCrosshair(true);
+  // Visible ONLY while the shift-hover gesture is live: it appears with the first
+  // shift+move and vanishes when shift is released (or the window loses focus).
+  const xhair = createCrosshair(false);
   const overlays: Record<string, { c: HTMLCanvasElement; g: CanvasRenderingContext2D }> = {};
   for (const id of keys.flatMap((k) => cellNames.map((c) => `c-${k}-${c}`))) {
     const o = document.createElement("canvas");
@@ -178,10 +184,14 @@ async function main() {
     const r = c.getBoundingClientRect();
     return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height, aspect: r.width / r.height };
   };
+  const hideXhair = () => { if (xhair.visible) { xhair.toggle(false); xhairRedraw(); } };
+  globalThis.addEventListener("keyup", (e) => { if ((e as KeyboardEvent).key === "Shift") hideXhair(); });
+  globalThis.addEventListener("blur", hideXhair);
   for (const k of keys) {
     for (const o of ORIENTS) {
       cv[`c-${k}-${o}`].addEventListener("pointermove", (e) => {
         if (!isShiftHover(e)) return;
+        if (!xhair.visible) xhair.toggle(true);
         const { u, v, aspect } = uvOf(cv[`c-${k}-${o}`], e);
         const ras = sc.slice.viewToRas(o, off[o], u, v, aspect);
         xhair.set(ras); jumpAll(ras);
@@ -199,6 +209,7 @@ async function main() {
     };
     cv[`c-${k}-threeD`].addEventListener("pointermove", (e) => {
       if (!isShiftHover(e)) return;
+      if (!xhair.visible) xhair.toggle(true);
       const { u, v } = uvOf(cv[`c-${k}-threeD`], e);
       if (inFlight) queued = { u, v }; else pick(u, v);
     });

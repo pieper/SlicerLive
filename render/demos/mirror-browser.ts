@@ -32,6 +32,7 @@ import {
   type Vec3,
   VolumeRenderingDisplayableManager,
 } from "../livescene.ts";
+import { SegEditDisplayableManager } from "../../logic/seged-manager.ts";
 
 const status = (m: string) => { const e = document.getElementById("status-text"); if (e) e.textContent = m; };
 const el = (id: string) => document.getElementById(id) as HTMLCanvasElement;
@@ -207,13 +208,20 @@ async function main() {
 
   addEventListener("resize", () => { resizeAll(); renderSlices(); a3d.draw(); });
 
+  // "seged" mode (segment editor): the segmentation is reproduced on-GPU from Slicer's streamed SegEdit
+  // *intents* (WebGPU effects), not fetched from the authoritative labelmap — so disparities between the
+  // WebGPU pipeline and Slicer's own are visible side by side. Enabled by the seged.html page path or ?seged.
+  const seged = location.pathname.includes("seged") || p.has("seged");
+  const segManager = seged
+    ? new SegEditDisplayableManager(gpu.device, { onEdit: (k) => status("seged: applied " + k) })
+    : new SegmentationDisplayableManager(gpu.device, 1.5);   // σ=1.5 = the existing SlicerLive bake
   const markupsDM = new MarkupsDisplayableManager();
   const live = new LiveScene(httpBase, [
     new LayoutDisplayableManager(),
     new CameraDisplayableManager(),
     new VolumeRenderingDisplayableManager(gpu.device),
     new SliceDisplayableManager(),
-    new SegmentationDisplayableManager(gpu.device, 1.5),   // σ=1.5 = the existing SlicerLive bake (repro Andrey's artifact)
+    segManager,
     markupsDM,
     new RoiCropDisplayableManager(),
   ]);
@@ -241,6 +249,20 @@ async function main() {
   const chrome = installChrome({ controls, anchor: cv.threeD });
   live.subscribe((c) => { if (c.type === "volumeRenderingDisplay" || c.type === "segmentation") chrome.refresh(); });
   Object.assign(globalThis, { __live: live, __sync: sync, __camState: () => camera.state() });   // debug hook
+  if (seged) {
+    // seged diagnostics: inspect what's in the 3D scene + force a rebuild, to distinguish
+    // "field not in scene" from "field present but not rendering (camera/redraw)".
+    Object.assign(globalThis, {
+      __seged: {
+        fields: () => [...fields3d.keys()],
+        vr3d: () => volumeShown3D,
+        cam: () => camera.state(),
+        rebuild: () => { rebuild3d(); return [...fields3d.keys()]; },
+        redraw: () => a3d.draw(),
+        palette: () => (segManager as unknown as { diag?: () => unknown }).diag?.(),
+      },
+    });
+  }
 
   // Markup drag (SlicerLive -> Slicer): grab a 3D control-point glyph and move it in the plane
   // perpendicular to the view at its own depth. The local glyph follows the cursor immediately

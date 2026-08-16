@@ -1,0 +1,2 @@
+[ws] subscribed
+[ws] done — 1 SegEdit event(s)

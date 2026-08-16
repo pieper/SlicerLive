@@ -1,0 +1,142 @@
+[
+  {
+    "pid": "KiTS-00013",
+    "dims": [
+      512,
+      512,
+      92
+    ],
+    "kidVox": 197192,
+    "massVox": 26741,
+    "fatMode": -105,
+    "kidney_p10_50_90": [
+      52,
+      207,
+      268
+    ],
+    "mass_p10_50_90": [
+      49,
+      96,
+      140
+    ],
+    "cortexMinusMedulla": 216,
+    "surfaceFatFrac": 0.503,
+    "surfaceSoftFrac": 0.497,
+    "kidVar_med": 1283,
+    "massVar_med": 496,
+    "kidVar_p90": 11104,
+    "massVar_p90": 2373
+  },
+  {
+    "pid": "KiTS-00057",
+    "dims": [
+      512,
+      512,
+      80
+    ],
+    "kidVox": 163776,
+    "massVox": 55450,
+    "fatMode": -105,
+    "kidney_p10_50_90": [
+      -1,
+      60,
+      102
+    ],
+    "mass_p10_50_90": [
+      26,
+      76,
+      118
+    ],
+    "cortexMinusMedulla": 103,
+    "surfaceFatFrac": 0.697,
+    "surfaceSoftFrac": 0.303,
+    "kidVar_med": 641,
+    "massVar_med": 502,
+    "kidVar_p90": 3203,
+    "massVar_p90": 1383
+  },
+  {
+    "pid": "KiTS-00081",
+    "dims": [
+      512,
+      512,
+      151
+    ],
+    "kidVox": 194244,
+    "massVox": 1851,
+    "fatMode": -115,
+    "kidney_p10_50_90": [
+      7,
+      108,
+      137
+    ],
+    "mass_p10_50_90": [
+      17,
+      75,
+      129
+    ],
+    "cortexMinusMedulla": 130,
+    "surfaceFatFrac": 0.877,
+    "surfaceSoftFrac": 0.123,
+    "kidVar_med": 395,
+    "massVar_med": 473,
+    "kidVar_p90": 4568,
+    "massVar_p90": 5579
+  },
+  {
+    "pid": "KiTS-00111",
+    "dims": [
+      512,
+      512,
+      186
+    ],
+    "kidVox": 325201,
+    "massVox": 20674,
+    "fatMode": -105,
+    "kidney_p10_50_90": [
+      9,
+      141,
+      231
+    ],
+    "mass_p10_50_90": [
+      69,
+      142,
+      195
+    ],
+    "cortexMinusMedulla": 222,
+    "surfaceFatFrac": 0.733,
+    "surfaceSoftFrac": 0.267,
+    "kidVar_med": 1710,
+    "massVar_med": 1047,
+    "kidVar_p90": 9110,
+    "massVar_p90": 4910
+  },
+  {
+    "pid": "KiTS-00010",
+    "dims": [
+      512,
+      512,
+      50
+    ],
+    "kidVox": 204728,
+    "massVox": 8715,
+    "fatMode": -115,
+    "kidney_p10_50_90": [
+      28,
+      200,
+      281
+    ],
+    "mass_p10_50_90": [
+      48,
+      197,
+      245
+    ],
+    "cortexMinusMedulla": 253,
+    "surfaceFatFrac": 0.551,
+    "surfaceSoftFrac": 0.449,
+    "kidVar_med": 2215,
+    "massVar_med": 1887,
+    "kidVar_p90": 14077,
+    "massVar_p90": 10361
+  }
+]

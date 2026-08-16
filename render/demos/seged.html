@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- "seged" = the Segment Editor, made efficient — a WebGPU-native mirror of Slicer's Segment Editor
+     (and a nod to Szeged). Paint / erase in Slicer's real Segment Editor; each committed stroke streams
+     as an mrson SegEdit intent and is reproduced here on-GPU by SegEditDriver, so disparities vs Slicer's
+     own pipeline show side by side. Loads the shared mirror bundle in seged mode (path contains "seged"). -->
+<title>seged — WebGPU Segment Editor mirror</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; background: #05060a; }
+  #grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+          gap: 2px; width: 100vw; height: calc(100vh - 46px); }
+  .cell { position: relative; min-width: 0; min-height: 0; }
+  .cell canvas { width: 100%; height: 100%; display: block; background: #000; touch-action: none; }
+  .cell.hidden { display: none; }
+  .cell .lab { position: absolute; top: 5px; left: 7px; font: 700 11px -apple-system, system-ui, sans-serif;
+               letter-spacing: .3px; opacity: .85; pointer-events: none; }
+  .lab.red { color: #f05a5a; } .lab.yellow { color: #f0d24a; } .lab.green { color: #5ad07a; } .lab.threeD { color: #9fb3d0; }
+  #status { position: fixed; top: 6px; left: 10px; font: 12px -apple-system, system-ui, sans-serif;
+            color: #9fb3d0; z-index: 3; display: flex; align-items: center; gap: 8px;
+            background: rgba(5,6,10,.72); padding: 3px 9px; border-radius: 6px; }
+  #status-text { pointer-events: none; }
+  #status-retry { font: 600 11px -apple-system, system-ui, sans-serif; color: #d6e2f2;
+            background: #1b2740; border: 1px solid #33507e; border-radius: 4px; padding: 1px 8px; cursor: pointer; }
+  #status-retry:hover { background: #24365a; }
+  #status.down #status-text { color: #f0b04a; }
+  #badge { position: fixed; top: 6px; right: 10px; z-index: 3; font: 700 11px -apple-system, system-ui, sans-serif;
+           color: #d6e2f2; background: rgba(43,108,176,.28); border: 1px solid #33507e; padding: 3px 9px; border-radius: 6px; }
+  #timeline { position: fixed; left: 0; right: 0; bottom: 0; height: 46px; z-index: 4;
+              display: flex; align-items: center; gap: 10px; padding: 0 12px; box-sizing: border-box;
+              background: #0b0e16; border-top: 1px solid #1b2740;
+              font: 12px -apple-system, system-ui, sans-serif; color: #9fb3d0; }
+  #tl-btns { display: flex; gap: 4px; }
+  #timeline button { font: 600 12px -apple-system, system-ui, sans-serif; color: #d6e2f2;
+              background: #1b2740; border: 1px solid #33507e; border-radius: 4px; padding: 3px 9px; cursor: pointer; }
+  #timeline button:hover { background: #24365a; }
+  #timeline button.on { background: #2b6cb0; border-color: #3f86d0; color: #fff; }
+  #tl-scrub { flex: 1; height: 6px; accent-color: #4a90d9; cursor: pointer; }
+  #tl-time { min-width: 118px; text-align: right; font-variant-numeric: tabular-nums; opacity: .9; }
+  #tl-preview { position: fixed; bottom: 52px; z-index: 5; width: 200px; pointer-events: none;
+              border: 1px solid #33507e; border-radius: 5px; box-shadow: 0 6px 22px rgba(0,0,0,.6); background: #000; display: none; }
+  #tl-live-dot { width: 8px; height: 8px; border-radius: 50%; background: #5ad07a; box-shadow: 0 0 6px #5ad07a; }
+  #timeline.replay #tl-live-dot { background: #f0b04a; box-shadow: 0 0 6px #f0b04a; }
+</style>
+</head>
+<body>
+  <div id="grid">
+    <div class="cell" id="cell-red"><canvas id="c-red"></canvas><div class="lab red">R · Axial</div></div>
+    <div class="cell" id="cell-threeD"><canvas id="c-threeD"></canvas><div class="lab threeD">3D · WebGPU seg</div></div>
+    <div class="cell" id="cell-green"><canvas id="c-green"></canvas><div class="lab green">G · Coronal</div></div>
+    <div class="cell" id="cell-yellow"><canvas id="c-yellow"></canvas><div class="lab yellow">Y · Sagittal</div></div>
+  </div>
+  <div id="status"><span id="status-text">loading…</span><button id="status-retry" hidden>Try now</button></div>
+  <div id="badge">seged · WebGPU intent-driven</div>
+  <img id="tl-preview" alt="">
+  <div id="timeline">
+    <span id="tl-live-dot" title="live / replay"></span>
+    <div id="tl-btns">
+      <button id="tl-play" title="Play / pause the recorded session">▶</button>
+      <button id="tl-live" class="on" title="Jump to live and follow">Live</button>
+      <button id="tl-mark" title="Mark this moment (LiveStory step)">＋ Mark</button>
+    </div>
+    <input id="tl-scrub" type="range" min="0" max="1000" value="1000" step="1">
+    <span id="tl-time">live</span>
+  </div>
+  <script type="module" src="mirror.js"></script>
+</body>
+</html>

@@ -8,7 +8,8 @@ async function initDevice() {
   if (!adapter) throw new Error("no WebGPU adapter");
   const want = [
     "float32-filterable",
-    "timestamp-query"
+    "timestamp-query",
+    "shader-f16"
   ].filter((f) => adapter.features.has(f));
   const lim = adapter.limits;
   const requiredLimits = {};
@@ -623,6 +624,19 @@ var SliceRenderer = class {
       panV: 0,
       zoom: 1
     };
+  }
+  /** Snapshot per-orientation pan+zoom (e.g. to persist a view across reloads). */
+  getViewState() {
+    return structuredClone(this.viewState);
+  }
+  /** Restore a (possibly partial) snapshot from getViewState(). */
+  setViewState(vs) {
+    for (const k of Object.keys(vs)) {
+      const v = vs[k];
+      if (v && Number.isFinite(v.zoom) && v.zoom > 0) this.viewState[k] = {
+        ...v
+      };
+    }
   }
   /** Mirror Slicer's in-plane navigation for an orientation: drive pan + zoom from the slice
    *  node's RAS centre and field of view (mm). zoom = extent/FOV on the limiting axis (== 1 when
@@ -4534,6 +4548,18 @@ var EditableSegmentation = class {
     ]);
     this.markDirty();
   }
+  /** Region-limited labelmap write (`lo`/`size` in label-grid ijk; data x-fastest, tightly packed).
+   *  Deliberately NO dirty notification: the caller pairs it with a region-limited rebake
+   *  (SegmentationLogic.rebakeShellRegion) — an onDirty full rebake would defeat the point. */
+  writeLabelRegion(data, lo, size) {
+    this.device.queue.writeTexture({
+      texture: this.labelTex,
+      origin: lo
+    }, data, {
+      bytesPerRow: size[0] * 4,
+      rowsPerImage: size[1]
+    }, size);
+  }
   /** Read the master labelmap back to CPU (ids per voxel, x-fastest). Handles WebGPU's 256-byte
    *  bytesPerRow alignment. For tests + zarr serialization (A-7); not on the interactive path. */
   async readLabelmap() {
@@ -4579,7 +4605,7 @@ var EditableSegmentation = class {
 var INIT_WGSL2 = (
   /* wgsl */
   `
-struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
+struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32>, origin : vec4<i32> };
 @group(0) @binding(0) var t_label : texture_3d<u32>;
 @group(0) @binding(1) var t_seed_out : texture_storage_3d<rgba32float, write>;
 @group(0) @binding(2) var<uniform> u : U;
@@ -4598,8 +4624,8 @@ fn labelAt(c : vec3<i32>) -> u32 {
 }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  if (any(gid >= u.dims.xyz)) { return; }
-  let c = vec3<i32>(gid);
+  let c = vec3<i32>(gid) + u.origin.xyz;   // region-limited dispatch offsets into the grid
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
   let my = labelAt(c);
   let meIn = my != 0u;
   let allMode = u.params.y > 0.5;                   // 0 = outer boundary only; 1 = ANY label change (multi-material interfaces)
@@ -4618,22 +4644,22 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (isChange) { boundary = true; if (my == 0u && !allMode) { region = nl; } }
   }
   var seed = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  if (boundary) { seed = vec4<f32>((u.ijkToRAS * vec4<f32>(vec3<f32>(gid), 1.0)).xyz, f32(region)); }
+  if (boundary) { seed = vec4<f32>((u.ijkToRAS * vec4<f32>(vec3<f32>(c), 1.0)).xyz, f32(region)); }
   textureStore(t_seed_out, c, seed);
 }`
 );
 var JFA_WGSL = (
   /* wgsl */
   `
-struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
+struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32>, origin : vec4<i32> };
 @group(0) @binding(0) var t_seed_in : texture_3d<f32>;
 @group(0) @binding(1) var t_seed_out : texture_storage_3d<rgba32float, write>;
 @group(0) @binding(2) var<uniform> u : U;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  if (any(gid >= u.dims.xyz)) { return; }
-  let c = vec3<i32>(gid);
-  let p = (u.ijkToRAS * vec4<f32>(vec3<f32>(gid), 1.0)).xyz;
+  let c = vec3<i32>(gid) + u.origin.xyz;   // region-limited dispatch offsets into the grid
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
+  let p = (u.ijkToRAS * vec4<f32>(vec3<f32>(c), 1.0)).xyz;
   let step = i32(u.params.x);
   let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
   var best = textureLoad(t_seed_in, c, 0);
@@ -4845,9 +4871,10 @@ var JfaSdfBaker = class {
       format: fmt,
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra
     });
+    const seedUsage = GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     this.seed = [
-      mk("rgba32float"),
-      mk("rgba32float")
+      mk("rgba32float", seedUsage),
+      mk("rgba32float", seedUsage)
     ];
     this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC);
     this.attrTex = mk("rgba16float", GPUTextureUsage.COPY_DST);
@@ -5004,6 +5031,172 @@ var JfaSdfBaker = class {
       2,
       1
     ], this.smoothSigma, 1);
+  }
+  /** REGION-LIMITED refine: re-flood ONLY `regionIjk` (padded-grid coords) after a labelmap edit
+   *  confined to it — a per-vertebra visibility flip re-bakes a few % of the grid instead of the
+   *  whole volume, which is what makes level stepping feel instant. The seed ping-pong pair is
+   *  first made consistent with a full-texture copy, so region passes can ping-pong while JFA
+   *  taps read valid exterior seeds (surfaces just outside the region flood in correctly).
+   *  Exterior distances that referenced a surface REMOVED inside the region go stale, but only
+   *  ≫band away from any visible shell — invisible, and the next full sweep cleans them. */
+  refineRegion(regionIjk) {
+    const dev = this.dev, [dx, dy, dz] = this.dims;
+    const lo = [
+      Math.max(0, regionIjk.lo[0]),
+      Math.max(0, regionIjk.lo[1]),
+      Math.max(0, regionIjk.lo[2])
+    ];
+    const hi = [
+      Math.min(dx, regionIjk.hi[0]),
+      Math.min(dy, regionIjk.hi[1]),
+      Math.min(dz, regionIjk.hi[2])
+    ];
+    const [rx, ry, rz] = [
+      hi[0] - lo[0],
+      hi[1] - lo[1],
+      hi[2] - lo[2]
+    ];
+    if (rx <= 0 || ry <= 0 || rz <= 0) return;
+    const g = [
+      Math.ceil(rx / 4),
+      Math.ceil(ry / 4),
+      Math.ceil(rz / 4)
+    ];
+    const region = {
+      lo,
+      hi
+    };
+    let src = this.lastSeed;
+    let enc = dev.createCommandEncoder();
+    enc.copyTextureToTexture({
+      texture: this.seed[src]
+    }, {
+      texture: this.seed[src ^ 1]
+    }, this.dims);
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    this.writeUni(0, lo);
+    enc = dev.createCommandEncoder();
+    {
+      const b = dev.createBindGroup({
+        layout: this.initPipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.labelTex.createView()
+          },
+          {
+            binding: 1,
+            resource: this.seed[src].createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: this.uni
+            }
+          }
+        ]
+      });
+      const p2 = enc.beginComputePass();
+      p2.setPipeline(this.initPipe);
+      p2.setBindGroup(0, b);
+      p2.dispatchWorkgroups(g[0], g[1], g[2]);
+      p2.end();
+    }
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    const maxDim = Math.max(rx, ry, rz);
+    const steps = [];
+    for (let s = 1 << Math.floor(Math.log2(Math.max(2, maxDim - 1))); s >= 1; s >>= 1) steps.push(s);
+    steps.push(2, 1);
+    for (const step of steps) {
+      this.writeUni(step, lo);
+      const dst = src ^ 1;
+      enc = dev.createCommandEncoder();
+      const b = dev.createBindGroup({
+        layout: this.jfaPipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.seed[src].createView()
+          },
+          {
+            binding: 1,
+            resource: this.seed[dst].createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: this.uni
+            }
+          }
+        ]
+      });
+      const p2 = enc.beginComputePass();
+      p2.setPipeline(this.jfaPipe);
+      p2.setBindGroup(0, b);
+      p2.dispatchWorkgroups(g[0], g[1], g[2]);
+      p2.end();
+      dev.queue.submit([
+        enc.finish()
+      ]);
+      src = dst;
+    }
+    this.lastSeed = src;
+    this.writeUni(0, lo);
+    enc = dev.createCommandEncoder();
+    const bf = dev.createBindGroup({
+      layout: this.finalPipe.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.seed[src].createView()
+        },
+        {
+          binding: 1,
+          resource: this.labelTex.createView()
+        },
+        {
+          binding: 2,
+          resource: this.sdfTex.createView()
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.uni
+          }
+        },
+        {
+          binding: 4,
+          resource: {
+            buffer: this.palBuf
+          }
+        },
+        {
+          binding: 5,
+          resource: this.attrTex.createView()
+        },
+        {
+          binding: 6,
+          resource: {
+            buffer: this.modeBuf
+          }
+        }
+      ]
+    });
+    const p = enc.beginComputePass();
+    p.setPipeline(this.finalPipe);
+    p.setBindGroup(0, bf);
+    p.dispatchWorkgroups(g[0], g[1], g[2]);
+    p.end();
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    this.blurStage(this.blurPipe, this.smoothSigma, this.sdfTex, this.sdfScratch, region);
+    this.blurStage(this.colBlurPipe, 1, this.sdfTex, this.sdfScratch, region);
+    this.blurStage(this.fullBlurPipe, 1, this.attrTex, this.attrScratch, region);
   }
   /** ATTR-ONLY rebake for palette/opacity changes (per-segment visibility): the distance field
    *  doesn't move, so re-run ONLY the finalize (from the last sweep's seed) with its sdf writes
@@ -5495,6 +5688,70 @@ var SegmentationLogic = class {
    *  With `regionRAS` (the bbox of the labels whose opacity changed): the finalize AND the
    *  seam blur run region-limited in one shot — full settled quality lands immediately, no
    *  two-phase. Without it: full-volume fast pass + a debounced full-volume seam blur. */
+  /** RAS bbox → padded-SDF-grid ijk bbox with an M-voxel margin (shell band + blur radii). */
+  regionToIjk(regionRAS, M = 8) {
+    const inv = invertAffine(this.sdf.sdfIjkToRAS());
+    const lo = [
+      Infinity,
+      Infinity,
+      Infinity
+    ];
+    const hi = [
+      -Infinity,
+      -Infinity,
+      -Infinity
+    ];
+    for (const x of [
+      regionRAS.lo[0],
+      regionRAS.hi[0]
+    ]) for (const y of [
+      regionRAS.lo[1],
+      regionRAS.hi[1]
+    ]) for (const z of [
+      regionRAS.lo[2],
+      regionRAS.hi[2]
+    ]) {
+      const i = inv[0] * x + inv[1] * y + inv[2] * z + inv[3];
+      const j = inv[4] * x + inv[5] * y + inv[6] * z + inv[7];
+      const k = inv[8] * x + inv[9] * y + inv[10] * z + inv[11];
+      lo[0] = Math.min(lo[0], i);
+      lo[1] = Math.min(lo[1], j);
+      lo[2] = Math.min(lo[2], k);
+      hi[0] = Math.max(hi[0], i);
+      hi[1] = Math.max(hi[1], j);
+      hi[2] = Math.max(hi[2], k);
+    }
+    return {
+      lo: [
+        Math.floor(lo[0]) - M,
+        Math.floor(lo[1]) - M,
+        Math.floor(lo[2]) - M
+      ],
+      hi: [
+        Math.ceil(hi[0]) + M,
+        Math.ceil(hi[1]) + M,
+        Math.ceil(hi[2]) + M
+      ]
+    };
+  }
+  /** REGION-LIMITED settle-refine after a labelmap edit confined to `regionRAS` (e.g. a
+   *  per-vertebra visibility flip written via EditableSegmentation.writeLabelRegion): the full
+   *  refine quality — JFA re-flood, finalize, seam blurs — over just the region, immediately.
+   *  Small regions bake in ~ms, so stepping through per-label visibility stays real-time. */
+  rebakeShellRegion(regionRAS) {
+    if (!this.sdf) {
+      this.rebake();
+      return;
+    }
+    if (this.refineTimer !== void 0) {
+      clearTimeout(this.refineTimer);
+      this.refineTimer = void 0;
+    }
+    this.sdf.setPalette(this.palette);
+    this.sdf.setModePalette(this.modePalette);
+    this.sdf.refineRegion(this.regionToIjk(regionRAS));
+    for (const cb of this.redrawCbs) cb();
+  }
   refreshOpacity(regionRAS) {
     if (!this.sdf) {
       this.rebake();
@@ -5502,53 +5759,7 @@ var SegmentationLogic = class {
     }
     this.sdf.setPalette(this.palette);
     if (regionRAS) {
-      const dims = this.sdf.sdfDims();
-      const inv = invertAffine(this.sdf.sdfIjkToRAS());
-      const lo = [
-        Infinity,
-        Infinity,
-        Infinity
-      ];
-      const hi = [
-        -Infinity,
-        -Infinity,
-        -Infinity
-      ];
-      for (const x of [
-        regionRAS.lo[0],
-        regionRAS.hi[0]
-      ]) for (const y of [
-        regionRAS.lo[1],
-        regionRAS.hi[1]
-      ]) for (const z of [
-        regionRAS.lo[2],
-        regionRAS.hi[2]
-      ]) {
-        const i = inv[0] * x + inv[1] * y + inv[2] * z + inv[3];
-        const j = inv[4] * x + inv[5] * y + inv[6] * z + inv[7];
-        const k = inv[8] * x + inv[9] * y + inv[10] * z + inv[11];
-        lo[0] = Math.min(lo[0], i);
-        lo[1] = Math.min(lo[1], j);
-        lo[2] = Math.min(lo[2], k);
-        hi[0] = Math.max(hi[0], i);
-        hi[1] = Math.max(hi[1], j);
-        hi[2] = Math.max(hi[2], k);
-      }
-      const M = 8;
-      const region = {
-        lo: [
-          Math.floor(lo[0]) - M,
-          Math.floor(lo[1]) - M,
-          Math.floor(lo[2]) - M
-        ],
-        hi: [
-          Math.ceil(hi[0]) + M,
-          Math.ceil(hi[1]) + M,
-          Math.ceil(hi[2]) + M
-        ]
-      };
-      void dims;
-      this.sdf.rebakeAttr(true, region);
+      this.sdf.rebakeAttr(true, this.regionToIjk(regionRAS));
       for (const cb of this.redrawCbs) cb();
       return;
     }
@@ -5910,7 +6121,7 @@ function ctLUT(maxAlpha = 0.32) {
   }
   return lut;
 }
-async function buildSpineCompareScene(gpu, format, meta, base, onProgress) {
+async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shellOpts) {
   const dev = gpu.device;
   const vol = meta.volumes;
   const track = (msg) => (n) => onProgress?.(msg, n);
@@ -5933,15 +6144,16 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress) {
   const lowRAS = flat(meta.ijkToRAS_low);
   const spMed = Uint8Array.from(sp.data);
   const refMed = Uint8Array.from(ref.data);
+  let discOp = 0;
   const levelPalette = new Float32Array(256 * 4);
   for (let l = 1; l < 256; l++) {
     const [r, g, b] = isDisc(l) ? DISC_COLOR : levelColor(l);
     levelPalette[l * 4] = r;
     levelPalette[l * 4 + 1] = g;
     levelPalette[l * 4 + 2] = b;
-    levelPalette[l * 4 + 3] = 1;
+    levelPalette[l * 4 + 3] = isDisc(l) ? discOp : 1;
   }
-  let volOpacity = 1;
+  let volOpacity = 0;
   const scaledLut = (o) => {
     const l = ctLUT().slice();
     for (let i = 0; i < 256; i++) l[i * 4 + 3] = Math.round(l[i * 4 + 3] * o);
@@ -5979,7 +6191,6 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress) {
     spineps: 1,
     ref: 1
   };
-  let discOp = 1;
   let clip = null;
   let extentState = {
     label: null,
@@ -5991,22 +6202,117 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress) {
     const editable = new EditableSegmentation(dev, cap.dims, {
       ijkToRAS: cap.ijkToRAS
     });
+    const outerShell = (shellOpts?.shell ?? "outer") === "outer";
     const logic = new SegmentationLogic(dev, editable, {
       renderMode: "sdf",
-      boundaryMode: "all",
+      boundaryMode: outerShell ? "outer" : "all",
       opacity: 1,
-      clippable: true
+      clippable: true,
+      bandMm: shellOpts?.bandVox !== void 0 ? shellOpts.bandVox * cap.vox : void 0
     });
     const levels = levelGeometry(lab, medDims, medRAS);
-    for (const [l] of levels) {
-      logic.setLabelColor(l, isDisc(l) ? DISC_COLOR : levelColor(l));
-      logic.setLabelOpacity(l, 1);
-    }
-    editable.loadLabelmap(cap.lab);
-    logic.refineNow();
-    const scene = new SceneRenderer(gpu, format);
+    for (const [l] of levels) logic.setLabelColor(l, isDisc(l) ? DISC_COLOR : levelColor(l));
     const shown = /* @__PURE__ */ new Map();
-    for (const [l] of levels) shown.set(l, 1);
+    for (const [l] of levels) shown.set(l, isDisc(l) ? discOp : 1);
+    for (const [l, o] of shown) logic.setLabelOpacity(l, o);
+    const visOf = () => {
+      const v = new Uint8Array(256).fill(1);
+      for (const [l, o] of shown) v[l] = o > 1e-3 ? 1 : 0;
+      return v;
+    };
+    let visKey = "";
+    const rebakeShellFull = () => {
+      const vis = visOf();
+      visKey = vis.join("");
+      const f = new Uint32Array(cap.lab.length);
+      for (let i = 0; i < f.length; i++) {
+        const l = cap.lab[i];
+        if (vis[l]) f[i] = l;
+      }
+      editable.loadLabelmap(f);
+      logic.refineNow();
+    };
+    const capInv = invertAffine2(cap.ijkToRAS);
+    const rebakeShellRegion = (regionRAS) => {
+      const vis = visOf();
+      visKey = vis.join("");
+      const lo = [
+        Infinity,
+        Infinity,
+        Infinity
+      ], hi = [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ];
+      for (const x of [
+        regionRAS.lo[0],
+        regionRAS.hi[0]
+      ]) for (const y of [
+        regionRAS.lo[1],
+        regionRAS.hi[1]
+      ]) for (const z of [
+        regionRAS.lo[2],
+        regionRAS.hi[2]
+      ]) {
+        const i = capInv[0] * x + capInv[1] * y + capInv[2] * z + capInv[3];
+        const j = capInv[4] * x + capInv[5] * y + capInv[6] * z + capInv[7];
+        const k = capInv[8] * x + capInv[9] * y + capInv[10] * z + capInv[11];
+        for (let d = 0; d < 3; d++) {
+          const v = [
+            i,
+            j,
+            k
+          ][d];
+          if (v < lo[d]) lo[d] = v;
+          if (v > hi[d]) hi[d] = v;
+        }
+      }
+      const rlo = [
+        0,
+        0,
+        0
+      ], rhi = [
+        0,
+        0,
+        0
+      ];
+      for (let d = 0; d < 3; d++) {
+        rlo[d] = Math.max(0, Math.floor(lo[d]) - 2);
+        rhi[d] = Math.min(cap.dims[d], Math.ceil(hi[d]) + 2);
+        if (rhi[d] <= rlo[d]) return;
+      }
+      const [sx, sy, sz] = [
+        rhi[0] - rlo[0],
+        rhi[1] - rlo[1],
+        rhi[2] - rlo[2]
+      ];
+      const out = new Uint32Array(sx * sy * sz);
+      const [dx, dy] = [
+        cap.dims[0],
+        cap.dims[1]
+      ];
+      let w = 0;
+      for (let z = rlo[2]; z < rhi[2]; z++) for (let y = rlo[1]; y < rhi[1]; y++) {
+        let r = (z * dy + y) * dx + rlo[0];
+        for (let x = 0; x < sx; x++, r++, w++) {
+          const l = cap.lab[r];
+          if (vis[l]) out[w] = l;
+        }
+      }
+      editable.writeLabelRegion(out, rlo, [
+        sx,
+        sy,
+        sz
+      ]);
+      logic.rebakeShellRegion(regionRAS);
+    };
+    if (outerShell) rebakeShellFull();
+    else {
+      editable.loadLabelmap(cap.lab);
+      logic.refineNow();
+    }
+    const scene = new SceneRenderer(gpu, format);
     const row = {
       key,
       overlayTex,
@@ -6023,6 +6329,13 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress) {
         scene.setBackground(0.05, 0.06, 0.09);
         if (clip) scene.setClipBox(clip.lo, clip.hi);
         else scene.clearClip();
+      },
+      applyShellVisibility(regionRAS) {
+        if (!outerShell) return false;
+        if (visOf().join("") === visKey) return false;
+        if (regionRAS) rebakeShellRegion(regionRAS);
+        else rebakeShellFull();
+        return true;
       },
       destroy() {
         logic.destroy();
@@ -6100,6 +6413,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress) {
             }
           }
           if (!changed.length) continue;
+          let bbox = null;
           if (changed.length <= row.levels.size / 2) {
             const lo2 = [
               Infinity,
@@ -6117,7 +6431,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress) {
                 if (g.hi[d] > hi2[d]) hi2[d] = g.hi[d];
               }
             }
-            row.logic.refreshOpacity({
+            bbox = {
               lo: [
                 lo2[0],
                 lo2[1],
@@ -6128,10 +6442,11 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress) {
                 hi2[1],
                 hi2[2]
               ]
-            });
-          } else {
-            row.logic.refreshOpacity();
+            };
           }
+          if (row.applyShellVisibility(bbox)) continue;
+          if (bbox) row.logic.refreshOpacity(bbox);
+          else row.logic.refreshOpacity();
         }
       };
       const applyClip = () => {
@@ -6307,6 +6622,10 @@ async function main() {
   const sc = await buildSpineCompareScene(gpu, srgb, meta, base, (msg, n) => {
     bytes += n;
     status(`${coll}/${pid}: ${msg} \u2014 ${(bytes / 1e6).toFixed(1)} MB`);
+  }, {
+    // ?shell=all restores the soft multi-material interface shell; ?band=<voxels> overrides the band.
+    shell: PARAMS.get("shell") === "all" ? "all" : "outer",
+    bandVox: PARAMS.get("band") ? Number(PARAMS.get("band")) : void 0
   });
   sc.upgraded.then(() => {
     drawAll();
@@ -6406,7 +6725,7 @@ async function main() {
     });
   };
   for (const k of keys) rowOf(k).logic.onRedraw(requestDraw);
-  const xhair = createCrosshair(true);
+  const xhair = createCrosshair(false);
   const overlays = {};
   for (const id of keys.flatMap((k) => cellNames.map((c) => `c-${k}-${c}`))) {
     const o = document.createElement("canvas");
@@ -6455,10 +6774,21 @@ async function main() {
       aspect: r.width / r.height
     };
   };
+  const hideXhair = () => {
+    if (xhair.visible) {
+      xhair.toggle(false);
+      xhairRedraw();
+    }
+  };
+  globalThis.addEventListener("keyup", (e) => {
+    if (e.key === "Shift") hideXhair();
+  });
+  globalThis.addEventListener("blur", hideXhair);
   for (const k of keys) {
     for (const o of ORIENTS) {
       cv[`c-${k}-${o}`].addEventListener("pointermove", (e) => {
         if (!isShiftHover(e)) return;
+        if (!xhair.visible) xhair.toggle(true);
         const { u, v, aspect } = uvOf(cv[`c-${k}-${o}`], e);
         const ras = sc.slice.viewToRas(o, off[o], u, v, aspect);
         xhair.set(ras);
@@ -6484,6 +6814,7 @@ async function main() {
     };
     cv[`c-${k}-threeD`].addEventListener("pointermove", (e) => {
       if (!isShiftHover(e)) return;
+      if (!xhair.visible) xhair.toggle(true);
       const { u, v } = uvOf(cv[`c-${k}-threeD`], e);
       if (inFlight) queued = {
         u,

@@ -51,6 +51,11 @@ export interface MirrorView {
 
 export interface DisplayableManager {
   interestedTypes: string[];
+  /** Node types whose BULK-DATA UPDATES this manager reproduces LOCALLY (it holds the same deterministic
+   *  op/filter), so the peer can skip re-streaming their bulk on change. The initial snapshot still
+   *  carries the bulk. Optional; declared e.g. by the seged manager (it recomputes the labelmap from
+   *  SegEdit intents). LiveSync sends the union on subscribe. */
+  localBulkTypes?: string[];
   onNodeAdded?(node: MrsonNode, scene: LiveScene): void | Promise<void>;
   onNodeRemoved?(id: string, scene: LiveScene): void;
   onEvent?(ev: Record<string, unknown>, scene: LiveScene): void | Promise<void>;
@@ -97,6 +102,11 @@ export class LiveScene {
    *  these on (re)connect. Public because LiveSync — not the model — owns the wire. */
   subscribedTypes(): string[] {
     return [...new Set(this.managers.flatMap((m) => m.interestedTypes))];
+  }
+  /** Union of node types the managers reproduce locally — the peer skips re-streaming their bulk updates
+   *  (ARCHITECTURE: consumer-declared local authority over deterministic bulk). LiveSync sends it on subscribe. */
+  localBulk(): string[] {
+    return [...new Set(this.managers.flatMap((m) => m.localBulkTypes ?? []))];
   }
   private interested(type: string | undefined): DisplayableManager[] {
     return type ? this.managers.filter((m) => m.interestedTypes.includes(type)) : [];

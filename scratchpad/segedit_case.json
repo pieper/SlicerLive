@@ -1,0 +1,32 @@
+{
+  "note": "One shared mrson SegEdit case: the SAME op drives Slicer's traditional Grow-from-seeds AND SlicerLive's WebGPU GrowCutEffect. Grid + synthetic image are defined deterministically so both pipelines reconstruct the identical intensity volume; the op carries only the human intent (seed scribbles in RAS).",
+  "grid": {
+    "dims": [128, 128, 128],
+    "ijkToRAS": [1, 0, 0, -64, 0, 1, 0, -64, 0, 0, 1, -64, 0, 0, 0, 1]
+  },
+  "image": {
+    "kind": "sphere",
+    "centerRAS": [0, 0, 0],
+    "radiusMm": 41,
+    "inside": 0.75,
+    "outside": 0.25
+  },
+  "op": {
+    "kind": "seeds",
+    "effect": "GrowFromSeeds",
+    "segmentId": "Segment_1",
+    "edgeLo": 0.15,
+    "edgeHi": 0.5,
+    "scribbles": [
+      { "label": 1, "points": [[0, 0, 0]], "brush": { "shape": "sphere", "diameterMm": 6 } },
+      { "label": 2, "points": [[60, 60, 60]], "brush": { "shape": "sphere", "diameterMm": 6 } },
+      { "label": 2, "points": [[-60, 60, 60]], "brush": { "shape": "sphere", "diameterMm": 6 } },
+      { "label": 2, "points": [[60, -60, 60]], "brush": { "shape": "sphere", "diameterMm": 6 } },
+      { "label": 2, "points": [[60, 60, -60]], "brush": { "shape": "sphere", "diameterMm": 6 } },
+      { "label": 2, "points": [[-60, -60, 60]], "brush": { "shape": "sphere", "diameterMm": 6 } },
+      { "label": 2, "points": [[-60, 60, -60]], "brush": { "shape": "sphere", "diameterMm": 6 } },
+      { "label": 2, "points": [[60, -60, -60]], "brush": { "shape": "sphere", "diameterMm": 6 } },
+      { "label": 2, "points": [[-60, -60, -60]], "brush": { "shape": "sphere", "diameterMm": 6 } }
+    ]
+  }
+}

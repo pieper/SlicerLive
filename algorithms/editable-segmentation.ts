@@ -63,6 +63,16 @@ export class EditableSegmentation {
     this.markDirty();
   }
 
+  /** Region-limited labelmap write (`lo`/`size` in label-grid ijk; data x-fastest, tightly packed).
+   *  Deliberately NO dirty notification: the caller pairs it with a region-limited rebake
+   *  (SegmentationLogic.rebakeShellRegion) — an onDirty full rebake would defeat the point. */
+  writeLabelRegion(data: Uint32Array, lo: Vec3, size: Vec3) {
+    this.device.queue.writeTexture(
+      { texture: this.labelTex, origin: lo as [number, number, number] }, data,
+      { bytesPerRow: size[0] * 4, rowsPerImage: size[1] }, size as [number, number, number],
+    );
+  }
+
   /** Read the master labelmap back to CPU (ids per voxel, x-fastest). Handles WebGPU's 256-byte
    *  bytesPerRow alignment. For tests + zarr serialization (A-7); not on the interactive path. */
   async readLabelmap(): Promise<Uint32Array> {

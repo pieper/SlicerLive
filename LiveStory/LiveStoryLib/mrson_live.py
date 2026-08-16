@@ -33,6 +33,7 @@ import slicer
 
 from . import serialize_mrson as M
 from . import mrson_server as HS
+from .segedit_capture import SegEditCapture
 
 
 _WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -275,6 +276,7 @@ class _WSClient:
         self.buf = bytearray()
         self.handshook = False
         self.types = set()
+        self.localBulk = set()  # node types whose bulk UPDATES the consumer reproduces locally (skip re-stream)
         self.tags = []          # (vtkObject, observerTag) to remove on disconnect
         self._out = _OutCoalescer(FLUSH_MS, self._flushOut)   # rate-limit Slicer->client live events
         self._lastCamSig = None                               # camera pose dedup (skip unchanged)
@@ -285,6 +287,9 @@ class _WSClient:
         self._segTimer.setSingleShot(True)
         self._segTimer.setInterval(250)
         self._segTimer.connect("timeout()", self._flushSegEdits)
+        # seged INTENT channel: when a client subscribes to "segEdit", stream one SegEdit op per
+        # committed Segment-Editor stroke (raw human intent) so the WebGPU SegEditDriver reproduces it.
+        self._segEditCap = None
         socket.connect("readyRead()", self._onReadyRead)
         socket.connect("disconnected()", self._onDisconnected)
 
@@ -359,7 +364,7 @@ class _WSClient:
             return
         op = msg.get("op")
         if op == "subscribe":
-            self._subscribe(msg.get("types", []))
+            self._subscribe(msg.get("types", []), msg.get("localBulk", []))
         elif op == "applyOps":
             self._applyOps(msg.get("ops", []), msg.get("tag"))
 
@@ -398,6 +403,12 @@ class _WSClient:
             except Exception:  # noqa: BLE001
                 pass
         self.tags = []
+        if self._segEditCap is not None:
+            try:
+                self._segEditCap.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._segEditCap = None
         try:
             self._segTimer.stop()
         except Exception:  # noqa: BLE001
@@ -416,8 +427,15 @@ class _WSClient:
         self.server._drop(self)
 
     # -- subscription + observers --
-    def _subscribe(self, types):
+    def _subscribe(self, types, localBulk=()):
         self.types = set(types)
+        # localBulk: node types whose BULK-DATA UPDATES the consumer will reproduce LOCALLY (it has the
+        # same deterministic op/filter), so the writer suppresses re-streaming their bulk on change. The
+        # INITIAL snapshot still carries the bulk (geometry + starting data); only per-change re-serialize
+        # is skipped. General mechanism (not seged-specific): e.g. a consumer that recomputes a filter or
+        # re-fetches a deterministic server result needn't be sent the heavy result. (Dual, TODO: a
+        # WRITER-declared bulk-by-reference mode — stream a URI, e.g. an IDC bucket, instead of inline.)
+        self.localBulk = set(localBulk or ())
         # Snapshot: reuse the HTTP server's full serialization (writes zarr once), then send
         # every node whose neutral type is subscribed as a NodeAdded (per-node declaration).
         scenePath = HS._ensure_serialized()
@@ -437,6 +455,10 @@ class _WSClient:
         self._tags_add(scene, scene.AddObserver(slicer.vtkMRMLScene.NodeAddedEvent, self._onSceneNodeAdded))
         self._tags_add(scene, scene.AddObserver(slicer.vtkMRMLScene.NodeRemovedEvent, self._onSceneNodeRemoved))
         self._tags_add(scene, scene.AddObserver(slicer.vtkMRMLScene.EndCloseEvent, self._onSceneClosed))
+        # seged: stream committed Segment-Editor strokes as SegEdit intents (sent DIRECT, not coalesced —
+        # each committed stroke is a discrete event that must not be dropped by latest-wins).
+        if "segEdit" in self.types and self._segEditCap is None:
+            self._segEditCap = SegEditCapture(sink=lambda ev: self.send(ev)).start()
 
     def _onSceneClosed(self, _caller, _event):
         HS.markDirty()
@@ -459,14 +481,18 @@ class _WSClient:
             dn = node.GetDisplayNode()
             if dn is not None:
                 self._tags_add(dn, dn.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onNodeModified))
-            # LABELMAP edits (paint/threshold/…) → SourceRepresentationModified on the vtkSegmentation
-            try:
-                import vtkSegmentationCorePython as vsc
-                segmentation = node.GetSegmentation()
-                self._tags_add(segmentation, segmentation.AddObserver(
-                    vsc.vtkSegmentation.SourceRepresentationModified, lambda _c, _e, m=node: self._onSegEdited(m)))
-            except Exception as e:  # noqa: BLE001
-                print("mrson_live: seg labelmap observer failed: %s" % e)
+            # LABELMAP edits (paint/threshold/…) → SourceRepresentationModified on the vtkSegmentation.
+            # SKIP when the consumer declared local authority over segmentation bulk (localBulk): it
+            # reproduces edits itself (e.g. seged via SegEdit intents), so re-streaming the heavy labelmap
+            # is wasted work + wire contention. The initial snapshot already gave it the geometry + start.
+            if "segmentation" not in self.localBulk:
+                try:
+                    import vtkSegmentationCorePython as vsc
+                    segmentation = node.GetSegmentation()
+                    self._tags_add(segmentation, segmentation.AddObserver(
+                        vsc.vtkSegmentation.SourceRepresentationModified, lambda _c, _e, m=node: self._onSegEdited(m)))
+                except Exception as e:  # noqa: BLE001
+                    print("mrson_live: seg labelmap observer failed: %s" % e)
 
     def _tags_add(self, obj, tag):
         self.tags.append((obj, tag))

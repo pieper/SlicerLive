@@ -226,12 +226,18 @@ function ctLUT(maxAlpha = 0.32): Uint8Array {
 
 /** Phase A: ct_low + masks → full scene in seconds. Phase B (background): ct_med
  *  streams in and swaps under every view; `upgraded` resolves. */
+export interface SpineShellOpts {
+  shell?: "outer" | "all";   // SDF boundary mode (default "outer" — segroulette's crisp surface-model look)
+  bandVox?: number;          // shell half-thickness override, in (isotropic SDF) voxels
+}
+
 export async function buildSpineCompareScene(
   gpu: Gpu,
   format: GPUTextureFormat,
   meta: CaseMeta,
   base: string,                        // e.g. BUCKET + "mets/10458/zarr/"
   onProgress?: (msg: string, bytes: number) => void,
+  shellOpts?: SpineShellOpts,
 ): Promise<SpineCompareScene> {
   const dev = gpu.device;
   const vol = meta.volumes;
@@ -247,13 +253,14 @@ export async function buildSpineCompareScene(
   const spMed = Uint8Array.from(sp.data);   // raw labels: vertebrae + 100+n discs
   const refMed = Uint8Array.from(ref.data);
 
+  let discOp = 0;   // the muted disc layer's opacity (SPINEPS only) — OFF by default; the tri-state control brings it back
   const levelPalette = new Float32Array(256 * 4);
   for (let l = 1; l < 256; l++) {
     const [r, g, b] = isDisc(l) ? DISC_COLOR : levelColor(l);
-    levelPalette[l * 4] = r; levelPalette[l * 4 + 1] = g; levelPalette[l * 4 + 2] = b; levelPalette[l * 4 + 3] = 1;
+    levelPalette[l * 4] = r; levelPalette[l * 4 + 1] = g; levelPalette[l * 4 + 2] = b; levelPalette[l * 4 + 3] = isDisc(l) ? discOp : 1;
   }
 
-  let volOpacity = 1;   // CT VR layer in the row 3D cells
+  let volOpacity = 0;   // CT VR layer in the row 3D cells — OFF by default so the shells read clean; tri-state control brings it back
   const scaledLut = (o: number): Uint8Array => {
     const l = ctLUT().slice();
     for (let i = 0; i < 256; i++) l[i * 4 + 3] = Math.round(l[i * 4 + 3] * o);
@@ -283,11 +290,16 @@ export async function buildSpineCompareScene(
   slice.setOverlayOpacity(0.5);
 
   const methodOp: Record<"spineps" | "ref", number> = { spineps: 1, ref: 1 };
-  let discOp = 1;                                     // the muted disc layer's opacity (SPINEPS only)
   let clip: { lo: Vec3; hi: Vec3 } | null = null;
   let extentState: { label: number | null; count: number } = { label: null, count: 99 };
 
-  type RowState = MethodRow & { lab: Uint8Array; shown: Map<number, number>; rebuild(): void };
+  /** applyShellVisibility: after per-label opacity updates, re-derive the outer-mode SDF if the
+   *  visible-label SET changed (region-limited when a bbox is given). Returns true when it rebaked
+   *  (attr included) — the caller then skips the attr-only refreshOpacity. */
+  type RowState = MethodRow & {
+    lab: Uint8Array; shown: Map<number, number>; rebuild(): void;
+    applyShellVisibility(regionRAS: { lo: Vec3; hi: Vec3 } | null): boolean;
+  };
   const makeRow = (key: "spineps" | "ref", lab: Uint8Array): RowState => {
     const overlayTex = bakeOverlay(lab);
     // 3D: this method's SDF shell in level colours, clippable so the extent control
@@ -296,18 +308,72 @@ export async function buildSpineCompareScene(
     // with this volume, and the full-res med grid still feeds the 2D overlays.
     const cap = resampleIsotropic(lab, medDims, medRAS, 256);
     const editable = new EditableSegmentation(dev, cap.dims, { ijkToRAS: cap.ijkToRAS });
-    // boundaryMode "all" (multi-material interface field): vertebrae ABUT, and the outer
-    // shell leaves a hole at the endplate contact when a neighbour is hidden — "all"
-    // surfaces every label change, so the contact faces are capped and the bone reads
-    // as a closed shape in 1-vert mode.
-    const logic = new SegmentationLogic(dev, editable, { renderMode: "sdf", boundaryMode: "all", opacity: 1, clippable: true });
+    // boundaryMode: "outer" (default) is segroulette's crisp surface-model look — SIGNED
+    // distance, tight 0.65-voxel shell band. "all" (multi-material interface field) reads
+    // noticeably softer (unsigned blurred distance, wider 1.5-voxel band); ?shell=all to compare.
+    const outerShell = (shellOpts?.shell ?? "outer") === "outer";
+    const logic = new SegmentationLogic(dev, editable, {
+      renderMode: "sdf", boundaryMode: outerShell ? "outer" : "all", opacity: 1, clippable: true,
+      bandMm: shellOpts?.bandVox !== undefined ? shellOpts.bandVox * cap.vox : undefined,
+    });
     const levels = levelGeometry(lab, medDims, medRAS);   // centroids/bboxes stay med-exact
-    for (const [l] of levels) { logic.setLabelColor(l, isDisc(l) ? DISC_COLOR : levelColor(l)); logic.setLabelOpacity(l, 1); }
-    editable.loadLabelmap(cap.lab);
-    logic.refineNow();
-    const scene = new SceneRenderer(gpu, format);
+    for (const [l] of levels) logic.setLabelColor(l, isDisc(l) ? DISC_COLOR : levelColor(l));
     const shown = new Map<number, number>();
-    for (const [l] of levels) shown.set(l, 1);
+    for (const [l] of levels) shown.set(l, isDisc(l) ? discOp : 1);
+    for (const [l, o] of shown) logic.setLabelOpacity(l, o);
+    // "outer" has no shell at a label↔label contact, so a hidden neighbour would leave an
+    // OPEN HOLE at the endplate. Fix: hidden labels become BACKGROUND in the SDF labelmap —
+    // the contact face is then a genuine outer boundary and gets the same crisp capped shell
+    // as everywhere else (Slicer's per-segment closed-surface semantics). Small flips (a level
+    // step) rewrite ONLY the changed labels' bbox and re-flood that region (refineRegion), so
+    // stepping through the spine with the arrows renders essentially instantly; large flips
+    // (full-spine restore, disc toggle) take the one-shot full bake.
+    const visOf = () => {
+      const v = new Uint8Array(256).fill(1);
+      for (const [l, o] of shown) v[l] = o > 0.001 ? 1 : 0;
+      return v;
+    };
+    let visKey = "";
+    const rebakeShellFull = () => {
+      const vis = visOf();
+      visKey = vis.join("");
+      const f = new Uint32Array(cap.lab.length);
+      for (let i = 0; i < f.length; i++) { const l = cap.lab[i]; if (vis[l]) f[i] = l; }
+      editable.loadLabelmap(f);
+      logic.refineNow();
+    };
+    const capInv = invertAffine(cap.ijkToRAS);
+    const rebakeShellRegion = (regionRAS: { lo: Vec3; hi: Vec3 }) => {
+      const vis = visOf();
+      visKey = vis.join("");
+      // RAS bbox → label-grid ijk bbox (+2 voxel resample-rounding margin), clamped
+      const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
+      for (const x of [regionRAS.lo[0], regionRAS.hi[0]]) for (const y of [regionRAS.lo[1], regionRAS.hi[1]]) for (const z of [regionRAS.lo[2], regionRAS.hi[2]]) {
+        const i = capInv[0] * x + capInv[1] * y + capInv[2] * z + capInv[3];
+        const j = capInv[4] * x + capInv[5] * y + capInv[6] * z + capInv[7];
+        const k = capInv[8] * x + capInv[9] * y + capInv[10] * z + capInv[11];
+        for (let d = 0; d < 3; d++) { const v = [i, j, k][d]; if (v < lo[d]) lo[d] = v; if (v > hi[d]) hi[d] = v; }
+      }
+      const rlo: Vec3 = [0, 0, 0], rhi: Vec3 = [0, 0, 0];
+      for (let d = 0; d < 3; d++) {
+        rlo[d] = Math.max(0, Math.floor(lo[d]) - 2);
+        rhi[d] = Math.min(cap.dims[d], Math.ceil(hi[d]) + 2);
+        if (rhi[d] <= rlo[d]) return;
+      }
+      const [sx, sy, sz] = [rhi[0] - rlo[0], rhi[1] - rlo[1], rhi[2] - rlo[2]];
+      const out = new Uint32Array(sx * sy * sz);
+      const [dx, dy] = [cap.dims[0], cap.dims[1]];
+      let w = 0;
+      for (let z = rlo[2]; z < rhi[2]; z++) for (let y = rlo[1]; y < rhi[1]; y++) {
+        let r = (z * dy + y) * dx + rlo[0];
+        for (let x = 0; x < sx; x++, r++, w++) { const l = cap.lab[r]; if (vis[l]) out[w] = l; }
+      }
+      editable.writeLabelRegion(out, rlo, [sx, sy, sz]);
+      logic.rebakeShellRegion(regionRAS);
+    };
+    if (outerShell) rebakeShellFull();   // initial bake already excludes the hidden discs
+    else { editable.loadLabelmap(cap.lab); logic.refineNow(); }
+    const scene = new SceneRenderer(gpu, format);
     const row = {
       key, overlayTex, scene, logic, levels, lab, shown,
       rebuild() {
@@ -317,6 +383,12 @@ export async function buildSpineCompareScene(
         scene.build(f);
         scene.setBackground(0.05, 0.06, 0.09);
         if (clip) scene.setClipBox(clip.lo, clip.hi); else scene.clearClip();
+      },
+      applyShellVisibility(regionRAS: { lo: Vec3; hi: Vec3 } | null) {
+        if (!outerShell) return false;                 // "all" caps interfaces in the field itself
+        if (visOf().join("") === visKey) return false; // pure opacity tweak — attr fast path suffices
+        if (regionRAS) rebakeShellRegion(regionRAS); else rebakeShellFull();
+        return true;
       },
       destroy() { logic.destroy(); editable.destroy(); this.overlayTex.destroy(); },
     } as RowState;
@@ -368,19 +440,22 @@ export async function buildSpineCompareScene(
             if (row.shown.get(l) !== o) { row.logic.setLabelOpacity(l, o); row.shown.set(l, o); changed.push(l); }
           }
           if (!changed.length) continue;
-          // region-limited attr rebake+blur over just the CHANGED labels' bboxes — a level
-          // step touches a couple of vertebrae, a few % of the volume, so the fully settled
-          // quality lands immediately. Large flips (full-spine restore) go full-volume.
+          // CHANGED labels' bbox: a level step touches a couple of vertebrae, a few % of the
+          // volume — everything downstream (labelmap rewrite, JFA re-flood, attr rebake) runs
+          // region-limited over it so stepping stays real-time. Large flips go full-volume.
+          let bbox: { lo: Vec3; hi: Vec3 } | null = null;
           if (changed.length <= row.levels.size / 2) {
             const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
             for (const l of changed) {
               const g = row.levels.get(l)!;
               for (let d = 0; d < 3; d++) { if (g.lo[d] < lo[d]) lo[d] = g.lo[d]; if (g.hi[d] > hi[d]) hi[d] = g.hi[d]; }
             }
-            row.logic.refreshOpacity({ lo: [lo[0], lo[1], lo[2]], hi: [hi[0], hi[1], hi[2]] });
-          } else {
-            row.logic.refreshOpacity();
+            bbox = { lo: [lo[0], lo[1], lo[2]], hi: [hi[0], hi[1], hi[2]] };
           }
+          // outer mode + membership change: the shell rebake (region or full) re-derives attr
+          // too. Otherwise (pure opacity tweak, or ?shell=all) the attr-only fast path settles it.
+          if (row.applyShellVisibility(bbox)) continue;
+          if (bbox) row.logic.refreshOpacity(bbox); else row.logic.refreshOpacity();
         }
       };
       const applyClip = () => {

@@ -180,6 +180,33 @@ def _markup_node(n, node_id):
     return node
 
 
+def _ensure_labelmap_geometry(seg, lm):
+    """An EMPTY segmentation exports to a labelmap with NO scalars (ExportAllSegments allocates nothing
+    when there's nothing to write), so dims/ijkToRAS/zarr would be missing and a consumer couldn't build
+    the grid. Materialize the segmentation's REFERENCE geometry as an all-zero labelmap so geometry (and
+    a zero labelmap) always stream — a consumer like seged needs the grid even before anything is painted."""
+    import numpy as np
+    import vtk
+    img = lm.GetImageData()
+    if img is not None and img.GetPointData() is not None and img.GetPointData().GetScalars() is not None:
+        return
+    try:
+        import vtkSegmentationCorePython as vsc
+        geom = seg.GetSegmentation().GetConversionParameter(
+            slicer.vtkSegmentationConverter.GetReferenceImageGeometryParameterName())
+        if not geom:
+            return
+        oi = vsc.vtkOrientedImageData()
+        slicer.vtkSegmentationConverter.DeserializeImageGeometry(geom, oi, True, vtk.VTK_UNSIGNED_CHAR, 1)
+        dims = oi.GetDimensions()
+        m = vtk.vtkMatrix4x4()
+        oi.GetImageToWorldMatrix(m)
+        slicer.util.updateVolumeFromArray(lm, np.zeros((dims[2], dims[1], dims[0]), np.uint8))
+        lm.SetIJKToRASMatrix(m)
+    except Exception as e:  # noqa: BLE001
+        print("serialize_mrson: reference-geometry materialize failed: %s" % e)
+
+
 def _segmentation_node(seg, node_id, blobdir):
     """vtkMRMLSegmentationNode -> mrson `segmentation` node: the merged binary labelmap as a
     content-addressed zarr blob + per-segment {labelValue, color}. Volume-based only (no surface)."""
@@ -187,6 +214,7 @@ def _segmentation_node(seg, node_id, blobdir):
     lm = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
     slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(
         seg, lm, slicer.vtkSegmentation.EXTENT_REFERENCE_GEOMETRY)
+    _ensure_labelmap_geometry(seg, lm)               # EMPTY seg → materialize the reference geometry (zeros)
     zarr = _zarr_desc(lm, node_id, blobdir)          # content-hashed labelmap chunks
     arr = slicer.util.arrayFromVolume(lm)
     m = vtk.vtkMatrix4x4()
@@ -247,7 +275,7 @@ def _segmentation_display_event(seg):
                 vis = bool(dn.GetSegmentVisibility(sid))
             except Exception:  # noqa: BLE001
                 vis = True
-        disp["segments"].append({"labelValue": int(s.GetLabelValue()),
+        disp["segments"].append({"id": sid, "labelValue": int(s.GetLabelValue()),
                                  "color": [c[0], c[1], c[2], 1.0], "visible": vis})
     return {"event": "SegmentationDisplayModified", "sourceId": seg.GetID(), "display": disp}
 

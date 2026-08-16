@@ -14,3 +14,12 @@ viewer/idcdemo/
 __pycache__/
 *.pyc
 render/test/*.js
+# large experiment data & render outputs (keep on disk, never commit)
+*.i16
+*.u8
+*.nrrd
+scratchpad/**/*.png
+scratchpad/kits-cache/
+scratchpad/kits/
+algorithms/eval/l0-out*/
+algorithms/eval/l0-out*/results.json

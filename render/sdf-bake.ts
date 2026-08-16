@@ -19,7 +19,7 @@ import { transpose4, type Vec3 } from "./mat4.ts";
 // Seeds store (RAS.xyz, regionLabel): a boundary voxel's REGION LABEL (its own if inside, else its
 // inside neighbour's) so the flood carries per-label colour along with distance. w>0.5 = valid seed.
 const INIT_WGSL = /* wgsl */ `
-struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
+struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32>, origin : vec4<i32> };
 @group(0) @binding(0) var t_label : texture_3d<u32>;
 @group(0) @binding(1) var t_seed_out : texture_storage_3d<rgba32float, write>;
 @group(0) @binding(2) var<uniform> u : U;
@@ -38,8 +38,8 @@ fn labelAt(c : vec3<i32>) -> u32 {
 }
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  if (any(gid >= u.dims.xyz)) { return; }
-  let c = vec3<i32>(gid);
+  let c = vec3<i32>(gid) + u.origin.xyz;   // region-limited dispatch offsets into the grid
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
   let my = labelAt(c);
   let meIn = my != 0u;
   let allMode = u.params.y > 0.5;                   // 0 = outer boundary only; 1 = ANY label change (multi-material interfaces)
@@ -58,20 +58,20 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (isChange) { boundary = true; if (my == 0u && !allMode) { region = nl; } }
   }
   var seed = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  if (boundary) { seed = vec4<f32>((u.ijkToRAS * vec4<f32>(vec3<f32>(gid), 1.0)).xyz, f32(region)); }
+  if (boundary) { seed = vec4<f32>((u.ijkToRAS * vec4<f32>(vec3<f32>(c), 1.0)).xyz, f32(region)); }
   textureStore(t_seed_out, c, seed);
 }`;
 
 const JFA_WGSL = /* wgsl */ `
-struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32> };
+struct U { ijkToRAS : mat4x4<f32>, dims : vec4<u32>, params : vec4<f32>, origin : vec4<i32> };
 @group(0) @binding(0) var t_seed_in : texture_3d<f32>;
 @group(0) @binding(1) var t_seed_out : texture_storage_3d<rgba32float, write>;
 @group(0) @binding(2) var<uniform> u : U;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  if (any(gid >= u.dims.xyz)) { return; }
-  let c = vec3<i32>(gid);
-  let p = (u.ijkToRAS * vec4<f32>(vec3<f32>(gid), 1.0)).xyz;
+  let c = vec3<i32>(gid) + u.origin.xyz;   // region-limited dispatch offsets into the grid
+  if (any(c >= vec3<i32>(u.dims.xyz))) { return; }
+  let p = (u.ijkToRAS * vec4<f32>(vec3<f32>(c), 1.0)).xyz;
   let step = i32(u.params.x);
   let dmax = vec3<i32>(u.dims.xyz) - vec3<i32>(1);
   var best = textureLoad(t_seed_in, c, 0);
@@ -271,7 +271,10 @@ export class JfaSdfBaker {
     this.ijkToRAS = m;
     const [dx, dy, dz] = this.dims;
     const mk = (fmt: GPUTextureFormat, extra = 0) => dev.createTexture({ size: this.dims as [number, number, number], dimension: "3d", format: fmt, usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra });
-    this.seed = [mk("rgba32float"), mk("rgba32float")];
+    // COPY usages: refineRegion() makes the ping-pong pair consistent with a texture copy
+    // before region-limited passes.
+    const seedUsage = GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
+    this.seed = [mk("rgba32float", seedUsage), mk("rgba32float", seedUsage)];
     this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC);   // blur copies in; readDistance copies out
     this.attrTex = mk("rgba16float", GPUTextureUsage.COPY_DST);  // .r opacity, .g mode; seam-blurred in refine
     this.attrScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
@@ -371,6 +374,75 @@ export class JfaSdfBaker {
    *  same σ (dropping it re-introduces Voronoi facets — crispness comes from the render band, not from
    *  under-smoothing). Higher quality lives in the resident texture, so camera renders stay cheap. */
   refine() { this.sweep([2, 1], this.smoothSigma, 1.0); }
+
+  /** REGION-LIMITED refine: re-flood ONLY `regionIjk` (padded-grid coords) after a labelmap edit
+   *  confined to it — a per-vertebra visibility flip re-bakes a few % of the grid instead of the
+   *  whole volume, which is what makes level stepping feel instant. The seed ping-pong pair is
+   *  first made consistent with a full-texture copy, so region passes can ping-pong while JFA
+   *  taps read valid exterior seeds (surfaces just outside the region flood in correctly).
+   *  Exterior distances that referenced a surface REMOVED inside the region go stale, but only
+   *  ≫band away from any visible shell — invisible, and the next full sweep cleans them. */
+  refineRegion(regionIjk: { lo: [number, number, number]; hi: [number, number, number] }) {
+    const dev = this.dev, [dx, dy, dz] = this.dims;
+    const lo: [number, number, number] = [Math.max(0, regionIjk.lo[0]), Math.max(0, regionIjk.lo[1]), Math.max(0, regionIjk.lo[2])];
+    const hi: [number, number, number] = [Math.min(dx, regionIjk.hi[0]), Math.min(dy, regionIjk.hi[1]), Math.min(dz, regionIjk.hi[2])];
+    const [rx, ry, rz] = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    if (rx <= 0 || ry <= 0 || rz <= 0) return;
+    const g: [number, number, number] = [Math.ceil(rx / 4), Math.ceil(ry / 4), Math.ceil(rz / 4)];
+    const region = { lo, hi };
+    let src = this.lastSeed;
+    let enc = dev.createCommandEncoder();
+    enc.copyTextureToTexture({ texture: this.seed[src] }, { texture: this.seed[src ^ 1] }, this.dims as [number, number, number]);
+    dev.queue.submit([enc.finish()]);
+    // region init → seed[src] (exterior keeps the previous flood — still valid there)
+    this.writeUni(0, lo);
+    enc = dev.createCommandEncoder();
+    {
+      const b = dev.createBindGroup({ layout: this.initPipe.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: this.labelTex.createView() },
+        { binding: 1, resource: this.seed[src].createView() },
+        { binding: 2, resource: { buffer: this.uni } },
+      ] });
+      const p = enc.beginComputePass(); p.setPipeline(this.initPipe); p.setBindGroup(0, b); p.dispatchWorkgroups(g[0], g[1], g[2]); p.end();
+    }
+    dev.queue.submit([enc.finish()]);
+    // region JFA, step schedule sized to the region, + the refine()-grade [2,1] extras
+    const maxDim = Math.max(rx, ry, rz);
+    const steps: number[] = [];
+    for (let s = 1 << Math.floor(Math.log2(Math.max(2, maxDim - 1))); s >= 1; s >>= 1) steps.push(s);
+    steps.push(2, 1);
+    for (const step of steps) {
+      this.writeUni(step, lo);
+      const dst = src ^ 1;
+      enc = dev.createCommandEncoder();
+      const b = dev.createBindGroup({ layout: this.jfaPipe.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: this.seed[src].createView() },
+        { binding: 1, resource: this.seed[dst].createView() },
+        { binding: 2, resource: { buffer: this.uni } },
+      ] });
+      const p = enc.beginComputePass(); p.setPipeline(this.jfaPipe); p.setBindGroup(0, b); p.dispatchWorkgroups(g[0], g[1], g[2]); p.end();
+      dev.queue.submit([enc.finish()]);
+      src = dst;
+    }
+    this.lastSeed = src;
+    // region finalize → sdfTex + attrTex, then the refine()-grade seam blurs, region-limited
+    this.writeUni(0, lo);
+    enc = dev.createCommandEncoder();
+    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: this.seed[src].createView() },
+      { binding: 1, resource: this.labelTex.createView() },
+      { binding: 2, resource: this.sdfTex.createView() },
+      { binding: 3, resource: { buffer: this.uni } },
+      { binding: 4, resource: { buffer: this.palBuf } },
+      { binding: 5, resource: this.attrTex.createView() },
+      { binding: 6, resource: { buffer: this.modeBuf } },
+    ] });
+    const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(g[0], g[1], g[2]); p.end();
+    dev.queue.submit([enc.finish()]);
+    this.blurStage(this.blurPipe, this.smoothSigma, this.sdfTex, this.sdfScratch, region);
+    this.blurStage(this.colBlurPipe, 1.0, this.sdfTex, this.sdfScratch, region);
+    this.blurStage(this.fullBlurPipe, 1.0, this.attrTex, this.attrScratch, region);
+  }
 
   /** ATTR-ONLY rebake for palette/opacity changes (per-segment visibility): the distance field
    *  doesn't move, so re-run ONLY the finalize (from the last sweep's seed) with its sdf writes

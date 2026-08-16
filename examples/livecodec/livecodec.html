@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- livecodec — download-speed race between two volume codecs on one CT scan:
+     "LiveCodec neural" (FSQ latents + ~0.8 MB decoder run on hand-written WebGPU
+     compute kernels, no ONNX Runtime) vs HTJ2K (OpenJPH wasm). Two codec rows
+     (linked MPR + 3D, one shared slice state) with real per-row progress bars and
+     time-to-first-image / time-to-final clocks. ?scan=<id> ?ver=<tag> ?net=<mbps>
+     ?bucket=<url-base> -->
+<title>livecodec — neural vs HTJ2K</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; background: #05060a; color: #d6e2f2;
+               font: 12px -apple-system, system-ui, sans-serif; }
+  #page { display: flex; flex-direction: column; height: 100vh; }
+  header { display: flex; align-items: center; gap: 12px; padding: 5px 12px; background: #0b0e16;
+           border-bottom: 1px solid #1b2740; flex: 0 0 auto; flex-wrap: wrap; }
+  header h1 { font-size: 13px; margin: 0; color: #9fb3d0; font-weight: 700; letter-spacing: .3px; }
+  #info { color: #7d92b5; }
+  #status { margin-left: auto; color: #9fb3d0; }
+  .chip { font: 600 11px -apple-system, system-ui, sans-serif; color: #d6e2f2; background: #1b2740;
+          border: 1px solid #33507e; border-radius: 4px; padding: 2px 8px; cursor: pointer; }
+  .chip:hover { background: #24365a; }
+  #rows { flex: 1; display: flex; flex-direction: column; gap: 2px; min-height: 0; }
+  .mrow { flex: 1; display: flex; gap: 2px; min-height: 0; }
+  .mlabel { writing-mode: vertical-rl; transform: rotate(180deg); text-align: center;
+            font-weight: 700; letter-spacing: .5px; padding: 0 1px; flex: 0 0 16px; }
+  .mrow.neural .mlabel { color: #f29a33; }
+  .mrow.htj2k .mlabel { color: #4da6f2; }
+  .rowbody { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .rowbar { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 3px 6px;
+            background: #0b0e16; border-bottom: 1px solid #131a2a; }
+  .rowname { font-weight: 700; white-space: nowrap; }
+  .mrow.neural .rowname { color: #f29a33; }
+  .mrow.htj2k .rowname { color: #4da6f2; }
+  .pbar { position: relative; flex: 1; height: 16px; background: #131a2a;
+          border: 1px solid #33507e; border-radius: 4px; overflow: hidden; min-width: 120px; }
+  .fill { position: absolute; inset: 0; width: 0%; background: #2b6cb0; transition: width .15s linear; }
+  .fill.done { background: #2f8f4f; }
+  .fill.err { background: #8f2f36; }
+  .ptext { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+           font: 600 10px -apple-system, system-ui, sans-serif; color: #e6eefb;
+           text-shadow: 0 1px 2px rgba(0,0,0,.8); white-space: nowrap; overflow: hidden; }
+  .times { color: #9fb3d0; font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 130px; text-align: right; }
+  .cells { flex: 1; display: flex; gap: 2px; min-height: 0; }
+  .cell { position: relative; flex: 1; min-width: 0; min-height: 0; }
+  .cell canvas { width: 100%; height: 100%; display: block; background: #000; touch-action: none; }
+  .cell .lab { position: absolute; top: 4px; left: 6px; font-weight: 700; font-size: 10px;
+               opacity: .75; pointer-events: none; color: #9fb3d0; }
+  /* double-click-to-maximize: one cell fills the rows area, its row bar stays */
+  #rows.maxmode .mrow { display: none; }
+  #rows.maxmode .mrow.hasmax { display: flex; flex: 1; }
+  #rows.maxmode .mrow.hasmax .cell { display: none; }
+  #rows.maxmode .mrow.hasmax .cell.max { display: block; flex: 1; }
+</style>
+<!-- CDN runtime: the OpenJPH HTJ2K wasm codec (global `Module` factory;
+     openjphjs.wasm resolves relative to this script URL). The neural decoder is
+     pure WebGPU compute, bundled into livecodec.js — no ONNX Runtime. -->
+<script src="https://cdn.jsdelivr.net/npm/@cornerstonejs/codec-openjph/dist/openjphjs.js"></script>
+</head>
+<body>
+  <div id="page">
+    <header>
+      <h1>livecodec race</h1>
+      <span id="info"></span>
+      <button id="rand" class="chip" title="pick another scan at random">Load random scan</button>
+      <!-- encoding: training-effort checkpoints from versions.json (hidden until
+           the versioned bucket layout exists); scan: the active dataset's cases
+           (legacy scans.json for the baseline, ood-scans.json for checkpoints).
+           Both are populated by livecodec.js; a change reloads with ?ver / ?scan
+           set (?net rides along). -->
+      <label class="chip" id="verwrap" style="display:none" title="compare training-effort checkpoints on the fixed out-of-distribution scan set">encoding:
+        <select id="ver"></select>
+      </label>
+      <label class="chip" title="pick a specific scan from the active dataset">scan:
+        <select id="scan"></select>
+      </label>
+      <label class="chip" title="fair: each codec is timed alone (contention-free, reproducible). live: both at once — visually dramatic, but the times include the two arms fighting for the main thread and GPU.">mode:
+        <select id="mode">
+          <option value="fair">fair (timed separately)</option>
+          <option value="live">live (simultaneous)</option>
+        </select>
+      </label>
+      <label class="chip" title="both codecs receive bytes at this simulated link speed, as if each were used alone on that network">net:
+        <select id="net">
+          <option value="3">3 Mbps (bad hospital wifi)</option>
+          <option value="10">10 Mbps (4G / VPN)</option>
+          <option value="25" selected>25 Mbps (typical wifi)</option>
+          <option value="100">100 Mbps (fast broadband)</option>
+          <option value="off">unthrottled (local)</option>
+        </select>
+      </label>
+      <span id="status">loading…</span>
+    </header>
+    <div id="rows">
+      <div class="mrow neural">
+        <div class="mlabel">NEURAL</div>
+        <div class="rowbody">
+          <div class="rowbar">
+            <span class="rowname" id="name-neural">LiveCodec neural</span>
+            <div class="pbar"><div class="fill" id="fill-neural"></div><span class="ptext" id="ptext-neural">waiting…</span></div>
+            <span class="times" id="times-neural"></span>
+          </div>
+          <div class="cells">
+            <div class="cell"><canvas id="c-neural-axial"></canvas><div class="lab">Axial</div></div>
+            <div class="cell"><canvas id="c-neural-sagittal"></canvas><div class="lab">Sagittal</div></div>
+            <div class="cell"><canvas id="c-neural-coronal"></canvas><div class="lab">Coronal</div></div>
+            <div class="cell"><canvas id="c-neural-threeD"></canvas><div class="lab">3D</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="mrow htj2k">
+        <div class="mlabel">HTJ2K</div>
+        <div class="rowbody">
+          <div class="rowbar">
+            <span class="rowname" id="name-htj2k">HTJ2K</span>
+            <div class="pbar"><div class="fill" id="fill-htj2k"></div><span class="ptext" id="ptext-htj2k">waiting…</span></div>
+            <span class="times" id="times-htj2k"></span>
+          </div>
+          <div class="cells">
+            <div class="cell"><canvas id="c-htj2k-axial"></canvas><div class="lab">Axial</div></div>
+            <div class="cell"><canvas id="c-htj2k-sagittal"></canvas><div class="lab">Sagittal</div></div>
+            <div class="cell"><canvas id="c-htj2k-coronal"></canvas><div class="lab">Coronal</div></div>
+            <div class="cell"><canvas id="c-htj2k-threeD"></canvas><div class="lab">3D</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="livecodec.js?v=20260814a"></script>   <!-- bump per deploy -->
+</body>
+</html>

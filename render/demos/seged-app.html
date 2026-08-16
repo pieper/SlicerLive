@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>seged — cooperative AI segmentation</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; background: #05060a; font: 13px -apple-system, system-ui, sans-serif; color: #cdd7e6; }
+  #app { display: flex; width: 100vw; height: 100vh; }
+  #viewer { position: relative; flex: 1; min-width: 0; }
+  #grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 2px; width: 100%; height: 100%; }
+  .cell { position: relative; min-width: 0; min-height: 0; }
+  .cell canvas { width: 100%; height: 100%; display: block; background: #000; touch-action: none; }
+  .cell .lab { position: absolute; top: 5px; left: 7px; font-weight: 700; font-size: 11px; letter-spacing: .3px; opacity: .85; pointer-events: none; }
+  .lab.axial { color: #f05a5a; } .lab.coronal { color: #5ad07a; } .lab.sagittal { color: #f0d24a; } .lab.threeD { color: #9fb3d0; }
+  #status { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); z-index: 3; background: rgba(5,6,10,.75); padding: 3px 10px; border-radius: 6px; color: #9fb3d0; max-width: 80%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* chat / log panel */
+  #chat-panel { width: 340px; flex: none; display: flex; flex-direction: column; background: #0b0e16; border-left: 1px solid #1b2740; }
+  #chat-panel.collapsed { width: 0; overflow: hidden; border-left: none; }
+  #chat-head { padding: 8px 12px; border-bottom: 1px solid #1b2740; font-weight: 700; color: #d6e2f2; display: flex; align-items: center; gap: 8px; }
+  #chat-head .dot { width: 8px; height: 8px; border-radius: 50%; background: #2b6cb0; box-shadow: 0 0 6px #2b6cb0; }
+  #chat-log { flex: 1; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 7px; }
+  .msg { padding: 6px 9px; border-radius: 8px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
+  .msg .who { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .5px; opacity: .6; margin-bottom: 2px; }
+  .msg.agent { background: #16233b; }
+  .msg.system { background: #12161f; color: #8fa0b8; font-size: 12px; }
+  .msg.human { background: #1e2b1e; }
+  #chat-toggle { position: absolute; top: 6px; right: 6px; z-index: 4; background: #1b2740; border: 1px solid #33507e; color: #d6e2f2; border-radius: 5px; padding: 3px 8px; cursor: pointer; font-size: 12px; }
+</style>
+</head>
+<body>
+  <div id="app">
+    <div id="viewer">
+      <div id="grid">
+        <div class="cell"><canvas id="c-axial"></canvas><div class="lab axial">R · Axial</div></div>
+        <div class="cell"><canvas id="c-threeD"></canvas><div class="lab threeD">3D · WebGPU seg</div></div>
+        <div class="cell"><canvas id="c-coronal"></canvas><div class="lab coronal">G · Coronal</div></div>
+        <div class="cell"><canvas id="c-sagittal"></canvas><div class="lab sagittal">Y · Sagittal</div></div>
+      </div>
+      <div id="status">loading…</div>
+      <button id="chat-toggle">chat</button>
+    </div>
+    <div id="chat-panel">
+      <div id="chat-head"><span class="dot"></span>seged · agent log</div>
+      <div id="chat-log"></div>
+    </div>
+  </div>
+  <script>
+    document.getElementById("chat-toggle").addEventListener("click", () => {
+      document.getElementById("chat-panel").classList.toggle("collapsed");
+    });
+  </script>
+  <script type="module" src="seged-app.js"></script>
+</body>
+</html>

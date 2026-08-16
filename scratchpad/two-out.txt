@@ -1,0 +1,2 @@
+A(localBulk=segmentation): snapshot-seg=0 update-seg=0
+B(normal): snapshot-seg=0 update-seg=0
