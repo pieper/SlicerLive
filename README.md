@@ -173,12 +173,20 @@ SlicerLive continues a line of experiments in GPU-accelerated medical imaging:
   editing expressed as GPU compute kernels, driven live from an editor UI. It also introduced the
   compositing renderer that `render/` follows — multiple pieces of content composited in a single
   ray-cast pass — along with analytic signed-distance-field compositing and ray marching through
-  nonlinear transforms, the direct ancestors of today's Fields, SDF shells, and `TransformField`.
+  nonlinear transforms, the direct ancestors of today's Fields, SDF shells, and `TransformField`.  This led to a proposal for [CommonGL](https://docs.google.com/document/d/1-4Up_Shq6oFTGhwXIF5DuiXUYsdIMlAC1oK7eNHWP_o/edit?usp=sharing) and experiments adding functionality to VTK's GLSL.
+
+  <a href="https://www.youtube.com/watch?v=hFxTyLPjQd0" target="_blank" rel="noopener"><img src="https://img.youtube.com/vi/hFxTyLPjQd0/mqdefault.jpg" alt="Nonlinear Transforms and Volume Rendering" width="200"></a>
+  <br><sub><a href="https://www.youtube.com/watch?v=hFxTyLPjQd0" target="_blank" rel="noopener">Nonlinear Transforms and Volume Rendering</a></sub>
+
 - <a href="https://github.com/pieper/step" target="_blank" rel="noopener"><b>step</b></a> — GPU medical
   image computing in the browser with JavaScript and WebGL 2.0, working directly from DICOM-native data
   structures. It contributed the everything-in-the-browser premise, the patient/pixel/texture coordinate
   discipline and `aToB` naming conventions the renderer still uses, and the transform-composition pattern
   that `TransformField` follows today.
+
+  <a href="https://youtu.be/ML9_JWAz1kY" target="_blank" rel="noopener"><img src="https://img.youtube.com/vi/ML9_JWAz1kY/mqdefault.jpg" alt="STEP nonlinear transform volumes" width="200"></a>
+  <a href="https://youtu.be/8dputUoKBTA" target="_blank" rel="noopener"><img src="https://img.youtube.com/vi/8dputUoKBTA/mqdefault.jpg" alt="MR/US registration in step" width="200"></a>
+  <br><sub><a href="https://youtu.be/ML9_JWAz1kY" target="_blank" rel="noopener">STEP nonlinear transform volumes</a> &nbsp;·&nbsp; <a href="https://youtu.be/8dputUoKBTA" target="_blank" rel="noopener">MR/US, step p3</a></sub>
 
 Beyond these direct ancestors, SlicerLive owes its deepest debt to the
 <a href="https://www.slicer.org/" target="_blank" rel="noopener">3D Slicer</a> developers and users —
