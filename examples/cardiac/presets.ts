@@ -19,6 +19,11 @@
 export interface Preset {
   color: number[][];
   scalarOpacity: number[][];
+  /** (ambient, diffuse, specular, specularPower) — the preset's OWN Phong coefficients.
+   *  Verified by reading them out of a running Slicer 5.12 + SlicerHeart, not from the XML.
+   *  Using generic values instead visibly changes the render: the CT presets are much less
+   *  ambient (0.1 vs a typical 0.25) and much less specular (0.2 @ power 10 vs 0.5 @ 24). */
+  shade: [number, number, number, number];
   /** Suggested window for the MPR views (not part of the VR preset). */
   windowLevel?: [number, number];
   blurb: string;
@@ -26,6 +31,7 @@ export interface Preset {
 
 export const CARDIAC_PRESETS: Record<string, Preset> = {
   "CT-EndoVascular": {
+    shade: [0.1, 0.9, 0.2, 10],
     blurb: "Myocardium opaque, contrast blood transparent above 338 HU — fly inside the chamber",
     windowLevel: [1400, 300],
     color: [
@@ -50,6 +56,7 @@ export const CARDIAC_PRESETS: Record<string, Preset> = {
     ],
   },
   "CT-Cardiac3": {
+    shade: [0.1, 0.9, 0.2, 10],
     blurb: "Standard cardiac CT preset — contrast blood pool opaque",
     windowLevel: [1400, 300],
     color: [
@@ -72,6 +79,7 @@ export const CARDIAC_PRESETS: Record<string, Preset> = {
     ],
   },
   "CT-Coronary-Arteries-3": {
+    shade: [0.1, 0.9, 0.2, 10],
     blurb: "Coronary/vessel emphasis, dark below 129 HU",
     windowLevel: [1000, 300],
     color: [
@@ -94,6 +102,7 @@ export const CARDIAC_PRESETS: Record<string, Preset> = {
     ],
   },
   "CT-Chest-Contrast-Enhanced": {
+    shade: [0.1, 0.9, 0.2, 10],
     blurb: "Contrast-enhanced chest — soft tissue and vessels together",
     windowLevel: [1400, 300],
     color: [
@@ -112,6 +121,7 @@ export const CARDIAC_PRESETS: Record<string, Preset> = {
     ],
   },
   "MR-Default": {
+    shade: [0.2, 1.0, 0.0, 1],
     blurb: "Default MR preset (for the HVSMR-2.0 whole-heart MRI path)",
     windowLevel: [500, 250],
     color: [

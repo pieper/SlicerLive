@@ -9,6 +9,11 @@ import { CameraInteractor } from "../vtk-interactor.ts";
 export interface CameraControlOpts {
   onChange?: () => void;          // called after every camera change (redraw)
   onLog?: (kind: string, detail: Record<string, unknown>) => void; // optional event log hook
+  /** Gate the whole interactor. Return false to hand the canvas to another controller — e.g.
+   *  the endovascular flight, which owns left-drag as first-person LOOK. Suppressing only
+   *  `onChange` is not enough: these handlers mutate the camera directly, so both controllers
+   *  would move it and the trackball would win. */
+  enabled?: () => boolean;
 }
 
 export function attachCameraControls(
@@ -39,8 +44,11 @@ export function attachCameraControls(
     return { dist: Math.hypot(b.x - a.x, b.y - a.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
   };
 
+  const on = () => opts.enabled?.() ?? true;
+
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());  // right-drag = zoom
   canvas.addEventListener("pointerdown", (e) => {
+    if (!on()) return;
     const { x, y } = local(e);
     pointers.set(e.pointerId, { x, y });
     canvas.setPointerCapture(e.pointerId);
@@ -54,6 +62,7 @@ export function attachCameraControls(
   });
   const endPointer = (e: PointerEvent) => {
     if (!pointers.delete(e.pointerId)) return;
+    if (!on()) { interactor.end(); pinch = null; return; }
     canvas.releasePointerCapture?.(e.pointerId);
     if (pointers.size < 2) pinch = null;
     if (pointers.size === 1) {   // dropped from pinch back to one finger → resume orbit
@@ -66,6 +75,7 @@ export function attachCameraControls(
   canvas.addEventListener("pointerup", endPointer);
   canvas.addEventListener("pointercancel", endPointer);
   canvas.addEventListener("pointermove", (e) => {
+    if (!on()) return;
     if (!pointers.has(e.pointerId)) return;
     const { x, y } = local(e);
     pointers.set(e.pointerId, { x, y });
@@ -84,6 +94,7 @@ export function attachCameraControls(
     }
   });
   canvas.addEventListener("wheel", (e) => {
+    if (!on()) return;
     e.preventDefault();
     interactor.wheel(e.deltaY < 0);   // deltaY<0 = scroll away = VTK MouseWheelForward = zoom in
     opts.onLog?.("cameraWheel", { deltaY: e.deltaY, distance: camera.distance });

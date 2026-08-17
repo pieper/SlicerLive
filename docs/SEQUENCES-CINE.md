@@ -86,8 +86,29 @@ the ragged case at playback time.
 int selectionIncrement = floor(elapsedTimeSec * PlaybackRateFps + 0.5);
 ```
 
-i.e. wall-clock-driven with frame dropping. That is precisely the right shape for a
-`requestAnimationFrame` cine loop — mirror the arithmetic rather than counting frames.
+i.e. wall-clock-driven with frame dropping. Mirror the *shape* (wall clock, drop frames) but
+**not this arithmetic — it runs about 2x too fast.**
+
+`floor(x + 0.5)` is round-to-nearest, and `LastSequenceBrowserUpdateTimeSec` is reset to now
+whenever the increment is non-zero. So the increment first reaches 1 at
+`elapsed = 0.5 / fps` — half the nominal period — and the steady-state rate is double what was
+asked for. Rounding would only be correct if elapsed were measured from a fixed origin.
+
+Measured in Slicer 5.12.0 (median inter-phase gap over 8-12 s of playback):
+
+| requested | measured | ratio |
+|---|---|---|
+| 0.5 fps | 0.92 | 1.83x |
+| 1 fps | 1.92 | 1.92x |
+| 2 fps | 3.75 | 1.88x |
+| 5 fps | 9.38 | 1.88x |
+| 10 fps | 16.88 | 1.69x |
+
+(The smaller error at 10 fps is the 50 Hz poll quantising the half-period.)
+
+SlicerLive uses a plain phase accumulator instead — `acc += dt * fps; inc = floor(acc);
+acc -= inc` — which measured **exactly 1.000 fps** when 1 fps was requested (individual gaps
+0.998-1.001 s). Keep it.
 
 `UpdateProxyNodesFromSequences` then fans out to every synchronized sequence with
 `targetProxyNode->CopyContent(sourceDataNode, deep)`, batching all `StartModify`/
@@ -172,8 +193,11 @@ shipped it before catching it.** Both of its states fail:
 Neither is acceptable in an animation, and no choice of `idleGapMs` fixes it: the frame rate
 you want (10 fps) is far faster than convergence (24 samples).
 
-**The fix is [render/cine-filmstrip.ts](render/cine-filmstrip.ts): converge every phase once
-offscreen, cache the finished image, and play back from the cache.** Each displayed frame is
+**SUPERSEDED (2026-08-17) — see §4.2b. The filmstrip below was built on a wrong premise and
+cost interactivity; it is no longer used by the cardiac example.**
+
+The fix *was* [render/cine-filmstrip.ts](render/cine-filmstrip.ts): converge every phase once
+offscreen, cache the finished image, and play back from the cache. Each displayed frame is
 a fully converged still, and playback costs one `copyTextureToTexture`. Because presenting
 is a raw copy rather than a blit pass, the canvas must be configured with `COPY_DST`:
 
@@ -192,8 +216,37 @@ clean when still.
 Cost is bounded and one-time: 10 phases × 24 samples = 240 traces, a few seconds for a
 128³ volume. Playback then runs at whatever rate you ask for, because a frame is a copy.
 
-The moving/settled loop is still exactly right for the *static* volume and for interaction —
-it is only animation over changing data that needs the filmstrip.
+### 4.2b What actually works: accumulate the held phase live
+
+The filmstrip assumed we could not render fast enough to converge during playback. **Measured,
+that is false.** Single pass, no accumulation, cine volume at 1184x820:
+
+| ray step | ms/frame | fps | single-pass noise |
+|---|---|---|---|
+| 0.805 mm (0.7x spacing, old default) | 14.7 | 68 | 4.30 |
+| **0.575 mm (0.5x — what Slicer uses)** | **7.1** | **140** | 2.99 |
+| 0.402 mm (0.35x) | 9.7 | 103 | 2.27 |
+| 0.287 mm (0.25x) | 13.0 | 77 | 1.91 |
+
+And Slicer, read out of a running instance, renders **single-pass with no accumulation at
+all**: `vtkOpenGLGPUVolumeRayCastMapper` with `UseJittering = 0`,
+`AutoAdjustSampleDistances = 0`, `SampleDistance` locked to half the input spacing,
+`ImageSampleDistance = 1`. One clean pass — that is where its speed comes from, and its
+banding is the price.
+
+So at 10 fps playback there is ~100 ms per displayed phase and a pass costs ~7 ms. Hold the
+phase and keep accumulating into it until it is due to advance; reset on any phase or camera
+change. No precomputation, nothing to invalidate, and **you can rotate while it plays** —
+which the filmstrip could not do, because a camera move invalidated every cached phase and
+playback stalled until they rebuilt.
+
+Verified: dragging through ~2 s of playback gave 32 phase advances across all 10 phases with
+playback still active; paused, the held phase reaches 48 accumulated passes in ~530 ms.
+Accumulation depth during playback is 2-6 passes per phase (one per animation frame), so
+playback is noisier than a still — but it is jitter noise in a moving image rather than
+banding, and it never stalls.
+
+The moving/settled loop is still exactly right for the *static* volume and for interaction.
 
 ### 4.3 The caching question, measured
 

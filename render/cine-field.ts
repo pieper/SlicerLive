@@ -67,6 +67,8 @@ export class CineField implements Field {
   readonly kind = "cine";
   readonly bindingCount = 3;              // volA (3d) + volB (3d) + lut (2d)
   private texes: GPUTexture[] = [];
+  private filled: boolean[] = [];
+  private dims: Vec3 = [0, 0, 0];
   private lutTex: GPUTexture;
   private dev: GPUDevice;
   private p2t: Mat4;
@@ -79,24 +81,31 @@ export class CineField implements Field {
   private b = 0;                          // index of frame B
   private blend = 0;                      // 0 => pure A
 
-  /** `frames` are scalar volumes in C-order (z,y,x), all sharing `dims` and `ijkToRAS`. */
+  /** Allocates `frameCount` empty frame textures; fill them with setFrameData(i, data) as
+   *  they arrive. Progressive loading matters: the first phase can be shown (and the scene
+   *  built) after ~1 MB instead of waiting for the whole sequence. Frames not yet supplied
+   *  read as zero, so always show a frame you have actually filled. */
   constructor(
     dev: GPUDevice,
-    frames: ArrayLike<number>[],
+    frames: ArrayLike<number>[] | number,
     dims: Vec3,
     lut: Uint8Array,
     opts: CineFieldOpts,
   ) {
-    if (!frames.length) throw new Error("CineField needs at least one frame");
+    const count = typeof frames === "number" ? frames : frames.length;
+    if (!count) throw new Error("CineField needs at least one frame");
     const size = dims as [number, number, number];
-    for (const f of frames) {
-      const t = dev.createTexture({
+    this.dims = dims;
+    for (let i = 0; i < count; i++) {
+      this.texes.push(dev.createTexture({
         size, dimension: "3d", format: "r16float",
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-      });
-      dev.queue.writeTexture({ texture: t }, toF16Array(f), { bytesPerRow: dims[0] * 2, rowsPerImage: dims[1] }, size);
-      this.texes.push(t);
+      }));
     }
+    this.filled = new Array(count).fill(false);
+    this.dev = dev;
+    if (typeof frames !== "number") frames.forEach((f, i) => this.setFrameData(i, f));
+
     this.lutTex = dev.createTexture({ size: [256, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
 
@@ -106,8 +115,18 @@ export class CineField implements Field {
     this.clim = opts.clim;
     this.shade = opts.shade ?? [0.25, 0.75, 0.5, 24];
     this.unit = opts.opacityUnitDistance ?? this.stepMm;
-    this.dev = dev;
   }
+
+  /** Upload one phase's voxels (C-order z,y,x) into its preallocated texture. */
+  setFrameData(i: number, data: ArrayLike<number>): void {
+    const [nx, ny, nz] = this.dims;
+    this.dev.queue.writeTexture({ texture: this.texes[i] }, toF16Array(data),
+      { bytesPerRow: nx * 2, rowsPerImage: ny }, [nx, ny, nz]);
+    this.filled[i] = true;
+  }
+  /** True once setFrameData has been called for this phase. */
+  hasFrame(i: number): boolean { return !!this.filled[i]; }
+  get framesLoaded(): number { return this.filled.reduce((n, f) => n + (f ? 1 : 0), 0); }
 
   get frameCount(): number { return this.texes.length; }
   get frame(): number { return this.a; }

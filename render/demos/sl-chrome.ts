@@ -39,6 +39,12 @@ const DEFAULT_HELP: { title: string; rows: [string, string][] }[] = [
     ["Wheel / two-finger", "Zoom (dolly)"], ["Double-click", "Maximize / restore"],
     ["Shift + move", "Pick → jump slices to the point"],
   ] },
+  { title: "Endovascular flight (fly-inside / endo demo)", rows: [
+    ["Up / Down", "Move in / out along the view axis"],
+    ["Left / Right", "Yaw"], ["Shift + Left/Right", "Pitch"], ["Ctrl + Left/Right", "Roll"],
+    ["Space", "Toggle forward cruise"], ["Shift + Space", "Toggle reverse cruise"],
+    ["Escape", "Stop"], ["Left-drag", "Look around"], ["Shift + click", "Autopilot target"],
+  ] },
   { title: "Slice views", rows: [
     ["Wheel / Left-drag", "Scroll through slices"], ["Right-drag / ⌘-wheel", "Zoom this slice"],
     ["Middle / Shift+Left-drag", "Pan"], ["Double-click", "Maximize / restore"], ["R", "Reset pan/zoom"],

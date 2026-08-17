@@ -51,16 +51,29 @@ function presetClim(name: string): [number, number] {
   const p = CARDIAC_PRESETS[name];
   return [p.color[0][0], p.color[p.color.length - 1][0]];
 }
-export function presetLUT(name: string): { lut: Uint8Array; clim: [number, number] } {
+export function presetLUT(name: string): {
+  lut: Uint8Array; clim: [number, number]; shade: [number, number, number, number];
+} {
   const p = CARDIAC_PRESETS[name];
   const clim = presetClim(name);
-  return { lut: lutFromTransferFunctions(p.color, p.scalarOpacity, clim), clim };
+  return { lut: lutFromTransferFunctions(p.color, p.scalarOpacity, clim), clim, shade: p.shade };
+}
+
+export interface LoadProgress {
+  /** Bytes received so far / expected for the phase currently loading. */
+  bytes: number;
+  /** Cine phases uploaded so far, and in total. */
+  frames: number;
+  totalFrames: number;
+  /** What is being fetched: the cine sequence or the (lazy) CTA. */
+  what: "cine" | "cta";
 }
 
 export interface CardiacScene {
   scene: SceneRenderer;
   slice: SliceRenderer;
-  cta: ImageField;
+  /** null until ensureCta() has loaded it — the CTA is 57 MB and is not needed to start. */
+  cta: ImageField | null;
   cine: CineField;
   browser: SequenceBrowser<number>;
   center: Vec3;
@@ -69,6 +82,11 @@ export interface CardiacScene {
   cineIjkToRAS: number[];
   ctaDims: Vec3;
   cineDims: Vec3;
+  /** Resolves once every cine phase has been uploaded. */
+  cineReady: Promise<void>;
+  /** Fetch + build the static CTA on demand. Resolves immediately if already loaded. */
+  ensureCta(onProgress?: (p: LoadProgress) => void): Promise<void>;
+  ctaLoaded(): boolean;
   roi: RoiWidget;
   /** Slicer's Volume Rendering module has exactly these two switches. */
   cropEnabled(): boolean;
@@ -83,53 +101,98 @@ export interface CardiacScene {
   presetName(): string;
 }
 
+export interface BuildOpts {
+  /** Which dataset this page needs. "cine" loads only the 10 phases (~13 MB); "cta" loads only
+   *  the static 512^3 volume (~57 MB). Splitting the demos in two is what lets each page fetch
+   *  one dataset instead of both. */
+  only?: "cine" | "cta";
+}
+
 export async function buildCardiacScene(
   gpu: Gpu,
   base: string,
   format?: GPUTextureFormat,
-  onBytes?: (n: number) => void,
+  onProgress?: (p: LoadProgress) => void,
+  buildOpts: BuildOpts = {},
 ): Promise<CardiacScene> {
   const dev = gpu.device;
 
-  // ---- static CTA ------------------------------------------------------------------
-  const ctaScene = await loadScene(base + "cta.json");
-  const ctaVol = Object.values(ctaScene.nodes).find((n) => n.class === "vtkMRMLScalarVolumeNode")!;
-  const ctaIjkToRAS = ctaVol.attrs!.ijkToRAS as number[];
-  const ctaZ = await fetchZarrVolume(ctaScene.blobBase, ctaVol.attrs!.zarr as ZarrDesc, onBytes);
-  const p0 = "CT-EndoVascular";
-  const { lut, clim } = presetLUT(p0);
-  const cta = new ImageField(dev, ctaZ.data, ctaZ.dims, [1, 1, 1], lut, {
-    clim, ijkToRAS: ctaIjkToRAS, shade: [0.25, 0.75, 0.5, 24],
+  // ---- 4D cine FIRST, progressively -------------------------------------------------
+  // The page opens on the cine, so nothing else may block first paint. Phases are fetched
+  // one at a time into a preallocated CineField; the caller can build and render as soon as
+  // phase 0 lands (~1.3 MB) rather than after the whole 70 MB payload.
+  const wantCine = buildOpts.only !== "cta";
+  // The endo page has no cine at all: build a 1-phase placeholder so every downstream reference
+  // (slice textures, bounds, the browser) stays valid without fetching 13 MB it will never show.
+  const cineScene = wantCine
+    ? await loadScene(base + "cine.json")
+    : { nodes: {}, blobBase: base };
+  const seqNode = wantCine
+    ? Object.values(cineScene.nodes).find((n) => n.class === "vtkMRMLSequenceNode")!
+    : null;
+  const items = (seqNode?.attrs!.items ?? [{ index: "0", node: "" }]) as { index: string; node: string }[];
+  const firstVol = wantCine ? cineScene.nodes[items[0].node] : null;
+  const cineIjkToRAS = (firstVol?.attrs!.ijkToRAS as number[]) ?? [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
+  const z0 = firstVol?.attrs!.zarr as ZarrDesc | undefined;
+  const cineDims: Vec3 = z0 ? [z0.shape[2], z0.shape[1], z0.shape[0]] : [2, 2, 2];
+
+  const cinePreset = presetLUT("CT-Coronary-Arteries-3");
+  const cine = new CineField(dev, items.length, cineDims, cinePreset.lut, {
+    clim: cinePreset.clim, ijkToRAS: cineIjkToRAS, shade: cinePreset.shade,
   });
 
-  // ---- 4D cine ---------------------------------------------------------------------
-  const cineScene = await loadScene(base + "cine.json");
-  const seqNode = Object.values(cineScene.nodes).find((n) => n.class === "vtkMRMLSequenceNode")!;
-  const items = seqNode.attrs!.items as { index: string; node: string }[];
-  const frames: Float32Array[] = [];
-  let cineDims: Vec3 = [0, 0, 0];
-  let cineIjkToRAS: number[] = [];
-  for (const it of items) {
-    const vn = cineScene.nodes[it.node];
-    const zv = await fetchZarrVolume(cineScene.blobBase, vn.attrs!.zarr as ZarrDesc, onBytes);
-    frames.push(zv.data);
-    cineDims = zv.dims;
-    cineIjkToRAS = vn.attrs!.ijkToRAS as number[];
+  const report = (what: "cine" | "cta", bytes: number) =>
+    onProgress?.({ bytes, frames: cine.framesLoaded, totalFrames: items.length, what });
+
+  // phase 0 before we return, so the caller always has something to draw
+  if (wantCine && z0) {
+    const zv = await fetchZarrVolume(cineScene.blobBase, z0, (n) => report("cine", n));
+    cine.setFrameData(0, zv.data);
+    report("cine", 0);
   }
-  // Cardiac CT over a beating heart: CT-Cardiac3 (blood pool opaque) reads better in motion
-  // than the endovascular inversion, which is meant for a camera inside the chamber.
-  const cinePreset = presetLUT("CT-Cardiac3");
-  const cine = new CineField(dev, frames, cineDims, cinePreset.lut, {
-    clim: cinePreset.clim, ijkToRAS: cineIjkToRAS, shade: [0.25, 0.75, 0.5, 24],
-  });
+  // the rest in the background
+  const cineReady = (async () => {
+    if (!wantCine) return;
+    for (let i = 1; i < items.length; i++) {
+      const vn = cineScene.nodes[items[i].node];
+      const zv = await fetchZarrVolume(cineScene.blobBase, vn.attrs!.zarr as ZarrDesc, (n) => report("cine", n));
+      cine.setFrameData(i, zv.data);
+      report("cine", 0);
+    }
+  })();
+
+  // ---- static CTA: lazy ---------------------------------------------------------------
+  let cta: ImageField | null = null;
+  let ctaIjkToRAS: number[] = [];
+  let ctaDims: Vec3 = [0, 0, 0];
+  let ctaPending: Promise<void> | null = null;
+  const ensureCta = (onP?: (p: LoadProgress) => void): Promise<void> => {
+    if (cta) return Promise.resolve();
+    if (ctaPending) return ctaPending;
+    ctaPending = (async () => {
+      const ctaScene = await loadScene(base + "cta.json");
+      const ctaVol = Object.values(ctaScene.nodes).find((n) => n.class === "vtkMRMLScalarVolumeNode")!;
+      ctaIjkToRAS = ctaVol.attrs!.ijkToRAS as number[];
+      const zv = await fetchZarrVolume(ctaScene.blobBase, ctaVol.attrs!.zarr as ZarrDesc,
+        (n) => onP?.({ bytes: n, frames: 0, totalFrames: 0, what: "cta" }));
+      ctaDims = zv.dims;
+      const p = presetLUT("CT-EndoVascular");
+      cta = new ImageField(dev, zv.data, zv.dims, [1, 1, 1], p.lut, {
+        clim: p.clim, ijkToRAS: ctaIjkToRAS, shade: p.shade,
+      });
+    })();
+    return ctaPending;
+  };
 
   // ---- sequence browser (mirrors vtkMRMLSequenceBrowserNode) --------------------------
-  const sa = seqNode.attrs!;
+  // On the endo page there is no sequence node; keep a valid 1-item browser so every
+  // downstream reference stays live without special-casing the caller.
+  const sa = (seqNode?.attrs ?? {}) as Record<string, unknown>;
   const sequence = new Sequence<number>({
-    indexName: sa.indexName as string,
-    indexUnit: sa.indexUnit as string,
-    indexType: sa.indexType as "numeric" | "text",
-    numericIndexValueTolerance: sa.numericIndexValueTolerance as number,
+    indexName: (sa.indexName as string) ?? "frame",
+    indexUnit: (sa.indexUnit as string) ?? "",
+    indexType: (sa.indexType as "numeric" | "text") ?? "numeric",
+    numericIndexValueTolerance: (sa.numericIndexValueTolerance as number) ?? 0.001,
   });
   items.forEach((it, i) => sequence.setDataNodeAtValue(i, it.index));
   const browser = new SequenceBrowser<number>();
@@ -142,17 +205,21 @@ export async function buildCardiacScene(
     cine.setFrame(browser.continuousItem, browser.playbackLooped);
   });
 
+  // The endo page renders the CTA, so it must be loaded BEFORE the scene is built — otherwise
+  // build() captures the (empty) cine placeholder field and the 3D view stays black.
+  if (buildOpts.only === "cta") await ensureCta((p) => onProgress?.(p));
+
   // ---- renderers --------------------------------------------------------------------
   const scene = new SceneRenderer(gpu, format);
-  let mode: "cta" | "cine" = "cta";
-  let preset = p0;
+  let mode: "cta" | "cine" = buildOpts.only === "cta" ? "cta" : "cine";
+  let preset = buildOpts.only === "cta" ? "CT-EndoVascular" : "CT-Coronary-Arteries-3";
 
   // ROI crop widget, spanning the middle of whichever volume is showing. The wireframe and
   // its handles are `clippable:false`, so the box never crops itself.
-  let roi: RoiWidget = createRoiWidget(...cta.aabb(), { coverage: 0.3 });
+  let roi: RoiWidget = createRoiWidget(...(((mode === "cta" && cta) ? cta : cine).aabb()), { coverage: 0.3 });
   let cropOn = false, roiOn = false;
   const rebuild = () => {
-    const vol = mode === "cta" ? cta : cine;
+    const vol = (mode === "cta" && cta) ? cta : cine;
     scene.build(roiOn ? [vol, roi.box, roi.handles] : [vol]);
     scene.setBackground(0.05, 0.06, 0.09);
     if (cropOn) scene.setClipBox(roi.lo(), roi.hi()); else scene.clearClip();
@@ -161,7 +228,7 @@ export async function buildCardiacScene(
 
   const slice = new SliceRenderer(gpu, format);
   const applySliceVolume = () => {
-    const f = mode === "cta" ? cta : cine;
+    const f = (mode === "cta" && cta) ? cta : cine;
     const [lo, hi] = f.aabb();
     slice.setVolume(f.patientToTexture(), lo, hi);
     slice.setTextures(f.volumeTexture());
@@ -172,7 +239,7 @@ export async function buildCardiacScene(
   applySliceVolume();
 
   const bounds = (): { center: Vec3; radius: number } => {
-    const [lo, hi] = (mode === "cta" ? cta : cine).aabb();
+    const [lo, hi] = ((mode === "cta" && cta) ? cta : cine).aabb();
     return {
       center: [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2],
       radius: Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2,
@@ -181,10 +248,13 @@ export async function buildCardiacScene(
   const b0 = bounds();
 
   const out: CardiacScene = {
-    scene, slice, cta, cine, browser,
+    scene, slice, cine, browser,
+    get cta() { return cta; },
+    cineReady, ensureCta, ctaLoaded: () => !!cta,
     center: b0.center, radius: b0.radius,
-    ctaIjkToRAS, cineIjkToRAS,
-    ctaDims: ctaZ.dims, cineDims,
+    cineIjkToRAS,
+    get ctaDims() { return ctaDims; }, cineDims,
+    get ctaIjkToRAS() { return ctaIjkToRAS; },
     mode: () => mode,
     presetName: () => preset,
     roi,
@@ -195,11 +265,13 @@ export async function buildCardiacScene(
     setPreset(name: string) {
       if (!CARDIAC_PRESETS[name]) return;
       preset = name;
-      const { lut, clim } = presetLUT(name);
-      // setLUT rewrites the 256-entry texture in place; clim moves with the preset, which
-      // is a uniform write. Neither touches the pipeline.
-      if (mode === "cta") { cta.setLUT(lut); (cta as unknown as { clim: [number, number] }).clim = clim; }
-      else { cine.setLUT(lut); (cine as unknown as { clim: [number, number] }).clim = clim; }
+      const { lut, clim, shade } = presetLUT(name);
+      // setLUT rewrites the 256-entry texture in place; clim and the Phong coefficients move
+      // with the preset (both uniform writes). Neither touches the pipeline.
+      const f = (mode === "cta" && cta) ? cta : cine;
+      f.setLUT(lut);
+      (f as unknown as { clim: [number, number]; shade: [number, number, number, number] }).clim = clim;
+      (f as unknown as { clim: [number, number]; shade: [number, number, number, number] }).shade = shade;
       scene.syncUniforms();
       applySliceVolume();
     },
@@ -207,7 +279,7 @@ export async function buildCardiacScene(
       if (m === mode) return;
       mode = m;
       // The two volumes have very different extents, so re-fit the ROI to the new one.
-      const [lo, hi] = (m === "cta" ? cta : cine).aabb();
+      const [lo, hi] = ((m === "cta" && cta) ? cta : cine).aabb();
       roi = createRoiWidget(lo, hi, { coverage: 0.3 });
       out.roi = roi;
       rebuild();

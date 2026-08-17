@@ -87,12 +87,22 @@ export class CineFilmstrip {
    *  so the page stays responsive while the strip fills in. `select(i)` must point the
    *  CineField at frame i and refresh the scene's bindings/uniforms; the caller must have
    *  already set the camera for (w, h). Returns the frame that just COMPLETED, or -1. */
-  step(scene: SceneRenderer, select: (i: number) => void, chunk = 4): number {
+  step(scene: SceneRenderer, select: (i: number) => void, chunk = 4, prefer = -1): number {
     if (this.complete || !this.w) return -1;
+    // `prefer` is the frame the user is actually looking at: converge THAT one first, so a
+    // paused view refines in place instead of the display walking the whole sequence while
+    // the rest of the strip fills in behind it.
+    if (prefer >= 0 && prefer < this.frames && !this.cached[prefer] && this.buildFrame !== prefer) {
+      this.buildFrame = prefer;
+      this.buildN = 0;
+    }
     while (this.cached[this.buildFrame]) this.buildFrame = (this.buildFrame + 1) % this.frames;
     const i = this.buildFrame;
     const view = this.tex[i]!.createView({ format: this.viewFormat });
-    if (this.buildN === 0) select(i);
+    // Re-select EVERY call, not just at buildN === 0. The caller is expected to restore the
+    // field to the frame the user is looking at after each step (the interactive renderer
+    // shares this state), so we cannot assume our selection survived between chunks.
+    select(i);
     const n = Math.min(chunk, this.samples - this.buildN);
     for (let k = 0; k < n; k++) {
       scene.renderAccum(view, this.w, this.h, this.buildN === 0 && k === 0);

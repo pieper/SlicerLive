@@ -74,6 +74,19 @@ produces noise that is statistically indistinguishable from random voxels — ve
 `work/` (downloads) and `data/` (generated zarr) are gitignored; `prep.ts` regenerates
 `data/` in a few seconds.
 
+**Published data.** The gallery build streams the zarr from a public, CORS-enabled JS2
+container rather than shipping it in the repo:
+
+```
+https://js2.jetstream-cloud.org:8001/swift/v1/slicerlive/cardiac/
+```
+
+466 objects, 69.7 MB (57 MB CTA + 13 MB cine). The page takes `?data=<url>` to repoint it —
+use `?data=data/` to run against a local `prep.ts` output. To re-upload after regenerating,
+authenticate with the `CIS230102_IU` application credential in `~/.config/openstack/clouds.yaml`
+and PUT each file under `slicerlive/cardiac/`; the container already carries
+`X-Container-Read: .r:*,.rlistings` and `Access-Control-Allow-Origin: *`.
+
 ## Notes on fidelity
 
 The presets are transcribed verbatim from Slicer's `presets.xml` and SlicerHeart's
