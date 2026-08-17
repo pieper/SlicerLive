@@ -194,7 +194,11 @@ const a3d = mountAdaptive3d({
   size: () => ({ w: shown("threeD") ? cv.threeD.width : 0, h: cv.threeD.height }),
   setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
   gpu,
-  movingScaleCap: 0.75,        // 512^3 DVR: interactive from the first drag frame
+  // Exterior DVR of a 512^3 volume needs the resolution cut to stay interactive while dragging.
+  // The endovascular view does not: rays terminate at the vessel wall within a few cm, so a
+  // full-resolution pass costs ~6 ms even at a very fine step (measured — see setStepForView).
+  // Upscaling there would only blur a frame we can afford to trace properly.
+  movingScaleCap: ENDO ? 1 : 0.75,
   // In cine mode tickCine owns the canvas and the accumulator; the adaptive loop must never
   // render there — two consumers of SceneRenderer's single accumulator means flashing phases.
   onFrame: () => { if (sc.mode() === "cine") adaptiveFramesInCine++; cross.redraw(); },
@@ -337,9 +341,28 @@ for (const m of ["cta", "cine"] as const) {
 /** Enter endovascular flight: park the camera in the blood pool and hand the 3D view to the
  *  first-person interactor. The orbit controls stay attached but are inert while flying (see
  *  `flying` guard in their onChange) — attaching both to one canvas would fight over drags. */
+/** Put the flying camera at a pose from Slicer: position, view direction, and up. Shared by
+ *  entering flight and by the first pose to arrive once a flight is already under way. */
+function seatFlight(p: { pos: Vec3; fp: Vec3; up: Vec3; va?: number }): void {
+  camera.position = [...p.pos] as Vec3;
+  camera.viewUp = [...p.up] as Vec3;
+  const v: Vec3 = [p.fp[0] - p.pos[0], p.fp[1] - p.pos[1], p.fp[2] - p.pos[2]];
+  const l = Math.hypot(v[0], v[1], v[2]);
+  lastGoodPos = [...p.pos] as Vec3;
+  aimDir = null; seekDir = null; seekTarget = null;   // the old heading belongs to the old pose
+  if (l > 1e-6) endo?.lookAlong([v[0] / l, v[1] / l, v[2] / l]);
+  jumpSlicesTo(camera.position);
+  draw3d();
+}
+
 const startFlight = async () => {
   if (!sc.ctaLoaded()) { await loadCtaIfNeeded(); setMode("cta"); }
   applyPreset("CT-EndoVascular");
+  // Prefer wherever Slicer's camera is parked — the point of the mrson follow is that you aim
+  // the start of the flight by hand in Slicer. The baked seed is the fallback, and it is what
+  // the published demo always uses since there is no Slicer behind it.
+  const fromSlicer = followedPose;
+  flightFromSlicer = !!fromSlicer;
   camera.position = [...seedRAS] as Vec3;
   camera.viewUp = [0, 1, 0];                                // +A up; roll is free from here
   camera.viewAngle = 80;                                    // wide, endoscope-like
@@ -361,6 +384,8 @@ const startFlight = async () => {
     clearance: (dir) => (dot3(dir, probedDir) > 0.9 ? clearanceAhead : Infinity),
   });
   endo.lookAlong(SEED_DIR);                                 // up the aorta
+  if (fromSlicer) seatFlight(fromSlicer);
+  status(fromSlicer ? "flight started from Slicer's camera" : "flight started from the aortic seed");
   jumpSlicesTo(camera.position);
   showCruise("stopped");
   draw3d();
@@ -470,6 +495,34 @@ const setStep = (mm: number) => {
   stepMmNow = mm;
   sc.scene.setSampleStep(mm);
   accN = 0;                       // never mix step sizes within one accumulated mean
+};
+
+// Ray step per view, chosen from measurement rather than one global default.
+//
+// A single ray-march pass with a jittered start is a one-sample estimate: the jitter buys us
+// freedom from banding and pays for it in speckle, which only accumulation averages out. While
+// flying, the camera moves every frame, so accumulation never gets a chance and the speckle is
+// all you see. The fix is to make the single pass itself accurate.
+//
+// Inside a vessel that is cheap, because rays terminate at the wall within a few cm. Measured at
+// the aortic seed, 692x415 (examples/cardiac/test/endo-quality.ts), RMS error against a
+// 256-sample converged reference:
+//
+//     step          interior ms/fps      RMS      exterior ms/fps
+//     0.700x voxel   1.67 / 600         11.18      —
+//     0.500x         2.04 / 489          6.67      11.4 / 88
+//     0.250x         3.31 / 302          2.31      20.3 / 49
+//     0.125x         5.85 / 171          1.23      36.4 / 27
+//
+// So the interior can afford 0.125x — nine times less error than the old default, still at
+// 171 fps — while the exterior view cannot: the same step there crosses the whole 512^3 volume
+// and collapses to 27 fps. Hence per-view, not global.
+const ENDO_STEP_MULT = 0.125;
+const CTA_STEP_MULT = 0.5;
+const setStepForView = () => {
+  if (sc.mode() === "cine") { setStep(sc.cine.sampleStep() * 0.5); return; }
+  const sp = sc.cta?.sampleStep();
+  if (sp) setStep(sp * (flying ? ENDO_STEP_MULT : CTA_STEP_MULT));
 };
 
 // ---- flight tick -------------------------------------------------------------------------
@@ -665,8 +718,8 @@ const tickCine = (msNow: number) => {
   requestAnimationFrame(tickCine);
   tickFlight(msNow);
   if (!shown("threeD")) { lastT = msNow; return; }
+  setStepForView();          // must run in CTA mode too — that is where flight lives
   if (sc.mode() !== "cine") { lastT = msNow; return; }
-  setStep((sc.cine.sampleStep()) * 0.5);
 
   // Wall-clock playback advance with frame dropping — vtkSlicerSequencesLogic's arithmetic.
   if (sc.browser.playbackActive) {
@@ -752,6 +805,13 @@ attachCameraControls(cv.threeD, camera, {
 //   In Slicer:  from LiveStoryLib import mrson_live; slicer.mrsonLive = mrson_live.startMrsonLive(2132)
 //   Here:       ?follow=2132   (or window.cardiac.follow(2132))
 let followWs: WebSocket | null = null;
+// The last pose Slicer sent, kept even while we ignore it, so entering flight can start from
+// wherever the user parked Slicer's camera. Null on the published demo, which has no Slicer.
+let followedPose: { pos: Vec3; fp: Vec3; up: Vec3; va?: number } | null = null;
+/** One-shot request to re-adopt Slicer's pose mid-flight (window.cardiac.resync()). */
+let resyncOnce = false;
+/** Whether THIS flight was seated from Slicer rather than the baked seed. */
+let flightFromSlicer = false;
 const follow = (port = 2132) => {
   followWs?.close();
   const ws = new WebSocket(`ws://localhost:${port}`);
@@ -776,6 +836,19 @@ const follow = (port = 2132) => {
     const up = c.viewUp as Vec3 | undefined;
     const va = c.viewAngle as number | undefined;
     if (!pos || !fp || !up) return;
+    followedPose = { pos: [...pos] as Vec3, fp: [...fp] as Vec3, up: [...up] as Vec3, va };
+    if (flying) {
+      // The endo page autoplays, so the flight is usually already under way by the time the
+      // first Slicer pose arrives. Seat the flight from that first pose — otherwise connecting
+      // a Slicer would never take effect. After that, ignore the stream: applying every event
+      // would yank the camera back mid-manoeuvre. resync() asks for one more.
+      if (!flightFromSlicer || resyncOnce) {
+        resyncOnce = false;
+        flightFromSlicer = true;
+        seatFlight({ pos: [...pos] as Vec3, fp: [...fp] as Vec3, up: [...up] as Vec3, va });
+      }
+      return;
+    }
     camera.position = [...pos] as Vec3;
     camera.focalPoint = [...fp] as Vec3;
     camera.viewUp = [...up] as Vec3;
@@ -800,6 +873,7 @@ if (new URLSearchParams(location.search).has("follow")) {
     playing: sc.browser.playbackActive, fps: sc.browser.playbackRateFps,
     crop: sc.cropEnabled(), roiVisible: sc.roiVisible(),
     boundFrame: sc.cine.frame, accN,
+    accumN: sc.scene.accumCount(),   // the renderer's real accumulation depth (accN is cine-only)
     adaptiveFramesInCine,        // must stay 0: two accumulator owners = flashing phases
     lastCamMove, renderInFlight,
     flying, cruise: endo ? endo.cruise() : "stopped",
@@ -818,6 +892,9 @@ if (new URLSearchParams(location.search).has("follow")) {
   cineAccum: () => accN,
   setOffset: (o: typeof SLICES[number], v: number) => { off[o] = v; drawPlane(o); },
   setMode, applyPreset, follow, startFlight,
+  /** Re-adopt Slicer's current pose once, mid-flight. */
+  resync: () => { resyncOnce = true; },
+  followedPose: () => followedPose,
   setCruise: (c: Cruise) => endo?.setCruise(c),
   setAutoTarget,
   // Drive the camera to exact values so a view can be matched 1:1 against Slicer.
