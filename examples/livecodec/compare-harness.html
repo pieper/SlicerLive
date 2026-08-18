@@ -1,0 +1,108 @@
+<!doctype html><meta charset="utf-8"><title>snapshot viewer harness</title>
+<style>
+body { margin:0; background:#0b0b0e; font:13px ui-sans-serif,system-ui,sans-serif; color:#d8d8dc; }
+#cmp { position: fixed; inset: 0; background: #0b0b0ef2; z-index: 50; display: flex;
+  flex-direction: column; padding: 10px 14px 14px; }
+#cmphead { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+#cmphead input[type=range] { flex: 1 1 260px; min-width: 180px; accent-color: #f0a020; }
+#cmpgrid { flex: 1; touch-action: none; cursor: grab; display: grid;
+  grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; min-height: 0; }
+.cmpcol { display: flex; flex-direction: column; min-height: 0; }
+.cmpcol h4 { margin: 0 0 4px; font: 600 12px ui-sans-serif,system-ui,sans-serif; letter-spacing:.04em; }
+.cmpcol.neural h4 { color:#f0a020; } .cmpcol.htj2k h4 { color:#58a6ff; }
+.cmpcells { flex:1; display:grid; grid-template-rows: 1fr 1fr 1fr; gap:6px; min-height:0; overflow:hidden; }
+.cmpcell { position:relative; overflow:hidden; background:#000; border:1px solid #26262c; }
+.cmpcell canvas { position:absolute; left:0; top:0; transform-origin:0 0;
+  image-rendering:pixelated; will-change:transform; }
+.cmpcell span { position:absolute; left:4px; top:3px; z-index:2; font:10px ui-monospace,monospace;
+  color:#8a8a92; pointer-events:none; }
+</style>
+<div id="cmp">
+  <div id="cmphead"><strong>harness</strong>
+    <input id="cmpslider" type="range" min="0" value="0" step="1"><span id="cmplabel"></span></div>
+  <div id="cmpgrid">
+    <div class="cmpcol neural"><h4>neural</h4><div class="cmpcells" id="cmp-neural"></div></div>
+    <div class="cmpcol htj2k"><h4>HTJ2K</h4><div class="cmpcells" id="cmp-htj2k"></div></div>
+  </div>
+</div>
+<script type="module">
+import { makeSnapshotViewer } from "./livecodec-compare.ts";
+// Deliberately anisotropic, like the real cohort: 2 mm slices, 0.39 mm in-plane.
+// A viewer that ignores spacing squashes the coronal/sagittal ~5x, which is
+// exactly the fault this harness exists to make visible.
+const Z = 137, Y = 512, X = 512, sz = 2.0, sy = 0.390625, sx = 0.390625;
+const mk = (n, f) => { const a = new Int16Array(n); for (let i=0;i<n;i++) a[i]=f(i); return a; };
+// A sphere in PHYSICAL space: it must look round in every pane if spacing is honoured.
+const cxmm = X*sx/2, cymm = Y*sy/2, czmm = Z*sz/2, R = 55;
+const ball = (px,py,pz) => {
+  const d = Math.hypot(px-cxmm, py-cymm, pz-czmm);
+  return d < R ? 300 : (d < R+8 ? 900 : -900);
+};
+function snap(budget, q) {
+  const jit = () => (Math.random()-0.5) * q;   // q shrinks with budget -> sharper
+  return { budget, bytes: budget, ms: budget/2e4,
+    ax: mk(Y*X, i => ball((i%X)*sx, ((i/X)|0)*sy, czmm) + jit()),
+    co: mk(Z*X, i => ball((i%X)*sx, cymm, ((i/X)|0)*sz) + jit()),
+    sa: mk(Z*Y, i => ball(cxmm, (i%Y)*sy, ((i/Y)|0)*sz) + jit()) };
+}
+const budgets = [8192, 32768, 131072, 524288];
+const snaps = { neural: budgets.map((b,i)=>snap(b, 400/(i+1))),
+                htj2k:  budgets.map((b,i)=>snap(b, 1600/(i+1))) };
+makeSnapshotViewer({ shape:[Z,Y,X], spacing:[sz,sy,sx], win:1400, lev:300,
+  budgets, snaps, keys:["neural","htj2k"], el:(id)=>document.getElementById(id) });
+
+// Drive the interactions head-lessly: ?zoom=N applies N wheel notches over the
+// neural axial, ?pan=x,y drags from that point. Both panes must respond
+// identically -- a compare view whose halves disagree is worse than useless.
+const q = new URLSearchParams(location.search);
+const cell0 = document.querySelector("#cmp-neural .cmpcell");
+const r0 = cell0.getBoundingClientRect();
+const at = { clientX: r0.left + r0.width * 0.62, clientY: r0.top + r0.height * 0.40 };
+const n = +(q.get("zoom") ?? 0);
+for (let i = 0; i < n; i++) {
+  cell0.querySelector("canvas").dispatchEvent(
+    new WheelEvent("wheel", { deltaY: -100, bubbles: true, cancelable: true, ...at }));
+}
+if (q.has("pan")) {
+  const [dx, dy] = q.get("pan").split(",").map(Number);
+  const cv0 = cell0.querySelector("canvas");
+  cv0.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 1, ...at }));
+  cv0.dispatchEvent(new PointerEvent("pointermove", { bubbles: true, pointerId: 1,
+    clientX: at.clientX + dx, clientY: at.clientY + dy }));
+  cv0.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1 }));
+}
+
+// Self-check, so the two faults that shipped last time cannot come back
+
+// unnoticed: panes drawn at voxel pitch instead of physical size, and a
+// transform that loses centring under scale or desyncs the two arms.
+function xf(sel) {
+  const m = new DOMMatrix(getComputedStyle(document.querySelector(sel)).transform);
+  return { sx: m.a, sy: m.d, tx: m.e, ty: m.f };
+}
+const fails = [];
+const nAx = xf("#cmp-neural .cmpcell:nth-child(1) canvas");
+const hAx = xf("#cmp-htj2k  .cmpcell:nth-child(1) canvas");
+const nCo = xf("#cmp-neural .cmpcell:nth-child(2) canvas");
+// 1. the two arms must be pixel-locked
+if (Math.abs(nAx.sx - hAx.sx) > 1e-6 || Math.abs(nAx.tx - hAx.tx) > 0.5 ||
+    Math.abs(nAx.ty - hAx.ty) > 0.5) fails.push("arms not locked");
+// 2. scale must be uniform: anisotropy belongs in the CSS size, not the matrix,
+//    otherwise a round object renders as an ellipse
+if (Math.abs(nAx.sx - nAx.sy) > 1e-6) fails.push("non-uniform scale on axial");
+if (Math.abs(nCo.sx - nCo.sy) > 1e-6) fails.push("non-uniform scale on coronal");
+// 3. physical sizing: the coronal canvas must be Z*sz mm tall, not Z px
+const co = document.querySelector("#cmp-neural .cmpcell:nth-child(2) canvas");
+if (Math.abs(parseFloat(co.style.height) - Z * sz) > 0.5) fails.push("coronal not sized in mm");
+if (Math.abs(parseFloat(co.style.width) - X * sx) > 0.5) fails.push("coronal width not in mm");
+// 4. zoom must actually magnify, and stay centred (image still overlaps the cell)
+if (n > 0) {
+  const cellR = document.querySelector("#cmp-neural .cmpcell").getBoundingClientRect();
+  const cvR = document.querySelector("#cmp-neural .cmpcell canvas").getBoundingClientRect();
+  if (nAx.sx <= 0.999) fails.push("zoom did not magnify");
+  const overlap = Math.min(cvR.right, cellR.right) - Math.max(cvR.left, cellR.left);
+  if (overlap < cellR.width * 0.3) fails.push("zoomed image drifted out of the cell");
+}
+console.log(fails.length ? "HARNESS FAIL: " + fails.join("; ") : "HARNESS PASS");
+window.__ready = true;
+</script>
