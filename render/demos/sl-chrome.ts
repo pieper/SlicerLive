@@ -56,6 +56,7 @@ const DEFAULT_HELP: { title: string; rows: [string, string][] }[] = [
     ["Left / Right", "Yaw"], ["Shift + Left/Right", "Pitch"], ["Ctrl + Left/Right", "Roll"],
     ["Space", "Toggle forward cruise"], ["Shift + Space", "Toggle reverse cruise"],
     ["Escape", "Stop"], ["Left-drag", "Look around"], ["Shift + click", "Autopilot target"],
+    ["Speed slider", "Travel speed in mm/s (live, applies mid-flight)"],
   ] },
   { title: "Slice views", rows: [
     ["Wheel / Left-drag", "Scroll through slices"], ["Right-drag / ⌘-wheel", "Zoom this slice"],

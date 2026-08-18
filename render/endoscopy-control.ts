@@ -44,6 +44,8 @@ export type Cruise = "forward" | "back" | "stopped";
 
 export interface EndoscopyOpts {
   /** mm per second while cruising (default 4 — vessels are small; this is a slow drift). */
+  /** Travel speed in mm/s (default 8). Vessels are small, so this is deliberately far below
+   *  a flythrough of, say, a colon; it can be changed live with setSpeed(). */
   speedMmPerSec?: number;
   /** degrees per second for arrow-key turning (default 60). */
   turnDegPerSec?: number;
@@ -75,6 +77,10 @@ export interface EndoscopyControls {
   setCruise(c: Cruise): void;
   /** Point the camera without changing position (e.g. adopting a pose from Slicer). */
   lookAlong(dir: Vec3): void;
+  /** Travel speed in mm/s, for both the arrow keys and the space-bar cruise. Live: changing it
+   *  mid-flight takes effect on the next tick, because every step is speed * dt. */
+  speed(): number;
+  setSpeed(mmPerSec: number): void;
   detach(): void;
 }
 
@@ -102,7 +108,7 @@ export function attachEndoscopyControls(
   camera: EndoCamera,
   opts: EndoscopyOpts = {},
 ): EndoscopyControls {
-  const speed = opts.speedMmPerSec ?? 4;
+  let speed = opts.speedMmPerSec ?? 8;
   const turn = ((opts.turnDegPerSec ?? 60) * Math.PI) / 180;
   const lookRad = opts.lookRadPerPx ?? 0.005;
   const refUp: Vec3 = opts.referenceUp ?? [0, 0, 1];
@@ -226,6 +232,8 @@ export function attachEndoscopyControls(
     cruise: () => cruise,
     setCruise,
     lookAlong: (dir) => { setDirection(dir); opts.onChange?.(); },
+    speed: () => speed,
+    setSpeed: (mmPerSec) => { speed = Math.max(0.1, mmPerSec); },
     tick(dtSec) {
       let moved = false;
       const dt = Math.min(dtSec, 0.1);   // clamp: a long stall must not teleport the camera

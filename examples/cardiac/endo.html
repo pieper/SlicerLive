@@ -21,8 +21,9 @@
   #keys { opacity: .65; font-size: 12px; }
   #transport { display: none; align-items: center; gap: 8px; }
   input[type=range] { accent-color: #4a86e8; }
-  #scrub { width: 190px; } #fps { width: 90px; }
-  #frameLbl, #fpsLbl { font-variant-numeric: tabular-nums; opacity: .7; min-width: 44px; }
+  #scrub { width: 190px; } #fps { width: 90px; } #speed { width: 110px; }
+  #frameLbl, #fpsLbl, #speedLbl { font-variant-numeric: tabular-nums; opacity: .7; min-width: 44px; }
+  #speedLbl { min-width: 62px; }
   main { flex: 1; min-height: 0; padding: 6px; }
   #grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
           gap: 4px; width: 100%; height: 100%; }
@@ -79,6 +80,11 @@
     <span id="keys">↑↓ in/out · ←→ yaw · shift+←→ pitch · ctrl+←→ roll · SPACE cruise · SHIFT+click a target</span>
   </div>
   <div class="group">
+    <label for="speed" style="opacity:.6">speed</label>
+    <input type="range" id="speed" min="1" max="60" step="1" value="8">
+    <span id="speedLbl">8 mm/s</span>
+  </div>
+  <div class="group">
     <label for="preset" style="opacity:.6">preset</label>
     <select id="preset"></select>
   </div>
@@ -124,4 +130,4 @@
 </div>
 
 <script>window.CARDIAC_DEMO = "endo";</script>
-<script type="module" src="cardiac.js?v=20260818c"></script>
+<script type="module" src="cardiac.js?v=20260818d"></script>

@@ -355,6 +355,24 @@ function seatFlight(p: { pos: Vec3; fp: Vec3; up: Vec3; va?: number }): void {
   draw3d();
 }
 
+// ---- flight speed ---------------------------------------------------------------------------
+// A header control rather than a popup one: speed is the thing you adjust WHILE flying, and the
+// SlicerLive popup opens over the 3D view, so it would hide what you are steering.
+// Only endo.html carries the markup — cardiac.html shares this bundle, hence the null checks.
+const speedEl = document.getElementById("speed") as HTMLInputElement | null;
+const speedLbl = document.getElementById("speedLbl");
+const DEFAULT_SPEED = 8;                       // mm/s
+const flightSpeed = () => (speedEl ? Number(speedEl.value) : DEFAULT_SPEED);
+const showSpeed = () => { if (speedLbl) speedLbl.textContent = `${flightSpeed()} mm/s`; };
+if (speedEl) {
+  speedEl.value = String(DEFAULT_SPEED);
+  showSpeed();
+  speedEl.oninput = () => {
+    showSpeed();
+    endo?.setSpeed(flightSpeed());             // live: takes effect on the next tick
+  };
+}
+
 const startFlight = async () => {
   if (!sc.ctaLoaded()) { await loadCtaIfNeeded(); setMode("cta"); }
   applyPreset("CT-EndoVascular");
@@ -370,7 +388,7 @@ const startFlight = async () => {
   lastGoodPos = [...camera.position] as Vec3;
   endo?.detach();
   endo = attachEndoscopyControls(cv.threeD, camera, {
-    speedMmPerSec: 4,        // vessels are small; 10x slower than the first cut
+    speedMmPerSec: flightSpeed(),
     marginMm: MARGIN_MM,
     referenceUp: [0, 0, 1],
     onChange: () => { jumpSlicesTo(camera.position); draw3d(); },
@@ -383,6 +401,7 @@ const startFlight = async () => {
     // works for reverse as well as forward — pick(u,v) could only ever see what is on screen.
     clearance: (dir) => (dot3(dir, probedDir) > 0.9 ? clearanceAhead : Infinity),
   });
+  endo.setSpeed(flightSpeed());
   endo.lookAlong(SEED_DIR);                                 // up the aorta
   if (fromSlicer) seatFlight(fromSlicer);
   status(fromSlicer ? "flight started from Slicer's camera" : "flight started from the aortic seed");
@@ -426,7 +445,7 @@ const showCruise = (c: Cruise) => {
   const label = c === "forward" ? "▶ forward" : c === "back" ? "◀ back" : "■ stopped";
   $("cruise").textContent = label;
   $("cruise").className = c === "stopped" ? "" : "on";
-  status(`endovascular flight · ${label} · ↑↓ in/out · ←→ yaw · shift ←→ pitch · ctrl ←→ roll · space cruise`);
+  status(`endovascular flight · ${label} · ${flightSpeed()} mm/s · ↑↓ in/out · ←→ yaw · shift ←→ pitch · ctrl ←→ roll · space cruise`);
 };
 
 // Cine rendering: accumulate the CURRENT phase live, every frame, with no precomputation.
@@ -877,6 +896,7 @@ if (new URLSearchParams(location.search).has("follow")) {
     adaptiveFramesInCine,        // must stay 0: two accumulator owners = flashing phases
     lastCamMove, renderInFlight,
     flying, cruise: endo ? endo.cruise() : "stopped",
+    speedMmPerSec: endo ? endo.speed() : flightSpeed(),
     autoTarget: autoTarget ? [...autoTarget] : null,
     seekTarget: seekTarget ? [...seekTarget] : null,   // the lead point: LEAD_MM ahead along aimDir
     aimDir: aimDir ? [...aimDir] : null,
@@ -896,6 +916,10 @@ if (new URLSearchParams(location.search).has("follow")) {
   resync: () => { resyncOnce = true; },
   followedPose: () => followedPose,
   setCruise: (c: Cruise) => endo?.setCruise(c),
+  setSpeed: (mmPerSec: number) => {
+    if (speedEl) { speedEl.value = String(mmPerSec); showSpeed(); }
+    endo?.setSpeed(mmPerSec);
+  },
   setAutoTarget,
   // Drive the camera to exact values so a view can be matched 1:1 against Slicer.
   getCamera: () => ({
