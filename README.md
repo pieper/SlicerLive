@@ -1,231 +1,191 @@
-<p align="center">
-  <img src="docs/slicerlive-logo.png" alt="SlicerLive" width="320">
-</p>
+# slicerlive 🧬
 
-# SlicerLive
+⚠️ **EXPERIMENTAL & AI-ASSISTED** — This is an early-stage research project deliberately written with AI-assisted coding. Expect rapid change, incomplete features, and rough edges. Use at your own risk in production.
 
-**Live 3D Slicer scenes on the web** — open a URL and a Slicer scene renders interactively in your browser
-on your own GPU, with no Slicer install and no server for the common case. The same TypeScript/WebGPU
-renderer also runs headless under Deno, so scenes too big for the browser can render on a remote GPU and
-stream to thin clients. Gateway eventually at **live.slicer.org**.
+**Live 3D Slicer scenes on the web** — open a URL and a Slicer scene renders interactively in your browser on your own GPU, with no Slicer install and no server for the common case. The same TypeScript/WebGPU renderer also runs headless under Deno, so scenes too big for the browser can render on a remote GPU and stream to thin clients. Gateway eventually at **live.slicer.org**.
 
-> ⚠️ **Work in progress.** SlicerLive is an experimental platform under active development — and, quite
-> deliberately, an experiment in AI-assisted coding: much of this code is written by AI agents working
-> under human direction and review. Expect rough edges and rapid change.
+> **Status:** Early development. Experimental platform under active development with rapidly evolving architecture. Much of this codebase is written by AI agents working under human direction and review.
 
-## Try it
+## What is slicerlive?
 
-- **SEGRoulette** — spin a random AI / expert segmentation from the NCI <a href="https://imaging.datacommons.cancer.gov/" target="_blank" rel="noopener">Imaging Data Commons</a>
-  (with its source CT, MR, or PET) into a live 3D + MPR viewer, DICOM streamed straight from IDC's public buckets:
-  <a href="https://pieper.github.io/live/webgpu/segroulette.html" target="_blank" rel="noopener"><b>pieper.github.io/live/webgpu/segroulette.html</b></a>
-- **Gallery** of live demos (volume rendering, 4-up MPR, segment editing, nnLive AI segmentation, LiveCodec, spine review):
-  <a href="https://pieper.github.io/live/" target="_blank" rel="noopener">pieper.github.io/live</a>
-- **Colab notebook** — find an IDC segmentation with `idc-index` and view it in an embedded SlicerLive output cell:
-  <a href="https://colab.research.google.com/github/pieper/SlicerLive/blob/main/notebooks/SlicerLive_IDC_demo.ipynb" target="_blank" rel="noopener"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a>
+**slicerlive** is a **modular, open ecosystem** for bringing medical imaging scenes to life in the browser and beyond. Rather than a monolithic application, it's a collection of independently-useful components that work together:
+
+- **Rendering** — WebGPU-powered 3D/MPR visualization with no scene-graph overhead
+- **Sync** — Real-time bidirectional sync (MRML ↔ browser ↔ remote GPU)
+- **mrson** — A vendor-neutral medical scene format (DICOM-aware, Git-friendly, content-addressed)
+- **Algorithms** — GPU-accelerated interactive segmentation with live preview
+- **Headless rendering** — The same TypeScript/WebGPU renderer runs in Deno for remote GPU compute
+
+## Future Organization
+
+The codebase will eventually be split across multiple focused repositories:
+
+| Component | Purpose | Future location |
+|-----------|---------|-----------------|
+| **rendering** | WebGPU 3D/MPR renderer (browser + Deno headless) | `slicerlive/rendering` |
+| **mrson** | Medical scene format (schema, codecs, validators) | `slicerlive/mrson` |
+| **sync** | Real-time scene replication + CouchDB-style sync | `slicerlive/sync` |
+| **algorithms** | GPU-accelerated segment editing engine | `slicerlive/algorithms` |
+| **core** | LiveScene model + observer dispatch | `slicerlive/core` |
+| **slicer** | 3D Slicer integration (LiveStory module + examples) | `slicerlive/slicer` |
+| **examples** | Demo applications (cardiac, spine review, SEGRoulette) | `slicerlive/examples` |
+| **harness** | Slicer ↔ Browser parity testing framework | `slicerlive/harness` |
+
+Currently everything is in this monorepo. See [docs/REFACTORING.md](docs/REFACTORING.md) for the planned separation strategy.
+
+## Quick Start
+
+### Try it live
+- **[SEGRoulette](https://pieper.github.io/live/webgpu/segroulette.html)** — Spin random AI segmentations from the NCI Imaging Data Commons
+- **[Gallery](https://pieper.github.io/live/)** — Volume rendering, 4-up MPR, segment editing, nnLive AI, LiveCodec
+
+### For developers
+
+**Render a volume in the browser:**
+```typescript
+import { SceneRenderer } from '@slicerlive/rendering';
+import { fetchZarrVolume } from '@slicerlive/rendering/zarr';
+
+const volume = await fetchZarrVolume('https://my-data-bucket/', zarSpec);
+const renderer = new SceneRenderer(canvas, device);
+renderer.addImageField(volume);
+renderer.render();
+```
+
+**Sync a scene bidirectionally:**
+```typescript
+import { LiveScene } from '@slicerlive/core';
+import { LiveSync } from '@slicerlive/sync';
+import { WebSocketTransport } from '@slicerlive/sync/transport';
+
+const scene = new LiveScene();
+const sync = new LiveSync(scene, new WebSocketTransport('ws://localhost:8000'));
+// Changes on either side propagate automatically
+```
 
 ## Architecture
 
-The one-line thesis: a **LiveScene** is a live, partially-replicated MRML scene — metadata (node state) plus
-bulk data (content-addressed blobs) — that any number of **participants** observe and write back to over any
-of several **transports**. Everything else in SlicerLive is either a participant or a transport. The current
-canonical architecture note is
-<a href="docs/ARCHITECTURE-2026-08-02.md" target="_blank" rel="noopener"><code>docs/ARCHITECTURE-2026-08-02.md</code></a>;
-it links back through the earlier iterations it supersedes.
+### The core idea: LiveScene
 
-### The renderer
+A **LiveScene** is a live, partially-replicated medical scene — metadata (node state) plus bulk data (content-addressed blobs) — that any number of **participants** observe and write back to over any of several **transports**.
 
-`render/` is a from-scratch TypeScript/WebGPU renderer with no scene-graph framework underneath. Its unit of
-content is the **Field**: a WGSL-composable piece of renderable content that a `SceneRenderer` (3D) or
-`SliceRenderer` (4-up MPR) ray-marches, compositing all fields in a single pass. The current fields:
+**Everything else is either a participant or a transport:**
 
-- **`ImageField`** — a scalar image volume, direct volume rendering through a transfer function, with
-  shading and cached empty-space skipping.
-- **`RGBAVolumeField`** — a precolored RGBA volume, rendered directly (see colorize mode below).
-- **`SegmentField`** — a segmentation rendered as a smooth shell or translucent surface (modes below).
-- **`FiducialField`** — markup points as shaded, pickable spheres.
-- **`CapsuleField`** — line and curve markups as capsule segments.
-- **`RoiBoxField`** — an interactive ROI box with drag handles, whose planes crop any field marked clippable.
-- **`TransformGizmoField`** — handles for grabbing and dragging transforms in the 3D view.
-- **`TransformField`** — a modifier rather than a compositor: a displacement grid that warps another field's
-  sampling position during the ray march.
+- **Participants:** 3D Slicer (LiveStory), web browser, headless renderer, AI agent
+- **Transports:** WebSocket, shared memory (planned), file system
+- **Observers:** Renderer, UI controls, analysis pipelines
 
-**Transforms.** Linear (rigid/affine) transforms compose into each field's image-to-patient matrix, so a
-transformed volume, segmentation, or markup costs nothing extra at render time. Nonlinear transforms — grid
-and thin-plate-spline displacement fields — are `TransformField`s: a receiver field warps its sampling
-position (including its gradient taps) through the displacement grid, so warps deform the apparent shape of
-volumes and the positions of markups without the receiver knowing anything about the transform. Everything
-runs in patient space, in millimeters, with slice orientations and display conventions matching Slicer's.
+The invariant: controllers never touch render objects or the network, views never write, and sync never renders — all coordinate only through LiveScene node state.
 
-**Segmentation rendering** gets particular attention, with several modes for different uses:
+### Layers
 
-- **Labelmap slices** — 2D slice views sample the labelmap with nearest-neighbor filtering for crisp,
-  unsmoothed label boundaries, with per-label colors read straight from the label texture.
-- **Iso shell** (the 3D default) — the binary labelmap is pre-smoothed by a small Gaussian and ray-marched
-  as a crisp, opaque, sub-voxel anti-aliased shell at its mid-value isosurface. A pure ray-marched surface:
-  no marching cubes, no polygons, so edits appear instantly.
-- **Gradient-opacity surface** — a translucent mode where opacity follows the local gradient magnitude,
-  giving the soft see-through look familiar from GPU volume-rendered segmentations.
-- **RGBA colorize** — segmentation colors are baked together with the grayscale volume into a single RGBA
-  volume (the "colorize volume" style) and rendered as one `RGBAVolumeField`, ideal for showing many labels
-  in anatomical context.
-- **SDF shells** — a signed-distance field is baked from the labelmap by a jump-flooding compute pass and
-  rendered as a terrace-free crisp shell, with an optional per-voxel attribute texture giving each label its
-  own opacity. An **adjacent-label interface mode** stores the unsigned distance to the nearest label
-  *change* rather than to background, and re-derives surface normals locally — so tightly packed, touching,
-  or nested labels (think vertebrae, or organs sharing walls) all surface cleanly from one multi-material
-  field instead of one SDF per segment.
+```
+┌─────────────────────────────────────────────┐
+│  Applications (cardiac, spine review, etc)  │
+├─────────────────────────────────────────────┤
+│  Slicer integration (LiveStory) + UI        │
+├─────────────────────────────────────────────┤
+│  Sync (replication, transport)              │
+├─────────────────────────────────────────────┤
+│  Core (LiveScene, observer dispatch)        │
+├─────────────────────────────────────────────┤
+│  mrson (document format + ops)              │
+├─────────────────────────────────────────────┤
+│  Rendering (3D/MPR fields + GPU plumbing)   │
+│  Algorithms (segment editing compute)       │
+└─────────────────────────────────────────────┘
+```
 
-Performance work is measured, not guessed: GPU timestamp-query profiling and an ablation harness drive
-optimizations like cached empty-space horizons (a representative scene went 236 ms → 27 ms with
-byte-identical output); see
-<a href="docs/RENDER-PERFORMANCE.md" target="_blank" rel="noopener"><code>docs/RENDER-PERFORMANCE.md</code></a>.
+## Code Review & Quality
 
-One codebase runs in the browser and headless under Deno — the remote path treats rendering as a
-**Producer → sample stream → Reconstructor** pipeline steered by a frame-time **Budget**, so progressive
-refinement locally and streamed rendering from a big remote GPU are the same mechanism
-(<a href="docs/UNIFIED-RENDERING-PLAN.md" target="_blank" rel="noopener"><code>docs/UNIFIED-RENDERING-PLAN.md</code></a>).
+**This is an AI-assisted codebase.** When reviewing code:
 
-### The scene model: observer-MVC, in Slicer's own terms
+- Verify numerical correctness, especially in ray-marching shaders and coordinate transforms
+- Check for off-by-one errors in medical coordinate systems (RAS/LPS, IJK/voxel semantics)
+- Ensure WebGPU device lifecycle and resource cleanup are correct
+- Validate DICOM/mrson round-trip fidelity for real datasets
+- Test edge cases (empty volumes, single-slice images, extreme aspect ratios)
 
-SlicerLive deliberately mirrors Slicer's MVC/observer shape, using Slicer's vocabulary:
+AI-generated code is often creative and performant but can hide subtle bugs. **Comprehensive testing and human review are essential** before any clinical use.
 
-- **LiveScene (the Model)** — the local authoritative copy of the scene, held as mrson nodes plus
-  content-addressed blobs. It exposes `applyOp()`: apply a mutation and notify observers. Every write is
-  tagged `{origin, version}`. This is the analogue of `vtkMRMLScene` and its node `ModifiedEvent`s.
-- **DisplayableManagers (the View)** — keyed by node type, they observe the scene, rebuild GPU render
-  objects (Fields) from node state, and request renders. Read-only, exactly like Slicer's
-  `vtkMRMLAbstractDisplayableManager`.
-- **Interactors and Controls (the Controller)** — the write half. An **Interactor** handles pointer input
-  through a grab-or-bubble stack (camera at the root) and writes node state while holding an interaction
-  lease; a **Control** is a data-bound DOM widget, the 1:1 DOM dual of a Slicer `qMRML` widget — it observes
-  a node property and writes changes back. The event and multi-rate interaction model is specified in
-  <a href="docs/ARCHITECTURE-2026-07-24.md" target="_blank" rel="noopener"><code>docs/ARCHITECTURE-2026-07-24.md</code></a>.
+## Key Documentation
 
-The invariant that keeps this honest: controllers never touch render objects or the network,
-views never write, and sync never renders — all three coordinate only through LiveScene node state. That
-means the same code runs standalone or connected: "connected" just adds a sync peer.
+- **[ARCHITECTURE-2026-08-02.md](docs/ARCHITECTURE-2026-08-02.md)** — System design and invariants
+- **[MRSON-LIVESCENE.md](docs/MRSON-LIVESCENE.md)** — Scene format and protocol
+- **[RENDER-PERFORMANCE.md](docs/RENDER-PERFORMANCE.md)** — GPU profiling and optimization
+- **[ALGORITHMS.md](docs/ALGORITHMS.md)** — Segment editing engine design
+- **[UNIFIED-RENDERING-PLAN.md](docs/UNIFIED-RENDERING-PLAN.md)** — Progressive refinement and remote GPU rendering
+- **[SLICERLIVE.md](docs/SLICERLIVE.md)** — Roadmap and future plans
 
-### LiveSync: replication, decoupled from everything else
+## Development Setup
 
-The mental model is CouchDB-shaped — LiveScene is a local database, its observer dispatch is the changes
-feed, and **LiveSync** is replication between two such databases (a browser LiveScene and a running Slicer,
-or two LiveScenes). LiveSync is the only component that knows about the wire, so all the impedance matching
-lives in one tunable place: latest-wins coalescing per key, debounce to the transport's sustainable rate,
-echo suppression, update-on-complete for interactions that must not stream, and per-peer sequence
-checkpoints so a reconnect catches up rather than re-snapshotting the scene. Bulk data rides a separate
-content-addressed channel — the changes feed carries blob hashes, the bytes move lazily. The WebSocket is
-the current transport; a shared-memory transport is planned for the bulk-data channel, so co-located
-processes (Slicer and a local renderer, or renderer and compute) can pass volumes without copies. After any
-burst, both sides converge on the same state. Divergence resolves by authority: a user-initiated change
-beats any automated or echoed value
-(<a href="docs/ARCHITECTURE-2026-08-02.md" target="_blank" rel="noopener"><code>docs/ARCHITECTURE-2026-08-02.md</code></a> §2–2a).
+### Prerequisites
+- Deno 1.x
+- Node 20+ (for VTK.js bundling)
+- (Optional) 3D Slicer for LiveStory integration
 
-In practice this syncs bidirectionally with a running 3D Slicer over a WebSocket at ~1 ms per op — drag a
-markup in the browser and it moves in Slicer, toggle visibility in Slicer's Qt GUI and the browser follows.
+### Local Development
 
-### mrson: the scene format
+**Render library:**
+```bash
+cd render
+deno lint
+deno check
+deno test --allow-write test/
+```
 
-**mrson** is the document and operation format that LiveSync (and files, and recordings) carry —
-LiveScene is the protocol, mrson is the payload, deliberately split so mrson can stand alone as a
-vendor-neutral format. It is a schema'd JSON representation of a medical scene with two faces: a
-materialized **document** (snapshot) and a stream of **ops** (incremental patches, Lamport-versioned,
-drop-to-latest safe). Types are neutral nouns (`image`, `segmentation`, `markup`, `transform`, `mesh`,
-`camera`…), not VTK class names; world space is patient space with explicit frames of reference; DICOM is
-treated as a boundary — imported attributes are carried losslessly for round-trip, but never drive the
-runtime. The full design, including how it subsumes OpenIGTLink-style realtime streams, is
-<a href="docs/MRSON-LIVESCENE.md" target="_blank" rel="noopener"><code>docs/MRSON-LIVESCENE.md</code></a>;
-scenes also support content-addressed commits and forks for Git-like history and sharing
-(<a href="docs/MRSON-COMMITS-FORKS.md" target="_blank" rel="noopener"><code>docs/MRSON-COMMITS-FORKS.md</code></a>).
+**Live demos:**
+```bash
+deno run -A examples/cardiac/serve.ts  # http://localhost:8777
+```
 
-### Segment editing
+**Full build and test:**
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed setup.
 
-`algorithms/` is a WebGPU-compute segment-editing engine — a sibling of `render/` with a strictly one-way
-dependency (it imports the renderer's device and field plumbing; the renderer never imports it). An
-`EditableSegmentation` keeps the labelmap in a GPU buffer that effects (paint, draw, islands, margin…)
-mutate incrementally in compute shaders, with a live smooth-surface render mode so edits appear under the
-brush in real time. It is driven entirely by mrson ops — no UI of its own — so the same edits can come from
-a browser interactor, a replayed recording, or an AI agent; `logic/` glues the engines together. Design and
-milestones: <a href="docs/ALGORITHMS.md" target="_blank" rel="noopener"><code>docs/ALGORITHMS.md</code></a>.
+## Design Philosophy
 
-### The Slicer side: LiveStory
+1. **Modular, not monolithic** — Use what you need. A renderer can work standalone; sync can work with any scene model.
 
-`LiveStory/` is the 3D Slicer module that makes Slicer a LiveScene peer. It exports a loaded scene to
-mrson (a self-contained serializer, no Slicer core changes), hosts the Slicer-side LiveSync endpoint
-(`mrson_live.py`: MRML observers out, `applyOps` in, with its own outbound coalescing), and records whole
-sessions as keyframe + delta streams with real 4-up screenshots — a recorded session can be scrubbed and
-replayed in the browser viewer. Narrated scene stories are served through Slicer's built-in WebServer.
+2. **Performance is measurable** — GPU profiling, ablation harness, regression testing. Guessing is not allowed.
 
-### Testing: numbers, not screenshots
+3. **Vendor-neutral format** — mrson is DICOM-aware but doesn't require DICOM. It's a medical scene format, not a DICOM reader.
 
-`harness/` drives identical synthetic input into native Slicer (via an MCP server) and the browser (via
-Chrome DevTools Protocol) and compares **numbers** — camera parameters, slice offsets, voxel indices —
-so look-and-feel parity with Slicer is a regression suite, not an eyeball judgment. Fixture-replay checks
-run CI-style with neither Slicer nor a browser; see
-<a href="docs/HARNESS.md" target="_blank" rel="noopener"><code>docs/HARNESS.md</code></a>.
+4. **One codebase, many contexts** — Browser TypeScript/WebGPU, headless Deno, Slicer Python. Same algorithms, different runtimes.
 
-## Background
+5. **Designed for AI** — Discrete ops, deterministic replay, API-first (no GUI required). Natural fit for AI-assisted segmentation and workflow.
 
-SlicerLive continues a line of experiments in GPU-accelerated medical imaging:
+## Funding
 
-- <a href="https://github.com/pieper/SlicerCL" target="_blank" rel="noopener"><b>SlicerCL</b></a> —
-  3D Slicer extensions written in OpenCL through pyopencl, including a GPU-accelerated GrowCut effect for
-  Slicer's segmentation editor. It contributed the core idea behind `algorithms/`: interactive segmentation
-  editing expressed as GPU compute kernels, driven live from an editor UI. It also introduced the
-  compositing renderer that `render/` follows — multiple pieces of content composited in a single
-  ray-cast pass — along with analytic signed-distance-field compositing and ray marching through
-  nonlinear transforms, the direct ancestors of today's Fields, SDF shells, and `TransformField`.  This led to a proposal for [CommonGL](https://docs.google.com/document/d/1-4Up_Shq6oFTGhwXIF5DuiXUYsdIMlAC1oK7eNHWP_o/edit?usp=sharing) and experiments adding functionality to VTK's GLSL.
+This work is supported by the NIH grant **[R01 CA310962](https://reporter.nih.gov/search/NqGZkegLQkaxQEbLxCXMdw/project-details/11343589#description)** — *3D Slicer: A unified open-source platform for advanced cancer imaging research*.
 
-  <a href="https://www.youtube.com/watch?v=hFxTyLPjQd0" target="_blank" rel="noopener"><img src="https://img.youtube.com/vi/hFxTyLPjQd0/mqdefault.jpg" alt="Nonlinear Transforms and Volume Rendering" width="200"></a>
-  <br><sub><a href="https://www.youtube.com/watch?v=hFxTyLPjQd0" target="_blank" rel="noopener">Nonlinear Transforms and Volume Rendering</a></sub>
+## License
 
-- <a href="https://github.com/pieper/step" target="_blank" rel="noopener"><b>step</b></a> — GPU medical
-  image computing in the browser with JavaScript and WebGL 2.0, working directly from DICOM-native data
-  structures. It contributed the everything-in-the-browser premise, the patient/pixel/texture coordinate
-  discipline and `aToB` naming conventions the renderer still uses, and the transform-composition pattern
-  that `TransformField` follows today.
+Apache 2.0 — same as 3D Slicer.
 
-  <a href="https://youtu.be/ML9_JWAz1kY" target="_blank" rel="noopener"><img src="https://img.youtube.com/vi/ML9_JWAz1kY/mqdefault.jpg" alt="STEP nonlinear transform volumes" width="200"></a>
-  <a href="https://youtu.be/8dputUoKBTA" target="_blank" rel="noopener"><img src="https://img.youtube.com/vi/8dputUoKBTA/mqdefault.jpg" alt="MR/US registration in step" width="200"></a>
-  <br><sub><a href="https://youtu.be/ML9_JWAz1kY" target="_blank" rel="noopener">STEP nonlinear transform volumes</a> &nbsp;·&nbsp; <a href="https://youtu.be/8dputUoKBTA" target="_blank" rel="noopener">MR/US, step p3</a></sub>
+## Contributing
 
-Beyond these direct ancestors, SlicerLive owes its deepest debt to the
-<a href="https://www.slicer.org/" target="_blank" rel="noopener">3D Slicer</a> developers and users —
-decades of their designs, code, and clinical-research workflows are the inspiration for, and the reference
-implementation behind, essentially everything here — and to the many software developers and researchers
-who published the algorithms and open implementations this project draws on, from ray-marched volume
-rendering and jump-flooding distance transforms to the ecosystem of open DICOM tooling.
+**slicerlive** is an experimental platform under active development. We welcome:
 
-## Layout
+- Bug reports and feature requests
+- Performance profiling and optimization
+- New field types and rendering modes
+- Integration with other medical imaging workflows
+- Educational use and teaching materials
+- **Code reviews with attention to numerical correctness and medical imaging semantics**
 
-- `render/` — the WebGPU renderer core, plus `render/demos/` (the pages published to the gallery) and
-  `render/test/`.
-- `algorithms/`, `logic/` — the segment-editing compute engine and the app-layer glue.
-- `LiveStory/` — the 3D Slicer extension (export, live sync, session recording).
-- `examples/` — larger scenario apps (spine review, LiveCodec).
-- `harness/` — the Slicer ↔ SlicerLive A/B parity harness.
-- `notebooks/` — the Colab IDC demo.
-- `docs/` — design notes; start with
-  <a href="docs/ARCHITECTURE-2026-08-02.md" target="_blank" rel="noopener"><code>docs/ARCHITECTURE-2026-08-02.md</code></a>,
-  roadmap in <a href="docs/SLICERLIVE.md" target="_blank" rel="noopener"><code>docs/SLICERLIVE.md</code></a>.
-
-## Plans
-
-* This repo is a mix of code for testing convenience, but it will be refactored at some point.  The LiveStory Slicer scripted module obviously doesn't belong here.
-* More field types for different interactive controls should be added.
-* More of Slicer's core functionality exposed.
-* A mode like [OHIF's local viewer](https://viewer.ohif.org/local) or [SliceDrop](https://slicedrop.com/) so you can drag and drop data.
-* Integration with [dicom-curate](https://github.com/clintools/dicom-curate) to handle deidentification and cloud data sync.
-* A native app using deno to access resources the browser is sandboxed from.
-* Polish the remote rendering service (either local app or remote/cloud service) for on-demand scale up when the data is too big for the browser.
-* Better examples of real applications (bridges to data acquisition and device control for example).
-* Recipes for making custom apps.
-* Backward compatibility so existing Slicer extensions can leverage this code.  This basically already exists, in the sense that the LiveSync allows any Slicer Module's GUI and Logic to manipulate MRML and LiveSync will mirror (most of) that to SlicerLive, but we also want to look at using wasm and pyodide to port those to run in the browser unchanged (probably by making a mock-Qt in typescript).  Plus a migration guide to make native extensions in typescript directly.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed contribution guidelines.
 
 ## Acknowledgments
 
-This work is being developed under the NIH grant
-<a href="https://reporter.nih.gov/search/NqGZkegLQkaxQEbLxCXMdw/project-details/11343589#description" target="_blank" rel="noopener"><b>R01 CA310962</b>,
-<i>3D Slicer: A unified open-source platform for advanced cancer imaging research</i></a>.
+This work continues a line of GPU-accelerated medical imaging experiments:
 
-Thanks to **Andrey Fedorov** for his valuable testing and feedback, which shaped the SEGRoulette viewer
-and its IDC integration.
+- **[SlicerCL](https://github.com/pieper/SlicerCL)** — GPU-accelerated segmentation effects (OpenCL)
+- **[step](https://github.com/pieper/step)** — Browser-based GPU medical image computing (WebGL 2.0)
+
+Deep gratitude to the [3D Slicer](https://www.slicer.org/) developers and community for decades of inspiration and reference implementation.
+
+---
+
+**Gateway:** Eventually at **live.slicer.org**. Currently at [pieper.github.io/live](https://pieper.github.io/live).
+
+**Questions?** Open an issue, start a discussion, or reach out on the [3D Slicer Discourse](https://discourse.slicer.org).
