@@ -8,28 +8,33 @@
  */
 export type SnapKey = "neural" | "htj2k";
 
-export interface SnapPlanes {
-  budget: number;
-  bytes: number;
-  ms: number;
+export interface Planes {
   ax: Int16Array;  // (Y, X)
   co: Int16Array;  // (Z, X)
   sa: Int16Array;  // (Z, Y)
 }
+
+/** One 60 Hz tick. `p` is shared with the previous frame when the decoder did
+ *  not touch the volume, so a long race costs memory per visual change rather
+ *  than per frame. */
+export interface Frame { ms: number; bytes: number; gen: number; p: Planes }
 
 export interface ViewerConfig {
   shape: [number, number, number];      // Z, Y, X
   spacing: [number, number, number];    // mm per voxel, same order
   win: number;
   lev: number;
-  budgets: number[];
-  snaps: Record<SnapKey, SnapPlanes[]>;
+  frames: Record<SnapKey, Frame[]>;
   keys: readonly SnapKey[];
   el: (id: string) => HTMLElement;
 }
 
+/** Scrub resolution. The slider walks a byte axis rather than a frame index,
+ *  so both arms are always showing the same number of delivered bytes. */
+const STEPS = 600;
+
 export function makeSnapshotViewer(cfg: ViewerConfig): void {
-  const { shape: sc_shape, spacing, win, lev, budgets, snaps, keys } = cfg;
+  const { shape: sc_shape, spacing, win, lev, frames, keys } = cfg;
   const grids: Record<RowKey, HTMLElement> = {
     neural: cfg.el("cmp-neural"), htj2k: cfg.el("cmp-htj2k"),
   };
@@ -82,10 +87,30 @@ export function makeSnapshotViewer(cfg: ViewerConfig): void {
     }
   };
 
+  // The arms do not end on the same byte count -- HTJ2K's lossless stream is
+  // slightly smaller than the neural coarse+fine+residual total -- so a lookup
+  // that demanded an exact match made the shorter arm vanish at the end of the
+  // scrub. Take the last frame at or before the target and clamp, so each pane
+  // holds its final state instead of blanking.
+  const atBytes = (key: SnapKey, target: number): Frame | undefined => {
+    const f = frames[key];
+    if (!f.length) return undefined;
+    let lo = 0, hi = f.length - 1, best = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (f[mid].bytes <= target) { best = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return f[best];
+  };
+  const maxBytes = Math.max(
+    frames.neural[frames.neural.length - 1]?.bytes ?? 0,
+    frames.htj2k[frames.htj2k.length - 1]?.bytes ?? 0);
+
   const draw = (i: number) => {
     const lo = lev - win / 2, span = Math.max(1, win);
+    const target = maxBytes * (i / Math.max(1, STEPS));
     for (const k of keys) {
-      const s = snaps[k][i];
+      const s = atBytes(k, target)?.p;
       canvases[k].forEach((cv, pi) => {
         const ctx = cv.getContext("2d")!;
         if (!s) { ctx.clearRect(0, 0, cv.width, cv.height); return; }
@@ -101,19 +126,18 @@ export function makeSnapshotViewer(cfg: ViewerConfig): void {
         ctx.putImageData(img, 0, 0);
       });
     }
-    const n = snaps.neural[i], hj = snaps.htj2k[i];
+    const n = atBytes("neural", target), hj = atBytes("htj2k", target);
     const kb = (b?: number) => b == null ? "\u2014"
       : b < 1e6 ? `${(b / 1024).toFixed(0)} KB` : `${(b / 1e6).toFixed(1)} MB`;
     cfg.el("cmplabel").textContent =
-      `budget ${kb(budgets[i])}  \u00b7  neural ${kb(n?.bytes)} @ ${n ? (n.ms / 1000).toFixed(1) : "\u2014"} s`
+      `at ${kb(target)}  \u00b7  neural ${kb(n?.bytes)} @ ${n ? (n.ms / 1000).toFixed(1) : "\u2014"} s`
       + `  \u00b7  HTJ2K ${kb(hj?.bytes)} @ ${hj ? (hj.ms / 1000).toFixed(1) : "\u2014"} s`;
     applyView();
   };
 
   const slider = cfg.el("cmpslider") as HTMLInputElement;
-  const n = Math.max(snaps.neural.length, snaps.htj2k.length);
-  slider.max = String(Math.max(0, n - 1));
-  slider.value = String(Math.max(0, n - 1));
+  slider.max = String(STEPS);
+  slider.value = String(STEPS);
   slider.oninput = () => draw(+slider.value);
 
   const grid = cfg.el("cmpgrid");
@@ -154,6 +178,9 @@ export function makeSnapshotViewer(cfg: ViewerConfig): void {
     applyView();
   };
   grid.onpointerup = () => { drag = null; };
+  // The grid is a manipulation surface, so a right-drag has to reach us rather
+  // than raising the browser menu.
+  grid.oncontextmenu = (e: MouseEvent) => { e.preventDefault(); };
   grid.onpointercancel = () => { drag = null; };
   addEventListener("keydown", (e) => {
     if (!cfg.el("cmp").classList.contains("on")) return;

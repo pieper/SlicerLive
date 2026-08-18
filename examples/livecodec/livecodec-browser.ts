@@ -223,39 +223,70 @@ async function main() {
   const pacers = { neural: new LinkPacer(), htj2k: new LinkPacer() };
   const meters = { neural: new BandwidthMeter(), htj2k: new BandwidthMeter() };
 
-  // ── byte-matched snapshots ────────────────────────────────────────────────
-  // A side-by-side at matched BYTES is the only honest way to compare two
-  // codecs visually: at matched wall-clock the faster decoder just shows more
-  // data. Full volumes cannot be kept (a 797-slice row is 836 MB), so each
-  // snapshot stores the three orthogonal mid-planes at full resolution, which
-  // is what you actually zoom into.
-  interface Snapshot {
-    budget: number;            // the byte budget this was captured at
-    bytes: number;             // bytes actually delivered when captured
-    ms: number;                // wall clock since the arm's clock started
-    ax: Int16Array; co: Int16Array; sa: Int16Array;
-  }
-  const snaps: Record<RowKey, Snapshot[]> = { neural: [], htj2k: [] };
-  const snapNext: Record<RowKey, number> = { neural: 0, htj2k: 0 };
-  let BUDGETS: number[] = [];
+  // ── evolution recorder ────────────────────────────────────────────────────
+  // A handful of log-spaced budgets was too coarse to see anything develop, and
+  // it snapped at whatever byte count a decode step happened to land on, so the
+  // two arms were never really matched. Instead sample on a fixed 60 Hz clock
+  // and keep the planes UNCOMPRESSED, so scrubbing is a memory read rather than
+  // a PNG decode.
+  //
+  // 60 Hz is affordable only because frames are deduplicated: the decoders
+  // change the volume a few hundred times across a race, so most ticks are
+  // identical to the one before and store a shared reference instead of a copy.
+  // Memory therefore tracks the number of real visual updates, not the frame
+  // rate, and the timeline stays uniform in time for smooth scrubbing.
+  const FPS = 60;
+  const MAX_DISTINCT = 320;         // per arm; beyond this older frames are thinned
+  interface Planes { ax: Int16Array; co: Int16Array; sa: Int16Array }
+  interface Frame { ms: number; bytes: number; gen: number; p: Planes }
+  const frames: Record<RowKey, Frame[]> = { neural: [], htj2k: [] };
+  const gen: Record<RowKey, number> = { neural: 0, htj2k: 0 };
+  let distinctBytes = 0;
 
-  /** Log-spaced across the previewable tiers, where the picture changes fast,
-   *  then a few across the residual to confirm it does not. Storing planes
-   *  rather than volumes makes frames cheap (~0.8 MB a snapshot here), so the
-   *  preview gets sampled densely enough to actually scrub. */
-  function planBudgets(previewEnd: number, total: number,
-                       preSteps = 24, postSteps = 4): number[] {
-    const lo = Math.max(2048, Math.round(previewEnd / 60));
-    const out: number[] = [];
-    for (let i = 0; i < preSteps; i++) {
-      out.push(Math.round(lo * Math.pow(previewEnd / lo, i / (preSteps - 1))));
+  /** Mark the row's volume as changed. Called wherever pixels actually move —
+   *  per decoded slice, not per flush, so the residual's slow reveal is
+   *  recorded rather than quantised to 32-slice steps. */
+  const touch = (key: RowKey) => { gen[key]++; };
+
+  function planeBytes(): number {
+    const [Z, Y, X] = sc.shape;
+    return (Y * X + Z * X + Z * Y) * 2;
+  }
+
+  /** Halve the resolution of the stored timeline when it grows too large,
+   *  keeping the full span rather than truncating one end of the race. */
+  function thin(key: RowKey): void {
+    const f = frames[key];
+    const seen = new Set<number>();
+    const keep: Frame[] = [];
+    for (let i = 0; i < f.length; i++) {
+      if (f[i].gen !== f[i - 1]?.gen && (seen.size % 2 === 0 || i === f.length - 1)) keep.push(f[i]);
+      else if (f[i].gen === f[i - 1]?.gen) keep.push({ ...f[i], p: keep[keep.length - 1]?.p ?? f[i].p });
+      seen.add(f[i].gen);
     }
-    if (total > previewEnd * 1.5) {
-      for (let i = 1; i <= postSteps; i++) {
-        out.push(Math.round(previewEnd * Math.pow(total / previewEnd, i / postSteps)));
+    frames[key] = keep;
+  }
+
+  function recorder(key: RowKey): { stop: () => void } {
+    let lastGen = -1;
+    let last: Planes | null = null;
+    let distinct = 0;
+    const tick = () => {
+      const bytes = meters[key].summary().bytes;
+      const ms = performance.now() - race[key].t0;
+      if (gen[key] !== lastGen || last == null) {
+        const [Z, Y, X] = sc.shape;
+        last = capturePlanes(sc.rows[key].vol, Z, Y, X);
+        lastGen = gen[key];
+        distinct++;
+        distinctBytes += planeBytes();
+        if (distinct > MAX_DISTINCT) { thin(key); distinct = Math.ceil(distinct / 2); }
       }
-    }
-    return [...new Set(out)].sort((a, b) => a - b);
+      frames[key].push({ ms, bytes, gen: lastGen, p: last });
+    };
+    tick();
+    const id = setInterval(tick, 1000 / FPS);
+    return { stop: () => { clearInterval(id); tick(); } };
   }
 
   function capturePlanes(vol: Float32Array, Z: number, Y: number, X: number) {
@@ -272,17 +303,6 @@ async function main() {
     return { ax, co, sa };
   }
 
-  /** Capture every budget the arm has passed since the last check. Called after
-   *  each volume update, so a snapshot reflects what was on screen at the time. */
-  function maybeSnap(key: RowKey): void {
-    const got = meters[key].summary().bytes;
-    while (snapNext[key] < BUDGETS.length && got >= BUDGETS[snapNext[key]]) {
-      const budget = BUDGETS[snapNext[key]++];
-      const [Z, Y, X] = sc.shape;
-      snaps[key].push({ budget, bytes: got, ms: performance.now() - race[key].t0,
-                        ...capturePlanes(sc.rows[key].vol, Z, Y, X) });
-    }
-  }
 
 
   // end-of-race report: measured per-row throughput + fairness verdict
@@ -545,7 +565,7 @@ async function main() {
         const z0 = ch * sh.chunkZ;
         mapOutputToHU(out, vol, z0, Z, sh, dec, scale);
         sc.writeSlab("neural", z0, Math.min(Z, z0 + sh.chunkZ));
-        maybeSnap("neural");
+        touch("neural");
       };
       const tDec = performance.now();
       for (let ch = 0; ch < sh.chunks; ch++) {
@@ -580,7 +600,7 @@ async function main() {
         console.warn(`dc grid size ${dcGrid.length} does not match the volume shape — skipping DC correction`);
       }
       sc.writeSlab("neural", 0, Z);
-      maybeSnap("neural");
+      touch("neural");
       requestDraw();
 
       // ── residual stage → near-lossless (reversible HT slices of
@@ -640,11 +660,12 @@ async function main() {
             r.got = received;
             while (next < ridx.length && ridx[next].offset + ridx[next].bytes <= received) {
               applySlice(ridx[next]);
+              touch("neural");            // per slice: the residual reveals slowly
               next++;
               r.note = `${next}/${ridx.length} slices`;
               if (next - flushed >= 32) {
                 sc.writeSlab("neural", flushed, next);
-                maybeSnap("neural");
+                touch("neural");
                 flushed = next;
                 requestDraw();
               }
@@ -652,7 +673,7 @@ async function main() {
           }
           while (next < ridx.length && ridx[next].offset + ridx[next].bytes <= received) { applySlice(ridx[next]); next++; }
           sc.writeSlab("neural", flushed, Z);
-          maybeSnap("neural");
+          touch("neural");
           requestDraw();
         }
         r.note = "near-lossless";
@@ -781,7 +802,7 @@ async function main() {
       }
       if (maxZ < 0) return;
       sc.writeSlab(row, minZ, maxZ + 1);
-      maybeSnap(row);
+      touch(row);
       let full = R;                              // rounds applied volume-wide
       for (let si = 0; si < nS; si++) if (applied[si] < full) full = applied[si];
       if (full >= 1 && r.tFirst == null) r.tFirst = elapsed(row);  // whole-volume preview on screen
@@ -876,7 +897,7 @@ async function main() {
       const flush = () => {
         if (next <= flushed) return;
         sc.writeSlab("htj2k", flushed, next);
-        maybeSnap("htj2k");
+        touch("htj2k");
         flushed = next;
         if (r.tFirst == null) r.tFirst = elapsed("htj2k");
         requestDraw();
@@ -890,6 +911,7 @@ async function main() {
         r.got = received;
         while (next < idx.length && idx[next].offset + idx[next].bytes <= received) {
           decodeSlice(idx[next]);
+          touch("htj2k");
           next++;
           r.note = `${next}/${idx.length} slices`;
           if (next - flushed >= 32) flush();
@@ -959,18 +981,6 @@ async function main() {
     status(`cached ${(cacheSize() / 1e6).toFixed(1)} MB — replaying at the simulated rate`);
   }
 
-  // Budgets are common to both arms, so a snapshot pair really is byte-matched.
-  // The preview end is the last point where the picture still changes fast: for
-  // the neural arm that is the end of the fine tier, and the HTJ2K arm is still
-  // deep in its resolution ladder there.
-  {
-    const previewEnd = bytes.coarse + bytes.fine + (bytes.dc ?? 0);
-    const total = Math.max(bytes.htj2k ?? 0, previewEnd + (bytes.residual ?? 0));
-    BUDGETS = planBudgets(previewEnd, total);
-    console.log(`livecodec: ${BUDGETS.length} byte budgets `
-      + `${(BUDGETS[0]/1024).toFixed(0)} KB .. ${(BUDGETS[BUDGETS.length-1]/1e6).toFixed(1)} MB`);
-  }
-
   // ── byte-matched snapshot viewer ──────────────────────────────────────────
   // Both panes draw the SAME budget, so any difference on screen is a
   // difference between the codecs and not between how far each happened to get.
@@ -979,12 +989,12 @@ async function main() {
   function buildCompare(): void {
     makeSnapshotViewer({
       shape: sc.shape, spacing: scan.spacing, win: sc.win, lev: sc.lev,
-      budgets: BUDGETS, snaps, keys, el,
+      frames, keys, el,
     });
   }
 
   (el("cmpopen") as HTMLButtonElement).addEventListener("click", () => {
-    if (!snaps.neural.length && !snaps.htj2k.length) { status("no snapshots yet — let a race finish"); return; }
+    if (!frames.neural.length && !frames.htj2k.length) { status("nothing recorded yet — let a race finish"); return; }
     el("cmp").classList.add("on");
     buildCompare();
   });
@@ -999,21 +1009,25 @@ async function main() {
   // same scan disagree wildly. Sequential costs the visual drama and buys
   // reproducible, contention-free times.
   // "live": the old simultaneous behaviour, for the side-by-side spectacle.
+  const record = async (key: RowKey, run: () => Promise<void>) => {
+    const rec = recorder(key);
+    try { await run(); } finally { rec.stop(); }
+  };
   if (raceMode === "cached") await prefetchAll();
   if (raceMode === "live") {
     const start = performance.now();
     race.neural.t0 = start;
     race.htj2k.t0 = start;
     status(`racing on ${scan.id} (live, simultaneous — times include contention)`);
-    await Promise.all([runNeural(), runHTJ2K()]);
+    await Promise.all([record("neural", runNeural), record("htj2k", runHTJ2K)]);
   } else {
     status(`measuring neural on ${scan.id} (fair mode — one arm at a time)…`);
     race.neural.t0 = performance.now();
-    await runNeural();
+    await record("neural", runNeural);
     updateBars();
     status(`measuring HTJ2K on ${scan.id}…`);
     race.htj2k.t0 = performance.now();
-    await runHTJ2K();
+    await record("htj2k", runHTJ2K);
     status(raceMode === "cached"
       ? `${scan.id} — cached replay at the simulated rate (${(cacheSize() / 1e6).toFixed(1)} MB held). `
         + `Change net or encoding to re-race instantly. Scroll a slice, drag a 3D to orbit.`

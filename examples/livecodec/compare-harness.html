@@ -38,18 +38,21 @@ const ball = (px,py,pz) => {
   const d = Math.hypot(px-cxmm, py-cymm, pz-czmm);
   return d < R ? 300 : (d < R+8 ? 900 : -900);
 };
-function snap(budget, q) {
-  const jit = () => (Math.random()-0.5) * q;   // q shrinks with budget -> sharper
-  return { budget, bytes: budget, ms: budget/2e4,
+function frame(bytes, q) {
+  const jit = () => (Math.random()-0.5) * q;   // q shrinks as bytes arrive -> sharper
+  return { ms: bytes/2e4, bytes, gen: bytes, p: {
     ax: mk(Y*X, i => ball((i%X)*sx, ((i/X)|0)*sy, czmm) + jit()),
     co: mk(Z*X, i => ball((i%X)*sx, cymm, ((i/X)|0)*sz) + jit()),
-    sa: mk(Z*Y, i => ball(cxmm, (i%Y)*sy, ((i/Y)|0)*sz) + jit()) };
+    sa: mk(Z*Y, i => ball(cxmm, (i%Y)*sy, ((i/Y)|0)*sz) + jit()) } };
 }
-const budgets = [8192, 32768, 131072, 524288];
-const snaps = { neural: budgets.map((b,i)=>snap(b, 400/(i+1))),
-                htj2k:  budgets.map((b,i)=>snap(b, 1600/(i+1))) };
+// The arms deliberately end on DIFFERENT byte totals, which is what made the
+// shorter one blank out at the end of the scrub before it clamped.
+const nB = [8192, 32768, 131072, 524288, 900000];
+const hB = [8192, 32768, 131072, 524288];
+const frames = { neural: nB.map((b,i)=>frame(b, 400/(i+1))),
+                 htj2k:  hB.map((b,i)=>frame(b, 1600/(i+1))) };
 makeSnapshotViewer({ shape:[Z,Y,X], spacing:[sz,sy,sx], win:1400, lev:300,
-  budgets, snaps, keys:["neural","htj2k"], el:(id)=>document.getElementById(id) });
+  frames, keys:["neural","htj2k"], el:(id)=>document.getElementById(id) });
 
 // Drive the interactions head-lessly: ?zoom=N applies N wheel notches over the
 // neural axial, ?pan=x,y drags from that point. Both panes must respond
@@ -102,6 +105,19 @@ if (n > 0) {
   if (nAx.sx <= 0.999) fails.push("zoom did not magnify");
   const overlap = Math.min(cvR.right, cellR.right) - Math.max(cvR.left, cellR.left);
   if (overlap < cellR.width * 0.3) fails.push("zoomed image drifted out of the cell");
+}
+// 5. the shorter arm must hold its last frame at full scrub, not disappear
+{
+  const sl = document.getElementById("cmpslider");
+  sl.value = sl.max;
+  sl.dispatchEvent(new Event("input"));
+  for (const col of ["neural", "htj2k"]) {
+    const cv = document.querySelector(`#cmp-${col} .cmpcell canvas`);
+    const d = cv.getContext("2d").getImageData(0, 0, cv.width, cv.height).data;
+    let lit = 0;
+    for (let i = 0; i < d.length; i += 4 * 997) if (d[i] > 8) lit++;
+    if (lit === 0) fails.push(`${col} blank at full scrub`);
+  }
 }
 console.log(fails.length ? "HARNESS FAIL: " + fails.join("; ") : "HARNESS PASS");
 window.__ready = true;
