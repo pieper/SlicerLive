@@ -199,12 +199,22 @@ export interface LatentShapes {
 
 export function latentShapes(meta: ScanMeta): LatentShapes {
   const f = meta.latent.fine, c = meta.latent.coarse;
+  // The decoded plane is the SCAN's own Y/X. Do NOT assume a fixed upsample
+  // factor: the default encoder downsamples 8x in-plane (fine 64^2 for a 512^2
+  // scan) but a fine_stride-4 encoder downsamples 4x (fine 128^2). Hardcoding
+  // 8 made every chunk write at a doubled stride for those versions — banded
+  // slices, gapped 3D, and occasional catastrophic frames.
   const s: LatentShapes = {
     C: f[1], Df: f[2], Hf: f[3], Wf: f[4], Dc: c[2], Hc: c[3], Wc: c[4],
-    chunks: meta.latent.chunks, chunkZ: meta.chunk_z, H: f[3] * 8, W: f[4] * 8,
+    chunks: meta.latent.chunks, chunkZ: meta.chunk_z,
+    H: meta.shape[1], W: meta.shape[2],
   };
   if (s.Df !== 2 * s.Dc || s.Hf !== 2 * s.Hc || s.Wf !== 2 * s.Wc) {
     throw new Error(`latent shapes not 2x: fine [${f}] vs coarse [${c}]`);
+  }
+  const up = s.H / s.Hf;
+  if (!Number.isInteger(up) || up !== s.W / s.Wf) {
+    throw new Error(`latent/scan mismatch: ${s.Hf}x${s.Wf} latent vs ${s.H}x${s.W} scan`);
   }
   return s;
 }
