@@ -79,7 +79,14 @@ export class AdaptiveModel {
 
 export const NBR = 4;      // neighbour quantisation classes; matches pack_staged.py
 
-export interface StageIndex { parts: number[]; buckets: number[]; nbr: number }
+export interface StageIndex {
+  parts: number[];      // byte length of each channel's stream (0 = channel done)
+  buckets: number[];    // bucket count this stage refines each channel to
+  K: number[];          // alphabet size per channel -- derived from the data by
+                        // the encoder, so it cannot be inferred here; a value
+                        // that disagrees by one desynchronises the stream
+  nbr: number;
+}
 
 /** Decode one stage for one channel, refining `prevQ` in place into the finer
  *  bucket grid. Every context term is causal in C-order, so the context of each
@@ -123,6 +130,64 @@ export function bucketsToCodes(q: Int32Array, nBuckets: number, levels: number):
   const w = levels / nBuckets;
   for (let i = 0; i < q.length; i++) {
     out[i] = nBuckets >= levels ? q[i] : Math.min(levels - 1, (q[i] + 0.5) * w - 0.5);
+  }
+  return out;
+}
+
+/** Decode one progressive stage of a whole scan into per-chunk float codes.
+ *
+ *  The stage payload holds one range-coded stream per latent channel, whose
+ *  lengths come from the sidecar; each is decoded over the (chunks, D, H, W)
+ *  grid that channel occupies. Returns the refined bucket state so the next
+ *  stage can continue from it, plus codes laid out exactly like the monolithic
+ *  tier (chunk-major, then channel) so the rest of the pipeline is unchanged.
+ */
+export function decodeFineStage(
+  payload: Uint8Array, index: StageIndex, levels: number[],
+  prev: Int32Array[], prevN: number[],
+  chunks: number, Df: number, Hf: number, Wf: number,
+): { buckets: Int32Array[]; codes: Float32Array } {
+  const per = Df * Hf * Wf;
+  const C = levels.length;
+  const out = new Float32Array(chunks * C * per);
+  const buckets: Int32Array[] = [];
+  let off = 0;
+  for (let c = 0; c < C; c++) {
+    const n = index.parts[c];
+    const q = index.buckets[c];
+    let b: Int32Array;
+    if (n === 0) {
+      b = prev[c];                       // this channel already reached full depth
+    } else {
+      const slice = payload.subarray(off, off + n);
+      b = decodeStage(slice, prev[c], prevN[c], q, index.K[c], [chunks, Df, Hf, Wf]);
+      off += n;
+    }
+    buckets.push(b);
+    const codes = bucketsToCodes(b, q, levels[c]);
+    for (let ch = 0; ch < chunks; ch++) {
+      const dst = ch * C * per + c * per;
+      const src = ch * per;
+      for (let i = 0; i < per; i++) out[dst + i] = codes[src + i];
+    }
+  }
+  return { buckets, codes: out };
+}
+
+/** Dequantise float codes (which may sit at bucket centres) to latent values.
+ *  Mirrors dequantFine in livecodec-scene.ts, but accepts fractional codes --
+ *  a partially-refined stage knows an interval, not an integer. */
+export function dequantFineFloat(
+  codes: Float32Array, chunk: number, C: number, per: number,
+  offset: number[], half: number[],
+): Float32Array {
+  const src = chunk * C * per;
+  const out = new Float32Array(C * per);
+  let o = 0;
+  for (let c = 0; c < C; c++) {
+    const off = offset[c], inv = 1 / half[c];
+    const cb = src + c * per;
+    for (let i = 0; i < per; i++) out[o++] = (codes[cb + i] - off) * inv;
   }
   return out;
 }
