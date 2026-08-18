@@ -30,11 +30,11 @@ import { attachCameraControls, framedCamera } from "../../render/demos/camera-co
 import { attachDoubleClick } from "../../render/demos/view-grid.ts";
 import { installChrome } from "../../render/demos/sl-chrome.ts";
 import {
-  applyDcCorrection, BandwidthMeter, BUCKET, dequantCoarseNative, dequantCoarseUp, dequantFine,
-  gunzip, latentShapes,
+  applyDcCorrection, BandwidthMeter, BUCKET, byteChunks, cacheSize, dequantCoarseNative,
+  dequantCoarseUp, dequantFine, gunzip, latentShapes,
   LinkPacer, loadDecoderMeta, loadOodScans, loadScanMeta, loadScans, loadVersions,
   makeLiveCodecScene, mapOutputToHU, type ResProgressiveIndex, type RowKey, type ScanEntry,
-  setSimulatedBandwidth, type SliceIndexEntry, streamFetch, type VersionEntry,
+  prefetch, setSimulatedBandwidth, type SliceIndexEntry, streamFetch, type VersionEntry,
 } from "./livecodec-scene.ts";
 
 // ── CDN globals (declared, not bundled) ──────────────────────────────────────
@@ -562,14 +562,8 @@ async function main() {
             const u16 = new Uint16Array(out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength));
             writeResidualPlane(e.z, 0, u16);
           };
-          const resp = await fetch(neuralBase + "residual.bin", { cache: "no-store" });
-          if (!resp.ok || !resp.body) throw new Error(`residual.bin HTTP ${resp.status}`);
           const mRes = meters.neural.begin("residual.bin");
-          const rrd = resp.body.getReader();
-          for (;;) {
-            const { done, value } = await rrd.read();
-            if (done) break;
-            await pacers.neural.admit(value.byteLength);
+          for await (const value of byteChunks(neuralBase + "residual.bin", pacers.neural)) {
             mRes.add(value.byteLength);
             rbuf.set(value, received);
             received += value.byteLength;
@@ -805,14 +799,8 @@ async function main() {
         requestDraw();
       };
 
-      const resp = await fetch(htj2kBase + "slices.bin", { cache: "no-store" });
-      if (!resp.ok || !resp.body) throw new Error(`slices.bin HTTP ${resp.status}`);
       const mSl = meters.htj2k.begin("slices.bin");
-      const rd = resp.body.getReader();
-      for (;;) {
-        const { done, value } = await rd.read();
-        if (done) break;
-        await pacers.htj2k.admit(value.byteLength);
+      for await (const value of byteChunks(htj2kBase + "slices.bin", pacers.htj2k)) {
         mSl.add(value.byteLength);
         buf.set(value, received);
         received += value.byteLength;
@@ -857,6 +845,37 @@ async function main() {
     }
   }, 100);
 
+  // ── cached mode: pull every byte first, then race from memory ─────────────
+  // Racing off the live network measures the link as much as the codec: real
+  // bandwidth wanders, the two arms run minutes apart under different
+  // conditions, and re-running at a new rate costs another full download.
+  // Prefetching makes the simulated pacer the ONLY thing setting the pace, so
+  // the comparison is reproducible and a rate or encoding change re-races at
+  // once. It does not remove main-thread contention — that is why even a cached
+  // race still runs the arms one at a time.
+  async function prefetchAll(): Promise<void> {
+    // The residual tier is optional: a version without one 404/403s here, which
+    // the per-URL catch below absorbs, so there is nothing to probe for first.
+    const urls = [
+      neuralBase + "coarse.gz", neuralBase + "fine.gz", neuralBase + "dc.gz",
+      neuralBase + "residual-index.json", neuralBase + "residual.bin",
+      htj2kBase + "index.json", htj2kBase + "slices.bin",
+    ];
+    let done = 0;
+    for (const u of urls) {
+      const short = u.slice(u.lastIndexOf("/") + 1);
+      status(`caching ${short} (${++done}/${urls.length})…`);
+      try {
+        await prefetch(u);
+      } catch (e) {
+        // A version without a residual tier 404s here; that is not fatal, the
+        // race just falls through to the network for whatever is missing.
+        console.warn("prefetch skipped", u, e);
+      }
+    }
+    status(`cached ${(cacheSize() / 1e6).toFixed(1)} MB — replaying at the simulated rate`);
+  }
+
   // ── how the two arms share the machine ────────────────────────────────────
   // "fair" (default): one at a time, each with its own clock. Simultaneous
   // running makes the numbers meaningless — HTJ2K does thousands of SYNCHRONOUS
@@ -866,6 +885,7 @@ async function main() {
   // same scan disagree wildly. Sequential costs the visual drama and buys
   // reproducible, contention-free times.
   // "live": the old simultaneous behaviour, for the side-by-side spectacle.
+  if (raceMode === "cached") await prefetchAll();
   if (raceMode === "live") {
     const start = performance.now();
     race.neural.t0 = start;
@@ -880,7 +900,10 @@ async function main() {
     status(`measuring HTJ2K on ${scan.id}…`);
     race.htj2k.t0 = performance.now();
     await runHTJ2K();
-    status(`${scan.id} — fair mode: each arm timed alone. Scroll a slice, drag a 3D to orbit.`);
+    status(raceMode === "cached"
+      ? `${scan.id} — cached replay at the simulated rate (${(cacheSize() / 1e6).toFixed(1)} MB held). `
+        + `Change net or encoding to re-race instantly. Scroll a slice, drag a 3D to orbit.`
+      : `${scan.id} — fair mode: each arm timed alone. Scroll a slice, drag a 3D to orbit.`);
   }
   updateBars();
   drawAll();

@@ -77,9 +77,10 @@
       <label class="chip" title="pick a specific scan from the active dataset">scan:
         <select id="scan"></select>
       </label>
-      <label class="chip" title="fair: each codec is timed alone (contention-free, reproducible). live: both at once — visually dramatic, but the times include the two arms fighting for the main thread and GPU.">mode:
+      <label class="chip" title="cached: every byte is downloaded once up front, then replayed from memory at the simulated rate — delivery is identical run to run, so changing the encoding or the net speed re-races instantly with no network variance. fair: each codec is timed alone against the live network. live: both at once — visually dramatic, but the times include the two arms fighting for the main thread and GPU.">mode:
         <select id="mode">
           <option value="fair">fair (timed separately)</option>
+          <option value="cached">cached (replay, repeatable)</option>
           <option value="live">live (simultaneous)</option>
         </select>
       </label>

@@ -88,105 +88,14 @@ export interface ResProgressiveIndex {
 
 // ── streaming fetch + gzip + simulated network ───────────────────────────────
 
-let simBps: number | null = null;
+// Transport (pacing, throughput, byte cache) lives in livecodec-net.ts; it is
+// re-exported here so callers keep a single import site.
+export {
+  BandwidthMeter, byteChunks, cacheClear, cacheHas, cacheSize, gunzip, LinkPacer,
+  prefetch, setSimulatedBandwidth, streamFetch,
+} from "./livecodec-net.ts";
+export type { StreamStat } from "./livecodec-net.ts";
 
-/** Simulate a link speed (bits/s) for the race, or null for unthrottled. */
-export function setSimulatedBandwidth(bitsPerSec: number | null): void {
-  simBps = bitsPerSec;
-}
-
-/** One simulated link per codec row: all of a row's concurrent fetches share it,
- *  so each method receives bytes exactly as fast as the chosen network would
- *  deliver them if it were used alone. Bytes are admitted no earlier than their
- *  scheduled arrival time; the clock starts at the row's first byte. */
-export class LinkPacer {
-  private t0 = 0;
-  private bytes = 0;
-
-  async admit(n: number): Promise<void> {
-    if (simBps == null) return;
-    if (!this.t0) this.t0 = performance.now();
-    this.bytes += n;
-    const due = this.t0 + (this.bytes * 8 / simBps) * 1000;
-    const wait = due - performance.now();
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  }
-}
-
-/** Measured throughput per stream, aggregated per row. Streams record first-
- *  request to last-byte wall time; the row summary unions overlapping intervals
- *  (fine.gz + dc.gz download in parallel) so time is never double-counted. */
-export interface StreamStat { name: string; bytes: number; t0: number; t1: number }
-
-export class BandwidthMeter {
-  stats: StreamStat[] = [];
-
-  begin(name: string) {
-    const s: StreamStat = { name, bytes: 0, t0: performance.now(), t1: performance.now() };
-    this.stats.push(s);
-    return {
-      at: (cumulative: number) => { s.bytes = cumulative; s.t1 = performance.now(); },
-      add: (n: number) => { s.bytes += n; s.t1 = performance.now(); },
-    };
-  }
-
-  summary(): { bytes: number; seconds: number; mbps: number; streams: StreamStat[] } {
-    const iv = this.stats.map((s) => [s.t0, s.t1] as [number, number]).sort((a, b) => a[0] - b[0]);
-    let seconds = 0, end = -Infinity;
-    for (const [a, b] of iv) {
-      seconds += Math.max(0, b - Math.max(a, end));
-      end = Math.max(end, b);
-    }
-    seconds /= 1000;
-    const bytes = this.stats.reduce((t, s) => t + s.bytes, 0);
-    return { bytes, seconds, mbps: seconds > 0 ? bytes * 8 / seconds / 1e6 : 0, streams: this.stats };
-  }
-}
-
-/** Fetch a URL with a body reader so onBytes(cumulativeTotal) reports progress
- *  DURING the download (the progress bars are the whole point of this demo).
- *  If a pacer is given, bytes are admitted at the simulated link speed. */
-export async function streamFetch(
-  url: string,
-  onBytes?: (total: number) => void,
-  pacer?: LinkPacer,
-): Promise<Uint8Array> {
-  // no-store: scan data is never served from the HTTP cache, so every race is a
-  // real download (codec runtimes — decoder weights, wasm — may cache; both
-  // rows benefit symmetrically, as deployed static assets would).
-  const resp = await fetch(url, { cache: "no-store" });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
-  if (!resp.body) {
-    const buf = new Uint8Array(await resp.arrayBuffer());
-    await pacer?.admit(buf.byteLength);
-    onBytes?.(buf.byteLength);
-    return buf;
-  }
-  const parts: Uint8Array[] = [];
-  const rd = resp.body.getReader();
-  let total = 0;
-  for (;;) {
-    const { done, value } = await rd.read();
-    if (done) break;
-    await pacer?.admit(value.byteLength);
-    parts.push(value);
-    total += value.byteLength;
-    onBytes?.(total);
-  }
-  const all = new Uint8Array(total);
-  let o = 0;
-  for (const p of parts) { all.set(p, o); o += p.byteLength; }
-  return all;
-}
-
-/** Inflate a gzip stream with the native DecompressionStream (no bundled zlib). */
-export async function gunzip(gz: Uint8Array): Promise<Uint8Array> {
-  const ds = new DecompressionStream("gzip");
-  const buf = await new Response(new Response(gz as BufferSource).body!.pipeThrough(ds)).arrayBuffer();
-  return new Uint8Array(buf);
-}
-
-// ── neural latent decode helpers (pure CPU, no DOM / no ort dependency) ──────
 
 export interface LatentShapes {
   C: number;                             // latent channels (5)
