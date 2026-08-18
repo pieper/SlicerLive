@@ -238,17 +238,22 @@ async function main() {
   const snapNext: Record<RowKey, number> = { neural: 0, htj2k: 0 };
   let BUDGETS: number[] = [];
 
-  /** Log-spaced up to the end of the previewable tiers, then one at the end.
-   *  Nothing visible changes while the residual streams — it is noise being
-   *  made exact — so spending snapshots there would waste memory on frames the
-   *  eye cannot tell apart. */
-  function planBudgets(previewEnd: number, total: number, steps = 14): number[] {
-    const lo = Math.max(2048, Math.round(previewEnd / 40));
+  /** Log-spaced across the previewable tiers, where the picture changes fast,
+   *  then a few across the residual to confirm it does not. Storing planes
+   *  rather than volumes makes frames cheap (~0.8 MB a snapshot here), so the
+   *  preview gets sampled densely enough to actually scrub. */
+  function planBudgets(previewEnd: number, total: number,
+                       preSteps = 24, postSteps = 4): number[] {
+    const lo = Math.max(2048, Math.round(previewEnd / 60));
     const out: number[] = [];
-    for (let i = 0; i < steps; i++) {
-      out.push(Math.round(lo * Math.pow(previewEnd / lo, i / (steps - 1))));
+    for (let i = 0; i < preSteps; i++) {
+      out.push(Math.round(lo * Math.pow(previewEnd / lo, i / (preSteps - 1))));
     }
-    if (total > previewEnd * 1.5) out.push(total);
+    if (total > previewEnd * 1.5) {
+      for (let i = 1; i <= postSteps; i++) {
+        out.push(Math.round(previewEnd * Math.pow(total / previewEnd, i / postSteps)));
+      }
+    }
     return [...new Set(out)].sort((a, b) => a - b);
   }
 
@@ -975,77 +980,136 @@ async function main() {
       neural: el("cmp-neural"), htj2k: el("cmp-htj2k"),
     };
     const [Z, Y, X] = sc.shape;
-    const planeDims: [string, number, number][] = [["axial", X, Y], ["coronal", X, Z], ["sagittal", Y, Z]];
+    const [sz, sy, sx] = scan.spacing;
+    // Physical extent, not voxel counts: the slice axis is several times coarser
+    // than the in-plane one, so drawing a coronal at its native pixel pitch
+    // squashes the patient. CSS sizing in millimetres makes every pane
+    // anatomically proportioned and lets zoom stay a single uniform factor.
+    const planes: { name: string; w: number; h: number; mmW: number; mmH: number }[] = [
+      { name: "axial",    w: X, h: Y, mmW: X * sx, mmH: Y * sy },
+      { name: "coronal",  w: X, h: Z, mmW: X * sx, mmH: Z * sz },
+      { name: "sagittal", w: Y, h: Z, mmW: Y * sy, mmH: Z * sz },
+    ];
     const canvases: Record<RowKey, HTMLCanvasElement[]> = { neural: [], htj2k: [] };
+    const cells: HTMLElement[] = [];
     for (const k of keys) {
       grids[k].replaceChildren();
-      for (const [name, w, h] of planeDims) {
+      for (const pl of planes) {
         const cell = document.createElement("div");
         cell.className = "cmpcell";
         const cv = document.createElement("canvas");
-        cv.width = w; cv.height = h;
+        cv.width = pl.w; cv.height = pl.h;
+        cv.style.width = `${pl.mmW}px`;
+        cv.style.height = `${pl.mmH}px`;
         const tag = document.createElement("span");
-        tag.textContent = name;
+        tag.textContent = pl.name;
         cell.append(cv, tag);
         grids[k].append(cell);
         canvases[k].push(cv);
+        cells.push(cell);
       }
     }
+
+    // One zoom/pan for every pane, in normalised units, so the two arms are
+    // always on the same anatomy — a fine-detail comparison of two different
+    // places is worthless.
     let zoom = 1, panX = 0, panY = 0;
     const applyView = () => {
       for (const k of keys) {
-        for (const cv of canvases[k]) {
-          const s = zoom * Math.min(
-            (cv.parentElement!.clientWidth || 1) / cv.width,
-            (cv.parentElement!.clientHeight || 1) / cv.height);
-          cv.style.transform =
-            `translate(-50%,-50%) translate(${panX}px,${panY}px) scale(${s})`;
-        }
+        canvases[k].forEach((cv, pi) => {
+          const cell = cv.parentElement as HTMLElement;
+          const pl = planes[pi];
+          const fit = Math.min((cell.clientWidth || 1) / pl.mmW, (cell.clientHeight || 1) / pl.mmH);
+          const s = fit * zoom;
+          const offX = (cell.clientWidth - pl.mmW * s) / 2 + panX * fit;
+          const offY = (cell.clientHeight - pl.mmH * s) / 2 + panY * fit;
+          cv.style.transform = `translate(${offX}px, ${offY}px) scale(${s})`;
+        });
       }
     };
+
     const draw = (i: number) => {
       const lo = sc.lev - sc.win / 2, span = Math.max(1, sc.win);
       for (const k of keys) {
         const s = snaps[k][i];
-        for (let pi = 0; pi < 3; pi++) {
-          const cv = canvases[k][pi];
+        canvases[k].forEach((cv, pi) => {
           const ctx = cv.getContext("2d")!;
-          if (!s) { ctx.clearRect(0, 0, cv.width, cv.height); continue; }
+          if (!s) { ctx.clearRect(0, 0, cv.width, cv.height); return; }
           const src = pi === 0 ? s.ax : pi === 1 ? s.co : s.sa;
           const img = ctx.createImageData(cv.width, cv.height);
+          const d = img.data;
           for (let j = 0; j < src.length; j++) {
             const g = Math.max(0, Math.min(255, ((src[j] - lo) / span) * 255)) | 0;
-            img.data[j * 4] = img.data[j * 4 + 1] = img.data[j * 4 + 2] = g;
-            img.data[j * 4 + 3] = 255;
+            const o = j * 4;
+            d[o] = d[o + 1] = d[o + 2] = g;
+            d[o + 3] = 255;
           }
           ctx.putImageData(img, 0, 0);
-        }
+        });
       }
       const n = snaps.neural[i], hj = snaps.htj2k[i];
-      const kb = (b?: number) => b == null ? "—" : b < 1e6 ? `${(b/1024).toFixed(0)} KB` : `${(b/1e6).toFixed(1)} MB`;
+      const kb = (b?: number) => b == null ? "\u2014"
+        : b < 1e6 ? `${(b / 1024).toFixed(0)} KB` : `${(b / 1e6).toFixed(1)} MB`;
       el("cmplabel").textContent =
-        `budget ${kb(BUDGETS[i])}  ·  neural ${kb(n?.bytes)} @ ${n ? (n.ms/1000).toFixed(1) : "—"} s`
-        + `  ·  HTJ2K ${kb(hj?.bytes)} @ ${hj ? (hj.ms/1000).toFixed(1) : "—"} s`;
+        `budget ${kb(BUDGETS[i])}  \u00b7  neural ${kb(n?.bytes)} @ ${n ? (n.ms / 1000).toFixed(1) : "\u2014"} s`
+        + `  \u00b7  HTJ2K ${kb(hj?.bytes)} @ ${hj ? (hj.ms / 1000).toFixed(1) : "\u2014"} s`;
       applyView();
     };
+
     const slider = el("cmpslider") as HTMLInputElement;
     const n = Math.max(snaps.neural.length, snaps.htj2k.length);
     slider.max = String(Math.max(0, n - 1));
-    slider.value = String(Math.max(0, n - 2));
+    slider.value = String(Math.max(0, n - 1));
     slider.oninput = () => draw(+slider.value);
+
     const grid = el("cmpgrid");
     grid.onwheel = (e: WheelEvent) => {
       e.preventDefault();
-      zoom = Math.max(1, Math.min(24, zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+      // Zoom about the cursor: anchor the point under the pointer so detail
+      // stays put instead of sliding out of frame as you magnify.
+      const cell = (e.target as HTMLElement).closest(".cmpcell") as HTMLElement | null;
+      const f = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      const next = Math.max(1, Math.min(40, zoom * f));
+      if (cell) {
+        const r = cell.getBoundingClientRect();
+        const cx = e.clientX - r.left - r.width / 2;
+        const cy = e.clientY - r.top - r.height / 2;
+        const pi = [...cell.parentElement!.children].indexOf(cell);
+        const pl = planes[pi] ?? planes[0];
+        const fit = Math.min(r.width / pl.mmW, r.height / pl.mmH) || 1;
+        panX += (cx / fit) * (1 - next / zoom);
+        panY += (cy / fit) * (1 - next / zoom);
+      }
+      zoom = next;
       applyView();
     };
-    let drag: { x: number; y: number } | null = null;
-    grid.onpointerdown = (e: PointerEvent) => { drag = { x: e.clientX - panX, y: e.clientY - panY }; };
+    let drag: { x: number; y: number; px: number; py: number; fit: number } | null = null;
+    grid.onpointerdown = (e: PointerEvent) => {
+      const cell = (e.target as HTMLElement).closest(".cmpcell") as HTMLElement | null;
+      const pi = cell ? [...cell.parentElement!.children].indexOf(cell) : 0;
+      const pl = planes[pi] ?? planes[0];
+      const r = cell?.getBoundingClientRect();
+      const fit = r ? Math.min(r.width / pl.mmW, r.height / pl.mmH) || 1 : 1;
+      drag = { x: e.clientX, y: e.clientY, px: panX, py: panY, fit };
+      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    };
     grid.onpointermove = (e: PointerEvent) => {
       if (!drag) return;
-      panX = e.clientX - drag.x; panY = e.clientY - drag.y; applyView();
+      panX = drag.px + (e.clientX - drag.x) / drag.fit;
+      panY = drag.py + (e.clientY - drag.y) / drag.fit;
+      applyView();
     };
     grid.onpointerup = () => { drag = null; };
+    grid.onpointercancel = () => { drag = null; };
+    addEventListener("keydown", (e) => {
+      if (!el("cmp").classList.contains("on")) return;
+      if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+        slider.value = String(Math.max(0, Math.min(+slider.max,
+          +slider.value + (e.key === "ArrowRight" ? 1 : -1))));
+        draw(+slider.value);
+      } else if (e.key === "0") { zoom = 1; panX = panY = 0; applyView(); }
+      else if (e.key === "Escape") el("cmp").classList.remove("on");
+    });
     addEventListener("resize", applyView);
     draw(+slider.value);
   }

@@ -57,18 +57,20 @@
   #cmphead { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
     color: #d8d8dc; font: 12px/1.4 ui-sans-serif, system-ui, sans-serif; }
   #cmphead input[type=range] { flex: 1 1 260px; min-width: 180px; accent-color: #f0a020; }
-  #cmpgrid { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  #cmpgrid { flex: 1; touch-action: none; cursor: grab; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
     margin-top: 10px; min-height: 0; }
   .cmpcol { display: flex; flex-direction: column; min-height: 0; }
   .cmpcol h4 { margin: 0 0 4px; font: 600 12px ui-sans-serif, system-ui, sans-serif;
     letter-spacing: .04em; }
   .cmpcol.neural h4 { color: #f0a020; }
   .cmpcol.htj2k  h4 { color: #58a6ff; }
-  .cmpcells { flex: 1; display: grid; grid-template-rows: 2fr 1fr 1fr; gap: 6px;
+  .cmpcells { flex: 1; display: grid; grid-template-rows: 1fr 1fr 1fr; gap: 6px;
     min-height: 0; overflow: hidden; }
   .cmpcell { position: relative; overflow: hidden; background: #000; border: 1px solid #26262c; }
-  .cmpcell canvas { position: absolute; left: 50%; top: 50%; transform-origin: 0 0;
-    image-rendering: pixelated; }
+  /* placed by an explicit pixel offset computed from the cell size, so the
+     canvas stays centred at any zoom; a percentage origin does not survive scale */
+  .cmpcell canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0;
+    image-rendering: pixelated; will-change: transform; }
   .cmpcell span { position: absolute; left: 4px; top: 3px; z-index: 2;
     font: 10px ui-monospace, monospace; color: #8a8a92; pointer-events: none; }
   #rows.maxmode .mrow { display: none; }
