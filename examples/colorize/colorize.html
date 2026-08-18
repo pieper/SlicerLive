@@ -1,0 +1,95 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>SlicerLive · colorize volume</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column;
+         background: #0b0d14; color: #dde3ee; overscroll-behavior: none;
+         font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  /* left padding clears the fixed "?" help button that installChrome pins at top-left */
+  header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+           padding: 8px 12px 8px 54px; border-bottom: 1px solid #1e2434; background: #0e1119; }
+  h1 { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: .2px; }
+  h1 small { font-weight: 400; opacity: .55; margin-left: 6px; }
+  .group { display: flex; align-items: center; gap: 6px; }
+  button, select { font: inherit; color: #dde3ee; background: #1a2030; cursor: pointer;
+                   border: 1px solid #2b3346; border-radius: 6px; padding: 4px 10px; }
+  button:hover, select:hover { background: #222a3d; }
+  #blurb { opacity: .6; font-size: 12px; flex: 1 1 260px; min-width: 0; }
+  #hint { opacity: .65; font-size: 12px; }
+  main { flex: 1; min-height: 0; padding: 6px; }
+  #grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+          gap: 4px; width: 100%; height: 100%; }
+  #grid.has-max .cell { display: none; }
+  #grid.has-max .cell.max { display: block; grid-area: 1 / 1 / 3 / 3; }
+  .cell { position: relative; min-width: 0; min-height: 0; }
+  .cell canvas { width: 100%; height: 100%; display: block; border-radius: 6px;
+                 background: #000; touch-action: none; }
+  .lab { position: absolute; top: 6px; left: 8px; font-size: 11px; font-weight: 700;
+         letter-spacing: .3px; opacity: .8; pointer-events: none; text-shadow: 0 1px 3px #000; }
+  .lab.axial { color: #f2726f; } .lab.coronal { color: #7fd67f; }
+  .lab.sagittal { color: #f0d264; } .lab.threeD { color: #9db4e8; }
+  #statusbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+               padding: 5px 12px; border-top: 1px solid #1e2434; background: #0e1119; font-size: 12px; }
+  #status { opacity: .75; flex: 1 1 auto; min-width: 0; }
+  #hover { flex: 0 0 auto; font-variant-numeric: tabular-nums; opacity: .8; min-width: 200px; }
+  #hover b { color: #9fe9ff; }
+  #loadwrap { position: fixed; left: 50%; transform: translateX(-50%); bottom: 46px; z-index: 90;
+              pointer-events: none; }
+  #loadbox { width: min(520px, 86vw); text-align: center; padding: 14px 20px 16px; border-radius: 14px;
+             background: linear-gradient(135deg, rgba(58,64,88,.72), rgba(20,24,38,.82));
+             backdrop-filter: blur(18px) saturate(1.5); -webkit-backdrop-filter: blur(18px) saturate(1.5);
+             border: 1px solid rgba(255,255,255,.18); box-shadow: 0 18px 50px rgba(0,0,0,.55); }
+  #loadtitle { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+  #loadsub { font-size: 12px; opacity: .6; margin-bottom: 14px; }
+  #bar { height: 12px; border-radius: 7px; background: #1a2030; border: 1px solid #2b3346; overflow: hidden; }
+  #barfill { height: 100%; width: 0%; border-radius: 6px; background: linear-gradient(90deg,#3f74d8,#7fd0ff);
+             transition: width .18s ease-out; }
+  #loadpct { margin-top: 8px; font-size: 12px; opacity: .75; font-variant-numeric: tabular-nums; }
+  #loadwrap.done { opacity: 0; pointer-events: none; transition: opacity .5s ease-out; }
+  #credits { opacity: .55; display: flex; gap: 12px; flex: 0 0 auto; }
+  #credits a { color: #9db4e8; text-decoration: none; }
+  #credits a:hover { color: #cfe0ff; text-decoration: underline; }
+</style>
+
+<header>
+  <h1>SlicerLive · colorize volume<small>CT tinted by 86 TotalSegmentator structures</small></h1>
+  <div class="group">
+    <label for="preset" style="opacity:.6">CT preset</label>
+    <select id="preset"></select>
+  </div>
+  <span id="hint">⌘/ctrl-click the SlicerLive badge for organ groups · shift+move to pick</span>
+  <div id="blurb"></div>
+</header>
+
+<main>
+  <div id="grid">
+    <div class="cell" data-cell="axial"><canvas id="c-axial"></canvas><div class="lab axial">R · Axial</div></div>
+    <div class="cell" data-cell="threeD"><canvas id="c-threeD"></canvas><div class="lab threeD">3D · colorize volume rendering</div></div>
+    <div class="cell" data-cell="coronal"><canvas id="c-coronal"></canvas><div class="lab coronal">G · Coronal</div></div>
+    <div class="cell" data-cell="sagittal"><canvas id="c-sagittal"></canvas><div class="lab sagittal">Y · Sagittal</div></div>
+  </div>
+</main>
+
+<div id="loadwrap">
+  <div id="loadbox">
+    <div id="loadtitle">Loading the CT…</div>
+    <div id="loadsub">509×365×299 chest/abdomen CT + 86-structure label volume, from a public JS2 bucket</div>
+    <div id="bar"><div id="barfill"></div></div>
+    <div id="loadpct">connecting…</div>
+  </div>
+</div>
+
+<div id="statusbar">
+  <div id="status">loading…</div>
+  <div id="hover"></div>
+  <div id="credits">
+    <a href="https://portal.imaging.datacommons.cancer.gov/explore/filters/?collection_id=nlst" target="_blank" rel="noopener">IDC · NLST</a>
+    <a href="https://doi.org/10.5281/zenodo.8347011" target="_blank" rel="noopener">TotalSegmentator segmentations</a>
+    <a href="https://github.com/wasserth/TotalSegmentator" target="_blank" rel="noopener">TotalSegmentator</a>
+    <a href="https://github.com/pieper/SlicerLive" target="_blank" rel="noopener">source</a>
+  </div>
+</div>
+
+<script type="module" src="colorize.js?v=20260818a"></script>

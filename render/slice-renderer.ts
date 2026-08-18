@@ -24,13 +24,19 @@ struct U {
   uvec : vec4<f32>,      // RAS vector spanning the view width  (isotropic mm)
   vvec : vec4<f32>,      // RAS vector spanning the view height (isotropic mm)
   params : vec4<f32>,    // win, lev, fillOpacity, outlineOpacity
-  size : vec4<f32>,      // sizeX, sizeY, _, _
+  size : vec4<f32>,      // sizeX, sizeY, labelOverlayMode, _
 };
 @group(0) @binding(0) var<uniform> u : U;
 @group(0) @binding(1) var s_lin : sampler;
 @group(0) @binding(2) var t_scalar : texture_3d<f32>;
 @group(0) @binding(3) var t_overlay : texture_3d<f32>;
 @group(0) @binding(4) var s_nn : sampler;   // NEAREST — labelmap overlay is per-voxel crisp (matches Slicer)
+// Label-overlay mode (size.z > 0.5): instead of a pre-coloured rgba volume, take the segment
+// number from a u8 label volume and its colour+opacity from the same 256x2 palette the
+// ColorizeField uses. A coloured overlay of a 509x365x299 CT would be 222 MB; label + palette
+// is 55 MB and, because it shares the palette, hiding an organ group in 3D hides it here too.
+@group(0) @binding(5) var t_labels : texture_3d<u32>;
+@group(0) @binding(6) var t_palette : texture_2d<f32>;
 
 struct V { @builtin(position) position : vec4<f32> };
 @vertex
@@ -43,10 +49,21 @@ fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92; let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
   return select(lo, hi, c > vec3<f32>(0.04045));
 }
+/** The overlay colour at a texture coordinate, from whichever source is configured. */
+fn ov_tex(t : vec3<f32>) -> vec4<f32> {
+  if (u.size.z > 0.5) {
+    let d = vec3<f32>(textureDimensions(t_labels));
+    let vi = vec3<i32>(clamp(floor(t * d), vec3<f32>(0.0), d - vec3<f32>(1.0)));
+    let lab = i32(textureLoad(t_labels, vi, 0).r);
+    if (lab == 0) { return vec4<f32>(0.0); }
+    return textureLoad(t_palette, vec2<i32>(lab, 1), 0);
+  }
+  return textureSampleLevel(t_overlay, s_nn, t, 0.0);
+}
 fn ov_at(ras : vec3<f32>) -> vec4<f32> {   // overlay at a RAS point (0 outside the volume)
   let t = (u.p2t * vec4<f32>(ras, 1.0)).xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
-  return textureSampleLevel(t_overlay, s_nn, t, 0.0);
+  return ov_tex(t);
 }
 @fragment
 fn fs_main(v : V) -> @location(0) vec4<f32> {
@@ -59,7 +76,7 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
   let win = max(u.params.x, 1e-6);
   let g = clamp((val - (u.params.y - win * 0.5)) / win, 0.0, 1.0);
   var col = vec3<f32>(g);
-  let ov = textureSampleLevel(t_overlay, s_nn, tex, 0.0);
+  let ov = ov_tex(tex);
   // Slicer-style 2D segmentation: a semi-transparent per-voxel FILL plus a brighter boundary
   // OUTLINE, with independent opacities (params.z = fill, params.w = outline). The outline is
   // screen-space (constant pixel width under zoom), drawn in the segment's own colour along its
@@ -140,6 +157,9 @@ export class SliceRenderer {
   private u = new Float32Array(36);  // p2t(16) + origin(4) + uvec(4) + vvec(4) + params(4) + size(4)
   private bind?: GPUBindGroup;
   private overlay?: GPUTexture;
+  private labels?: GPUTexture;
+  private palette?: GPUTexture;
+  private scalarTex?: GPUTexture;
   // actual in-plane extents (mm) spanned by the LAST rendered viewport, aspect-corrected so
   // pixels stay isotropic on a non-square view (0 until first render → fall back to the square span).
   private uSpanMm = 0;
@@ -177,6 +197,25 @@ export class SliceRenderer {
     this.setOverlayOpacity(0.55);
   }
 
+  /** 1x1x1 stand-ins so the label-overlay bindings always exist. The pipeline layout is fixed,
+   *  so every caller must bind them even when it only wants a plain MPR. */
+  private emptyLabels?: GPUTexture;
+  private emptyPalette?: GPUTexture;
+  private noLabels(): GPUTexture {
+    if (!this.emptyLabels) {
+      this.emptyLabels = this.dev.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      this.dev.queue.writeTexture({ texture: this.emptyLabels }, new Uint8Array(1), { bytesPerRow: 1, rowsPerImage: 1 }, [1, 1, 1]);
+    }
+    return this.emptyLabels;
+  }
+  private noPalette(): GPUTexture {
+    if (!this.emptyPalette) {
+      this.emptyPalette = this.dev.createTexture({ size: [256, 2], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      this.dev.queue.writeTexture({ texture: this.emptyPalette }, new Uint8Array(256 * 2 * 4), { bytesPerRow: 256 * 4 }, [256, 2]);
+    }
+    return this.emptyPalette;
+  }
+
   private emptyOverlay?: GPUTexture;
   private transparentOverlay(): GPUTexture {
     if (!this.emptyOverlay) {
@@ -198,14 +237,32 @@ export class SliceRenderer {
    *  same RAS->tex mapping addresses both. Omit overlay for a plain MPR. */
   setTextures(scalar: GPUTexture, overlay?: GPUTexture) {
     this.overlay = overlay ?? this.transparentOverlay();
+    this.scalarTex = scalar;
+    this.rebind();
+  }
+
+  /** Colour the overlay from a u8 label volume + the 256x2 palette (row 1 = colour/opacity),
+   *  instead of a pre-coloured rgba volume. Same geometry requirement as setTextures. Pass
+   *  nulls to go back to the rgba overlay. */
+  setLabelOverlay(labels: GPUTexture | null, palette: GPUTexture | null) {
+    this.labels = labels ?? undefined;
+    this.palette = palette ?? undefined;
+    this.u[34] = labels && palette ? 1 : 0;      // size.z = label-overlay mode
+    if (this.scalarTex) this.rebind();
+  }
+
+  private rebind() {
+    if (!this.scalarTex) return;
     this.bind = this.dev.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.ubuf } },
         { binding: 1, resource: this.sampler },
-        { binding: 2, resource: scalar.createView() },
-        { binding: 3, resource: this.overlay.createView() },
+        { binding: 2, resource: this.scalarTex.createView() },
+        { binding: 3, resource: (this.overlay ?? this.transparentOverlay()).createView() },
         { binding: 4, resource: this.nnSampler },
+        { binding: 5, resource: (this.labels ?? this.noLabels()).createView() },
+        { binding: 6, resource: (this.palette ?? this.noPalette()).createView() },
       ],
     });
   }

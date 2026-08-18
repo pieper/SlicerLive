@@ -7,6 +7,9 @@ import { SL_LOGO } from "./sl-logo.ts";
 
 export interface VizControl {
   label: string;
+  /** Optional heading emitted above this control. Consecutive controls sharing a section get
+   *  one heading between them — how the popup separates "Volume rendering" from organ groups. */
+  section?: string;
   disabled?: () => boolean;    // e.g. no segmentation to toggle
   // A control is EITHER a boolean switch (get/set) OR a unified opacity control (getOpacity/setOpacity):
   // the latter clicks through the tri-state (100→50→0) and drags side-to-side into a live opacity slider.
@@ -15,6 +18,14 @@ export interface VizControl {
   getOpacity?: () => number;
   setOpacity?: (o: number) => void;   // continuous 0..1 (hot-updates while dragging)
   color?: [number, number, number];   // fill tint for the opacity chip (default cyan)
+}
+/** A labelled dropdown — e.g. picking which transfer function to apply to a CT. */
+export interface SelectControl {
+  label: string;
+  section?: string;
+  options: { value: string; label: string }[];
+  get: () => string;
+  set: (value: string) => void;
 }
 export interface SegInfo { num: number; name: string; color: [number, number, number] }
 export interface SegmentControls {
@@ -25,6 +36,7 @@ export interface SegmentControls {
 }
 export interface ChromeOpts {
   controls?: VizControl[];                                   // viz toggles (empty → branding only)
+  selects?: SelectControl[];                                 // dropdowns, rendered above the toggles
   segments?: SegmentControls;                                // per-segment visibility list (swatch + toggle)
   help?: { title: string; rows: [string, string][] }[];     // override the default cheat-sheet
   onChange?: () => void;                                     // after a toggle (redraw)
@@ -200,13 +212,50 @@ export function installChrome(opts: ChromeOpts): Chrome {
   const OPBOX_CSS = "width:44px;height:18px;border-radius:6px;position:relative;overflow:hidden;flex:0 0 auto;" +
     "background:rgba(255,255,255,.14);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);touch-action:none;";
 
+  const heading = (text: string, first: boolean) => {
+    const h = document.createElement("div");
+    h.textContent = text;
+    h.style.cssText = "font:700 10px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;" +
+      "text-transform:uppercase;color:#9fe9ff;margin:" + (first ? "0 0 8px" : "12px 0 6px") + ";" +
+      (first ? "" : "border-top:1px solid rgba(255,255,255,.12);padding-top:10px;");
+    pop.appendChild(h);
+  };
+
+  const selects = opts.selects ?? [];
+  const selEls: { c: SelectControl; el: HTMLSelectElement }[] = [];
+  let sectionSeen: string | null = null;
+  let firstHead = true;
+  for (const c of selects) {
+    const sec = c.section ?? "Visualization";
+    if (sec !== sectionSeen) { heading(sec, firstHead); sectionSeen = sec; firstHead = false; }
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:5px 0;";
+    const lab = document.createElement("span"); lab.textContent = c.label;
+    const sel = document.createElement("select");
+    sel.style.cssText = "flex:1 1 auto;max-width:60%;border-radius:7px;padding:4px 6px;cursor:pointer;" +
+      "font:500 12px -apple-system,system-ui,sans-serif;color:#e8eeff;background:rgba(255,255,255,.10);" +
+      "border:1px solid rgba(255,255,255,.20);";
+    for (const o of c.options) {
+      const op = document.createElement("option");
+      op.value = o.value; op.textContent = o.label;
+      // the popup is glass over the canvas; the native dropdown list needs its own dark bg
+      op.style.cssText = "background:#1b2030;color:#e8eeff;";
+      sel.appendChild(op);
+    }
+    sel.value = c.get();
+    // stopPropagation: the popup closes on outside clicks, and a <select> click must not count
+    sel.onclick = (e) => e.stopPropagation();
+    sel.onchange = () => { c.set(sel.value); opts.onChange?.(); refresh(); };
+    row.appendChild(lab); row.appendChild(sel);
+    pop.appendChild(row);
+    selEls.push({ c, el: sel });
+  }
+
   const rows: { c: VizControl; row: HTMLElement; sw?: HTMLElement; repaint?: () => void }[] = [];
   if (controls.length) {
-    const head = document.createElement("div");
-    head.textContent = "Visualization";
-    head.style.cssText = "font:700 10px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#9fe9ff;margin:0 0 8px;";
-    pop.appendChild(head);
     for (const c of controls) {
+      const sec = c.section ?? "Visualization";
+      if (sec !== sectionSeen) { heading(sec, firstHead); sectionSeen = sec; firstHead = false; }
       const row = document.createElement("div");
       row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:14px;padding:5px 0;";
       const lab = document.createElement("span"); lab.textContent = c.label;
@@ -227,7 +276,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
       }
       pop.appendChild(row);
     }
-  } else if (opts.about === false && !opts.segments) {
+  } else if (opts.about === false && !opts.segments && !selects.length) {
     pop.textContent = "SlicerLive — WebGPU renderer";
   }
 
@@ -289,6 +338,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
   }
 
   function refresh() {
+    for (const { c, el } of selEls) { const v = c.get(); if (el.value !== v) el.value = v; }
     for (const { c, row, sw, repaint } of rows) {
       const dis = c.disabled?.() ?? false;
       row.style.opacity = dis ? "0.4" : "1";

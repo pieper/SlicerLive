@@ -23,3 +23,8 @@ scratchpad/kits-cache/
 scratchpad/kits/
 algorithms/eval/l0-out*/
 algorithms/eval/l0-out*/results.json
+
+# colorize demo: 62 MB of CT + label zarr rebuilt by examples/colorize/prep.py and served
+# from the public JS2 container — never in the repo
+examples/colorize/data/
+examples/colorize/*.js
