@@ -77,6 +77,10 @@ const race: Record<RowKey, RaceState> = {
   htj2k: { t0: 0, stage: "waiting", note: "", got: 0, expected: 0, tFirst: null, tFinal: null, error: null },
 };
 const elapsed = (k: RowKey) => (performance.now() - race[k].t0) / 1000;
+/** Decoder start-up charged to each arm: neural = weights download + WGSL
+ *  pipeline build; htj2k = wasm fetch + instantiate + decoder construct. Both
+ *  are costs a real user pays before seeing anything. */
+const spinup: Record<RowKey, number> = { neural: 0, htj2k: 0 };
 
 function updateBars() {
   for (const k of ["neural", "htj2k"] as RowKey[]) {
@@ -217,6 +221,63 @@ async function main() {
   setSimulatedBandwidth(netParam === "off" ? null : Number(netParam) * 1e6);
   const pacers = { neural: new LinkPacer(), htj2k: new LinkPacer() };
   const meters = { neural: new BandwidthMeter(), htj2k: new BandwidthMeter() };
+
+  // ── byte-matched snapshots ────────────────────────────────────────────────
+  // A side-by-side at matched BYTES is the only honest way to compare two
+  // codecs visually: at matched wall-clock the faster decoder just shows more
+  // data. Full volumes cannot be kept (a 797-slice row is 836 MB), so each
+  // snapshot stores the three orthogonal mid-planes at full resolution, which
+  // is what you actually zoom into.
+  interface Snapshot {
+    budget: number;            // the byte budget this was captured at
+    bytes: number;             // bytes actually delivered when captured
+    ms: number;                // wall clock since the arm's clock started
+    ax: Int16Array; co: Int16Array; sa: Int16Array;
+  }
+  const snaps: Record<RowKey, Snapshot[]> = { neural: [], htj2k: [] };
+  const snapNext: Record<RowKey, number> = { neural: 0, htj2k: 0 };
+  let BUDGETS: number[] = [];
+
+  /** Log-spaced up to the end of the previewable tiers, then one at the end.
+   *  Nothing visible changes while the residual streams — it is noise being
+   *  made exact — so spending snapshots there would waste memory on frames the
+   *  eye cannot tell apart. */
+  function planBudgets(previewEnd: number, total: number, steps = 14): number[] {
+    const lo = Math.max(2048, Math.round(previewEnd / 40));
+    const out: number[] = [];
+    for (let i = 0; i < steps; i++) {
+      out.push(Math.round(lo * Math.pow(previewEnd / lo, i / (steps - 1))));
+    }
+    if (total > previewEnd * 1.5) out.push(total);
+    return [...new Set(out)].sort((a, b) => a - b);
+  }
+
+  function capturePlanes(vol: Float32Array, Z: number, Y: number, X: number) {
+    const zc = Z >> 1, yc = Y >> 1, xc = X >> 1;
+    const ax = new Int16Array(Y * X), co = new Int16Array(Z * X), sa = new Int16Array(Z * Y);
+    const base = zc * Y * X;
+    for (let i = 0; i < Y * X; i++) ax[i] = vol[base + i];
+    for (let z = 0; z < Z; z++) {
+      const rowOff = z * Y * X + yc * X;
+      for (let x = 0; x < X; x++) co[z * X + x] = vol[rowOff + x];
+      const colOff = z * Y * X + xc;
+      for (let y = 0; y < Y; y++) sa[z * Y + y] = vol[colOff + y * X];
+    }
+    return { ax, co, sa };
+  }
+
+  /** Capture every budget the arm has passed since the last check. Called after
+   *  each volume update, so a snapshot reflects what was on screen at the time. */
+  function maybeSnap(key: RowKey): void {
+    const got = meters[key].summary().bytes;
+    while (snapNext[key] < BUDGETS.length && got >= BUDGETS[snapNext[key]]) {
+      const budget = BUDGETS[snapNext[key]++];
+      const [Z, Y, X] = sc.shape;
+      snaps[key].push({ budget, bytes: got, ms: performance.now() - race[key].t0,
+                        ...capturePlanes(sc.rows[key].vol, Z, Y, X) });
+    }
+  }
+
 
   // end-of-race report: measured per-row throughput + fairness verdict
   const reportIfDone = () => {
@@ -447,6 +508,7 @@ async function main() {
         .then((has) => has ? loadNet("decoder25-preview") : null)
         .catch(() => null);
       const netP = loadNet("decoder25");
+      netP.then(() => { spinup.neural = performance.now() - race.neural.t0; });
       netP.catch(() => { /* surfaced below when awaited */ });
       previewP.catch(() => { /* falls back to the full net */ });
       r.stage = "coarse"; r.expected = bytes.coarse; r.got = 0;
@@ -477,6 +539,7 @@ async function main() {
         const z0 = ch * sh.chunkZ;
         mapOutputToHU(out, vol, z0, Z, sh, dec, scale);
         sc.writeSlab("neural", z0, Math.min(Z, z0 + sh.chunkZ));
+        maybeSnap("neural");
       };
       const tDec = performance.now();
       for (let ch = 0; ch < sh.chunks; ch++) {
@@ -511,6 +574,7 @@ async function main() {
         console.warn(`dc grid size ${dcGrid.length} does not match the volume shape — skipping DC correction`);
       }
       sc.writeSlab("neural", 0, Z);
+      maybeSnap("neural");
       requestDraw();
 
       // ── residual stage → near-lossless (reversible HT slices of
@@ -574,6 +638,7 @@ async function main() {
               r.note = `${next}/${ridx.length} slices`;
               if (next - flushed >= 32) {
                 sc.writeSlab("neural", flushed, next);
+                maybeSnap("neural");
                 flushed = next;
                 requestDraw();
               }
@@ -581,6 +646,7 @@ async function main() {
           }
           while (next < ridx.length && ridx[next].offset + ridx[next].bytes <= received) { applySlice(ridx[next]); next++; }
           sc.writeSlab("neural", flushed, Z);
+          maybeSnap("neural");
           requestDraw();
         }
         r.note = "near-lossless";
@@ -709,6 +775,7 @@ async function main() {
       }
       if (maxZ < 0) return;
       sc.writeSlab(row, minZ, maxZ + 1);
+      maybeSnap(row);
       let full = R;                              // rounds applied volume-wide
       for (let si = 0; si < nS; si++) if (applied[si] < full) full = applied[si];
       if (full >= 1 && r.tFirst == null) r.tFirst = elapsed(row);  // whole-volume preview on screen
@@ -752,12 +819,21 @@ async function main() {
     try {
       const factory = (globalThis as unknown as { Module?: () => Promise<OpenJphModule> }).Module;
       if (!factory) throw new Error("openjph script did not load");
+      // The openjph wasm is fetched by a <script> tag at page load, i.e. before
+      // the clock starts, while the neural arm pays its 12.7 MB of weights
+      // INSIDE the clock. Charging the HTJ2K arm for that download keeps the
+      // two spin-ups comparable; the timing is recoverable after the fact from
+      // the resource entry.
+      const ojEntry = performance.getEntriesByType("resource")
+        .find((e) => e.name.includes("openjph")) as PerformanceResourceTiming | undefined;
+      const ojFetchMs = ojEntry ? ojEntry.duration : 0;
       const openjphP = factory();
       const idxResp = await fetch(htj2kBase + "index.json", { cache: "no-store" });
       if (!idxResp.ok) throw new Error(`index.json HTTP ${idxResp.status}`);
       const rawIdx = await idxResp.json() as SliceIndexEntry[] | ResProgressiveIndex;
       const openjph = await openjphP;
       const decoder = new openjph.HTJ2KDecoder();
+      spinup.htj2k = (performance.now() - race.htj2k.t0) + ojFetchMs;
       const vol = sc.rows.htj2k.vol;
       const sliceSize = X * Y;
       if (!Array.isArray(rawIdx) && rawIdx.layout === "res-progressive") {
@@ -794,6 +870,7 @@ async function main() {
       const flush = () => {
         if (next <= flushed) return;
         sc.writeSlab("htj2k", flushed, next);
+        maybeSnap("htj2k");
         flushed = next;
         if (r.tFirst == null) r.tFirst = elapsed("htj2k");
         requestDraw();
@@ -875,6 +952,110 @@ async function main() {
     }
     status(`cached ${(cacheSize() / 1e6).toFixed(1)} MB — replaying at the simulated rate`);
   }
+
+  // Budgets are common to both arms, so a snapshot pair really is byte-matched.
+  // The preview end is the last point where the picture still changes fast: for
+  // the neural arm that is the end of the fine tier, and the HTJ2K arm is still
+  // deep in its resolution ladder there.
+  {
+    const previewEnd = bytes.coarse + bytes.fine + (bytes.dc ?? 0);
+    const total = Math.max(bytes.htj2k ?? 0, previewEnd + (bytes.residual ?? 0));
+    BUDGETS = planBudgets(previewEnd, total);
+    console.log(`livecodec: ${BUDGETS.length} byte budgets `
+      + `${(BUDGETS[0]/1024).toFixed(0)} KB .. ${(BUDGETS[BUDGETS.length-1]/1e6).toFixed(1)} MB`);
+  }
+
+  // ── byte-matched snapshot viewer ──────────────────────────────────────────
+  // Both panes draw the SAME budget, so any difference on screen is a
+  // difference between the codecs and not between how far each happened to get.
+  // Zoom and pan are shared, because a fine-detail comparison is worthless if
+  // the two views are not on the same pixel.
+  function buildCompare(): void {
+    const grids: Record<RowKey, HTMLElement> = {
+      neural: el("cmp-neural"), htj2k: el("cmp-htj2k"),
+    };
+    const [Z, Y, X] = sc.shape;
+    const planeDims: [string, number, number][] = [["axial", X, Y], ["coronal", X, Z], ["sagittal", Y, Z]];
+    const canvases: Record<RowKey, HTMLCanvasElement[]> = { neural: [], htj2k: [] };
+    for (const k of keys) {
+      grids[k].replaceChildren();
+      for (const [name, w, h] of planeDims) {
+        const cell = document.createElement("div");
+        cell.className = "cmpcell";
+        const cv = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        const tag = document.createElement("span");
+        tag.textContent = name;
+        cell.append(cv, tag);
+        grids[k].append(cell);
+        canvases[k].push(cv);
+      }
+    }
+    let zoom = 1, panX = 0, panY = 0;
+    const applyView = () => {
+      for (const k of keys) {
+        for (const cv of canvases[k]) {
+          const s = zoom * Math.min(
+            (cv.parentElement!.clientWidth || 1) / cv.width,
+            (cv.parentElement!.clientHeight || 1) / cv.height);
+          cv.style.transform =
+            `translate(-50%,-50%) translate(${panX}px,${panY}px) scale(${s})`;
+        }
+      }
+    };
+    const draw = (i: number) => {
+      const lo = sc.lev - sc.win / 2, span = Math.max(1, sc.win);
+      for (const k of keys) {
+        const s = snaps[k][i];
+        for (let pi = 0; pi < 3; pi++) {
+          const cv = canvases[k][pi];
+          const ctx = cv.getContext("2d")!;
+          if (!s) { ctx.clearRect(0, 0, cv.width, cv.height); continue; }
+          const src = pi === 0 ? s.ax : pi === 1 ? s.co : s.sa;
+          const img = ctx.createImageData(cv.width, cv.height);
+          for (let j = 0; j < src.length; j++) {
+            const g = Math.max(0, Math.min(255, ((src[j] - lo) / span) * 255)) | 0;
+            img.data[j * 4] = img.data[j * 4 + 1] = img.data[j * 4 + 2] = g;
+            img.data[j * 4 + 3] = 255;
+          }
+          ctx.putImageData(img, 0, 0);
+        }
+      }
+      const n = snaps.neural[i], hj = snaps.htj2k[i];
+      const kb = (b?: number) => b == null ? "—" : b < 1e6 ? `${(b/1024).toFixed(0)} KB` : `${(b/1e6).toFixed(1)} MB`;
+      el("cmplabel").textContent =
+        `budget ${kb(BUDGETS[i])}  ·  neural ${kb(n?.bytes)} @ ${n ? (n.ms/1000).toFixed(1) : "—"} s`
+        + `  ·  HTJ2K ${kb(hj?.bytes)} @ ${hj ? (hj.ms/1000).toFixed(1) : "—"} s`;
+      applyView();
+    };
+    const slider = el("cmpslider") as HTMLInputElement;
+    const n = Math.max(snaps.neural.length, snaps.htj2k.length);
+    slider.max = String(Math.max(0, n - 1));
+    slider.value = String(Math.max(0, n - 2));
+    slider.oninput = () => draw(+slider.value);
+    const grid = el("cmpgrid");
+    grid.onwheel = (e: WheelEvent) => {
+      e.preventDefault();
+      zoom = Math.max(1, Math.min(24, zoom * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+      applyView();
+    };
+    let drag: { x: number; y: number } | null = null;
+    grid.onpointerdown = (e: PointerEvent) => { drag = { x: e.clientX - panX, y: e.clientY - panY }; };
+    grid.onpointermove = (e: PointerEvent) => {
+      if (!drag) return;
+      panX = e.clientX - drag.x; panY = e.clientY - drag.y; applyView();
+    };
+    grid.onpointerup = () => { drag = null; };
+    addEventListener("resize", applyView);
+    draw(+slider.value);
+  }
+
+  (el("cmpopen") as HTMLButtonElement).addEventListener("click", () => {
+    if (!snaps.neural.length && !snaps.htj2k.length) { status("no snapshots yet — let a race finish"); return; }
+    el("cmp").classList.add("on");
+    buildCompare();
+  });
+  (el("cmpclose") as HTMLButtonElement).addEventListener("click", () => el("cmp").classList.remove("on"));
 
   // ── how the two arms share the machine ────────────────────────────────────
   // "fair" (default): one at a time, each with its own clock. Simultaneous

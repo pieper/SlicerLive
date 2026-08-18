@@ -50,6 +50,27 @@
   .cell .lab { position: absolute; top: 4px; left: 6px; font-weight: 700; font-size: 10px;
                opacity: .75; pointer-events: none; color: #9fb3d0; }
   /* double-click-to-maximize: one cell fills the rows area, its row bar stays */
+  /* byte-matched snapshot comparison */
+  #cmp { position: fixed; inset: 0; background: #0b0b0ef2; z-index: 50; display: none;
+    flex-direction: column; padding: 10px 14px 14px; }
+  #cmp.on { display: flex; }
+  #cmphead { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    color: #d8d8dc; font: 12px/1.4 ui-sans-serif, system-ui, sans-serif; }
+  #cmphead input[type=range] { flex: 1 1 260px; min-width: 180px; accent-color: #f0a020; }
+  #cmpgrid { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    margin-top: 10px; min-height: 0; }
+  .cmpcol { display: flex; flex-direction: column; min-height: 0; }
+  .cmpcol h4 { margin: 0 0 4px; font: 600 12px ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: .04em; }
+  .cmpcol.neural h4 { color: #f0a020; }
+  .cmpcol.htj2k  h4 { color: #58a6ff; }
+  .cmpcells { flex: 1; display: grid; grid-template-rows: 2fr 1fr 1fr; gap: 6px;
+    min-height: 0; overflow: hidden; }
+  .cmpcell { position: relative; overflow: hidden; background: #000; border: 1px solid #26262c; }
+  .cmpcell canvas { position: absolute; left: 50%; top: 50%; transform-origin: 0 0;
+    image-rendering: pixelated; }
+  .cmpcell span { position: absolute; left: 4px; top: 3px; z-index: 2;
+    font: 10px ui-monospace, monospace; color: #8a8a92; pointer-events: none; }
   #rows.maxmode .mrow { display: none; }
   #rows.maxmode .mrow.hasmax { display: flex; flex: 1; }
   #rows.maxmode .mrow.hasmax .cell { display: none; }
@@ -65,6 +86,7 @@
     <header>
       <h1>livecodec race</h1>
       <span id="info"></span>
+      <button id="cmpopen" class="chip" title="compare the two codecs at matched byte budgets, captured during the race">compare</button>
       <button id="rand" class="chip" title="pick another scan at random">Load random scan</button>
       <!-- encoding: training-effort checkpoints from versions.json (hidden until
            the versioned bucket layout exists); scan: the active dataset's cases
@@ -130,6 +152,19 @@
       </div>
     </div>
   </div>
-  <script type="module" src="livecodec.js?v=20260814a"></script>   <!-- bump per deploy -->
+  <div id="cmp">
+  <div id="cmphead">
+    <button id="cmpclose" class="chip">close</button>
+    <strong>byte-matched snapshots</strong>
+    <input id="cmpslider" type="range" min="0" value="0" step="1" aria-label="byte budget">
+    <span id="cmplabel"></span>
+    <span style="color:#8a8a92">scroll to zoom · drag to pan · both panes move together</span>
+  </div>
+  <div id="cmpgrid">
+    <div class="cmpcol neural"><h4>LiveCodec neural</h4><div class="cmpcells" id="cmp-neural"></div></div>
+    <div class="cmpcol htj2k"><h4>HTJ2K</h4><div class="cmpcells" id="cmp-htj2k"></div></div>
+  </div>
+</div>
+<script type="module" src="livecodec.js?v=20260814a"></script>   <!-- bump per deploy -->
 </body>
 </html>
