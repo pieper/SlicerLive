@@ -52,28 +52,41 @@ for (const n of NAMES) {
 const DATA_BASE = new URLSearchParams(location.search).get("data") ??
   "https://js2.jetstream-cloud.org:8001/swift/v1/slicerlive/colorize/";
 
-// The CT is ~61 MB over the network, so the progress readout has to be real: exact bytes
-// against the manifest's known totals, a percentage, and a live rate with an ETA. A bar that
-// only says "loading" for a minute reads as a hang.
+// Download progress. Two streams: the segmentation (~0.6 MB, first, so it can render while you
+// wait) then the CT (~61 MB). Both get the bar, because a bar that only starts moving after the
+// first stream finishes reads as a hang.
+//
+// LoadProgress.bytes is cumulative (colorize-scene sums fetchZarrVolume's per-chunk deltas), and
+// the totals come from the manifest, which records the compressed size prep.py actually wrote —
+// so the percentage is against real bytes rather than a guess.
 const barFill = $("barfill"), loadPct = $("loadpct"), loadWrap = $("loadwrap");
 const loadTitle = $("loadtitle"), loadSub = $("loadsub");
-let ctBytes = 0, ctTotal = 0;
-const t0 = performance.now();
+let ctStart = 0;
+const fmt = (b: number) => (b / 1048576).toFixed(1);
 const onProgress = (p: { bytes: number; total: number; what: "ct" | "labels"; done?: boolean }) => {
+  const frac = p.total ? Math.min(1, p.bytes / p.total) : 0;
+  barFill.style.width = `${Math.max(2, frac * 100).toFixed(1)}%`;
   if (p.what === "labels") {
-    if (!p.done) loadPct.textContent = `segmentation ${(p.bytes / 1048576).toFixed(1)} MB`;
+    loadPct.textContent = p.done
+      ? "segmentation ready — fetching the CT…"
+      : `segmentation  ${fmt(p.bytes)} / ${fmt(p.total)} MB`;
     return;
   }
-  ctBytes = p.bytes; ctTotal = p.total || ctTotal;
-  const frac = ctTotal ? Math.min(1, ctBytes / ctTotal) : 0;
-  barFill.style.width = `${Math.max(2, frac * 100).toFixed(1)}%`;
-  const secs = (performance.now() - t0) / 1000;
-  const rate = ctBytes / Math.max(secs, 0.001) / 1048576;
-  const left = rate > 0.05 && ctTotal ? Math.max(0, (ctTotal - ctBytes) / 1048576 / rate) : NaN;
+  // Time the CT from its FIRST byte, not from page load: the segmentation fetch happens first,
+  // and including it would understate the rate and inflate the estimate.
+  if (!ctStart) ctStart = performance.now();
+  const secs = (performance.now() - ctStart) / 1000;
+  const rate = secs > 0.25 ? p.bytes / secs / 1048576 : 0;
+  const left = rate > 0.05 ? (p.total - p.bytes) / 1048576 / rate : NaN;
+  // The `done` event fires after the volume is decoded and uploaded to the GPU, so elapsed time
+  // has grown while bytes have not — recomputing the rate there reports a fraction of the real
+  // download speed. Drop the rate and the estimate once there is nothing left to wait for.
+  const settling = p.done || frac >= 0.995;
   loadPct.textContent =
-    `${(ctBytes / 1048576).toFixed(1)} / ${(ctTotal / 1048576).toFixed(1)} MB` +
-    `  ·  ${(frac * 100).toFixed(0)}%  ·  ${rate.toFixed(1)} MB/s` +
-    (Number.isFinite(left) ? `  ·  ${left.toFixed(0)}s left` : "");
+    `${fmt(p.bytes)} / ${fmt(p.total)} MB  ·  ${(frac * 100).toFixed(0)}%` +
+    (rate > 0 && !settling ? `  ·  ${rate.toFixed(1)} MB/s` : "") +
+    (Number.isFinite(left) && !settling ? `  ·  ${left < 1 ? "<1" : left.toFixed(0)}s left` : "") +
+    (p.done ? "  ·  decoding" : "");
 };
 
 status("loading segmentation…");

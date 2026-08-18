@@ -23,6 +23,9 @@ export interface Manifest {
   segments: { num: number; name: string; color: number[] }[];
   groups: GroupInfo[];
 }
+/** `bytes` is CUMULATIVE for the named stream, against `total`. fetchZarrVolume's own callback
+ *  reports a per-chunk DELTA, so the running sum is kept here — one place, rather than in every
+ *  consumer that wants a percentage. */
 export interface LoadProgress { bytes: number; total: number; what: "ct" | "labels"; done?: boolean }
 
 export interface ColorizeScene {
@@ -92,9 +95,12 @@ export async function buildColorizeScene(
   // LABELS FIRST. They are ~0.6 MB against the CT's ~61 MB, so the segmentation can be on
   // screen as flat coloured surfaces about a second in, while the CT streams behind it.
   const ctTotal = manifest.ct.bytes ?? 0, labTotal = manifest.labels.bytes ?? 0;
-  const labZ = await fetchZarrVolume(blobBase, manifest.labels,
-    (n) => onProgress?.({ bytes: n, total: labTotal, what: "labels" }));
-  onProgress?.({ bytes: labTotal, total: labTotal, what: "labels", done: true });
+  let labGot = 0;
+  const labZ = await fetchZarrVolume(blobBase, manifest.labels, (n) => {
+    labGot += n;
+    onProgress?.({ bytes: labGot, total: labTotal, what: "labels" });
+  });
+  onProgress?.({ bytes: Math.max(labGot, labTotal), total: labTotal, what: "labels", done: true });
 
   const [nz, ny, nx] = manifest.ct.shape;
   const dims: Vec3 = [nx, ny, nz];
@@ -123,13 +129,16 @@ export async function buildColorizeScene(
   let onCtArrived: (() => void) | null = null;
   const ctReady = new Promise<void>((res) => { onCtArrived = res; });
   // Deliberately NOT awaited: the caller gets a usable scene now and the CT fills in.
-  const ctFetch = fetchZarrVolume(blobBase, manifest.ct,
-    (n) => onProgress?.({ bytes: n, total: ctTotal, what: "ct" }))
+  let ctGot = 0;
+  const ctFetch = fetchZarrVolume(blobBase, manifest.ct, (n) => {
+    ctGot += n;
+    onProgress?.({ bytes: ctGot, total: ctTotal, what: "ct" });
+  })
     .then((ctZ) => {
       field.setCT(ctZ.data);
       field.setCtModulation(0.55);
       field.setContextOpacity(0.12);
-      onProgress?.({ bytes: ctTotal, total: ctTotal, what: "ct", done: true });
+      onProgress?.({ bytes: Math.max(ctGot, ctTotal), total: ctTotal, what: "ct", done: true });
       onCtArrived?.();
     });
   void ctFetch;
