@@ -94,7 +94,16 @@ export class ColorizeField implements Field {
     // decodes the chunk — so a "|u1" label volume arrives as floats. Handing that straight to
     // writeTexture reinterprets 4-byte floats as 4 separate label bytes and the labelmap comes
     // out as scattered noise, while every value-based read of the same array looks correct.
-    const lab8 = labels instanceof Uint8Array ? labels : Uint8Array.from(labels, (v) => v & 0xff);
+    // A plain loop, NOT Uint8Array.from(labels, fn): the callback form measured 3979 ms for this
+    // volume's 55.5 M elements against 80 ms here. Same trap as f32tof16 — per-element function
+    // call overhead at this scale is seconds of blocked main thread.
+    let lab8: Uint8Array;
+    if (labels instanceof Uint8Array) {
+      lab8 = labels;
+    } else {
+      lab8 = new Uint8Array(labels.length);
+      for (let i = 0; i < labels.length; i++) lab8[i] = labels[i];
+    }
     dev.queue.writeTexture({ texture: this.labTex }, lab8,
       { bytesPerRow: dims[0], rowsPerImage: dims[1] }, size);
 
