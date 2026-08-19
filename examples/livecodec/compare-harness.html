@@ -36,6 +36,9 @@ const mk = (n, f) => { const a = new Int16Array(n); for (let i=0;i<n;i++) a[i]=f
 const cxmm = X*sx/2, cymm = Y*sy/2, czmm = Z*sz/2, R = 55;
 const ball = (px,py,pz) => {
   const d = Math.hypot(px-cxmm, py-cymm, pz-czmm);
+  // Superior marker: a bright cap near max z. Without it the phantom is
+  // z-symmetric and an upside-down coronal/sagittal looks identical.
+  if (pz > Z*sz - 30 && Math.hypot(px-cxmm, py-cymm) < 40) return 1200;
   return d < R ? 300 : (d < R+8 ? 900 : -900);
 };
 function frame(bytes, q) {
@@ -117,6 +120,28 @@ if (n > 0) {
     let lit = 0;
     for (let i = 0; i < d.length; i += 4 * 997) if (d[i] > 8) lit++;
     if (lit === 0) fails.push(`${col} blank at full scrub`);
+  }
+}
+// 6. superior must render at the TOP of coronal and sagittal. The planes store
+//    z as the row index, so drawing them straight puts the feet up.
+{
+  const sl2 = document.getElementById("cmpslider");
+  sl2.value = sl2.max; sl2.dispatchEvent(new Event("input"));
+  for (const which of [2, 3]) {                 // nth-child 2=coronal, 3=sagittal
+    const cv = document.querySelector(`#cmp-neural .cmpcell:nth-child(${which}) canvas`);
+    const d = cv.getContext("2d").getImageData(0, 0, cv.width, cv.height).data;
+    const band = (y0, y1) => {
+      let s = 0, n = 0;
+      for (let y = y0; y < y1; y++) for (let x = 0; x < cv.width; x += 3) {
+        s += d[(y * cv.width + x) * 4]; n++;
+      }
+      return s / Math.max(1, n);
+    };
+    const top = band(0, Math.floor(cv.height * 0.18));
+    const bot = band(Math.floor(cv.height * 0.82), cv.height);
+    if (!(top > bot * 1.15)) {
+      fails.push(`pane ${which} not superior-up (top ${top.toFixed(0)} vs bottom ${bot.toFixed(0)})`);
+    }
   }
 }
 console.log(fails.length ? "HARNESS FAIL: " + fails.join("; ") : "HARNESS PASS");

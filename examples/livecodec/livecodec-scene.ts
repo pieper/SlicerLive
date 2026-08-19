@@ -51,6 +51,7 @@ export interface VersionEntry {
   params: number | string;               // parameter count (e.g. 28.6e6) or preformatted
   note?: string;
   heads?: string[];                      // decoder heads published ("full", "preview")
+  staged?: boolean;                      // fine tier ships as progressive stages
 }
 
 export interface ScanMeta {

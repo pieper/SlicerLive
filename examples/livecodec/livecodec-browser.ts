@@ -170,7 +170,12 @@ async function main() {
       typeof p === "number" ? (p >= 1e6 ? `${(p / 1e6).toFixed(1)}M` : `${Math.round(p / 1e3)}k`) : p;
     verSel.add(new Option("v3 · 31 vols (baseline)", ""));
     for (const v of versions) {
-      verSel.add(new Option(`${v.tag} · ${fmtSteps(v.steps)} steps · ${fmtParams(v.params)}`, v.tag));
+      // Mark which checkpoints ship the progressive fine tier: it is the whole
+      // difference in how the race behaves, and is otherwise invisible until
+      // you watch the bars.
+      const prog = v.staged ? " · progressive" : "";
+      verSel.add(new Option(
+        `${v.tag} · ${fmtSteps(v.steps)} steps · ${fmtParams(v.params)}${prog}`, v.tag));
     }
     verSel.value = version?.tag ?? "";
     verSel.addEventListener("change", () => {

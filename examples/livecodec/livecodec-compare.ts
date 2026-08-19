@@ -117,11 +117,19 @@ export function makeSnapshotViewer(cfg: ViewerConfig): void {
         const src = pi === 0 ? s.ax : pi === 1 ? s.co : s.sa;
         const img = ctx.createImageData(cv.width, cv.height);
         const d = img.data;
-        for (let j = 0; j < src.length; j++) {
-          const g = Math.max(0, Math.min(255, ((src[j] - lo) / span) * 255)) | 0;
-          const o = j * 4;
-          d[o] = d[o + 1] = d[o + 2] = g;
-          d[o + 3] = 255;
+        // Coronal and sagittal are stored with z as the row index, so row 0 is
+        // the most INFERIOR slice. Drawn straight that puts the feet at the top;
+        // radiological convention is superior up, so those two read bottom-up.
+        const flipY = pi !== 0;
+        const W = cv.width, H = cv.height;
+        for (let y = 0; y < H; y++) {
+          const sy = flipY ? H - 1 - y : y;
+          for (let x = 0; x < W; x++) {
+            const g = Math.max(0, Math.min(255, ((src[sy * W + x] - lo) / span) * 255)) | 0;
+            const o = (y * W + x) * 4;
+            d[o] = d[o + 1] = d[o + 2] = g;
+            d[o + 3] = 255;
+          }
         }
         ctx.putImageData(img, 0, 0);
       });

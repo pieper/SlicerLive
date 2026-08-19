@@ -54,7 +54,10 @@
   #cmp { position: fixed; inset: 0; background: #0b0b0ef2; z-index: 50; display: none;
     flex-direction: column; padding: 10px 14px 14px; }
   #cmp.on { display: flex; }
+  /* the shared '?' chrome button is position:fixed at 12,12 with a higher
+     z-index, so the toolbar starts clear of it rather than under it */
   #cmphead { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding-left: 52px;
     color: #d8d8dc; font: 12px/1.4 ui-sans-serif, system-ui, sans-serif; }
   #cmphead input[type=range] { flex: 1 1 260px; min-width: 180px; accent-color: #f0a020; }
   #cmpgrid { flex: 1; touch-action: none; cursor: grab; display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
