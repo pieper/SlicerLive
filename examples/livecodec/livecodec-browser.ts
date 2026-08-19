@@ -28,6 +28,7 @@ import { SliceInteractor } from "../../render/slice-interactor.ts";
 import { attachSliceControls } from "../../render/demos/slice-control.ts";
 import { attachCameraControls, framedCamera } from "../../render/demos/camera-control.ts";
 import { makeSnapshotViewer } from "./livecodec-compare.ts";
+import { decodeFineStage, dequantFineFloat, type StageIndex } from "./livecodec-range.ts";
 import { attachDoubleClick } from "../../render/demos/view-grid.ts";
 import { installChrome } from "../../render/demos/sl-chrome.ts";
 import {
@@ -580,21 +581,63 @@ async function main() {
       requestDraw();
 
       // background: fine + dc → per-chunk refinement, then the DC-corrected final state
-      r.stage = "fine+dc"; r.expected = bytes.fine + bytes.dc; r.got = 0;
+      const staged = meta.staged;
+      r.stage = "fine+dc";
+      r.expected = (staged ? staged.bytes.reduce((a, b) => a + b, 0) : bytes.fine) + bytes.dc;
+      r.got = 0;
       let fGot = 0, dGot = 0;
-      const [fineGz, dcGz] = await Promise.all([
-        streamFetch(neuralBase + "fine.gz", ((m) => (n: number) => { fGot = n; r.got = fGot + dGot; m.at(n); })(meters.neural.begin("fine.gz")), pacers.neural),
-        streamFetch(neuralBase + "dc.gz", ((m) => (n: number) => { dGot = n; r.got = fGot + dGot; m.at(n); })(meters.neural.begin("dc.gz")), pacers.neural),
-      ]);
-      const fineCodes = await gunzip(fineGz);
-      const dcBytes = await gunzip(dcGz);
-      const dcGrid = new Int8Array(dcBytes.buffer, dcBytes.byteOffset, dcBytes.byteLength);
-      for (let ch = 0; ch < sh.chunks; ch++) {
-        r.note = `refine ${ch + 1}/${sh.chunks}`;
-        // the FINE tier always runs the full head — detail is the whole point here
-        await decodeChunk(net, 1, dequantFine(fineCodes, ch, sh, dec), ch);
-        requestDraw();
+      const dcP = streamFetch(neuralBase + "dc.gz",
+        ((m) => (n: number) => { dGot = n; r.got = fGot + dGot; m.at(n); })(
+          meters.neural.begin("dc.gz")), pacers.neural);
+
+      if (staged) {
+        // Progressive fine tier: each stage narrows every site's FSQ code to a
+        // finer bucket, so the volume can be re-decoded and shown after ANY of
+        // them. The monolithic tier is useless until its last byte; the first
+        // stage here is about a quarter of it.
+        let prev = dec.levels.map(() => new Int32Array(
+          sh.chunks * sh.Df * sh.Hf * sh.Wf)) as Int32Array<ArrayBufferLike>[];
+        let prevN = dec.levels.map(() => 1);
+        const per = sh.Df * sh.Hf * sh.Wf;
+        for (let s = 1; s <= staged.stages; s++) {
+          const idxP = fetch(neuralBase + `fine-s${s}.json`).then((x) => x.json() as Promise<StageIndex>);
+          const mS = meters.neural.begin(`fine-s${s}.bin`);
+          const buf = await streamFetch(neuralBase + `fine-s${s}.bin`,
+            ((base) => (n: number) => { fGot = base + n; r.got = fGot + dGot; mS.at(n); })(fGot),
+            pacers.neural);
+          const idx = await idxP;
+          r.note = `stage ${s}/${staged.stages}`;
+          const tS = performance.now();
+          const out = decodeFineStage(buf, idx, dec.levels, prev, prevN,
+                                      sh.chunks, sh.Df, sh.Hf, sh.Wf);
+          const entropyMs = performance.now() - tS;
+          prev = out.buckets;
+          prevN = idx.buckets;
+          for (let ch = 0; ch < sh.chunks; ch++) {
+            r.note = `stage ${s}/${staged.stages} · chunk ${ch + 1}/${sh.chunks}`;
+            await decodeChunk(net, 1, dequantFineFloat(out.codes, ch, sh.C, per,
+                                                       dec.offset, dec.half), ch);
+            touch("neural");
+            requestDraw();
+          }
+          console.log(`livecodec: fine stage ${s} — ${(buf.byteLength / 1024).toFixed(0)} KB, `
+            + `entropy decode ${entropyMs.toFixed(0)} ms, `
+            + `neural decode ${(performance.now() - tS - entropyMs).toFixed(0)} ms`);
+        }
+      } else {
+        const fineGz = await streamFetch(neuralBase + "fine.gz",
+          ((m) => (n: number) => { fGot = n; r.got = fGot + dGot; m.at(n); })(
+            meters.neural.begin("fine.gz")), pacers.neural);
+        const fineCodes = await gunzip(fineGz);
+        for (let ch = 0; ch < sh.chunks; ch++) {
+          r.note = `refine ${ch + 1}/${sh.chunks}`;
+          // the FINE tier always runs the full head — detail is the whole point here
+          await decodeChunk(net, 1, dequantFine(fineCodes, ch, sh, dec), ch);
+          requestDraw();
+        }
       }
+      const dcBytes = await gunzip(await dcP);
+      const dcGrid = new Int8Array(dcBytes.buffer, dcBytes.byteOffset, dcBytes.byteLength);
       r.note = "dc correction";
       if (!applyDcCorrection(vol, scan.shape, dcGrid)) {
         console.warn(`dc grid size ${dcGrid.length} does not match the volume shape — skipping DC correction`);
@@ -963,6 +1006,10 @@ async function main() {
     // the per-URL catch below absorbs, so there is nothing to probe for first.
     const urls = [
       neuralBase + "coarse.gz", neuralBase + "fine.gz", neuralBase + "dc.gz",
+      ...(meta.staged
+        ? Array.from({ length: meta.staged.stages }, (_, i) =>
+            [neuralBase + `fine-s${i + 1}.bin`, neuralBase + `fine-s${i + 1}.json`]).flat()
+        : []),
       neuralBase + "residual-index.json", neuralBase + "residual.bin",
       htj2kBase + "index.json", htj2kBase + "slices.bin",
     ];

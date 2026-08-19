@@ -174,6 +174,24 @@ export function decodeFineStage(
   return { buckets, codes: out };
 }
 
+export function dequantFine(
+  codes: Uint8Array, chunk: number,
+  s: { C: number; Df: number; Hf: number; Wf: number },
+  dec: { offset: number[]; half: number[] },
+): Float32Array {
+  const { C, Df, Hf, Wf } = s;
+  const per = Df * Hf * Wf;
+  const src = chunk * C * per;
+  const out = new Float32Array(C * per);
+  let o = 0;
+  for (let c = 0; c < C; c++) {
+    const off = dec.offset[c], inv = 1 / dec.half[c];
+    const cb = src + c * per;
+    for (let i = 0; i < per; i++) out[o++] = (codes[cb + i] - off) * inv;
+  }
+  return out;
+}
+
 /** Dequantise float codes (which may sit at bucket centres) to latent values.
  *  Mirrors dequantFine in livecodec-scene.ts, but accepts fractional codes --
  *  a partially-refined stage knows an interval, not an integer. */

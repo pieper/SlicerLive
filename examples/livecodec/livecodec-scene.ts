@@ -60,6 +60,9 @@ export interface ScanMeta {
   chunk_z: number;                       // z-slices per neural chunk (32)
   latent: { fine: number[]; coarse: number[]; chunks: number }; // per-chunk [1,C,D,H',W']
   bytes: ScanEntry["bytes"];
+  /** Present when the fine tier also ships as progressive range-coded stages.
+   *  Absent on older versions, which keep the monolithic fine.gz path. */
+  staged?: { stages: number; bytes: number[]; nbr: number };
 }
 
 export interface DecoderMeta {
@@ -90,6 +93,7 @@ export interface ResProgressiveIndex {
 
 // Transport (pacing, throughput, byte cache) lives in livecodec-net.ts; it is
 // re-exported here so callers keep a single import site.
+export { dequantFine } from "./livecodec-range.ts";
 export {
   BandwidthMeter, byteChunks, cacheClear, cacheHas, cacheSize, gunzip, LinkPacer,
   prefetch, setSimulatedBandwidth, streamFetch,
@@ -170,19 +174,9 @@ export function dequantCoarseUp(codes: Uint8Array, chunk: number, s: LatentShape
 }
 
 /** Dequantize ONE chunk's fine codes (no upsample): [C, Df, Hf, Wf] flat. */
-export function dequantFine(codes: Uint8Array, chunk: number, s: LatentShapes, dec: DecoderMeta): Float32Array {
-  const { C, Df, Hf, Wf } = s;
-  const per = Df * Hf * Wf;
-  const src = chunk * C * per;
-  const out = new Float32Array(C * per);
-  let o = 0;
-  for (let c = 0; c < C; c++) {
-    const off = dec.offset[c], inv = 1 / dec.half[c];
-    const cb = src + c * per;
-    for (let i = 0; i < per; i++) out[o++] = (codes[cb + i] - off) * inv;
-  }
-  return out;
-}
+// dequantFine now lives in livecodec-range.ts beside the staged float variant:
+// it is pure arithmetic with no render dependency, so keeping it out of this
+// module lets both be exercised without a WebGPU context.
 
 /** Map one chunk's decoder output ([-1,1] units, [1,1,chunkZ,H/scale,W/scale]) to HU
  *  and write it into the full volume at z0, trimming the padded z tail past Z.
