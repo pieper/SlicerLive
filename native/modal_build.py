@@ -65,17 +65,22 @@ def build_and_run(bin_name: str) -> dict:
     out["build_s"] = round(time.time() - t0, 1)
     out["build_log"] = b.stdout[-3000:]
     build_vol.commit()
-    r = sh(f"RUST_BACKTRACE=1 {target_dir}/release/{bin_name} 2>&1", timeout=300)
+    r = sh(f"RUST_BACKTRACE=1 {target_dir}/release/{bin_name} /tmp/out.bin 2>&1", timeout=300)
     out["run"] = r.stdout[-6000:]
     out["rc"] = r.returncode
+    fp = pathlib.Path("/tmp/out.bin")
+    out["file"] = fp.read_bytes() if fp.exists() else b""
     return out
 
 
 @app.local_entrypoint()
-def main(bin: str = "nvenc-probe"):
+def main(bin: str = "nvenc-probe", out: str = ""):
     res = build_and_run.remote(bin)
     print(res["host_cpu"])
     print(f"build {res['build_s']}s · {res.get('target_dir')}")
     print(res["build_log"])
     print("---- run (rc", res["rc"], ") ----")
     print(res["run"])
+    if out and res.get("file"):
+        pathlib.Path(out).write_bytes(res["file"])
+        print(f"saved {len(res['file'])} bytes -> {out}")

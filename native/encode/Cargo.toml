@@ -9,6 +9,14 @@ license = "Apache-2.0"
 name = "nvenc-probe"
 path = "src/bin/nvenc_probe.rs"
 
+[[bin]]
+name = "av1-dump"
+path = "src/bin/av1_dump.rs"
+
+[[bin]]
+name = "liverender-sidecar"
+path = "src/bin/sidecar.rs"
+
 [dependencies]
 nvidia-video-codec-sdk = "0.4"
 # Explicit CUDA version: the NVENC crate's default asks `nvcc`, which does not exist on a driver-only
