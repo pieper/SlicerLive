@@ -54,6 +54,17 @@ function worldToClip(vp: Mat4, p: Vec3): [number, number, number, number] {
   ];
 }
 
+/** World → CSS px inside a canvas of CSS size (rw,rh), using the SAME view·proj the picker uses.
+ *  Exported so a test harness can aim a synthetic pointer exactly at a handle. */
+export function projectToCanvasCss(
+  cam: VtkCamera, viewW: number, viewH: number, world: Vec3, rw: number, rh: number,
+): { x: number; y: number } | null {
+  const { vp } = camMatrices(cam, viewW, viewH);
+  const c = worldToClip(vp, world);
+  if (c[3] <= 0) return null;
+  return { x: ((c[0] / c[3]) * 0.5 + 0.5) * rw, y: (1 - ((c[1] / c[3]) * 0.5 + 0.5)) * rh };
+}
+
 export interface WidgetControls { detach(): void }
 
 export function attachWidgetControls(

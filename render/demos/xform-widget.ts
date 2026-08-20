@@ -1,12 +1,12 @@
 // Linear transform GIZMO widget (rotation + translation) for a volume — a classic
 // transform gizmo (RGB axis arrows + RGB rotation rings + centre) drawn by
 // TransformGizmoField, driven by the shared grab-or-bubble widget-control. It edits a rigid
-// worldFromLocal matrix on a target ImageField via setWorldTransform; each drag is Tier-A
-// (syncUniforms, no rebuild). Registration-style: nudge/spin one volume relative to another.
+// worldFromLocal matrix on a target (an ImageField locally, a proxy that ships the matrix to the
+// render server remotely) via setWorldTransform; each drag is Tier-A (syncUniforms, no rebuild).
+// Registration-style: nudge/spin one volume relative to another.
 //
 // The gizmo is screen-constant size and its picking must match, so handleList(scale) places
 // the invisible pick points at the same world scale the shader draws the glyphs.
-import type { ImageField } from "../fields.ts";
 import { TransformGizmoField } from "../transform-gizmo-field.ts";
 import { applyMat4, identity, type Mat4, type Vec3, multiply, rotationAboutAxis, translation } from "../mat4.ts";
 
@@ -16,6 +16,14 @@ export type XMeta =
   | { kind: "rotate"; axis: 0 | 1 | 2 };        // ring: rotate about one RAS axis, about the centre
 
 export interface XHandle { id: number; world: Vec3; data: XMeta; cursor: string }
+
+/** What the widget needs of its target: where it starts, and somewhere to put the matrix.
+ *  An ImageField satisfies this structurally (local, Tier-A); a REMOTE demo passes a proxy
+ *  that ships the matrix to the render server instead — same widget math either way. */
+export interface XformTarget {
+  worldCenter(): Vec3;
+  setWorldTransform(m: Mat4): void;
+}
 
 const E: Vec3[] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
 const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -44,14 +52,17 @@ export interface XformWidget {
   matrix(): Mat4;
 }
 
-export function makeXformWidget(target: ImageField, _sizeMm: number): XformWidget {
+/** `initial` resumes an in-progress transform (a remote client reconnecting to a server whose
+ *  target has already been moved); C0 must then be the target's centre BEFORE that matrix. */
+export function makeXformWidget(target: XformTarget, _sizeMm: number, initial?: Mat4): XformWidget {
   const C0 = target.worldCenter();
   const field = new TransformGizmoField(C0, 88);   // 88 px on-screen radius — comfortably pickable
-  let M: Mat4 = identity();
+  let M: Mat4 = initial ? initial.slice() as Mat4 : identity();
   let M0: Mat4 = identity();
   let pivot0: Vec3 = [...C0] as Vec3;
 
   const pivot = (): Vec3 => applyMat4(M, C0);
+  if (initial) field.setPivot(pivot());
 
   return {
     field,

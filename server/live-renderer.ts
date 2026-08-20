@@ -10,15 +10,25 @@ import { initDevice } from "../render/device.ts";
 import { SceneRenderer } from "../render/scene-renderer.ts";
 import { loadSceneVolumeField } from "../render/scene-volume.ts";
 import { BudgetController } from "../render/budget-controller.ts";
-import type { Vec3 } from "../render/mat4.ts";
+import { buildMultiVolume } from "../render/demos/selftest-scenes.ts";
+import { TransformGizmoField } from "../render/transform-gizmo-field.ts";
+import type { Field, ImageField } from "../render/fields.ts";
+import { identity, type Mat4, type Vec3 } from "../render/mat4.ts";
 
 const PORT = Number(Deno.env.get("PORT") ?? 8787);
+// DEMO=single  one big volume (CTACardio) — the original M3 scene.
+// DEMO=multi   the selftest MULTI-VOLUME scene (CTACardio + Panoramix +200mm R) with the
+//              interactive transform GIZMO on Panoramix: identical fields to
+//              demos/selftest-browser.ts?demo=multi, only the compositing runs up here.
+const DEMO = Deno.env.get("DEMO") ?? "single";
 // The REAL volume rendered remotely — the point of remote rendering is data too big for the browser.
 const SCENE_URL = Deno.env.get("SCENE") ?? "https://pieper.github.io/live/scenes/CTACardio.json";
 // Self-contained client (page + bundle) served by this server — kept out of the public gallery since
 // it needs the local server running. Build with:
 //   deno run -A npm:esbuild render/demos/remote-browser.ts --bundle --format=esm --outfile=server/client/remote.js
 const CLIENT_DIR = Deno.env.get("CLIENT_DIR") ?? new URL("./client/", import.meta.url).pathname;
+const DBG = (Deno.env.get("DBG") ?? "0") !== "0";
+const dbg = (...a: unknown[]) => { if (DBG) console.log(`[${performance.now().toFixed(0)}]`, ...a); };
 const IDLE_MS = 80;                          // after this long with no camera update, send one native frame
 const COMPRESS = (Deno.env.get("COMPRESS") ?? "1") !== "0";   // gzip the rgba8 samples (M5 rung 1)
 
@@ -35,77 +45,485 @@ async function gzip(bytes: Uint8Array): Promise<Uint8Array> {
 const gpu = await initDevice();
 const scene = new SceneRenderer(gpu, "rgba8unorm");
 let mb = 0;
-console.log(`[live-renderer] loading ${SCENE_URL} …`);
-const sv = await loadSceneVolumeField(gpu.device, SCENE_URL, (n) => { mb += n; });
-scene.build([sv.field]);
-scene.setBackground(0.05, 0.06, 0.09);
-const center = sv.center;
-const radius = sv.radius;
-const sceneName = sv.name;
-console.log(`[live-renderer] scene "${sceneName}" ready — ${sv.dims.join("×")} · ${(mb / 1e6).toFixed(0)} MB · center ${center.map((v) => v.toFixed(0))} radius ${radius.toFixed(0)}`);
+let fields: Field[], center: Vec3, radius: number, sceneName: string, detail: string;
+// The gizmo's target volume + the gizmo field itself — present only in DEMO=multi. The widget
+// MATH runs in the browser (pure geometry, no GPU); what arrives here is the resulting matrix.
+let xformTarget: ImageField | null = null;
+let gizmo: TransformGizmoField | null = null;
+let xformC0: Vec3 = [0, 0, 0];    // the target's centre at IDENTITY — the widget's pivot origin
+let xformM: Mat4 = identity();    // last matrix applied, replayed to a (re)connecting client
 
-interface CamMsg { type: "cam"; w: number; h: number; p: Vec3; f: Vec3; u: Vec3; a: number }
-
-function sendFrame(sock: WebSocket, sw: number, sh: number, vw: number, vh: number, settled: number, compressed: number, payload: Uint8Array) {
-  const head = new Uint16Array([sw, sh, vw, vh, settled, compressed]);   // 12-byte header
-  const frame = new Uint8Array(12 + payload.length);
-  frame.set(new Uint8Array(head.buffer), 0);
-  frame.set(payload, 12);
-  sock.send(frame);
+if (DEMO === "multi") {
+  console.log(`[live-renderer] loading the multi-volume selftest scene …`);
+  const sc = await buildMultiVolume(gpu.device, (n) => { mb += n; });
+  xformTarget = sc.pano.field;
+  xformC0 = sc.pano.field.worldCenter();
+  gizmo = new TransformGizmoField(xformC0, 88);
+  fields = [...sc.fields, gizmo];
+  center = [
+    (sc.cta.center[0] + sc.pano.center[0]) / 2,
+    (sc.cta.center[1] + sc.pano.center[1]) / 2,
+    (sc.cta.center[2] + sc.pano.center[2]) / 2,
+  ];
+  radius = Math.max(sc.cta.radius, sc.pano.radius) * 1.35;
+  sceneName = `${sc.cta.name} + ${sc.pano.name}`;
+  detail = `${sc.cta.dims.join("×")} + ${sc.pano.dims.join("×")}`;
+} else {
+  console.log(`[live-renderer] loading ${SCENE_URL} …`);
+  const sv = await loadSceneVolumeField(gpu.device, SCENE_URL, (n) => { mb += n; });
+  fields = [sv.field];
+  center = sv.center;
+  radius = sv.radius;
+  sceneName = sv.name;
+  detail = sv.dims.join("×");
 }
+scene.build(fields);
+scene.setBackground(0.05, 0.06, 0.09);
+console.log(`[live-renderer] scene "${sceneName}" ready — ${detail} · ${(mb / 1e6).toFixed(0)} MB · center ${center.map((v) => v.toFixed(0))} radius ${radius.toFixed(0)}`);
+
+interface CamMsg { type: "cam"; w: number; h: number; p: Vec3; f: Vec3; u: Vec3; a: number; dn?: number }
+// The gizmo drag, as the client computed it: the target's world matrix, the gizmo's new pivot
+// (it rides the target) and which component is highlighted. Tier-A — syncUniforms, no rebuild.
+// NOTE: a Mat4 is a Float32Array, which JSON.stringify turns into an OBJECT ({"0":1,...}), not an
+// array — so matrices cross the wire as plain number[] and are rebuilt on arrival at both ends.
+interface XformMsg { type: "xform"; m: number[]; pivot: Vec3; active: number | null }
+
+// A 4K settled frame is ~32 MB of samples, ~4.6 MB gzipped — and a cloud WebSocket proxy (Modal's,
+// measured 2026-08-20) DROPS THE CONNECTION on a message that big. So a frame goes out as one or
+// more chunks of at most CHUNK bytes, each repeating the header with its (index, count); the client
+// concatenates and only acks the last one. Chunking is unconditional — same path everywhere.
+const CHUNK = Number(Deno.env.get("CHUNK_BYTES") ?? 1_000_000);
+// Bumped on EVERY wire-format change. The client refuses to talk across a mismatch — today's
+// debugging fog came from a stale cached bundle speaking an older protocol at a newer server,
+// which decodes as coherent-looking garbage rather than failing loudly.
+const PROTO = 4;
+
+// kind 0 = FULL  : sw×sh samples reconstructed across the whole view
+// kind 1 = PATCH : sw×sh samples covering only the VIEW RECT (px,py,pw,ph) — everything else on the
+//                  client is left exactly as it was. A patch may be native (pw==sw) or reduced.
+// The client assembles all chunks before presenting, so a frame is applied ATOMICALLY or not at all.
+
+// ---------------------------------------------------------------------------
+// FRAME DELTA. Two facts make this sound and cheap (measured 2026-08-20):
+//   * an unchanged scene re-traces to BIT-IDENTICAL samples (no per-frame jitter), so a plain
+//     comparison is an exact change detector — no thresholds, no false positives;
+//   * a local edit really is local — moving one of the two volumes changed 7.5% of pixels, bbox
+//     9.6% of the view — so the bound is worth finding.
+// Nothing here knows what a gizmo is: it compares this probe's samples with the last probe the
+// client SAW (committed only after a complete send) and reports where they differ.
+// ---------------------------------------------------------------------------
+const NX = 48, NY = 27;   // ~1300 tiles — the spatial resolution of the delta
+const NTILES = NX * NY;
+
+const tileLo = (i: number, n: number, size: number) => Math.floor((i * size) / n);
+
+/** Mark tiles whose samples differ between two frames of the SAME geometry. Returns how many. */
+function diffTiles(a: Uint8Array, b: Uint8Array, w: number, h: number, out: Uint8Array): number {
+  const A = new Uint32Array(a.buffer, a.byteOffset, w * h);
+  const B = new Uint32Array(b.buffer, b.byteOffset, w * h);
+  let n = 0;
+  for (let ty = 0; ty < NY; ty++) {
+    const y0 = tileLo(ty, NY, h), y1 = tileLo(ty + 1, NY, h);
+    for (let tx = 0; tx < NX; tx++) {
+      const x0 = tileLo(tx, NX, w), x1 = tileLo(tx + 1, NX, w);
+      let hit = 0;
+      for (let y = y0; y < y1 && !hit; y++) {
+        const row = y * w;
+        for (let x = x0; x < x1; x++) if (A[row + x] !== B[row + x]) { hit = 1; break; }
+      }
+      out[ty * NX + tx] = hit;
+      n += hit;
+    }
+  }
+  return n;
+}
+
+/** Tile-aligned bounding box of the marked tiles, in samples of a w×h frame. */
+function tileBBox(dirty: Uint8Array, w: number, h: number): { x: number; y: number; w: number; h: number } | null {
+  let tx0 = NX, ty0 = NY, tx1 = -1, ty1 = -1;
+  for (let ty = 0; ty < NY; ty++) {
+    for (let tx = 0; tx < NX; tx++) {
+      if (!dirty[ty * NX + tx]) continue;
+      if (tx < tx0) tx0 = tx; if (tx > tx1) tx1 = tx;
+      if (ty < ty0) ty0 = ty; if (ty > ty1) ty1 = ty;
+    }
+  }
+  if (tx1 < 0) return null;
+  const x = tileLo(tx0, NX, w), y = tileLo(ty0, NY, h);
+  return { x, y, w: tileLo(tx1 + 1, NX, w) - x, h: tileLo(ty1 + 1, NY, h) - y };
+}
+
+/** Copy a sample sub-rect out of a full sample buffer (tight rows, ready to compress). */
+function cropSamples(src: Uint8Array, w: number, r: { x: number; y: number; w: number; h: number }): Uint8Array {
+  const out = new Uint8Array(r.w * r.h * 4);
+  for (let y = 0; y < r.h; y++) {
+    const from = ((r.y + y) * w + r.x) * 4;
+    out.set(src.subarray(from, from + r.w * 4), y * r.w * 4);
+  }
+  return out;
+}
+
+interface Rect { x: number; y: number; w: number; h: number }
 
 function handleWs(req: Request): Response {
   const { socket, response } = Deno.upgradeWebSocket(req);
   // Budget targets an END-TO-END frame period (render + transport), so on a constrained link the
-  // bytes cost of a bigger frame shows up as a slower ack and the resolution shrinks. On localhost
-  // transport ≈ 0 so it tracks render time. (M4: bandwidth+latency-driven, per the plan.)
-  const budget = new BudgetController({ targetMs: 33, startPx: 3e6 });
-  let latest: CamMsg | null = null;
-  let gen = 0, sentGen = -1, lastMsg = 0, open = false, idleFull = false;
+  // bytes cost of a bigger frame shows up as a slower ack and the resolution shrinks. Start
+  // CONSERVATIVE and grow into the link: an optimistic start puts its oversized frames exactly
+  // where they hurt most — the opening seconds of finger-to-photon.
+  // A budget for the GPU alone: the probe trace must stay cheap however fast the link is.
+  const renderBudget = new BudgetController({ targetMs: 10, startPx: 0.5e6 });
 
-  // Ack-based credit: one frame in flight. The client acks each presented frame; send→ack is the
-  // transport cost. This drop-to-latest paces the server to the link's real capacity (Python spike §3).
-  let ackResolve: (() => void) | null = null;
+  // ---- LINK MODEL: measured, not chased. --------------------------------------------------------
+  // The old controller steered a pixel budget toward a 33 ms end-to-end target that a WAN cannot
+  // meet (RTT alone exceeds it), so it pinned at its floor; and it learned only from frames that
+  // completed un-preempted, so mid-interaction it was frozen at whatever stale value it last had —
+  // which is exactly "sometimes sharp, sometimes stuttering, sometimes degraded for no reason".
+  // Instead, the cack stream (receipt time of every chunk) directly yields bandwidth and RTT, sent
+  // frames yield compressed bytes/pixel, and the patch AREA is computed feed-forward so a frame's
+  // predicted render+transfer time fits the frame period. Estimates update on EVERY chunk, aborted
+  // frames included.
+  let bwBpms = 3000;      // link bandwidth, bytes per ms (init ~24 Mbit/s)
+  let rttMs = 60;         // round-trip, ms
+  let bppC = 0.4;         // compressed bytes per sample pixel
+  let probeMsE = 12;      // whole-view probe trace, ms (fixed cost per frame)
+  let renderPerPx = 4e-5; // patch trace, ms per sample pixel
+  let encodePerPx = 2e-5; // gzip, ms per sample pixel
+  let renderMsE = 15;     // probe+retrace of the last frame, ms (for the status stamp)
+  const ew = (old_: number, v: number, a: number) => old_ * (1 - a) + v * a;
+  /** Target frame period while interacting: ~10 updates/s, stretched only when the round trip
+   *  itself makes that impossible. */
+  const periodMs = () => Math.min(160, Math.max(80, rttMs + probeMsE + 40));
+  /** The area whose PREDICTED cost — render + encode + transfer, all per pixel, after the fixed
+   *  round-trip and probe — fits in one period. Every term is measured, so this is right on a LAN
+   *  (render-bound), on a WAN (transfer-bound) and on a slow GPU alike. */
+  // Closed-loop TRIM on top of the feed-forward model: the ratio of predicted to ACTUAL frame
+  // period, so systematic model error (a WAN that never quite delivers its measured bandwidth,
+  // an encoder that shares the CPU) converges the real period onto the target instead of
+  // overshooting it by a constant factor.
+  let trim = 1;
+  let lastCommitT = 0, lastPredictedMs = 0;
+  const linkArea = (w: number, h: number) => {
+    const budgetMs = Math.max(10, periodMs() - rttMs - probeMsE);
+    const perPx = renderPerPx + encodePerPx + bppC / bwBpms;
+    return Math.max(0.03e6, Math.min(w * h, (budgetMs / perPx) * trim));
+  };
+  let latest: CamMsg | null = null;
+  let gen = 0, sentGen = -1, lastMsg = 0, open = false;
+
+  // ---- The ENTIRE model of the client, kept exact by ordered delivery. ----
+  // WebSocket frames arrive in order and the client applies a frame atomically or drops it and says
+  // so (resync). So three facts suffice — no per-tile bookkeeping to fall out of sync:
+  //   needFull   the next frame must repaint the whole view (new session / resize / resync)
+  //   stale      union view-rect currently shown below native resolution (null = fully native)
+  //   prevMotion the last probe the client's content is consistent with — committed ONLY after a
+  //              frame derived from it was completely sent, so an aborted send never poisons it
+  let needFull = true;
+  let stale: Rect | null = null;
+  let motionStreak = 0;   // committed motion frames in this burst — 0 = the engage frame
+  let lastMotionCommit = 0;
+  let prevMotion: Uint8Array | null = null, motionW = 0, motionH = 0;
+  const dirty = new Uint8Array(NTILES);
+
+  const addStale = (r: Rect) => {
+    if (!stale) { stale = { ...r }; return; }
+    const x0 = Math.min(stale.x, r.x), y0 = Math.min(stale.y, r.y);
+    const x1 = Math.max(stale.x + stale.w, r.x + r.w), y1 = Math.max(stale.y + stale.h, r.y + r.h);
+    stale = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  };
+  const resetClientModel = (why: string) => {
+    needFull = true; stale = null; prevMotion = null; probeF = 0;
+    dbg(`client model reset (${why})`);
+  };
+
+  // Ack-based credit: one frame in flight; the ack is PACING, never a gate on responding to input.
+  let ackResolve: ((real: boolean) => void) | null = null;
   let ackTimer: ReturnType<typeof setTimeout> | 0 = 0;
-  const gotAck = () => { if (ackResolve) { clearTimeout(ackTimer); const r = ackResolve; ackResolve = null; r(); } };
-  const waitAck = (ms: number) => new Promise<void>((res) => { ackResolve = res; ackTimer = setTimeout(() => { ackResolve = null; res(); }, ms); });
+  const settleAck = (real: boolean) => { if (ackResolve) { clearTimeout(ackTimer); const r = ackResolve; ackResolve = null; r(real); } };
+  const gotAck = () => settleAck(true);
+  const abortWait = () => settleAck(false);
+  const waitAck = (ms: number) => new Promise<boolean>((res) => { ackResolve = res; ackTimer = setTimeout(() => { ackResolve = null; dbg(`ack TIMEOUT ${ms}ms`); res(false); }, ms); });
+
+  /** Wait until the socket send buffer is below `cap` (or input/close intervenes). Bytes already in
+   *  the buffer cannot be unsent, so bounding them is what makes preemption real on a slow link. */
+  async function drained(atGen: number, cap = 0, preempt = true): Promise<boolean> {
+    while (open && (!preempt || gen === atGen) && socket.bufferedAmount > cap) await sleep(2);
+    return open && (!preempt || gen === atGen);
+  }
+
+  // APP-LEVEL chunk flow control. bufferedAmount only sees the userland queue — the kernel and the
+  // network hold megabytes more that preemption can never recall. The client cacks every binary
+  // message on RECEIPT, so `sentChunks - cacked` is a true count of chunks in flight end-to-end;
+  // holding it at ≤ CHUNK_WINDOW makes the preemption tail a constant ~2 chunks on ANY link.
+  const CHUNK_WINDOW = 2;
+  const inflight: { bytes: number; t: number; pre: number }[] = [];   // chunks on the wire, in order
+  let cackWaiter: (() => void) | null = null;
+  const gotCack = () => {
+    const c = inflight.shift();
+    if (c) {
+      const dt = performance.now() - c.t;
+      if (c.pre === 0) {
+        // Sent onto an empty wire: dt ≈ RTT + bytes/BW — the cleanest RTT sample we get.
+        rttMs = ew(rttMs, Math.max(1, dt - c.bytes / bwBpms), 0.2);
+      }
+      // Bandwidth sample from the part of dt that was not RTT. On a LAN that is sub-millisecond,
+      // so the floor keeps the sample finite (and large) instead of skipping it — skipping fast
+      // links left the estimate at its 24 Mbit/s seed and starved local density.
+      const xfer = Math.max(0.5, dt - rttMs);
+      bwBpms = Math.min(2e6, Math.max(50, ew(bwBpms, (c.pre + c.bytes) / xfer, 0.2)));
+    }
+    if (cackWaiter) { const r = cackWaiter; cackWaiter = null; r(); }
+  };
+  async function cackRoom(atGen: number, preempt = true): Promise<boolean> {
+    while (open && (!preempt || gen === atGen) && inflight.length >= CHUNK_WINDOW) {
+      const tw = performance.now();
+      await new Promise<void>((res) => {
+        cackWaiter = res;
+        setTimeout(() => { if (cackWaiter === res) { cackWaiter = null; res(); } }, 250);
+      });
+      if (performance.now() - tw > 240) dbg(`cack TIMEOUT (inflight ${inflight.length}, buffered ${socket.bufferedAmount})`);
+    }
+    return open && (!preempt || gen === atGen);
+  }
+
+  /** PREEMPTABLE chunked send. At most ~one chunk beyond what has drained is ever committed to the
+   *  wire, and new input aborts between chunks — so even a native 4K frame never blocks a fresh
+   *  motion frame by more than ~one chunk. Returns false if aborted (the client, which assembles
+   *  chunks and presents atomically, then simply never shows the partial frame). */
+  let sentBytes = 0;      // compressed bytes of the frame currently being sent (feeds bppC)
+  let encodeMs = 0;       // gzip time of the frame currently being sent (feeds encodePerPx)
+  let genAt = 0;          // performance.now() of the last gen bump — the server side of finger-to-photon
+  /** `preempt`: abort between chunks when input arrives. TRUE only for the long settle sends.
+   *  A motion frame is never preempted: it is small by construction (the link model sized it to
+   *  one frame period) and it is newer than anything the client holds — discarding it on every
+   *  new event is how continuous input LIVELOCKED the pipeline into ~1 update/s. */
+  async function sendFrameP(atGen: number, sw: number, sh: number, vw: number, vh: number, settled: number, raw: Uint8Array, kind = 0, px = 0, py = 0, pw = 0, ph = 0, renderMs = 0, preempt = true): Promise<boolean> {
+    sentBytes = 0; encodeMs = 0;
+    const sinceInput = Math.min(65535, Math.round(performance.now() - genAt));
+    const n = Math.max(1, Math.ceil(raw.length / CHUNK));
+    for (let i = 0; i < n; i++) {
+      if (!open || (preempt && gen !== atGen)) return false;
+      // Compression happens PER CHUNK, in here: a 32 MB native frame gzipped in one blob is a
+      // ~200 ms un-preemptable await (measured as the whole latency regression); per chunk it is
+      // ~10 ms between preemption checks, and it overlaps the previous chunk's transmission.
+      const slice = raw.subarray(i * CHUNK, Math.min(raw.length, (i + 1) * CHUNK));
+      const te = performance.now();
+      const part = COMPRESS ? await gzip(slice) : slice;
+      encodeMs += performance.now() - te;
+      if (!open || (preempt && gen !== atGen)) return false;
+      // spare fields carry the server's own finger-to-photon split: [13] ms from input to this
+      // send, [14] render ms — so the status line can show where time went, live.
+      const head = new Uint16Array([sw, sh, vw, vh, settled, COMPRESS ? 1 : 0, i, n, kind, px, py, pw, ph, sinceInput, Math.min(65535, Math.round(renderMs)), 0]);   // 32-byte header
+      const frame = new Uint8Array(32 + part.length);
+      frame.set(new Uint8Array(head.buffer), 0);
+      frame.set(part, 32);
+      if (!await cackRoom(atGen, preempt)) return false;   // ≤ CHUNK_WINDOW chunks in flight, end to end
+      inflight.push({ bytes: frame.length, t: performance.now(), pre: inflight.reduce((n, c) => n + c.bytes, 0) });
+      sentBytes += frame.length;
+      socket.send(frame);
+      if (!await drained(atGen, CHUNK, preempt)) return false;
+    }
+    return true;
+  }
 
   socket.onopen = () => {
     open = true;
-    socket.send(JSON.stringify({ type: "hello", center, radius, name: sceneName, sceneUrl: SCENE_URL }));
+    // `widget` tells the client to mount the SAME transform widget it would mount locally, seeded
+    // with the target's start centre — its drags come back as {xform} instead of touching a field.
+    socket.send(JSON.stringify({
+      type: "hello", proto: PROTO, center, radius, name: sceneName, sceneUrl: SCENE_URL, demo: DEMO,
+      widget: xformTarget ? { center: xformC0, m: [...xformM] } : null,
+    }));
     loop();
   };
-  socket.onclose = () => { open = false; gotAck(); };
-  socket.onerror = () => { open = false; gotAck(); };
+  socket.onclose = () => { open = false; settleAck(false); };
+  socket.onerror = () => { open = false; settleAck(false); };
   socket.onmessage = (e) => {
     try {
-      const m = JSON.parse(e.data as string) as { type: string } & CamMsg;
-      if (m.type === "cam") { latest = m; gen++; lastMsg = performance.now(); }
+      // A UNION, not an intersection: the three message shapes have incompatible `type` fields, and
+      // intersecting them collapses the lot to `never`.
+      const m = JSON.parse(e.data as string) as CamMsg | XformMsg | { type: "ack" | "resync" | "cack" };
+      if (m.type === "cam") {
+        const c = m as CamMsg;
+        // An IDENTICAL camera is not a change: re-sending it must not invalidate anything.
+        const same = latest !== null && latest.w === c.w && latest.h === c.h && latest.a === c.a &&
+          latest.p.every((v, i) => v === c.p[i]) && latest.f.every((v, i) => v === c.f[i]) &&
+          latest.u.every((v, i) => v === c.u[i]);
+        // A RESIZE means the client rebuilt its surface: everything we believe it holds is gone.
+        if (latest === null || latest.w !== c.w || latest.h !== c.h) resetClientModel(`size ${c.w}x${c.h}`);
+        latest = c;
+        lastMsg = performance.now();
+        if (!same) { gen++; genAt = performance.now(); abortWait(); }
+      }
       else if (m.type === "ack") gotAck();
+      else if (m.type === "cack") gotCack();
+      else if (m.type === "resync") {
+        // The client dropped a frame it could not apply. Start over from a full frame.
+        resetClientModel("resync");
+        gen++; gotAck();
+      }
+      else if (m.type === "xform" && xformTarget && gizmo) {
+        const x = m as XformMsg;
+        const a = Array.isArray(x.m) ? x.m : Object.values(x.m as unknown as Record<string, number>);
+        if (a.length !== 16) return;             // ignore a malformed matrix rather than NaN the scene
+        xformM = new Float32Array(a) as Mat4;
+        xformTarget.setWorldTransform(xformM);
+        gizmo.setPivot(x.pivot);
+        gizmo.setActive(x.active);
+        scene.syncUniforms();      // Tier-A: re-pack uniforms + ray-entry AABB, no rebuild
+        lastMsg = performance.now();
+        gen++; genAt = performance.now(); abortWait();   // a scene edit invalidates; the DIFF decides what to send
+      }
     } catch { /* ignore */ }
   };
+
+  /** Geometry of the PROBE trace — the cheap whole-view render whose only jobs are to answer
+   *  "what changed?" and to cover the case where everything did. Its divisor answers to TWO limits
+   *  and takes the stricter: the GPU (the probe must stay cheap to trace) and the link (when
+   *  everything changed, the probe IS the frame). It snaps to 1/f and only moves after the answer
+   *  disagrees twice running — the delta can only compare frames of the same geometry. */
+  let probeF = 0, probeDisagree = 0;
+  const divisor = (px: number, w: number, h: number) =>
+    Math.max(1, Math.min(4, Math.round(1 / Math.max(0.25, Math.min(1, Math.sqrt(px / (w * h)))))));
+  function probeSize(w: number, h: number): [number, number] {
+    const want = Math.max(divisor(renderBudget.budgetPx, w, h), divisor(linkArea(w, h), w, h));
+    if (probeF === 0) probeF = want;
+    else if (want !== probeF) { if (++probeDisagree >= 2) { probeF = want; probeDisagree = 0; } }
+    else probeDisagree = 0;
+    return [Math.max(16, Math.round(w / probeF)), Math.max(16, Math.round(h / probeF))];
+  }
 
   async function loop() {
     while (open) {
       if (!latest) { await sleep(10); continue; }
       const { w, h, p, f, u, a } = latest;
-      let sw: number, sh: number, settled: number;
-      if (gen !== sentGen) {
-        const s = budget.scale(w, h);
-        sw = Math.max(16, Math.round(w * s)); sh = Math.max(16, Math.round(h * s)); settled = 0;
-      } else if (!idleFull && performance.now() - lastMsg > IDLE_MS) {
-        sw = w; sh = h; settled = 1;
-      } else { await sleep(8); continue; }
 
+      // ---- SETTLED: ONE native pass over the stale region, applied atomically. ------------------
+      // The client presents it only when every chunk has arrived, so the view goes from "coarse but
+      // coherent" to "native and coherent" in a single step — no block-by-block pop-in. Preemption
+      // lives at every boundary: after the trace, after compression, and BETWEEN CHUNKS of the send.
+      if (gen === sentGen) {
+        // While the finger is DOWN a pause is usually mid-gesture: starting a native settle then
+        // is work we will almost surely preempt and re-drain. Wait longer before committing.
+        const idleMs = latest.dn ? 250 : IDLE_MS;
+        if ((stale || needFull) && performance.now() - lastMsg > idleMs) {
+          const atGen = gen;
+          let r: Rect = needFull || !stale ? { x: 0, y: 0, w, h } : { ...stale };
+          // clamp to the view
+          const x0 = Math.max(0, Math.min(w, Math.floor(r.x))), y0 = Math.max(0, Math.min(h, Math.floor(r.y)));
+          r = { x: x0, y: y0, w: Math.min(w - x0, Math.ceil(r.w)), h: Math.min(h - y0, Math.ceil(r.h)) };
+          if (r.w <= 0 || r.h <= 0) { stale = null; continue; }
+          if (r.w * r.h > 0.8 * w * h) r = { x: 0, y: 0, w, h };
+          const full = r.w === w && r.h === h && r.x === 0 && r.y === 0;
+          // TWO-STEP: when native would take a while to cross the link, first ship the same region
+          // at HALF density (~1/4 the bytes) — a big, ATOMIC sharpening a few hundred ms after the
+          // gesture ends — then the native pass. Kills "lingers degraded for a second, then snaps".
+          const nativeEtaMs = (r.w * r.h * bppC) / bwBpms;
+          const steps: number[] = nativeEtaMs > 400 ? [0.5, 1] : [1];
+          let done = true;
+          for (const den of steps) {
+            const tw = Math.max(16, Math.round(r.w * den)), th = Math.max(16, Math.round(r.h * den));
+            const tr0 = performance.now();
+            if (full) scene.setCamera(p, f, u, a, w, h);
+            else scene.setCameraTile(p, f, u, a, w, h, r);
+            const raw = await scene.traceSamples(tw, th);
+            const renderMs = performance.now() - tr0;
+            if (!open || gen !== atGen) { dbg("settle abandoned after trace"); done = false; break; }
+            const ok = await sendFrameP(atGen, tw, th, w, h, den === 1 ? 1 : 0, raw, full ? 0 : 1, r.x, r.y, r.w, r.h, renderMs);
+            if (!ok) { dbg("settle send preempted"); done = false; break; }
+            if (raw.length) bppC = Math.max(0.05, ew(bppC, sentBytes / (tw * th), 0.3));
+            dbg(`settled ${den === 1 ? "native" : "half"} ${full ? "full" : "patch"} ${tw}x${th} ${(sentBytes / 1e3) | 0}kB`);
+            await waitAck(2000);
+          }
+          if (done) { stale = null; needFull = false; }
+          motionStreak = 0;
+          continue;
+        }
+        await sleep(8); continue;
+      }
+
+      // ---- MOVING: probe the whole view cheaply, then ship only what differs. -------------------
+      const [sw, sh] = probeSize(w, h);
+      const renderedGen = gen;
       scene.setCamera(p, f, u, a, sw, sh);
       const t0 = performance.now();
-      const bytes = await scene.traceSamples(sw, sh);
-      const payload = COMPRESS ? await gzip(bytes) : bytes;
+      const bytes = await scene.traceSamples(sw, sh, h);   // view height: keeps the gizmo view-sized
+      const probeMs = performance.now() - t0;
+      probeMsE = ew(probeMsE, probeMs, 0.3);
+      renderBudget.update(probeMs);
       if (!open) break;
-      sendFrame(socket, sw, sh, w, h, settled, COMPRESS ? 1 : 0, payload);
-      await waitAck(500);                                  // transport: wait for the client to present
-      if (!settled) budget.update(performance.now() - t0); // render + transport → the end-to-end cost
-      if (settled) idleFull = true; else { sentGen = gen; idleFull = false; }
+      // NOT preempted here: input that landed during this ~10-50 ms trace does not make the frame
+      // worthless — it is still newer than what the client shows, and the next iteration picks up
+      // the newest input immediately after. (Discarding it was the continuous-input livelock.)
+
+      const baseOk = !needFull && prevMotion !== null && motionW === sw && motionH === sh;
+      let nDirty: number;
+      if (baseOk) nDirty = diffTiles(prevMotion!, bytes, sw, sh, dirty);
+      else { dirty.fill(1); nDirty = NTILES; }
+
+      if (baseOk && nDirty === 0) { sentGen = renderedGen; continue; }   // nothing changed: send NOTHING
+
+      const box = baseOk && nDirty / NTILES < 0.5 ? tileBBox(dirty, sw, sh) : null;
+      const kx = w / sw, ky = h / sh;   // probe samples → view pixels
+      const view = box && {
+        x: Math.round(box.x * kx), y: Math.round(box.y * ky),
+        w: Math.round(box.w * kx), h: Math.round(box.h * ky),
+      };
+
+      // Re-trace the changed rect at the density the LINK affords — up to NATIVE. Feed-forward
+      // from measured bandwidth/RTT/bytes-per-pixel, so it adapts the moment the rect changes
+      // size, instead of a lagging pixel budget frozen mid-interaction. The FIRST frame of a
+      // motion burst is capped small: that frame IS the finger-to-photon response, and nothing
+      // may make it expensive.
+      let native = false, psw = sw, psh = sh;
+      let payloadRaw: Uint8Array;
+      if (performance.now() - lastMotionCommit > 400) motionStreak = 0;   // a new burst is starting
+      if (view) {
+        let area = linkArea(w, h);
+        // The engage frame is the finger-to-photon response: HALF the sustainable area (and never
+        // more than 0.25 MP), so it lands in well under a period; the stream escalates right after.
+        if (motionStreak === 0) area = Math.min(area * 0.5, 0.25e6);
+        const s2 = Math.min(1, Math.sqrt(area / (view.w * view.h)));
+        psw = Math.max(16, Math.round(view.w * s2));
+        psh = Math.max(16, Math.round(view.h * s2));
+        scene.setCameraTile(p, f, u, a, w, h, view);
+        const tr = performance.now();
+        payloadRaw = await scene.traceSamples(psw, psh);   // tile projection: view focal is default
+        renderPerPx = ew(renderPerPx, (performance.now() - tr) / (psw * psh), 0.3);
+        native = psw >= view.w;
+      } else {
+        payloadRaw = bytes;
+      }
+      const renderMs = performance.now() - t0;
+      const ok = view
+        ? await sendFrameP(renderedGen, psw, psh, w, h, 0, payloadRaw, 1, view.x, view.y, view.w, view.h, renderMs, false)
+        : await sendFrameP(renderedGen, sw, sh, w, h, 0, payloadRaw, 0, 0, 0, 0, 0, renderMs, false);
+      if (!ok) break;      // only a closed socket stops a motion frame
+      renderMsE = ew(renderMsE, renderMs, 0.3);
+      {
+        // Observed period vs what the model promised for this frame → trim toward target.
+        const now = performance.now();
+        if (lastCommitT && motionStreak > 0 && lastPredictedMs > 0) {
+          const actual = now - lastCommitT;
+          if (actual < 2000) trim = Math.min(1.5, Math.max(0.25, ew(trim, trim * (lastPredictedMs / actual), 0.25)));
+        }
+        lastCommitT = now;
+        lastPredictedMs = periodMs();
+      }
+      const px = payloadRaw.length / 4;
+      if (px) {
+        bppC = Math.max(0.05, ew(bppC, sentBytes / px, 0.3));
+        encodePerPx = ew(encodePerPx, encodeMs / px, 0.3);
+      }
+      motionStreak++; lastMotionCommit = performance.now();
+
+      // Committed: the client now holds a view consistent with THIS probe.
+      prevMotion = bytes; motionW = sw; motionH = sh;
+      if (view) { if (!native) addStale(view); }
+      else { needFull = false; addStale({ x: 0, y: 0, w, h }); }
+      sentGen = renderedGen;
+      dbg(`sent ${view ? `patch ${psw}x${psh}` : `full ${sw}x${sh}`} ${sentBytes / 1e3 | 0}kB${native ? " native" : ""} bw=${bwBpms | 0} rtt=${rttMs | 0} bpp=${bppC.toFixed(2)} r=${(renderPerPx * 1e6).toFixed(0)}ns e=${(encodePerPx * 1e6).toFixed(0)}ns P=${periodMs() | 0} trim=${trim.toFixed(2)} area=${(linkArea(w, h) / 1e6).toFixed(2)}MP`);
+      await waitAck(500);
     }
   }
   return response;
@@ -119,7 +537,14 @@ async function serveStatic(req: Request): Promise<Response> {
   try {
     const body = await Deno.readFile(CLIENT_DIR + path.replace(/^\//, ""));
     const ext = path.slice(path.lastIndexOf("."));
-    return new Response(body, { headers: { "content-type": MIME[ext] ?? "application/octet-stream" } });
+    return new Response(body, {
+      headers: {
+        "content-type": MIME[ext] ?? "application/octet-stream",
+        // The page and its bundle MUST move in lockstep with the server: with no validators at all,
+        // cache behaviour is undefined and a stale bundle speaks a stale protocol.
+        "cache-control": "no-store",
+      },
+    });
   } catch {
     return new Response("not found", { status: 404 });
   }

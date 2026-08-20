@@ -5,7 +5,7 @@
 
 import type { Gpu } from "./device.ts";
 import type { Field } from "./fields.ts";
-import { type Mat4, type Vec3, invert, lookAt, multiply, perspectiveZO } from "./mat4.ts";
+import { type Mat4, type Vec3, invert, lookAt, multiply, perspectiveZO, perspectiveZOTile } from "./mat4.ts";
 
 const DEFAULT_FORMAT: GPUTextureFormat = "rgba8unorm-srgb";
 const SCENE_FLOATS = 16; // bmin(4) bmax(4) scene(4) bg(4)
@@ -835,6 +835,25 @@ ${pickDispatch}
     this.dev.queue.writeBuffer(this.camBuf, 0, cam);
   }
 
+  /** Camera for ONE TILE of the view: the same rays the full frame would cast for `rect`, into a
+   *  rect.w×rect.h target. Screen-space glyph sizing stays keyed to the FULL view height, so a
+   *  patch of the gizmo is drawn at exactly the size the full frame drew it. Pair with
+   *  traceSamples(rect.w, rect.h) — its focal rewrite is then a no-op. */
+  setCameraTile(eye: Vec3, center: Vec3, up: Vec3, fovyDeg: number, viewW: number, viewH: number, rect: { x: number; y: number; w: number; h: number }) {
+    const view = lookAt(eye, center, up);
+    const proj = perspectiveZOTile((fovyDeg * Math.PI) / 180, viewW, viewH, rect.x, rect.y, rect.w, rect.h, 1, 100000);
+    const invVP: Mat4 = invert(multiply(proj, view));
+    this.baseInvVP = invVP;
+    const cam = new Float32Array(24);
+    cam.set(invVP, 0);
+    this.focalPx = (viewH / 2) / Math.tan((fovyDeg * Math.PI) / 360);
+    cam[16] = rect.w; cam[17] = rect.h;   // ray generation divides by the TARGET size
+    cam[18] = this.focalPx;               // screen-constant glyphs: the FULL view's focal
+    cam[19] = 0;
+    cam[20] = eye[0]; cam[21] = eye[1]; cam[22] = eye[2];
+    this.dev.queue.writeBuffer(this.camBuf, 0, cam);
+  }
+
   private flush() { this.dev.queue.writeBuffer(this.matBuf, 0, this.mat); }
 
   /** Ray-trace the cursor (u,v in [0,1], y down) through the composited fields and return the
@@ -973,8 +992,18 @@ ${pickDispatch}
    *  background) as tightly-packed rgba8 — the bytes streamed to the remote client, which runs the
    *  same reconstruction (upsample + background composite) the local resolve does. The caller sets
    *  the camera to width×height first (like renderUpscaled). Returns width*height*4 bytes. */
-  async traceSamples(width: number, height: number): Promise<Uint8Array> {
+  async traceSamples(width: number, height: number, viewH = height): Promise<Uint8Array> {
     this.flush();
+    // The ray grid is generated from u_cam.size.xy — it MUST be the size of the target being
+    // rendered, whatever setCamera/setCameraTile happened to write. When a tile is traced at
+    // reduced density (target psw×psh for a larger view rect), leaving the rect size here makes
+    // the shader cast rays for only the top-left corner of the frustum and the client upscales
+    // that corner across the whole rect — giant zoomed fragments (the 2026-08-20 regression).
+    this.dev.queue.writeBuffer(this.camBuf, 64, new Float32Array([width, height]));
+    // Same focal rewrite renderUpscaled does: screen-space glyphs (gizmo, fiducial handles) size
+    // from u_cam.size.z, and setCamera was given the SAMPLE size — so under a reduced trace they
+    // would grow ~1/scale once the CLIENT upsamples the samples to the view. Rays are unchanged.
+    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([this.focalPx * (viewH / height)]));
     const target = this.dev.createTexture({ size: [width, height], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     const enc = this.dev.createCommandEncoder();
     const tp = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });

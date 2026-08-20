@@ -55,6 +55,30 @@ export function perspectiveZO(fovy: number, aspect: number, near: number, far: n
   return m;
 }
 
+/** Off-centre perspective covering ONLY the pixel rect (x,y,w,h) of a viewW×viewH view (y down).
+ *  Same conventions as perspectiveZO — with the full rect it produces exactly that matrix — so a
+ *  tile renders the identical rays the full frame would have cast for those pixels. That is what
+ *  lets the transport re-send a PATCH: a sub-rect rendered at native resolution, pixel-aligned with
+ *  the frame already on screen. */
+export function perspectiveZOTile(
+  fovy: number, viewW: number, viewH: number,
+  x: number, y: number, w: number, h: number, near: number, far: number,
+): Mat4 {
+  const t = near * Math.tan(fovy / 2), b = -t;
+  const r = t * (viewW / viewH), l = -r;
+  const l2 = l + ((r - l) * x) / viewW, r2 = l + ((r - l) * (x + w)) / viewW;
+  const t2 = t - ((t - b) * y) / viewH, b2 = t - ((t - b) * (y + h)) / viewH;
+  const m = new Float32Array(16);
+  m[0] = (2 * near) / (r2 - l2);
+  m[5] = (2 * near) / (t2 - b2);
+  m[8] = (r2 + l2) / (r2 - l2);
+  m[9] = (t2 + b2) / (t2 - b2);
+  m[10] = far / (near - far);
+  m[11] = -1;
+  m[14] = (far * near) / (near - far);
+  return m;
+}
+
 // Right-handed lookAt (camera looks from eye toward center, up ~ +y).
 export function lookAt(eye: Vec3, center: Vec3, up: Vec3): Mat4 {
   let zx = eye[0] - center[0], zy = eye[1] - center[1], zz = eye[2] - center[2];

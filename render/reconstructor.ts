@@ -9,7 +9,10 @@ import type { Gpu } from "./device.ts";
 const WGSL = /* wgsl */ `
 @group(0) @binding(0) var t_sample : texture_2d<f32>;
 @group(0) @binding(1) var s_lin : sampler;
-@group(0) @binding(2) var<uniform> u_sr : vec4<f32>;   // (sampleW, sampleH, viewW, viewH)
+// size = (sampleW, sampleH, _, _); rect = (originX, originY, spanW, spanH) in DESTINATION pixels —
+// the region this present writes. A full frame is (0, 0, viewW, viewH); a PATCH is its dirty rect.
+struct SR { size : vec4<f32>, rect : vec4<f32> };
+@group(0) @binding(2) var<uniform> u_sr : SR;
 @group(0) @binding(3) var<uniform> u_bg : vec4<f32>;
 fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92;
@@ -52,8 +55,8 @@ fn vs(@builtin(vertex_index) vi : u32) -> RV {
 }
 @fragment
 fn fs(v : RV) -> @location(0) vec4<f32> {
-  let uv = v.position.xy / u_sr.zw;
-  let s = cr(uv, u_sr.xy);
+  let uv = (v.position.xy - u_sr.rect.xy) / u_sr.rect.zw;
+  let s = cr(uv, u_sr.size.xy);
   let a = clamp(s.a, 0.0, 1.0);
   let bg = srgb2physical(u_bg.rgb);
   return vec4<f32>(mix(bg, s.rgb, a), 1.0);
@@ -63,7 +66,7 @@ export class Reconstructor {
   private dev: GPUDevice;
   private pipeline: GPURenderPipeline;
   private sampler: GPUSampler;
-  private srBuf: GPUBuffer;   // (sampleW, sampleH, viewW, viewH)
+  private srBuf: GPUBuffer;   // SR { size, rect }
   private bgBuf: GPUBuffer;   // background rgb
   private tex?: GPUTexture;
   private bind?: GPUBindGroup;
@@ -73,7 +76,7 @@ export class Reconstructor {
   constructor(gpu: Gpu, format: GPUTextureFormat) {
     this.dev = gpu.device;
     this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
-    this.srBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.srBuf = this.dev.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bgBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const mod = this.dev.createShaderModule({ code: WGSL });
     this.pipeline = this.dev.createRenderPipeline({
@@ -105,14 +108,19 @@ export class Reconstructor {
     });
   }
 
-  /** Upload `samples` (sampleW×sampleH premultiplied rgba8) and reconstruct to `view` (viewW×viewH). */
-  present(view: GPUTextureView, samples: Uint8Array, sampleW: number, sampleH: number, viewW: number, viewH: number) {
+  /** Upload `samples` (sampleW×sampleH premultiplied rgba8) and reconstruct to `view` (viewW×viewH).
+   *  With `rect`, this is a PATCH: only those destination pixels are written (scissor + load), so
+   *  everything already in `view` survives — the transport can then re-send just a dirty region. */
+  present(view: GPUTextureView, samples: Uint8Array, sampleW: number, sampleH: number, viewW: number, viewH: number, rect?: { x: number; y: number; w: number; h: number }) {
     this.ensureTex(sampleW, sampleH);
     this.dev.queue.writeTexture({ texture: this.tex! }, samples, { bytesPerRow: sampleW * 4, rowsPerImage: sampleH }, [sampleW, sampleH]);
-    this.dev.queue.writeBuffer(this.srBuf, 0, new Float32Array([sampleW, sampleH, viewW, viewH]));
+    const r = rect ?? { x: 0, y: 0, w: viewW, h: viewH };
+    this.dev.queue.writeBuffer(this.srBuf, 0, new Float32Array([sampleW, sampleH, 0, 0, r.x, r.y, r.w, r.h]));
     const enc = this.dev.createCommandEncoder();
-    const p = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
-    p.setPipeline(this.pipeline); p.setBindGroup(0, this.bind!); p.draw(3); p.end();
+    const p = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: rect ? "load" : "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    p.setPipeline(this.pipeline); p.setBindGroup(0, this.bind!);
+    if (rect) p.setScissorRect(r.x, r.y, r.w, r.h);
+    p.draw(3); p.end();
     this.dev.queue.submit([enc.finish()]);
   }
 }

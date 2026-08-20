@@ -1,16 +1,31 @@
 // Remote-render client (M3/M4): the SAME scene rendered either LOCALLY (this browser's GPU) or
 // REMOTELY (a Deno LiveRenderer over WebSocket) — a per-view RenderMode the user toggles. Remote
 // sends the camera and RECONSTRUCTS the traced samples the server streams; local uses the shared
-// mountAdaptive3d. Both share one camera, so switching modes is instant. Bundled to
-// server/client/remote.js and served BY the Deno server (same origin as the /ws upgrade).
+// mountAdaptive3d. Both share one camera and one gizmo, so switching modes is instant.
+//
+// LOCAL MODE OWES THE SERVER NOTHING: it builds the scene from the same public scene URLs the
+// gallery demos use and renders through this browser's WebGPU. The server is only a source of
+// remote frames, so the page still works when it is down, and `?local=1` never opens a socket at
+// all. `?server=wss://host/` points the remote half at a renderer elsewhere (e.g. Modal) — which is
+// what lets this page live in the static gallery instead of only being served by the renderer.
 import { initDevice } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { loadSceneVolumeField } from "../scene-volume.ts";
 import { Reconstructor } from "../reconstructor.ts";
 import { mountAdaptive3d, type Adaptive3d } from "./accum-loop.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
-import type { Vec3 } from "../mat4.ts";
+import { attachWidgetControls, type Handle, projectToCanvasCss } from "./widget-control.ts";
+import { componentOf, makeXformWidget, type XformTarget, type XformWidget, type XMeta } from "./xform-widget.ts";
+import { buildMultiVolume } from "./selftest-scenes.ts";
+import type { ImageField } from "../fields.ts";
+import { identity, type Mat4, type Vec3 } from "../mat4.ts";
 import type { VtkCamera } from "../vtk-camera.ts";
+
+// The one-volume scene the server defaults to, so a standalone page can load it too.
+const SINGLE_SCENE = "https://pieper.github.io/live/scenes/CTACardio.json";
+// Must match the server's PROTO. On mismatch the client reloads once (cache-bypassing) instead of
+// rendering garbage from a wire format it cannot parse.
+const PROTO = 4;
 
 const status = (msg: string, err = false) => {
   const el = document.getElementById("status");
@@ -19,29 +34,162 @@ const status = (msg: string, err = false) => {
 
 async function main() {
   const canvas = document.getElementById("gpu") as HTMLCanvasElement;
+  const params = new URLSearchParams(location.search);
+  // Same-origin renderer by default (this page is usually served BY it); "" = never connect.
+  const serverUrl = params.has("local")
+    ? ""
+    : params.get("server") ?? `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`;
   const modeBtn = document.getElementById("mode") as HTMLButtonElement | null;
   if (!(navigator as unknown as { gpu?: unknown }).gpu) { status("WebGPU not available — try Chrome/Edge 113+ or Safari 18+.", true); return; }
   const gpu = await initDevice();
   const ctx = canvas.getContext("webgpu") as GPUCanvasContext;
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
-  ctx.configure({ device: gpu.device, format: preferred, viewFormats: [srgb], alphaMode: "opaque" });
+  // COPY_DST: frames are reconstructed into our OWN view texture and copied here, so a PATCH can
+  // repaint a rect of the last image instead of the whole view (a swapchain texture is transient).
+  ctx.configure({
+    device: gpu.device, format: preferred, viewFormats: [srgb], alphaMode: "opaque",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST,
+  });
   const recon = new Reconstructor(gpu, srgb);
   recon.setBackground(0.05, 0.06, 0.09);
 
-  const resize = () => {
-    const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
-    const size = Math.min(720, Math.floor(canvas.clientWidth * dpr));
-    canvas.width = size; canvas.height = size;
+  // The remote image lives here between frames; the canvas is a copy of it. Patches paint into it.
+  // `surfaceValid` is the safety interlock: a patch may only be applied ON TOP of a full frame at
+  // the CURRENT size. A fresh texture's contents are undefined — painting a patch into one and
+  // showing the result is how uninitialised GPU memory ends up on screen as a solid colour block.
+  let viewTex: GPUTexture | null = null, viewW = 0, viewH = 0, surfaceValid = false;
+  const makeViewTex = (w: number, h: number) => {
+    const t = gpu.device.createTexture({
+      size: [w, h], format: preferred, viewFormats: [srgb],
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    // Define every texel immediately: nothing undefined may ever reach the screen.
+    const enc = gpu.device.createCommandEncoder();
+    enc.beginRenderPass({
+      colorAttachments: [{
+        view: t.createView({ format: srgb }), loadOp: "clear", storeOp: "store",
+        clearValue: { r: 0.05, g: 0.06, b: 0.09, a: 1 },
+      }],
+    }).end();
+    gpu.device.queue.submit([enc.finish()]);
+    return t;
   };
-  globalThis.addEventListener("resize", () => { resize(); onCam(); });
+  const ensureViewTex = () => {
+    if (!viewTex || viewW !== canvas.width || viewH !== canvas.height) {
+      viewTex?.destroy();
+      viewW = canvas.width; viewH = canvas.height;
+      surfaceValid = false;
+      viewTex = makeViewTex(viewW, viewH);
+    }
+    return viewTex;
+  };
+  const blitToCanvas = () => {
+    const enc = gpu.device.createCommandEncoder();
+    enc.copyTextureToTexture({ texture: viewTex! }, { texture: ctx.getCurrentTexture() }, [viewW, viewH]);
+    gpu.device.queue.submit([enc.finish()]);
+  };
+
+  // Stretch-draw one texture over another — visual CONTINUITY across a resize: the old image stays
+  // up (scaled) until the correctly-sized frame arrives, instead of a cleared black canvas being
+  // "filled in by patches".
+  const stretchWGSL = /* wgsl */ `
+@group(0) @binding(0) var t : texture_2d<f32>;
+@group(0) @binding(1) var s : sampler;
+struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i : u32) -> V {
+  let x = select(-1.0, 3.0, i == 1u); let y = select(-1.0, 3.0, i == 2u);
+  var o : V; o.p = vec4<f32>(x, y, 0.0, 1.0); o.uv = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5); return o;
+}
+@fragment fn fs(v : V) -> @location(0) vec4<f32> { return textureSample(t, s, v.uv); }`;
+  const stretchMod = gpu.device.createShaderModule({ code: stretchWGSL });
+  const stretchPipe = gpu.device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: stretchMod, entryPoint: "vs" },
+    fragment: { module: stretchMod, entryPoint: "fs", targets: [{ format: srgb }] },
+    primitive: { topology: "triangle-list" },
+  });
+  const stretchSampler = gpu.device.createSampler({ magFilter: "linear", minFilter: "linear" });
+  const stretchInto = (dst: GPUTexture, src: GPUTexture) => {
+    const bind = gpu.device.createBindGroup({
+      layout: stretchPipe.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: src.createView() }, { binding: 1, resource: stretchSampler }],
+    });
+    const enc = gpu.device.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: dst.createView({ format: srgb }), loadOp: "clear", storeOp: "store", clearValue: { r: 0.05, g: 0.06, b: 0.09, a: 1 } }] });
+    pass.setPipeline(stretchPipe); pass.setBindGroup(0, bind); pass.draw(3); pass.end();
+    gpu.device.queue.submit([enc.finish()]);
+  };
+
+  const MAX_DIM = 3840;   // 4K cap: a maximized retina window can ask for more than that
+  /** Resize the drawing buffer IF the layout actually changed. Assigning canvas.width CLEARS the
+   *  canvas — even to the same value — so this must never run unconditionally: doing it on every
+   *  ResizeObserver tick is what made the view blank on interaction and "fill back in". Returns
+   *  whether the size changed. On change the old image is stretch-blitted across for continuity. */
+  const resize = (): boolean => {
+    const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
+    const cw = Math.floor(canvas.clientWidth * dpr), ch = Math.floor(canvas.clientHeight * dpr);
+    if (cw <= 0 || ch <= 0) return false;               // not laid out yet — keep what we have
+    const k = Math.min(1, MAX_DIM / Math.max(cw, ch));
+    const w = Math.max(16, Math.round(cw * k)), h = Math.max(16, Math.round(ch * k));
+    if (w === canvas.width && h === canvas.height) return false;
+    const old = viewTex; viewTex = null;                // keep the old image out of destroy()'s reach
+    canvas.width = w; canvas.height = h;                // (this clears the canvas)
+    ensureViewTex();                                    // new surface, background-cleared, INVALID
+    if (old) { stretchInto(viewTex!, old); old.destroy(); }
+    blitToCanvas();                                     // continuity: old image, scaled, immediately
+    return true;
+  };
+  new ResizeObserver(() => { if (resize()) { requestResync(); onCam(); } }).observe(canvas);
+  globalThis.addEventListener("resize", () => { if (resize()) { requestResync(); onCam(); } });
   resize();
 
   let camera: VtkCamera | null = null;
-  let sceneName = "scene", sceneUrl = "";
+  let sceneName = "scene", sceneUrl = "", demo = params.get("demo") ?? "multi";
   let mode: "remote" | "local" = "remote";
-  let frames = 0, bytes = 0, lastCamSentAt = 0;
+  let frames = 0, bytes = 0, frameBytes = 0, lastCamSentAt = 0;
+  let camDirty = true;   // the camera is worth sending (it moved, the view resized, or it is new)
+  let pdown = false;     // finger state, shipped with the camera: the server settles sooner once released
   const rtt: number[] = [];
+  const parts: Uint8Array[] = [];   // chunks of the frame currently arriving
+  // The self-healing valve: whenever a frame cannot be applied (size mismatch, no full frame under
+  // a patch yet), tell the server once and let it start over from a full frame. Debounced until
+  // that full frame arrives so a burst of stale frames does not trigger a burst of resets.
+  let resyncSent = false;
+  let dbgDropped = 0, dbgResyncs = 0, dbgApplied = 0;
+  let lastErr = "";
+  const requestResync = () => {
+    dbgDropped++;
+    if (resyncSent || ws?.readyState !== WebSocket.OPEN) return;
+    resyncSent = true; dbgResyncs++;
+    ws.send('{"type":"resync"}');
+  };
+  let lastFrame: { kind: number; sw: number; sh: number; pw: number; ph: number; kB: number; settled: number } | null = null;
+  let dbgStarts = 0, dbgDrags = 0;   // widget-drag counters for the CDP harness
+  let dbgPresentMs = 0, dbgGunzipMs = 0, dbgQueued = 0;   // where client-side frame time goes
+  const concat = (bs: Uint8Array[]) => {
+    const out = new Uint8Array(bs.reduce((n, b) => n + b.length, 0));
+    let o = 0;
+    for (const b of bs) { out.set(b, o); o += b.length; }
+    return out;
+  };
+
+  // ---- the transform GIZMO (DEMO=multi) ----
+  // The widget is pure geometry, so it runs HERE in both modes: picking, the camera-plane drag and
+  // the resulting rigid matrix are computed client-side. Remotely that matrix is a {xform} message
+  // (the server applies it to its Panoramix field); locally it goes straight into this browser's
+  // copy of that field. One widget, one gizmo field — so toggling modes never loses the pose.
+  let widget: XformWidget | null = null;
+  let widgetSeed: { center: Vec3; m: number[] } | null = null;   // wire form: a plain 16-number array
+  // A Mat4 is a Float32Array, so JSON.stringify turns one into an OBJECT — accept either shape and
+  // fall back to identity rather than building a zero-length matrix (which silently NaNs the pick
+  // geometry: handles project to nowhere and every drag falls through to the camera).
+  const toMat4 = (v: unknown): Mat4 => {
+    const a = Array.isArray(v) ? v : v && typeof v === "object" ? Object.values(v as Record<string, number>) : [];
+    return a.length === 16 ? new Float32Array(a) as Mat4 : identity();
+  };
+  let localPano: ImageField | null = null;      // set once the local scene is built
+  let xformDirty = false;                        // a gizmo change is waiting for the next send tick
 
   // ---- LOCAL path (lazy): build the SAME scene on this GPU + the shared adaptive driver ----
   let localScene: SceneRenderer | null = null;
@@ -49,13 +197,32 @@ async function main() {
   let loadingLocal = false;
   const ensureLocal = async (): Promise<boolean> => {
     if (a3d) return true;
-    if (loadingLocal || !camera || !sceneUrl) return false;
+    if (loadingLocal) return false;
     loadingLocal = true;
     status(`loading ${sceneName} locally…`);
     let mb = 0;
-    const sv = await loadSceneVolumeField(gpu.device, sceneUrl, (n) => { mb += n; status(`loading ${sceneName} locally… ${(mb / 1e6).toFixed(0)} MB`); });
+    const prog = (n: number) => { mb += n; status(`loading ${sceneName} locally… ${(mb / 1e6).toFixed(0)} MB`); };
     localScene = new SceneRenderer(gpu, srgb);
-    localScene.build([sv.field]);
+    if (demo === "multi") {
+      // The same builder the server ran — this browser now holds both volumes itself. Everything
+      // the view needs (framing, the gizmo's start centre) comes out of the data, not the server.
+      const sc = await buildMultiVolume(gpu.device, prog);
+      localPano = sc.pano.field;
+      const c0 = sc.pano.field.worldCenter();          // centre at identity = the widget's pivot origin
+      if (!widget) createWidget({ center: c0, m: [...identity()] });
+      localPano.setWorldTransform(widget!.matrix());   // adopt the pose the gizmo is already in
+      localScene.build([...sc.fields, widget!.field]);
+      bootstrap({
+        name: `${sc.cta.name} + ${sc.pano.name}`, sceneUrl: "",
+        center: [(sc.cta.center[0] + sc.pano.center[0]) / 2, (sc.cta.center[1] + sc.pano.center[1]) / 2,
+                 (sc.cta.center[2] + sc.pano.center[2]) / 2] as Vec3,
+        radius: Math.max(sc.cta.radius, sc.pano.radius) * 1.35,
+      });
+    } else {
+      const sv = await loadSceneVolumeField(gpu.device, sceneUrl || SINGLE_SCENE, prog);
+      localScene.build([sv.field]);
+      bootstrap({ name: sv.name, sceneUrl: sceneUrl || SINGLE_SCENE, center: sv.center, radius: sv.radius });
+    }
     localScene.setBackground(0.05, 0.06, 0.09);
     a3d = mountAdaptive3d({
       scene: () => localScene,
@@ -69,73 +236,241 @@ async function main() {
     return true;
   };
 
-  // ---- REMOTE path ----
-  const ws = new WebSocket(`ws://${location.host}/`);
-  ws.binaryType = "arraybuffer";
+  // Track the finger itself (capture phase, observation only): a pause mid-gesture must not look
+  // like a release to the server, or it starts a heavyweight settle it will only have to preempt.
+  canvas.addEventListener("pointerdown", () => { pdown = true; }, true);
+  globalThis.addEventListener("pointerup", () => { pdown = false; camDirty = true; scheduleSend(); }, true);
+
+  // ---- REMOTE path (optional) ----
+  const ws = serverUrl ? new WebSocket(serverUrl) : null;
+  if (ws) ws.binaryType = "arraybuffer";
   let lastSent = -1e12;
   let trailing: ReturnType<typeof setTimeout> | 0 = 0;
   const sendCam = () => {
     trailing = 0;
-    if (!camera || ws.readyState !== WebSocket.OPEN) return;
+    if (!camera || ws?.readyState !== WebSocket.OPEN) return;
     lastSent = lastCamSentAt = performance.now();
-    ws.send(JSON.stringify({ type: "cam", w: canvas.width, h: canvas.height, p: [...camera.position], f: [...camera.focalPoint], u: [...camera.viewUp], a: camera.viewAngle }));
+    if (camDirty) {
+      camDirty = false;
+      ws.send(JSON.stringify({ type: "cam", w: canvas.width, h: canvas.height, p: [...camera.position], f: [...camera.focalPoint], u: [...camera.viewUp], a: camera.viewAngle, dn: pdown ? 1 : 0 }));
+    }
+    // A pending gizmo edit rides the same coalesced tick (latest-wins, like the camera).
+    if (xformDirty && widget) {
+      xformDirty = false;
+      const active = widget.field.activeId;
+      ws.send(JSON.stringify({ type: "xform", m: [...widget.matrix()], pivot: widget.pivotWorld(), active: active >= 0 ? active : null }));
+    }
   };
   const scheduleSend = () => {
-    if (!camera || ws.readyState !== WebSocket.OPEN) return;
+    if (!camera || ws?.readyState !== WebSocket.OPEN) return;
     const dt = performance.now() - lastSent;
     if (dt >= 15) sendCam();
     else if (!trailing) trailing = setTimeout(sendCam, 15 - dt);
   };
 
   const statusLine = (where: "remote" | "local", extra = "") =>
-    status(`${sceneName} · ${where.toUpperCase()} · ${extra}${where === "remote" ? `~${[...rtt].sort((a, b) => a - b)[rtt.length >> 1] | 0} ms round-trip · ${(bytes / 1e6).toFixed(1)} MB` : "your GPU"}`);
+    status(`${sceneName} · ${where.toUpperCase()} · ${canvas.width}×${canvas.height} view · ${extra}${where === "remote" ? `~${[...rtt].sort((a, b) => a - b)[rtt.length >> 1] | 0} ms round-trip · ${(bytes / 1e6).toFixed(1)} MB` : "your GPU"}`);
 
+  // Ask the active path for a new frame WITHOUT claiming the camera moved — a gizmo edit needs a
+  // redraw, but re-sending the camera would invalidate the whole view and cost a full frame.
+  const requestFrame = () => { if (mode === "remote") scheduleSend(); else a3d?.draw(); };
   // Any camera/view change → drive the ACTIVE path.
-  const onCam = () => { if (mode === "remote") scheduleSend(); else a3d?.draw(); };
+  const onCam = () => { camDirty = true; requestFrame(); };
 
-  ws.onopen = () => status("connected — waiting for scene…");
-  ws.onclose = () => { if (mode === "remote") status("render server disconnected — switch to Local, or restart server/live-renderer.ts", true); };
-  ws.onerror = () => { if (mode === "remote") status("cannot reach render server — switch to Local, or start server/live-renderer.ts", true); };
+  // A gizmo change always goes BOTH ways: queued for the server (tiny JSON) and applied to the
+  // local field if this browser has loaded it. That keeps the two renderers in the same pose, so
+  // the mode toggle stays a pure A/B of the SAME scene.
+  const pushXform = () => {
+    if (!widget) return;
+    xformDirty = true;
+    localPano?.setWorldTransform(widget.matrix());
+    localScene?.syncUniforms();
+    if (mode === "remote") scheduleSend();
+  };
+
+  /** The SAME widget the local demo mounts, against a target that reports the start centre and
+   *  forwards each new matrix instead of owning a field. Needs no camera and no GPU — so it can be
+   *  built from the server's hello OR from the locally loaded volume, whichever comes first. */
+  const createWidget = (seed: { center: Vec3; m: number[] }) => {
+    const target: XformTarget = {
+      worldCenter: () => seed.center,
+      setWorldTransform: () => {/* fan-out happens in pushXform (server + local field) */},
+    };
+    widget = makeXformWidget(target, 0, toMat4(seed.m));
+  };
+
+  /** Wire the widget to the pointer. Separate from createWidget because picking needs the camera. */
+  let widgetAttached = false;
+  const attachWidget = () => {
+    if (!widget || !camera || widgetAttached) return;
+    widgetAttached = true;
+    const focalPx = () => (canvas.height / 2) / Math.tan((camera!.viewAngle * Math.PI) / 360);
+    // Capture phase, so a grabbed handle never also orbits the camera.
+    attachWidgetControls(canvas, camera!, {
+      getHandles: (): Handle[] => widget!.handleList(widget!.scaleFor(camera!.position, focalPx())),
+      getSize: () => ({ w: canvas.width, h: canvas.height }),
+      onDragStart: (h) => { dbgStarts++; widget!.setActive(componentOf(h.data as XMeta)); widget!.beginDrag(); pushXform(); },
+      onDrag: (h, world) => { dbgDrags++; widget!.drag(h.data as XMeta, h.world, world); pushXform(); },
+      onDragEnd: () => { widget!.setActive(null); pushXform(); },
+      onHover: (h) => { widget!.setActive(h ? componentOf(h.data as XMeta) : null); pushXform(); },
+      onChange: () => requestFrame(),   // NOT onCam: the camera did not move
+    });
+  };
+
+  /** Set up camera + interaction once the scene is known. First caller wins — the server's hello
+   *  and a standalone local load produce the same framing, so either may go first. */
+  const bootstrap = (c: { name: string; sceneUrl: string; center: Vec3; radius: number }) => {
+    sceneName = c.name;
+    if (c.sceneUrl) sceneUrl = c.sceneUrl;
+    if (!camera) {
+      camera = framedCamera(c.center, c.radius);
+      attachCameraControls(canvas, camera, { onChange: onCam });
+    }
+    attachWidget();
+  };
+
+  ws?.addEventListener("open", () => status("connected — waiting for scene…"));
+  // No server, or it went away: fall back to rendering here. The page is never dead in the water.
+  const fallbackLocal = async (why: string) => {
+    if (mode === "local") return;
+    status(`${why} — rendering locally instead`, true);
+    if (await ensureLocal()) await setMode("local");
+  };
+  ws?.addEventListener("close", () => fallbackLocal("render server disconnected"));
+  ws?.addEventListener("error", () => fallbackLocal("cannot reach the render server"));
   const gunzip = async (b: Uint8Array): Promise<Uint8Array> =>
     new Uint8Array(await new Response(new Response(b).body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
 
-  ws.onmessage = async (e) => {
+  let applyChain: Promise<void> = Promise.resolve();
+  ws?.addEventListener("message", (ev) => {
+    // cack on RECEIPT (not after decode/present): it is the server's flow-control signal for how
+    // many chunks are genuinely in flight on the wire.
+    if (typeof ev.data !== "string" && ws.readyState === WebSocket.OPEN) ws.send('{"type":"cack"}');
+    applyChain = applyChain.then(() => applyMessage(ev)).catch((err) => {
+      // An exception here means a frame we could not even decode — make it VISIBLE, not a silent
+      // console line: this is precisely the stale-protocol failure mode.
+      lastErr = String(err?.message ?? err);
+      status("frame decode error: " + lastErr + " — try a hard reload", true);
+      requestResync();
+    });
+  });
+  const applyMessage = async (e: MessageEvent) => {
     if (typeof e.data === "string") {
-      const m = JSON.parse(e.data);
+      const m = JSON.parse(e.data as string);
       if (m.type === "hello") {
-        sceneName = m.name ?? "scene"; sceneUrl = m.sceneUrl ?? "";
-        camera = framedCamera(m.center as Vec3, m.radius);
-        attachCameraControls(canvas, camera, { onChange: onCam });
+        if ((m.proto ?? 0) !== PROTO) {
+          status(`page/server version mismatch (page ${PROTO}, server ${m.proto}) — reloading…`, true);
+          ws?.close();
+          if (!sessionStorage.getItem("lr_reloaded")) {
+            sessionStorage.setItem("lr_reloaded", "1");
+            location.reload();
+          }
+          return;
+        }
+        sessionStorage.removeItem("lr_reloaded");
+        demo = m.demo ?? "single";
+        widgetSeed = m.widget ?? null;
+        if (widgetSeed && !widget) createWidget(widgetSeed);
+        bootstrap({ name: m.name ?? "scene", sceneUrl: m.sceneUrl ?? "", center: m.center as Vec3, radius: m.radius });
         sendCam();
-        statusLine("remote", "drag to orbit · ");
+        statusLine("remote", widget ? "drag a gizmo handle to move Panoramix · " : "drag to orbit · ");
       }
       return;
     }
     if (mode !== "remote") return;   // ignore stale remote frames while in Local mode
     const buf = e.data as ArrayBuffer;
-    const head = new Uint16Array(buf, 0, 6);
+    const head = new Uint16Array(buf, 0, 16);
     const sw = head[0], sh = head[1], settled = head[4], compressed = head[5];
-    let samples = new Uint8Array(buf, 12);
-    if (compressed) samples = await gunzip(samples);
-    recon.present(ctx.getCurrentTexture().createView({ format: srgb }), samples, sw, sh, canvas.width, canvas.height);
-    ws.send('{"type":"ack"}');       // ack-based credit: server sends the next frame once we present
-    frames++; bytes += buf.byteLength;
+    const chunk = head[6], chunks = head[7];
+    // kind 1 = PATCH: these samples cover only the view rect (px,py,pw,ph)
+    const kind = head[8], px = head[9], py = head[10], pw = head[11], ph = head[12];
+    const srvSinceInput = head[13], srvRenderMs = head[14];   // the server's own timing split
+    frameBytes += buf.byteLength;
+    // Big frames arrive in pieces (a cloud ws proxy closes the socket on multi-MB messages) —
+    // reassemble, and ack only when the last piece lands so the credit scheme still paces us.
+    let samples: Uint8Array;
+    if (chunks > 1) {
+      if (chunk === 0) parts.length = 0;
+      let part = new Uint8Array(buf, 32);
+      if (compressed) part = await gunzip(part);   // chunks are independently gzipped
+      parts.push(part);
+      if (chunk < chunks - 1) return;
+      samples = concat(parts);
+    } else {
+      samples = new Uint8Array(buf, 32);
+      if (compressed) samples = await gunzip(samples);
+    }
+    // ---- APPLY RULES. WebSocket delivery is ordered, so these three rules keep the client's
+    // surface exactly consistent with the server's model of it — or trigger a resync that resets
+    // both sides to a full frame. A frame that fails a rule is DROPPED whole, never partially or
+    // stretchily applied: better a moment of the old image than any amount of debris.
+    const vw = head[2], vh = head[3];
+    if (vw !== canvas.width || vh !== canvas.height) { requestResync(); return; }   // rendered for a view that no longer exists
+    const tp = performance.now();
+    const dst = ensureViewTex().createView({ format: srgb });
+    if (kind === 1) {
+      // PATCH: only ever ON TOP of a complete same-size image.
+      if (!surfaceValid || px + pw > viewW || py + ph > viewH) { requestResync(); return; }
+      recon.present(dst, samples, sw, sh, viewW, viewH, { x: px, y: py, w: pw, h: ph });
+    } else {
+      recon.present(dst, samples, sw, sh, viewW, viewH);
+      surfaceValid = true;
+      resyncSent = false;   // the reset round-trip is complete
+    }
+    blitToCanvas();
+    dbgApplied++;
+    dbgPresentMs += performance.now() - tp;
+    ws!.send('{"type":"ack"}');      // ack-based credit: server sends the next frame once we present
+    frames++; bytes += frameBytes;
+    const kB = frameBytes / 1e3; frameBytes = 0;
+    lastFrame = { kind, sw, sh, pw, ph, kB: Math.round(kB), settled };
     const dt = performance.now() - lastCamSentAt; rtt.push(dt); if (rtt.length > 30) rtt.shift();
-    statusLine("remote", `${settled ? "native" : `${sw}×${sh}`} · ${compressed ? "gz " : ""}`);
+    statusLine("remote", `${kind === 1 ? `patch ${sw}×${sh}→${pw}×${ph}` : settled ? "samples native" : `samples ${sw}×${sh}`} · ${kB.toFixed(0)} kB${compressed ? " gz" : ""} · srv ${srvSinceInput}ms (render ${srvRenderMs}) · `);
   };
 
   // ---- RenderMode toggle ----
   const setMode = async (m: "remote" | "local") => {
     if (m === "local") { if (!await ensureLocal()) { status("cannot load local scene", true); return; } }
+    if (m === "remote" && ws?.readyState !== WebSocket.OPEN) { status("no render server connected — staying local", true); return; }
     mode = m;
-    if (modeBtn) modeBtn.textContent = m === "remote" ? "Rendering: Remote (Deno)" : "Rendering: Local (your GPU)";
+    if (modeBtn) {
+      modeBtn.textContent = m === "remote"
+        ? "Rendering on the REMOTE GPU — click to render locally"
+        : "Rendering on YOUR GPU — click to render remotely";
+    }
     if (m === "remote") sendCam(); else a3d?.draw();
   };
   modeBtn?.addEventListener("click", () => setMode(mode === "remote" ? "local" : "remote"));
 
+  // No server at all (?local=1, or the page served from the static gallery): render here, now.
+  if (!ws) { status("no render server — rendering locally"); if (await ensureLocal()) await setMode("local"); }
+
   (globalThis as unknown as { __remoteDbg: unknown }).__remoteDbg = {
-    frames: () => frames, connected: () => ws.readyState === WebSocket.OPEN, hasCam: () => !!camera,
+    frames: () => frames, connected: () => ws?.readyState === WebSocket.OPEN, hasCam: () => !!camera,
     mode: () => mode, setMode: (m: "remote" | "local") => setMode(m),
+    // Gizmo handles in CSS px, so a harness can aim a synthetic pointer at one (the remote twin of
+    // selftest-browser's __xformDbg).
+    handles: () => {
+      if (!widget || !camera) return [];
+      const r = canvas.getBoundingClientRect();
+      const focalPx = (canvas.height / 2) / Math.tan((camera.viewAngle * Math.PI) / 360);
+      return widget.handleList(widget.scaleFor(camera.position, focalPx)).map((h) => {
+        const m = h.data as XMeta & { axis?: number };
+        const s = projectToCanvasCss(camera!, canvas.width, canvas.height, h.world, r.width, r.height);
+        return { id: h.id, kind: m.kind, axis: m.axis, x: s?.x ?? null, y: s?.y ?? null };
+      });
+    },
+    matrix: () => widget ? [...widget.matrix()] : null,
+    cam: () => camera ? { p: [...camera.position], f: [...camera.focalPoint], u: [...camera.viewUp], d: camera.distance } : null,
+    diag: () => ({
+      proto: PROTO, dpr: globalThis.devicePixelRatio,
+      css: [canvas.clientWidth, canvas.clientHeight], buf: [canvas.width, canvas.height],
+      tex: [viewW, viewH], surfaceValid, applied: dbgApplied, dropped: dbgDropped,
+      resyncs: dbgResyncs, lastErr,
+    }),
+    last: () => lastFrame,
+    drags: () => ({ starts: dbgStarts, drags: dbgDrags }),
+    timing: () => { const r = { frames, presentMs: Math.round(dbgPresentMs), gunzipMs: Math.round(dbgGunzipMs), queued: dbgQueued }; dbgPresentMs = 0; dbgGunzipMs = 0; return r; },
   };
 }
 main().catch((e) => status("error: " + (e?.message ?? e), true));

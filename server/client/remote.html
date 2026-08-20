@@ -4,34 +4,42 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SlicerLive — Remote Render (Deno)</title>
+<link rel="icon" href="data:,">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; background: #06070c; color: #d8d8e0; font-family: -apple-system, system-ui, sans-serif; display: flex; flex-direction: column; }
-  header { flex: 0 0 auto; padding: 12px 16px; border-bottom: 1px solid #1b1b28; }
-  h1 { margin: 0; font-size: 15px; }
+  header { flex: 0 0 auto; padding: 8px 12px; border-bottom: 1px solid #1b1b28; display: flex;
+           align-items: center; gap: 12px; flex-wrap: wrap; }
+  h1 { margin: 0; font-size: 14px; white-space: nowrap; }
   .badge { display: inline-block; font-size: 10px; color: #04121c; background: linear-gradient(180deg, #9fe9ff, #54c6f0);
            font-weight: 700; border-radius: 5px; padding: 1px 6px; vertical-align: middle; margin-left: 6px; }
-  p.sub { margin: 6px 0 0; font-size: 12px; opacity: .65; max-width: 70ch; line-height: 1.4; }
+  details { font-size: 12px; opacity: .7; }
+  details summary { cursor: pointer; }
+  details p { margin: 8px 0 0; max-width: 80ch; line-height: 1.4; }
   a { color: #7fa8e0; }
-  main { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 12px; }
-  #gpu { width: min(80vmin, 720px); height: min(80vmin, 720px); border-radius: 8px; background: #000; touch-action: none; cursor: grab; }
+  main { flex: 1 1 auto; min-height: 0; display: flex; }
+  /* The view fills the window: maximize the browser to drive it to 4K. */
+  #gpu { flex: 1 1 auto; width: 100%; height: 100%; display: block; background: #000; touch-action: none; cursor: grab; }
   #gpu:active { cursor: grabbing; }
   #status { position: fixed; bottom: 6px; left: 10px; font-size: 11px; color: #9fb3d0; font-family: ui-monospace, monospace; pointer-events: none; text-shadow: 0 0 3px #000; }
-  #mode { margin-top: 8px; font: 600 12px -apple-system, system-ui, sans-serif; color: #04121c; cursor: pointer;
+  #mode { font: 600 12px -apple-system, system-ui, sans-serif; color: #04121c; cursor: pointer;
     background: linear-gradient(180deg, #9fe9ff, #54c6f0); border: 0; border-radius: 7px; padding: 6px 13px; }
 </style>
 </head>
 <body>
 <header>
   <h1>Remote Render<span class="badge">Deno · WebGPU · WS</span></h1>
-  <p class="sub">The <b>same</b> TS/WebGPU renderer, running headless in a Deno process, streaming traced
+  <button id="mode">Rendering on the REMOTE GPU — click to render locally</button>
+  <details><summary>what am I looking at?</summary><p>The <b>same</b> TS/WebGPU renderer, running headless in a Deno process, streaming traced
     samples over a WebSocket. This page just sends its camera and <b>reconstructs</b> the samples
     (Catmull-Rom upsample + background composite) — the identical Reconstructor the local demos use.
-    Drag to orbit. <b>Toggle</b> the same scene between your local GPU and the remote renderer. Start the
-    server with <code>deno run --unstable-webgpu --allow-net --allow-read --allow-env server/live-renderer.ts</code>.</p>
-  <button id="mode">Rendering: Remote (Deno)</button>
+    Drag to orbit; in the multi-volume scene, drag a <b>gizmo</b> handle to move/rotate Panoramix —
+    the widget math runs here, the composited render happens there. <b>Toggle</b> the same scene
+    between your local GPU and the remote renderer. Start the server with
+    <code>deno run --unstable-webgpu --allow-net --allow-read --allow-env server/live-renderer.ts</code>
+    (add <code>DEMO=multi</code> for the two-volume + gizmo scene).</p></details>
 </header>
 <main><canvas id="gpu"></canvas></main>
 <div id="status">connecting…</div>

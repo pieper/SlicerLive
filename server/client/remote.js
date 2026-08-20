@@ -4,7 +4,7 @@ async function initDevice() {
   if (!gpu) throw new Error("WebGPU not available (need Chrome/Edge/Safari or Deno --unstable-webgpu)");
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("no WebGPU adapter");
-  const want = ["float32-filterable", "timestamp-query"].filter((f) => adapter.features.has(f));
+  const want = ["float32-filterable", "timestamp-query", "shader-f16"].filter((f) => adapter.features.has(f));
   const lim = adapter.limits;
   const requiredLimits = {};
   const raise = (k) => {
@@ -22,6 +22,33 @@ async function initDevice() {
 function identity() {
   const m = new Float32Array(16);
   m[0] = m[5] = m[10] = m[15] = 1;
+  return m;
+}
+function translation(t) {
+  const m = identity();
+  m[12] = t[0];
+  m[13] = t[1];
+  m[14] = t[2];
+  return m;
+}
+function rotationAboutAxis(axis, angle) {
+  let x = axis[0], y = axis[1], z = axis[2];
+  const l = Math.hypot(x, y, z) || 1;
+  x /= l;
+  y /= l;
+  z /= l;
+  const c = Math.cos(angle), s = Math.sin(angle), t = 1 - c;
+  const m = new Float32Array(16);
+  m[0] = c + x * x * t;
+  m[1] = y * x * t + z * s;
+  m[2] = z * x * t - y * s;
+  m[4] = x * y * t - z * s;
+  m[5] = c + y * y * t;
+  m[6] = z * y * t + x * s;
+  m[8] = x * z * t + y * s;
+  m[9] = y * z * t - x * s;
+  m[10] = c + z * z * t;
+  m[15] = 1;
   return m;
 }
 function multiply(a, b) {
@@ -42,6 +69,21 @@ function perspectiveZO(fovy, aspect, near, far) {
   m[5] = f;
   m[11] = -1;
   m[10] = far / (near - far);
+  m[14] = far * near / (near - far);
+  return m;
+}
+function perspectiveZOTile(fovy, viewW, viewH, x, y, w, h, near, far) {
+  const t = near * Math.tan(fovy / 2), b = -t;
+  const r = t * (viewW / viewH), l = -r;
+  const l2 = l + (r - l) * x / viewW, r2 = l + (r - l) * (x + w) / viewW;
+  const t2 = t - (t - b) * y / viewH, b2 = t - (t - b) * (y + h) / viewH;
+  const m = new Float32Array(16);
+  m[0] = 2 * near / (r2 - l2);
+  m[5] = 2 * near / (t2 - b2);
+  m[8] = (r2 + l2) / (r2 - l2);
+  m[9] = (t2 + b2) / (t2 - b2);
+  m[10] = far / (near - far);
+  m[11] = -1;
   m[14] = far * near / (near - far);
   return m;
 }
@@ -463,6 +505,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     this.flush();
     this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([this.focalPx * (viewH / renderH)]));
     this.dev.queue.writeBuffer(this.superresBuf, 0, new Float32Array([renderW, renderH, viewW, viewH]));
+    this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
     const enc = this.dev.createCommandEncoder();
     const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.lowView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
     tp.setPipeline(this.pipeline);
@@ -548,6 +591,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     } else {
       this.dev.queue.writeBuffer(this.camBuf, 0, this.baseInvVP);
     }
+    this.dev.queue.writeBuffer(this.camBuf, 76, new Float32Array([n - 1]));
     this.flush();
     this.dev.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array([this.mat[12], this.mat[13], this.mat[14], 1 / n]));
     const prev = this.accumPing, next = 1 - this.accumPing;
@@ -582,8 +626,8 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     });
     this.clipOff = uoff;
     this.pickOff = uoff + CLIP_FLOATS;
-    this.mat = new Float32Array(uoff + CLIP_FLOATS + 4);
-    this.matBuf = this.dev.createBuffer({ size: (uoff + CLIP_FLOATS + 4) * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.mat = new Float32Array(uoff + CLIP_FLOATS + 12);
+    this.matBuf = this.dev.createBuffer({ size: (uoff + CLIP_FLOATS + 12) * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const module = this.dev.createShaderModule({ code: this.wgsl() });
     this.pipeline = this.dev.createRenderPipeline({
       layout: "auto",
@@ -692,6 +736,8 @@ ${members}
   clip_planes : array<vec4<f32>, 8>,   // (nx, ny, nz, offset) inward; tail so field offsets are stable
   clip_count : vec4<f32>,              // (count, _, _, _)
   pick_cursor : vec4<f32>,             // (ndc_x, ndc_y, _, _) \u2014 the ray for fs_pick
+  probe_origin : vec4<f32>,            // explicit-ray probe: world origin
+  probe_dir : vec4<f32>,               // (dx, dy, dz, enabled) \u2014 w>0 uses this ray instead of the cursor
 };
 @group(0) @binding(0) var<uniform> u_cam : Camera;
 @group(0) @binding(1) var<uniform> u_material : Material;
@@ -752,7 +798,23 @@ fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
 ${skipInit}
   loop {
     if (t >= t_far || safety >= 5000${hasGhost ? "" : " || integrated.a >= 0.99"}) { break; }
-    let js = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5; // per-(pixel,sample) jitter \u2014 frame-invariant; temporal AA rides on the sub-pixel NDC jitter (frame.xy), which is exact identity at 0
+    // Per-(pixel, step, ACCUM FRAME) ray-offset jitter. The frame term (u_cam.size.w, the
+    // accumulation index) is what makes temporal AA actually converge: with a frame-invariant
+    // offset the jitter turns banding into FIXED-PATTERN noise that averaging can never remove
+    // (measured: 32 samples was as grainy as 1). Varying it per frame decorrelates the samples
+    // so the mean approaches the true integral \u2014 no banding AND no noise. size.w is 0 for every
+    // non-accumulating path, so frame 1 stays byte-identical to a plain renderToView.
+    // Base offset: decorrelated per (pixel, step) so a single frame shows noise, not banding.
+    let jbase = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    // Advance it across accumulation frames by the golden-ratio additive recurrence
+    // (Cranley-Patterson rotation). MEASURED: this converges at the same 1/sqrt(n) rate as an
+    // independent random offset per frame (high-freq energy 1.36 vs 1.31 at n=64) \u2014 the low-
+    // discrepancy walk is NOT faster here, because the variance is dominated by the step size
+    // against a sharp transfer function, not by the sequence. Kept because it is deterministic
+    // and costs nothing; reduce sampleStep if you need less residual speckle.
+    // At size.w = 0 this is exactly jbase, so the first accumulated frame stays byte-identical
+    // to a plain renderToView \u2014 the property render/test baselines depend on.
+    let js = fract(jbase + u_cam.size.w * 0.6180339887) - 0.5;
     let wp = ro + rd * (t + js * step);
     var sum = vec4<f32>(0.0);
     var all_defer = true;        // every field guarantees emptiness here -> we may leap
@@ -792,8 +854,16 @@ ${ghostDispatch}
 // Output: (wp.x, wp.y, wp.z, hit). hit=0 means the ray never reached 50% (empty/miss).
 @fragment
 fn fs_pick() -> @location(0) vec4<f32> {
-  let ro = ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 0.0, 1.0));
-  let rd = normalize(ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 1.0, 1.0)) - ro);
+  // Two ray sources: the screen cursor (pick) or an explicit world ray (probe). The explicit
+  // form exists because the cursor ray can only ever probe what is ON SCREEN \u2014 useless for
+  // "how much room is BEHIND me?", which endovascular navigation needs for reverse and for
+  // lateral clearance.
+  var ro = ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 0.0, 1.0));
+  var rd = normalize(ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 1.0, 1.0)) - ro);
+  if (u_material.probe_dir.w > 0.5) {
+    ro = u_material.probe_origin.xyz;
+    rd = normalize(u_material.probe_dir.xyz);
+  }
   let inv = vec3<f32>(1.0) / rd;
   let tb = (u_material.bmin.xyz - ro) * inv;
   let tt = (u_material.bmax.xyz - ro) * inv;
@@ -941,6 +1011,28 @@ ${pickDispatch}
     cam[16] = width;
     cam[17] = height;
     cam[18] = height / 2 / Math.tan(fovyDeg * Math.PI / 360);
+    cam[19] = 0;
+    cam[20] = eye[0];
+    cam[21] = eye[1];
+    cam[22] = eye[2];
+    this.dev.queue.writeBuffer(this.camBuf, 0, cam);
+  }
+  /** Camera for ONE TILE of the view: the same rays the full frame would cast for `rect`, into a
+   *  rect.w×rect.h target. Screen-space glyph sizing stays keyed to the FULL view height, so a
+   *  patch of the gizmo is drawn at exactly the size the full frame drew it. Pair with
+   *  traceSamples(rect.w, rect.h) — its focal rewrite is then a no-op. */
+  setCameraTile(eye, center, up, fovyDeg, viewW, viewH, rect) {
+    const view = lookAt(eye, center, up);
+    const proj = perspectiveZOTile(fovyDeg * Math.PI / 180, viewW, viewH, rect.x, rect.y, rect.w, rect.h, 1, 1e5);
+    const invVP = invert(multiply(proj, view));
+    this.baseInvVP = invVP;
+    const cam = new Float32Array(24);
+    cam.set(invVP, 0);
+    this.focalPx = viewH / 2 / Math.tan(fovyDeg * Math.PI / 360);
+    cam[16] = rect.w;
+    cam[17] = rect.h;
+    cam[18] = this.focalPx;
+    cam[19] = 0;
     cam[20] = eye[0];
     cam[21] = eye[1];
     cam[22] = eye[2];
@@ -955,9 +1047,50 @@ ${pickDispatch}
    *  Uses the camera set by the last setCamera(); returns null if the ray never reaches 50%. */
   async pick(u, v) {
     if (!this.pickPipeline || !this.pickBind || !this.placed.length) return null;
-    this.mat[this.pickOff] = u * 2 - 1;
-    this.mat[this.pickOff + 1] = 1 - v * 2;
-    this.flush();
+    return this.serialise(async () => {
+      this.mat[this.pickOff] = u * 2 - 1;
+      this.mat[this.pickOff + 1] = 1 - v * 2;
+      this.mat[this.pickOff + 11] = 0;
+      this.flush();
+      return await this.tracePick();
+    });
+  }
+  /** Trace an EXPLICIT world ray and return the distance (mm) to the first point where
+   *  front-to-back opacity reaches 50%, or Infinity if it never does. Unlike pick(), the ray
+   *  is independent of the camera, so it can look backwards and sideways — which is what makes
+   *  collision "rails" possible in a first-person flythrough. */
+  async probe(origin, dir) {
+    if (!this.pickPipeline || !this.pickBind || !this.placed.length) return Infinity;
+    const l = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+    return this.serialise(async () => {
+      this.mat[this.pickOff + 4] = origin[0];
+      this.mat[this.pickOff + 5] = origin[1];
+      this.mat[this.pickOff + 6] = origin[2];
+      this.mat[this.pickOff + 8] = dir[0] / l;
+      this.mat[this.pickOff + 9] = dir[1] / l;
+      this.mat[this.pickOff + 10] = dir[2] / l;
+      this.mat[this.pickOff + 11] = 1;
+      this.flush();
+      const hit = await this.tracePick();
+      this.mat[this.pickOff + 11] = 0;
+      this.flush();
+      if (!hit) return Infinity;
+      return Math.hypot(hit[0] - origin[0], hit[1] - origin[1], hit[2] - origin[2]);
+    });
+  }
+  /** Serialises pick/probe. They share ONE uniform buffer and ONE readback buffer, so
+   *  concurrent calls would overwrite each other's ray and double-map the buffer — a
+   *  Promise.all of probes silently returns garbage. Callers may fire as many as they like;
+   *  they queue here. */
+  pickChain = Promise.resolve();
+  serialise(fn) {
+    const next = this.pickChain.then(fn, fn);
+    this.pickChain = next.catch(() => {
+    });
+    return next;
+  }
+  /** The shared 1x1 render + readback behind pick() and probe(). */
+  async tracePick() {
     if (!this.pickTarget) {
       this.pickTarget = this.dev.createTexture({ size: [1, 1], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
       this.pickReadBuf = this.dev.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -1047,8 +1180,10 @@ ${pickDispatch}
    *  background) as tightly-packed rgba8 — the bytes streamed to the remote client, which runs the
    *  same reconstruction (upsample + background composite) the local resolve does. The caller sets
    *  the camera to width×height first (like renderUpscaled). Returns width*height*4 bytes. */
-  async traceSamples(width, height) {
+  async traceSamples(width, height, viewH = height) {
     this.flush();
+    this.dev.queue.writeBuffer(this.camBuf, 64, new Float32Array([width, height]));
+    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([this.focalPx * (viewH / height)]));
     const target = this.dev.createTexture({ size: [width, height], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     const enc = this.dev.createCommandEncoder();
     const tp = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
@@ -1089,6 +1224,7 @@ var ImageField = class {
   // volume (3d) + lut (2d)
   volTex;
   lutTex;
+  dev;
   p2t;
   clim;
   shade;
@@ -1113,6 +1249,20 @@ var ImageField = class {
     this.clim = opts.clim;
     this.shade = opts.shade ?? [0.35, 0.75, 0.35, 20];
     this.unit = opts.opacityUnitDistance ?? this.stepMm;
+    this.dev = dev;
+  }
+  /** Replace the 256-entry rgba8 color/opacity LUT in place (no texture/bind-group churn).
+   *  The bind group holds a stable view of lutTex, so the next render uses the new LUT. */
+  setLUT(lut) {
+    this.dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
+  }
+  /** The scalar range the LUT spans — window/level for the volume rendering. Re-packed into
+   *  the material uniform on the next syncUniforms()/render, so no pipeline rebuild. */
+  setClim(lo, hi) {
+    this.clim = [lo, hi];
+  }
+  getClim() {
+    return [this.clim[0], this.clim[1]];
   }
   origP2t;
   // sampling matrix + box at identity, for setWorldTransform
@@ -1250,7 +1400,9 @@ async function inflateDeflate(buf) {
 async function fetchZarrVolume(blobBase, z, onBytes, concurrency = 12) {
   const Ctor = ZDT[z.dtype] ?? Int16Array;
   const [nz, ny, nx] = z.shape, [cz, cy, cx] = z.chunks, [ncz, ncy, ncx] = z.chunkGrid;
-  const base = blobBase + z.dir + "/" + z.dataset + "/";
+  const hashes = z.chunkHashes;
+  const posBase = blobBase + z.dir + "/" + z.dataset + "/";
+  const chunkUrl = (kk, jj, ii) => hashes ? blobBase + hashes[kk + "." + jj + "." + ii] : posBase + kk + "." + jj + "." + ii;
   const out = new Float32Array(nz * ny * nx);
   let lo = Infinity, hi = -Infinity;
   const jobs = [];
@@ -1259,8 +1411,30 @@ async function fetchZarrVolume(blobBase, z, onBytes, concurrency = 12) {
   const worker = async () => {
     while (idx < jobs.length) {
       const [kk, jj, ii] = jobs[idx++];
-      const gz = await (await fetch(base + kk + "." + jj + "." + ii)).arrayBuffer();
-      onBytes?.(gz.byteLength);
+      const resp = await fetch(chunkUrl(kk, jj, ii));
+      let gz;
+      if (resp.body && onBytes) {
+        const parts = [];
+        const rd = resp.body.getReader();
+        let total = 0;
+        for (; ; ) {
+          const { done, value } = await rd.read();
+          if (done) break;
+          parts.push(value);
+          total += value.byteLength;
+          onBytes(value.byteLength);
+        }
+        const all = new Uint8Array(total);
+        let o = 0;
+        for (const p of parts) {
+          all.set(p, o);
+          o += p.byteLength;
+        }
+        gz = all.buffer;
+      } else {
+        gz = await resp.arrayBuffer();
+        onBytes?.(gz.byteLength);
+      }
       const chunk = new Ctor(await inflateDeflate(gz));
       const z0 = kk * cz, y0 = jj * cy, x0 = ii * cx;
       const zw = Math.min(cz, nz - z0), yw = Math.min(cy, ny - y0), xw = Math.min(cx, nx - x0);
@@ -1280,6 +1454,79 @@ async function fetchZarrVolume(blobBase, z, onBytes, concurrency = 12) {
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, worker));
   return { data: out, dims: [nx, ny, nz], range: [lo, hi] };
+}
+
+// render/mrson.ts
+var TYPE_TO_CLASS = {
+  image: "vtkMRMLScalarVolumeNode",
+  mesh: "vtkMRMLModelNode",
+  segmentation: "vtkMRMLSegmentationNode",
+  markup: "vtkMRMLMarkupsFiducialNode",
+  transform: "vtkMRMLLinearTransformNode",
+  camera: "vtkMRMLCameraNode",
+  view: "vtkMRMLViewNode",
+  transferFunction: "vtkMRMLVolumePropertyNode",
+  scalarVolumeDisplay: "vtkMRMLScalarVolumeDisplayNode",
+  volumeRenderingDisplay: "vtkMRMLGPURayCastVolumeRenderingDisplayNode",
+  modelDisplay: "vtkMRMLModelDisplayNode",
+  markupDisplay: "vtkMRMLMarkupsDisplayNode"
+};
+function isMrsonScene(raw) {
+  const r = raw;
+  if (!r || typeof r !== "object") return false;
+  if (r.mrson !== void 0) return true;
+  return !!r.nodes && Object.values(r.nodes).some((n) => typeof n?.type === "string");
+}
+var colorRows = (a) => Array.isArray(a) ? a.map((s) => [s.value, s.rgba[0], s.rgba[1], s.rgba[2]]) : [];
+var opacityRows = (a) => Array.isArray(a) ? a.map((s) => [s.value, s.opacity]) : [];
+function adaptMrsonScene(scene) {
+  const nodes = scene.nodes ?? {};
+  const out = {};
+  for (const [id, n] of Object.entries(nodes)) {
+    const cls = n.source?.mrmlClass ?? TYPE_TO_CLASS[n.type] ?? n.type;
+    const refs = { ...n.refs ?? {} };
+    const attrs = {};
+    switch (n.type) {
+      case "image":
+        attrs.zarr = n.zarr;
+        attrs.ijkToRAS = n.ijkToRAS;
+        attrs.dims = n.dims;
+        attrs.comps = n.comps;
+        break;
+      case "transferFunction":
+        attrs.color = colorRows(n.colorStops);
+        attrs.scalarOpacity = opacityRows(n.scalarOpacity);
+        attrs.gradientOpacity = opacityRows(n.gradientOpacity);
+        attrs.shade = n.shade;
+        break;
+      case "scalarVolumeDisplay":
+        attrs.window = n.window;
+        attrs.level = n.level;
+        attrs.color = n.color;
+        attrs.visibility = n.visible ? 1 : 0;
+        break;
+      case "volumeRenderingDisplay":
+        if (n.refs?.transferFunction) refs.volumeProperty = n.refs.transferFunction;
+        break;
+      case "markup": {
+        attrs.controlPoints = n.controlPoints;
+        const dc = (n.refs?.display ?? []).map((d) => nodes[d]?.color).find(Boolean);
+        if (dc) attrs.color = dc.slice(0, 3);
+        break;
+      }
+      case "camera":
+        attrs.position = n.position;
+        attrs.focalPoint = n.focalPoint;
+        attrs.viewUp = n.viewUp;
+        attrs.viewAngle = n.viewAngle;
+        attrs.parallelScale = n.parallelScale;
+        break;
+      default:
+        break;
+    }
+    out[id] = { id, class: cls, name: n.name, refs, attrs, blobs: [] };
+  }
+  return { blobBase: scene.blobBase, nodes: out };
 }
 
 // render/scene-volume.ts
@@ -1338,7 +1585,8 @@ function parseMarkups(nodes) {
 }
 async function loadSceneVolumeField(dev, sceneUrl, onBytes, opts = {}) {
   const raw = await (await fetch(sceneUrl)).json();
-  const wrapper = raw.nodes ? raw : { nodes: raw };
+  const adapted = isMrsonScene(raw) ? adaptMrsonScene(raw) : raw;
+  const wrapper = adapted.nodes ? adapted : { nodes: adapted };
   const nodes = wrapper.nodes;
   const pageBase = globalThis.location?.href ?? "file:///";
   const sceneAbs = new URL(sceneUrl, pageBase).href;
@@ -1394,7 +1642,10 @@ var WGSL = (
   `
 @group(0) @binding(0) var t_sample : texture_2d<f32>;
 @group(0) @binding(1) var s_lin : sampler;
-@group(0) @binding(2) var<uniform> u_sr : vec4<f32>;   // (sampleW, sampleH, viewW, viewH)
+// size = (sampleW, sampleH, _, _); rect = (originX, originY, spanW, spanH) in DESTINATION pixels \u2014
+// the region this present writes. A full frame is (0, 0, viewW, viewH); a PATCH is its dirty rect.
+struct SR { size : vec4<f32>, rect : vec4<f32> };
+@group(0) @binding(2) var<uniform> u_sr : SR;
 @group(0) @binding(3) var<uniform> u_bg : vec4<f32>;
 fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92;
@@ -1437,8 +1688,8 @@ fn vs(@builtin(vertex_index) vi : u32) -> RV {
 }
 @fragment
 fn fs(v : RV) -> @location(0) vec4<f32> {
-  let uv = v.position.xy / u_sr.zw;
-  let s = cr(uv, u_sr.xy);
+  let uv = (v.position.xy - u_sr.rect.xy) / u_sr.rect.zw;
+  let s = cr(uv, u_sr.size.xy);
   let a = clamp(s.a, 0.0, 1.0);
   let bg = srgb2physical(u_bg.rgb);
   return vec4<f32>(mix(bg, s.rgb, a), 1.0);
@@ -1449,7 +1700,7 @@ var Reconstructor = class {
   pipeline;
   sampler;
   srBuf;
-  // (sampleW, sampleH, viewW, viewH)
+  // SR { size, rect }
   bgBuf;
   // background rgb
   tex;
@@ -1459,7 +1710,7 @@ var Reconstructor = class {
   constructor(gpu, format) {
     this.dev = gpu.device;
     this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
-    this.srBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.srBuf = this.dev.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bgBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const mod = this.dev.createShaderModule({ code: WGSL });
     this.pipeline = this.dev.createRenderPipeline({
@@ -1489,15 +1740,19 @@ var Reconstructor = class {
       ]
     });
   }
-  /** Upload `samples` (sampleW×sampleH premultiplied rgba8) and reconstruct to `view` (viewW×viewH). */
-  present(view, samples, sampleW, sampleH, viewW, viewH) {
+  /** Upload `samples` (sampleW×sampleH premultiplied rgba8) and reconstruct to `view` (viewW×viewH).
+   *  With `rect`, this is a PATCH: only those destination pixels are written (scissor + load), so
+   *  everything already in `view` survives — the transport can then re-send just a dirty region. */
+  present(view, samples, sampleW, sampleH, viewW, viewH, rect) {
     this.ensureTex(sampleW, sampleH);
     this.dev.queue.writeTexture({ texture: this.tex }, samples, { bytesPerRow: sampleW * 4, rowsPerImage: sampleH }, [sampleW, sampleH]);
-    this.dev.queue.writeBuffer(this.srBuf, 0, new Float32Array([sampleW, sampleH, viewW, viewH]));
+    const r = rect ?? { x: 0, y: 0, w: viewW, h: viewH };
+    this.dev.queue.writeBuffer(this.srBuf, 0, new Float32Array([sampleW, sampleH, 0, 0, r.x, r.y, r.w, r.h]));
     const enc = this.dev.createCommandEncoder();
-    const p = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const p = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: rect ? "load" : "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
     p.setPipeline(this.pipeline);
     p.setBindGroup(0, this.bind);
+    if (rect) p.setScissorRect(r.x, r.y, r.w, r.h);
     p.draw(3);
     p.end();
     this.dev.queue.submit([enc.finish()]);
@@ -1512,15 +1767,15 @@ var BudgetController = class {
   maxPx;
   constructor(opts = {}) {
     this.targetMs = opts.targetMs ?? 16;
-    this.minPx = opts.minPx ?? 15e4;
+    this.minPx = opts.minPx ?? 3e4;
     this.maxPx = opts.maxPx ?? 8e6;
-    this.budgetPx = opts.startPx ?? 12e5;
+    this.budgetPx = opts.startPx ?? 35e4;
   }
   /** Nudge the budget toward hitting targetMs. Multiplicative, clamped per step (0.8–1.25×) so the
    *  loop is stable, and bounded to [minPx, maxPx]. Faster-than-target grows it; slower shrinks it. */
   update(measuredMs) {
     if (!(measuredMs > 0) || !Number.isFinite(measuredMs)) return;
-    const adj = Math.max(0.6, Math.min(1.2, this.targetMs / measuredMs));
+    const adj = Math.max(0.35, Math.min(1.2, this.targetMs / measuredMs));
     this.budgetPx = Math.max(this.minPx, Math.min(this.maxPx, this.budgetPx * adj));
   }
   /** Resolution scale for a `w×h` view: sqrt(budget / area), clamped to [0.25, 1]. 1 when the view
@@ -1535,7 +1790,10 @@ var BudgetController = class {
 function mountAdaptiveLoop(opts) {
   const target = opts.target ?? 32;
   const idleGap = opts.idleGapMs ?? 120;
-  const raf = () => new Promise((r) => requestAnimationFrame(() => r()));
+  const paced = () => Promise.race([
+    new Promise((r) => requestAnimationFrame(() => r())),
+    new Promise((r) => setTimeout(r, 33))
+  ]);
   const sync = opts.sync ?? (() => Promise.resolve());
   let running = false, stopped = false, lastKick = -1e12, wasMoving = false;
   const step = () => {
@@ -1558,7 +1816,7 @@ function mountAdaptiveLoop(opts) {
   const run = async () => {
     running = true;
     stopped = false;
-    while (!stopped && step()) await Promise.all([sync(), raf()]);
+    while (!stopped && step()) await Promise.all([sync(), paced()]);
     running = false;
   };
   return {
@@ -1574,12 +1832,27 @@ function mountAdaptiveLoop(opts) {
 }
 function mountAdaptive3d(opts) {
   const budget = new BudgetController({ targetMs: opts.targetMs ?? 16 });
+  const DBG = typeof location !== "undefined" && new URLSearchParams(location.search).has("perf");
+  let dbgN = 0, dbgMoving = 0, dbgSettled = 0, dbgLast = 0;
+  const dbgTick = (kind, ms, s) => {
+    if (!DBG) return;
+    dbgN++;
+    if (kind === "mov") dbgMoving += ms;
+    else dbgSettled += ms;
+    const now = performance.now();
+    if (now - dbgLast > 500) {
+      console.log(`[perf] mov=${dbgMoving.toFixed(0)}ms/${dbgN}f settled=${dbgSettled.toFixed(0)}ms lastScale=${s.toFixed(2)} last=${ms.toFixed(1)}ms`);
+      dbgLast = now;
+      dbgMoving = dbgSettled = dbgN = 0;
+    }
+  };
+  const movingCap = opts.movingScaleCap ?? 1;
   const renderMoving = () => {
     const sc = opts.scene();
     if (!sc) return;
     const { w: vw, h: vh } = opts.size();
     if (!vw || !vh) return;
-    const s = budget.scale(vw, vh), t0 = performance.now();
+    const s = Math.min(movingCap, budget.scale(vw, vh)), t0 = performance.now();
     if (s > 0.98) {
       opts.setCamera(sc, vw, vh);
       sc.renderToView(opts.view(), vw, vh);
@@ -1588,7 +1861,11 @@ function mountAdaptive3d(opts) {
       opts.setCamera(sc, rw, rh);
       sc.renderUpscaled(opts.view(), rw, rh, vw, vh);
     }
-    opts.gpu.device.queue.onSubmittedWorkDone().then(() => budget.update(performance.now() - t0));
+    opts.gpu.device.queue.onSubmittedWorkDone().then(() => {
+      const ms = performance.now() - t0;
+      budget.update(ms);
+      dbgTick("mov", ms, s);
+    });
     opts.onFrame?.();
   };
   const renderSettled = (reset) => {
@@ -1596,8 +1873,10 @@ function mountAdaptive3d(opts) {
     if (!sc) return;
     const { w: vw, h: vh } = opts.size();
     if (!vw || !vh) return;
+    const t0 = performance.now();
     opts.setCamera(sc, vw, vh);
     sc.renderAccum(opts.view(), vw, vh, reset);
+    if (DBG) opts.gpu.device.queue.onSubmittedWorkDone().then(() => dbgTick("set", performance.now() - t0, 1));
     opts.onFrame?.();
   };
   const loop = mountAdaptiveLoop({
@@ -1605,10 +1884,24 @@ function mountAdaptive3d(opts) {
     renderSettled,
     count: () => opts.scene()?.accumCount() ?? 1e9,
     target: opts.target ?? 24,
+    idleGapMs: opts.idleGapMs,
     sync: () => opts.gpu.device.queue.onSubmittedWorkDone()
     // GPU-paced: no backlog, input preempts
   });
-  return { draw: () => loop.kick(), budget, renderSettled, renderMoving, loop };
+  let kickN = 0, kickLast = 0;
+  const draw = () => {
+    if (DBG) {
+      kickN++;
+      const now = performance.now();
+      if (now - kickLast > 500) {
+        console.log(`[perf] kicks=${kickN} in 500ms`);
+        kickN = 0;
+        kickLast = now;
+      }
+    }
+    loop.kick();
+  };
+  return { draw, budget, renderSettled, renderMoving, loop };
 }
 
 // render/vtk-camera.ts
@@ -1725,6 +2018,34 @@ var VtkCamera = class _VtkCamera {
     const { right, up } = this.basis();
     const motion = add(scale(right, -dxDisplay * mmPerPixel), scale(up, -dyDisplay * mmPerPixel));
     this.translate(motion);
+  }
+  /** Project a world (RAS) point to display pixels (y DOWN, origin top-left) for a w×h viewport.
+   *  Vertical-FOV perspective matching SceneRenderer.setCamera (perspectiveZO(fovy, w/h)). `depth`
+   *  is the distance along the view direction (>0 in front of the camera). Used to hit-test
+   *  screen-space markup glyphs. */
+  worldToDisplay(p, w, h) {
+    const { right, up } = this.basis();
+    const dop = this.directionOfProjection;
+    const rel = sub(p, this.position);
+    const depth = dot(rel, dop);
+    const halfH = Math.max(1e-6, depth) * Math.tan(this.viewAngle * Math.PI / 360);
+    const aspect = w / h;
+    const ndcx = dot(rel, right) / (halfH * aspect);
+    const ndcy = dot(rel, up) / halfH;
+    return { x: (ndcx * 0.5 + 0.5) * w, y: (0.5 - ndcy * 0.5) * h, depth };
+  }
+  /** Inverse of worldToDisplay at a FIXED view-depth: the world point under display pixel (x,y)
+   *  lying in the plane perpendicular to the view at `depth`. Dragging a 3D handle in this plane
+   *  keeps its distance from the camera, so it tracks the cursor without depth ambiguity. */
+  displayToWorldAtDepth(x, y, depth, w, h) {
+    const { right, up } = this.basis();
+    const dop = this.directionOfProjection;
+    const halfH = Math.max(1e-6, depth) * Math.tan(this.viewAngle * Math.PI / 360);
+    const aspect = w / h;
+    const ndcx = x / w * 2 - 1;
+    const ndcy = 1 - y / h * 2;
+    const offset = add(scale(right, ndcx * halfH * aspect), scale(up, ndcy * halfH));
+    return add(add(this.position, scale(dop, depth)), offset);
   }
   /** vtkCamera-comparable snapshot for the harness. */
   state() {
@@ -1854,27 +2175,68 @@ function attachCameraControls(canvas, camera, opts = {}) {
     const r = canvas.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
+  canvas.style.touchAction = "none";
+  const docEl = (canvas.ownerDocument ?? document).documentElement;
+  if (docEl) docEl.style.overscrollBehavior = "none";
+  canvas.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+  const pointers = /* @__PURE__ */ new Map();
+  let pinch = null;
+  const pinchState = () => {
+    const [a, b] = [...pointers.values()];
+    return { dist: Math.hypot(b.x - a.x, b.y - a.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+  };
+  const on = () => opts.enabled?.() ?? true;
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointerdown", (e) => {
+    if (!on()) return;
     const { x, y } = local(e);
-    interactor.start(e.button, x, y, canvas.clientHeight, {
-      shift: e.shiftKey,
-      ctrl: e.ctrlKey || e.metaKey,
-      alt: e.altKey
-    });
+    pointers.set(e.pointerId, { x, y });
     canvas.setPointerCapture(e.pointerId);
-    opts.onLog?.("cameraStart", { action: interactor.action, x, y, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
+    if (pointers.size === 1) {
+      interactor.start(e.button, x, y, canvas.clientHeight, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
+      opts.onLog?.("cameraStart", { action: interactor.action, x, y, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
+    } else if (pointers.size === 2) {
+      interactor.end();
+      pinch = pinchState();
+    }
   });
-  canvas.addEventListener("pointerup", (e) => {
-    interactor.end();
-    canvas.releasePointerCapture(e.pointerId);
-  });
+  const endPointer = (e) => {
+    if (!pointers.delete(e.pointerId)) return;
+    if (!on()) {
+      interactor.end();
+      pinch = null;
+      return;
+    }
+    canvas.releasePointerCapture?.(e.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (pointers.size === 1) {
+      const p = [...pointers.values()][0];
+      interactor.start(0, p.x, p.y, canvas.clientHeight, { shift: false, ctrl: false, alt: false });
+    } else if (pointers.size === 0) {
+      interactor.end();
+    }
+  };
+  canvas.addEventListener("pointerup", endPointer);
+  canvas.addEventListener("pointercancel", endPointer);
   canvas.addEventListener("pointermove", (e) => {
-    if (interactor.action === "none") return;
+    if (!on()) return;
+    if (!pointers.has(e.pointerId)) return;
     const { x, y } = local(e);
-    interactor.move(x, y, canvas.clientWidth, canvas.clientHeight);
+    pointers.set(e.pointerId, { x, y });
+    if (pointers.size >= 2) {
+      const p = pinchState();
+      if (pinch) {
+        if (p.dist > 0 && pinch.dist > 0) camera.dolly(p.dist / pinch.dist);
+        camera.panByDisplayDelta(p.mx - pinch.mx, pinch.my - p.my, canvas.clientWidth, canvas.clientHeight);
+        opts.onChange?.();
+      }
+      pinch = p;
+    } else if (interactor.action !== "none") {
+      interactor.move(x, y, canvas.clientWidth, canvas.clientHeight);
+    }
   });
   canvas.addEventListener("wheel", (e) => {
+    if (!on()) return;
     e.preventDefault();
     interactor.wheel(e.deltaY < 0);
     opts.onLog?.("cameraWheel", { deltaY: e.deltaY, distance: camera.distance });
@@ -1890,7 +2252,360 @@ function framedCamera(center, radius, distMul = 2.6) {
   );
 }
 
+// render/demos/widget-control.ts
+var sub2 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+var dot2 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+function camMatrices(cam, w, h) {
+  const view = lookAt(cam.position, cam.focalPoint, cam.viewUp);
+  const proj = perspectiveZO(cam.viewAngle * Math.PI / 180, w / h, 1, 1e5);
+  const vp = multiply(proj, view);
+  return { vp, invVp: invert(vp) };
+}
+function worldToClip(vp, p) {
+  return [
+    vp[0] * p[0] + vp[4] * p[1] + vp[8] * p[2] + vp[12],
+    vp[1] * p[0] + vp[5] * p[1] + vp[9] * p[2] + vp[13],
+    vp[2] * p[0] + vp[6] * p[1] + vp[10] * p[2] + vp[14],
+    vp[3] * p[0] + vp[7] * p[1] + vp[11] * p[2] + vp[15]
+  ];
+}
+function projectToCanvasCss(cam, viewW, viewH, world, rw, rh) {
+  const { vp } = camMatrices(cam, viewW, viewH);
+  const c = worldToClip(vp, world);
+  if (c[3] <= 0) return null;
+  return { x: (c[0] / c[3] * 0.5 + 0.5) * rw, y: (1 - (c[1] / c[3] * 0.5 + 0.5)) * rh };
+}
+function attachWidgetControls(canvas, camera, opts) {
+  const cursorCss = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top, rw: r.width, rh: r.height };
+  };
+  const project = (vp, world, rw, rh) => {
+    const c = worldToClip(vp, world);
+    if (c[3] <= 0) return null;
+    const ndcx = c[0] / c[3], ndcy = c[1] / c[3];
+    return { x: (ndcx * 0.5 + 0.5) * rw, y: (1 - (ndcy * 0.5 + 0.5)) * rh };
+  };
+  const unprojectToPlane = (invVp, px, py, rw, rh, planePt) => {
+    const ndcx = px / rw * 2 - 1, ndcy = 1 - py / rh * 2;
+    const near = applyMat4(invVp, [ndcx, ndcy, 0]);
+    const far = applyMat4(invVp, [ndcx, ndcy, 1]);
+    const ro = near, rd = sub2(far, near);
+    const n = sub2(camera.position, camera.focalPoint);
+    const denom = dot2(rd, n);
+    if (Math.abs(denom) < 1e-9) return [...planePt];
+    const t = dot2(sub2(planePt, ro), n) / denom;
+    return [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+  };
+  const pick = (e) => {
+    const { x, y, rw, rh } = cursorCss(e);
+    const { w, h } = opts.getSize();
+    const { vp } = camMatrices(camera, w, h);
+    let best = null, bestD = Infinity;
+    for (const hnd of opts.getHandles()) {
+      const s = project(vp, hnd.world, rw, rh);
+      if (!s) continue;
+      const d = Math.hypot(s.x - x, s.y - y), r = hnd.pickPx ?? 16;
+      if (d < r && d < bestD) {
+        bestD = d;
+        best = hnd;
+      }
+    }
+    return best;
+  };
+  let grabbed = null, hovered = null;
+  const onDown = (e) => {
+    if (e.button !== 0) return;
+    const h = pick(e);
+    if (!h) return;
+    e.stopPropagation();
+    e.preventDefault();
+    grabbed = h;
+    canvas.setPointerCapture(e.pointerId);
+    canvas.style.cursor = h.cursor ? h.cursor : "grabbing";
+    opts.onDragStart?.(h);
+    window.addEventListener("pointermove", onMove, true);
+    window.addEventListener("pointerup", onUp, true);
+  };
+  const onMove = (e) => {
+    if (!grabbed) return;
+    e.stopPropagation();
+    const { x, y, rw, rh } = cursorCss(e);
+    const { w, h } = opts.getSize();
+    const { invVp } = camMatrices(camera, w, h);
+    const world = unprojectToPlane(invVp, x, y, rw, rh, grabbed.world);
+    opts.onDrag(grabbed, world);
+    opts.onChange?.();
+  };
+  const onUp = (e) => {
+    if (!grabbed) return;
+    e.stopPropagation();
+    const g = grabbed;
+    grabbed = null;
+    try {
+      canvas.releasePointerCapture(e.pointerId);
+    } catch {
+    }
+    window.removeEventListener("pointermove", onMove, true);
+    window.removeEventListener("pointerup", onUp, true);
+    opts.onDragEnd?.(g);
+  };
+  const onHoverMove = (e) => {
+    if (grabbed) return;
+    const h = pick(e);
+    if (h !== hovered) {
+      hovered = h;
+      canvas.style.cursor = h ? h.cursor ?? "grab" : "";
+      opts.onHover?.(h);
+      opts.onChange?.();
+    }
+  };
+  canvas.addEventListener("pointerdown", onDown, true);
+  canvas.addEventListener("pointermove", onHoverMove);
+  return {
+    detach() {
+      canvas.removeEventListener("pointerdown", onDown, true);
+      canvas.removeEventListener("pointermove", onHoverMove);
+      window.removeEventListener("pointermove", onMove, true);
+      window.removeEventListener("pointerup", onUp, true);
+    }
+  };
+}
+
+// render/transform-gizmo-field.ts
+var TransformGizmoField = class {
+  kind = "giz";
+  bindingCount = 0;
+  clippable = false;
+  ghost = true;
+  providesSkip = true;
+  pivot;
+  px;
+  // on-screen gizmo size, in pixels (radius of the rings ~ this)
+  active = -1;
+  // highlighted component (0..6) or -1
+  constructor(pivot, pxSize = 60) {
+    this.pivot = [...pivot];
+    this.px = pxSize;
+  }
+  setPivot(p) {
+    this.pivot = [...p];
+  }
+  setActive(id) {
+    this.active = id ?? -1;
+  }
+  get pxSize() {
+    return this.px;
+  }
+  get activeId() {
+    return this.active;
+  }
+  uniformFloats() {
+    return 8;
+  }
+  // pivot(4: xyz, pxSize) + params(4: active, _, _, _)
+  sampleStep() {
+    return 1;
+  }
+  aabb() {
+    const m = 300;
+    return [[this.pivot[0] - m, this.pivot[1] - m, this.pivot[2] - m], [this.pivot[0] + m, this.pivot[1] + m, this.pivot[2] + m]];
+  }
+  structMembers(s) {
+    return [`  giz${s}_pivot : vec4<f32>,`, `  giz${s}_params : vec4<f32>,`].join("\n");
+  }
+  declareBindings() {
+    return "";
+  }
+  bindEntries() {
+    return [];
+  }
+  samplingWGSL(s) {
+    return (
+      /* wgsl */
+      `
+fn giz${s}_axis(i : i32) -> vec3<f32> {
+  if (i == 0) { return vec3<f32>(1.0, 0.0, 0.0); }
+  if (i == 1) { return vec3<f32>(0.0, 1.0, 0.0); }
+  return vec3<f32>(0.0, 0.0, 1.0);
+}
+fn giz${s}_color(a : i32, on : bool) -> vec3<f32> {
+  if (a == 0) { return select(vec3<f32>(0.85, 0.40, 0.40), vec3<f32>(0.98, 0.16, 0.16), on); }
+  if (a == 1) { return select(vec3<f32>(0.40, 0.80, 0.40), vec3<f32>(0.10, 0.85, 0.10), on); }
+  return select(vec3<f32>(0.45, 0.50, 0.95), vec3<f32>(0.20, 0.35, 1.00), on);
+}
+fn giz${s}_arrow(p : vec3<f32>, a : i32) -> f32 {
+  let e = giz${s}_axis(a);
+  let al = dot(p, e);
+  let rad = length(p - al * e);
+  let shaft = max(rad - 0.035, max(0.12 - al, al - 0.66));            // capped cylinder
+  let hr = 0.11 * clamp((1.0 - al) / 0.34, 0.0, 1.0);                 // cone taper to the tip
+  let head = max(rad - hr, max(0.66 - al, al - 1.0));
+  return min(shaft, head);
+}
+fn giz${s}_ring(p : vec3<f32>, a : i32) -> f32 {
+  let e = giz${s}_axis(a);
+  let al = dot(p, e);
+  let rad = length(p - al * e);
+  return length(vec2<f32>(rad - 0.92, al)) - 0.045;                   // torus in the plane \u22A5 axis
+}
+fn sample_field_giz${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
+  let pivot = u_material.giz${s}_pivot.xyz;
+  let pxSize = u_material.giz${s}_pivot.w;
+  let activeId = i32(u_material.giz${s}_params.x);
+  // screen-constant size: world size for pxSize pixels at the pivot's depth
+  let S = pxSize * length(u_cam.eye.xyz - pivot) / max(u_cam.size.z, 1.0);
+  if (S <= 0.0) { return vec4<f32>(0.0); }
+  let p = (wp - pivot) / S;                        // gizmo-local (unit = ring radius-ish)
+  let vn = normalize(u_cam.eye.xyz - pivot);       // view vector for the degenerate-axis fade
+  let stepg = max(u_material.scene.x / S, 1e-4);    // AA band, in gizmo units
+  var best_op = 0.0;
+  var best_col = vec3<f32>(0.0);
+  // 3 translation arrows \u2014 fade as the axis points at the camera
+  for (var a = 0; a < 3; a = a + 1) {
+    let dp = abs(dot(vn, giz${s}_axis(a)));
+    let fade = 1.0 - smoothstep(0.80, 0.97, dp);
+    let on = activeId == a;
+    let op = clamp(0.5 - giz${s}_arrow(p, a) / stepg, 0.0, 1.0) * select(0.5 * fade, 1.0, on);
+    if (op > best_op) { best_op = op; best_col = giz${s}_color(a, on); }
+  }
+  // 3 rotation rings \u2014 fade as the axis approaches edge-on
+  for (var a = 0; a < 3; a = a + 1) {
+    let dp = abs(dot(vn, giz${s}_axis(a)));
+    let fade = smoothstep(0.06, 0.22, dp);
+    let on = activeId == a + 3;
+    let op = clamp(0.5 - giz${s}_ring(p, a) / stepg, 0.0, 1.0) * select(0.5 * fade, 1.0, on);
+    if (op > best_op) { best_op = op; best_col = giz${s}_color(a, on); }
+  }
+  // centre sphere \u2014 view-plane translate
+  {
+    let on = activeId == 6;
+    let op = clamp(0.5 - (length(p) - 0.08) / stepg, 0.0, 1.0) * select(0.5, 1.0, on);
+    if (op > best_op) { best_op = op; best_col = select(vec3<f32>(0.85), vec3<f32>(1.0), on); }
+  }
+  if (best_op <= 0.0) { return vec4<f32>(0.0); }
+  return vec4<f32>(srgb2physical(best_col) * best_op, best_op);
+}`
+    );
+  }
+  skipWGSL(s) {
+    return (
+      /* wgsl */
+      `
+fn skip_giz${s}(wp : vec3<f32>) -> f32 {
+  let pivot = u_material.giz${s}_pivot.xyz;
+  let S = u_material.giz${s}_pivot.w * length(u_cam.eye.xyz - pivot) / max(u_cam.size.z, 1.0);
+  if (S <= 0.0) { return 1.0e6; }
+  let p = (wp - pivot) / S;
+  var d = length(p) - 0.08;
+  for (var a = 0; a < 3; a = a + 1) { d = min(d, giz${s}_arrow(p, a)); d = min(d, giz${s}_ring(p, a)); }
+  return max(d * S, 0.0);
+}`
+    );
+  }
+  fillUniforms(out, off) {
+    out[off + 0] = this.pivot[0];
+    out[off + 1] = this.pivot[1];
+    out[off + 2] = this.pivot[2];
+    out[off + 3] = this.px;
+    out[off + 4] = this.active;
+  }
+};
+
+// render/demos/xform-widget.ts
+var E = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+var sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+var dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+var cross2 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+var scale2 = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+var norm2 = (a) => {
+  const l = Math.hypot(a[0], a[1], a[2]) || 1;
+  return [a[0] / l, a[1] / l, a[2] / l];
+};
+var reject = (v, axis) => sub3(v, scale2(axis, dot3(v, axis)));
+function componentOf(m) {
+  if (m.kind === "translate-cam") return 6;
+  if (m.kind === "translate-axis") return m.axis;
+  return m.axis + 3;
+}
+function makeXformWidget(target, _sizeMm, initial) {
+  const C0 = target.worldCenter();
+  const field = new TransformGizmoField(C0, 88);
+  let M = initial ? initial.slice() : identity();
+  let M0 = identity();
+  let pivot0 = [...C0];
+  const pivot = () => applyMat4(M, C0);
+  if (initial) field.setPivot(pivot());
+  return {
+    field,
+    pivotWorld: () => pivot(),
+    scaleFor(eye, focalPx) {
+      const p = pivot();
+      return field.pxSize * Math.hypot(eye[0] - p[0], eye[1] - p[1], eye[2] - p[2]) / Math.max(focalPx, 1);
+    },
+    handleList(S) {
+      const p = pivot();
+      const at = (off) => [p[0] + off[0] * S, p[1] + off[1] * S, p[2] + off[2] * S];
+      const hs = [];
+      let id = 0;
+      hs.push({ id: id++, world: p, data: { kind: "translate-cam" }, cursor: "move" });
+      for (let a = 0; a < 3; a++) hs.push({ id: id++, world: at(scale2(E[a], 0.5)), data: { kind: "translate-axis", axis: a }, cursor: "move" });
+      const k = 0.92 / Math.SQRT2;
+      for (let a = 0; a < 3; a++) {
+        const p1 = E[(a + 1) % 3], p2 = E[(a + 2) % 3];
+        for (const [s1, s2] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+          const off = [(p1[0] * s1 + p2[0] * s2) * k, (p1[1] * s1 + p2[1] * s2) * k, (p1[2] * s1 + p2[2] * s2) * k];
+          hs.push({ id: id++, world: at(off), data: { kind: "rotate", axis: a }, cursor: "grab" });
+        }
+      }
+      return hs;
+    },
+    beginDrag() {
+      M0 = M.slice();
+      pivot0 = pivot();
+    },
+    drag(meta, P0, W) {
+      if (meta.kind === "translate-cam") {
+        M = multiply(translation(sub3(W, P0)), M0);
+      } else if (meta.kind === "translate-axis") {
+        M = multiply(translation(scale2(E[meta.axis], dot3(sub3(W, P0), E[meta.axis]))), M0);
+      } else {
+        const a = E[meta.axis];
+        const v0 = norm2(reject(sub3(P0, pivot0), a));
+        const v1 = norm2(reject(sub3(W, pivot0), a));
+        const ang = Math.atan2(dot3(a, cross2(v0, v1)), dot3(v0, v1));
+        const Rp = multiply(translation(pivot0), multiply(rotationAboutAxis(a, ang), translation(scale2(pivot0, -1))));
+        M = multiply(Rp, M0);
+      }
+      target.setWorldTransform(M);
+      field.setPivot(pivot());
+    },
+    setActive(id) {
+      field.setActive(id);
+    },
+    matrix: () => M.slice()
+  };
+}
+
+// render/demos/selftest-scenes.ts
+var SCENES = {
+  CTACardio: "https://pieper.github.io/live/scenes/CTACardio.json",
+  Panoramix: "https://pieper.github.io/live/scenes/CTAAbdomenPanoramix.json",
+  MRHead: "https://pieper.github.io/live/legacy/scenes/MRHead.json"
+};
+var PANO_OFFSET_R = 200;
+async function buildMultiVolume(dev, onBytes) {
+  const cta = await loadSceneVolumeField(dev, SCENES.CTACardio, onBytes);
+  const pano = await loadSceneVolumeField(dev, SCENES.Panoramix, onBytes, {
+    // the selftest's initial +200mm R translation, folded into the volume's geometry
+    extraTranslationRAS: [PANO_OFFSET_R, 0, 0]
+  });
+  return { cta, pano, fields: [cta.field, pano.field] };
+}
+
 // render/demos/remote-browser.ts
+var SINGLE_SCENE = "https://pieper.github.io/live/scenes/CTACardio.json";
+var PROTO = 4;
 var status = (msg, err = false) => {
   const el = document.getElementById("status");
   if (el) {
@@ -1900,6 +2615,8 @@ var status = (msg, err = false) => {
 };
 async function main() {
   const canvas = document.getElementById("gpu");
+  const params = new URLSearchParams(location.search);
+  const serverUrl = params.has("local") ? "" : params.get("server") ?? `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`;
   const modeBtn = document.getElementById("mode");
   if (!navigator.gpu) {
     status("WebGPU not available \u2014 try Chrome/Edge 113+ or Safari 18+.", true);
@@ -1909,40 +2626,190 @@ async function main() {
   const ctx = canvas.getContext("webgpu");
   const preferred = navigator.gpu.getPreferredCanvasFormat();
   const srgb = preferred + "-srgb";
-  ctx.configure({ device: gpu.device, format: preferred, viewFormats: [srgb], alphaMode: "opaque" });
+  ctx.configure({
+    device: gpu.device,
+    format: preferred,
+    viewFormats: [srgb],
+    alphaMode: "opaque",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST
+  });
   const recon = new Reconstructor(gpu, srgb);
   recon.setBackground(0.05, 0.06, 0.09);
+  let viewTex = null, viewW = 0, viewH = 0, surfaceValid = false;
+  const makeViewTex = (w, h) => {
+    const t = gpu.device.createTexture({
+      size: [w, h],
+      format: preferred,
+      viewFormats: [srgb],
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING
+    });
+    const enc = gpu.device.createCommandEncoder();
+    enc.beginRenderPass({
+      colorAttachments: [{
+        view: t.createView({ format: srgb }),
+        loadOp: "clear",
+        storeOp: "store",
+        clearValue: { r: 0.05, g: 0.06, b: 0.09, a: 1 }
+      }]
+    }).end();
+    gpu.device.queue.submit([enc.finish()]);
+    return t;
+  };
+  const ensureViewTex = () => {
+    if (!viewTex || viewW !== canvas.width || viewH !== canvas.height) {
+      viewTex?.destroy();
+      viewW = canvas.width;
+      viewH = canvas.height;
+      surfaceValid = false;
+      viewTex = makeViewTex(viewW, viewH);
+    }
+    return viewTex;
+  };
+  const blitToCanvas = () => {
+    const enc = gpu.device.createCommandEncoder();
+    enc.copyTextureToTexture({ texture: viewTex }, { texture: ctx.getCurrentTexture() }, [viewW, viewH]);
+    gpu.device.queue.submit([enc.finish()]);
+  };
+  const stretchWGSL = (
+    /* wgsl */
+    `
+@group(0) @binding(0) var t : texture_2d<f32>;
+@group(0) @binding(1) var s : sampler;
+struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i : u32) -> V {
+  let x = select(-1.0, 3.0, i == 1u); let y = select(-1.0, 3.0, i == 2u);
+  var o : V; o.p = vec4<f32>(x, y, 0.0, 1.0); o.uv = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5); return o;
+}
+@fragment fn fs(v : V) -> @location(0) vec4<f32> { return textureSample(t, s, v.uv); }`
+  );
+  const stretchMod = gpu.device.createShaderModule({ code: stretchWGSL });
+  const stretchPipe = gpu.device.createRenderPipeline({
+    layout: "auto",
+    vertex: { module: stretchMod, entryPoint: "vs" },
+    fragment: { module: stretchMod, entryPoint: "fs", targets: [{ format: srgb }] },
+    primitive: { topology: "triangle-list" }
+  });
+  const stretchSampler = gpu.device.createSampler({ magFilter: "linear", minFilter: "linear" });
+  const stretchInto = (dst, src) => {
+    const bind = gpu.device.createBindGroup({
+      layout: stretchPipe.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: src.createView() }, { binding: 1, resource: stretchSampler }]
+    });
+    const enc = gpu.device.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: dst.createView({ format: srgb }), loadOp: "clear", storeOp: "store", clearValue: { r: 0.05, g: 0.06, b: 0.09, a: 1 } }] });
+    pass.setPipeline(stretchPipe);
+    pass.setBindGroup(0, bind);
+    pass.draw(3);
+    pass.end();
+    gpu.device.queue.submit([enc.finish()]);
+  };
+  const MAX_DIM = 3840;
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
-    const size = Math.min(720, Math.floor(canvas.clientWidth * dpr));
-    canvas.width = size;
-    canvas.height = size;
+    const cw = Math.floor(canvas.clientWidth * dpr), ch = Math.floor(canvas.clientHeight * dpr);
+    if (cw <= 0 || ch <= 0) return false;
+    const k = Math.min(1, MAX_DIM / Math.max(cw, ch));
+    const w = Math.max(16, Math.round(cw * k)), h = Math.max(16, Math.round(ch * k));
+    if (w === canvas.width && h === canvas.height) return false;
+    const old = viewTex;
+    viewTex = null;
+    canvas.width = w;
+    canvas.height = h;
+    ensureViewTex();
+    if (old) {
+      stretchInto(viewTex, old);
+      old.destroy();
+    }
+    blitToCanvas();
+    return true;
   };
+  new ResizeObserver(() => {
+    if (resize()) {
+      requestResync();
+      onCam();
+    }
+  }).observe(canvas);
   globalThis.addEventListener("resize", () => {
-    resize();
-    onCam();
+    if (resize()) {
+      requestResync();
+      onCam();
+    }
   });
   resize();
   let camera = null;
-  let sceneName = "scene", sceneUrl = "";
+  let sceneName = "scene", sceneUrl = "", demo = params.get("demo") ?? "multi";
   let mode = "remote";
-  let frames = 0, bytes = 0, lastCamSentAt = 0;
+  let frames = 0, bytes = 0, frameBytes = 0, lastCamSentAt = 0;
+  let camDirty = true;
+  let pdown = false;
   const rtt = [];
+  const parts = [];
+  let resyncSent = false;
+  let dbgDropped = 0, dbgResyncs = 0, dbgApplied = 0;
+  let lastErr = "";
+  const requestResync = () => {
+    dbgDropped++;
+    if (resyncSent || ws?.readyState !== WebSocket.OPEN) return;
+    resyncSent = true;
+    dbgResyncs++;
+    ws.send('{"type":"resync"}');
+  };
+  let lastFrame = null;
+  let dbgStarts = 0, dbgDrags = 0;
+  let dbgPresentMs = 0, dbgGunzipMs = 0, dbgQueued = 0;
+  const concat = (bs) => {
+    const out = new Uint8Array(bs.reduce((n, b) => n + b.length, 0));
+    let o = 0;
+    for (const b of bs) {
+      out.set(b, o);
+      o += b.length;
+    }
+    return out;
+  };
+  let widget = null;
+  let widgetSeed = null;
+  const toMat4 = (v) => {
+    const a = Array.isArray(v) ? v : v && typeof v === "object" ? Object.values(v) : [];
+    return a.length === 16 ? new Float32Array(a) : identity();
+  };
+  let localPano = null;
+  let xformDirty = false;
   let localScene = null;
   let a3d = null;
   let loadingLocal = false;
   const ensureLocal = async () => {
     if (a3d) return true;
-    if (loadingLocal || !camera || !sceneUrl) return false;
+    if (loadingLocal) return false;
     loadingLocal = true;
     status(`loading ${sceneName} locally\u2026`);
     let mb = 0;
-    const sv = await loadSceneVolumeField(gpu.device, sceneUrl, (n) => {
+    const prog = (n) => {
       mb += n;
       status(`loading ${sceneName} locally\u2026 ${(mb / 1e6).toFixed(0)} MB`);
-    });
+    };
     localScene = new SceneRenderer(gpu, srgb);
-    localScene.build([sv.field]);
+    if (demo === "multi") {
+      const sc = await buildMultiVolume(gpu.device, prog);
+      localPano = sc.pano.field;
+      const c0 = sc.pano.field.worldCenter();
+      if (!widget) createWidget({ center: c0, m: [...identity()] });
+      localPano.setWorldTransform(widget.matrix());
+      localScene.build([...sc.fields, widget.field]);
+      bootstrap({
+        name: `${sc.cta.name} + ${sc.pano.name}`,
+        sceneUrl: "",
+        center: [
+          (sc.cta.center[0] + sc.pano.center[0]) / 2,
+          (sc.cta.center[1] + sc.pano.center[1]) / 2,
+          (sc.cta.center[2] + sc.pano.center[2]) / 2
+        ],
+        radius: Math.max(sc.cta.radius, sc.pano.radius) * 1.35
+      });
+    } else {
+      const sv = await loadSceneVolumeField(gpu.device, sceneUrl || SINGLE_SCENE, prog);
+      localScene.build([sv.field]);
+      bootstrap({ name: sv.name, sceneUrl: sceneUrl || SINGLE_SCENE, center: sv.center, radius: sv.radius });
+    }
     localScene.setBackground(0.05, 0.06, 0.09);
     a3d = mountAdaptive3d({
       scene: () => localScene,
@@ -1955,62 +2822,194 @@ async function main() {
     loadingLocal = false;
     return true;
   };
-  const ws = new WebSocket(`ws://${location.host}/`);
-  ws.binaryType = "arraybuffer";
+  canvas.addEventListener("pointerdown", () => {
+    pdown = true;
+  }, true);
+  globalThis.addEventListener("pointerup", () => {
+    pdown = false;
+    camDirty = true;
+    scheduleSend();
+  }, true);
+  const ws = serverUrl ? new WebSocket(serverUrl) : null;
+  if (ws) ws.binaryType = "arraybuffer";
   let lastSent = -1e12;
   let trailing = 0;
   const sendCam = () => {
     trailing = 0;
-    if (!camera || ws.readyState !== WebSocket.OPEN) return;
+    if (!camera || ws?.readyState !== WebSocket.OPEN) return;
     lastSent = lastCamSentAt = performance.now();
-    ws.send(JSON.stringify({ type: "cam", w: canvas.width, h: canvas.height, p: [...camera.position], f: [...camera.focalPoint], u: [...camera.viewUp], a: camera.viewAngle }));
+    if (camDirty) {
+      camDirty = false;
+      ws.send(JSON.stringify({ type: "cam", w: canvas.width, h: canvas.height, p: [...camera.position], f: [...camera.focalPoint], u: [...camera.viewUp], a: camera.viewAngle, dn: pdown ? 1 : 0 }));
+    }
+    if (xformDirty && widget) {
+      xformDirty = false;
+      const active = widget.field.activeId;
+      ws.send(JSON.stringify({ type: "xform", m: [...widget.matrix()], pivot: widget.pivotWorld(), active: active >= 0 ? active : null }));
+    }
   };
   const scheduleSend = () => {
-    if (!camera || ws.readyState !== WebSocket.OPEN) return;
+    if (!camera || ws?.readyState !== WebSocket.OPEN) return;
     const dt = performance.now() - lastSent;
     if (dt >= 15) sendCam();
     else if (!trailing) trailing = setTimeout(sendCam, 15 - dt);
   };
-  const statusLine = (where, extra = "") => status(`${sceneName} \xB7 ${where.toUpperCase()} \xB7 ${extra}${where === "remote" ? `~${[...rtt].sort((a, b) => a - b)[rtt.length >> 1] | 0} ms round-trip \xB7 ${(bytes / 1e6).toFixed(1)} MB` : "your GPU"}`);
-  const onCam = () => {
+  const statusLine = (where, extra = "") => status(`${sceneName} \xB7 ${where.toUpperCase()} \xB7 ${canvas.width}\xD7${canvas.height} view \xB7 ${extra}${where === "remote" ? `~${[...rtt].sort((a, b) => a - b)[rtt.length >> 1] | 0} ms round-trip \xB7 ${(bytes / 1e6).toFixed(1)} MB` : "your GPU"}`);
+  const requestFrame = () => {
     if (mode === "remote") scheduleSend();
     else a3d?.draw();
   };
-  ws.onopen = () => status("connected \u2014 waiting for scene\u2026");
-  ws.onclose = () => {
-    if (mode === "remote") status("render server disconnected \u2014 switch to Local, or restart server/live-renderer.ts", true);
+  const onCam = () => {
+    camDirty = true;
+    requestFrame();
   };
-  ws.onerror = () => {
-    if (mode === "remote") status("cannot reach render server \u2014 switch to Local, or start server/live-renderer.ts", true);
+  const pushXform = () => {
+    if (!widget) return;
+    xformDirty = true;
+    localPano?.setWorldTransform(widget.matrix());
+    localScene?.syncUniforms();
+    if (mode === "remote") scheduleSend();
   };
+  const createWidget = (seed) => {
+    const target = {
+      worldCenter: () => seed.center,
+      setWorldTransform: () => {
+      }
+    };
+    widget = makeXformWidget(target, 0, toMat4(seed.m));
+  };
+  let widgetAttached = false;
+  const attachWidget = () => {
+    if (!widget || !camera || widgetAttached) return;
+    widgetAttached = true;
+    const focalPx = () => canvas.height / 2 / Math.tan(camera.viewAngle * Math.PI / 360);
+    attachWidgetControls(canvas, camera, {
+      getHandles: () => widget.handleList(widget.scaleFor(camera.position, focalPx())),
+      getSize: () => ({ w: canvas.width, h: canvas.height }),
+      onDragStart: (h) => {
+        dbgStarts++;
+        widget.setActive(componentOf(h.data));
+        widget.beginDrag();
+        pushXform();
+      },
+      onDrag: (h, world) => {
+        dbgDrags++;
+        widget.drag(h.data, h.world, world);
+        pushXform();
+      },
+      onDragEnd: () => {
+        widget.setActive(null);
+        pushXform();
+      },
+      onHover: (h) => {
+        widget.setActive(h ? componentOf(h.data) : null);
+        pushXform();
+      },
+      onChange: () => requestFrame()
+      // NOT onCam: the camera did not move
+    });
+  };
+  const bootstrap = (c) => {
+    sceneName = c.name;
+    if (c.sceneUrl) sceneUrl = c.sceneUrl;
+    if (!camera) {
+      camera = framedCamera(c.center, c.radius);
+      attachCameraControls(canvas, camera, { onChange: onCam });
+    }
+    attachWidget();
+  };
+  ws?.addEventListener("open", () => status("connected \u2014 waiting for scene\u2026"));
+  const fallbackLocal = async (why) => {
+    if (mode === "local") return;
+    status(`${why} \u2014 rendering locally instead`, true);
+    if (await ensureLocal()) await setMode("local");
+  };
+  ws?.addEventListener("close", () => fallbackLocal("render server disconnected"));
+  ws?.addEventListener("error", () => fallbackLocal("cannot reach the render server"));
   const gunzip = async (b) => new Uint8Array(await new Response(new Response(b).body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
-  ws.onmessage = async (e) => {
+  let applyChain = Promise.resolve();
+  ws?.addEventListener("message", (ev) => {
+    if (typeof ev.data !== "string" && ws.readyState === WebSocket.OPEN) ws.send('{"type":"cack"}');
+    applyChain = applyChain.then(() => applyMessage(ev)).catch((err) => {
+      lastErr = String(err?.message ?? err);
+      status("frame decode error: " + lastErr + " \u2014 try a hard reload", true);
+      requestResync();
+    });
+  });
+  const applyMessage = async (e) => {
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data);
       if (m.type === "hello") {
-        sceneName = m.name ?? "scene";
-        sceneUrl = m.sceneUrl ?? "";
-        camera = framedCamera(m.center, m.radius);
-        attachCameraControls(canvas, camera, { onChange: onCam });
+        if ((m.proto ?? 0) !== PROTO) {
+          status(`page/server version mismatch (page ${PROTO}, server ${m.proto}) \u2014 reloading\u2026`, true);
+          ws?.close();
+          if (!sessionStorage.getItem("lr_reloaded")) {
+            sessionStorage.setItem("lr_reloaded", "1");
+            location.reload();
+          }
+          return;
+        }
+        sessionStorage.removeItem("lr_reloaded");
+        demo = m.demo ?? "single";
+        widgetSeed = m.widget ?? null;
+        if (widgetSeed && !widget) createWidget(widgetSeed);
+        bootstrap({ name: m.name ?? "scene", sceneUrl: m.sceneUrl ?? "", center: m.center, radius: m.radius });
         sendCam();
-        statusLine("remote", "drag to orbit \xB7 ");
+        statusLine("remote", widget ? "drag a gizmo handle to move Panoramix \xB7 " : "drag to orbit \xB7 ");
       }
       return;
     }
     if (mode !== "remote") return;
     const buf = e.data;
-    const head = new Uint16Array(buf, 0, 6);
+    const head = new Uint16Array(buf, 0, 16);
     const sw = head[0], sh = head[1], settled = head[4], compressed = head[5];
-    let samples = new Uint8Array(buf, 12);
-    if (compressed) samples = await gunzip(samples);
-    recon.present(ctx.getCurrentTexture().createView({ format: srgb }), samples, sw, sh, canvas.width, canvas.height);
+    const chunk = head[6], chunks = head[7];
+    const kind = head[8], px = head[9], py = head[10], pw = head[11], ph = head[12];
+    const srvSinceInput = head[13], srvRenderMs = head[14];
+    frameBytes += buf.byteLength;
+    let samples;
+    if (chunks > 1) {
+      if (chunk === 0) parts.length = 0;
+      let part = new Uint8Array(buf, 32);
+      if (compressed) part = await gunzip(part);
+      parts.push(part);
+      if (chunk < chunks - 1) return;
+      samples = concat(parts);
+    } else {
+      samples = new Uint8Array(buf, 32);
+      if (compressed) samples = await gunzip(samples);
+    }
+    const vw = head[2], vh = head[3];
+    if (vw !== canvas.width || vh !== canvas.height) {
+      requestResync();
+      return;
+    }
+    const tp = performance.now();
+    const dst = ensureViewTex().createView({ format: srgb });
+    if (kind === 1) {
+      if (!surfaceValid || px + pw > viewW || py + ph > viewH) {
+        requestResync();
+        return;
+      }
+      recon.present(dst, samples, sw, sh, viewW, viewH, { x: px, y: py, w: pw, h: ph });
+    } else {
+      recon.present(dst, samples, sw, sh, viewW, viewH);
+      surfaceValid = true;
+      resyncSent = false;
+    }
+    blitToCanvas();
+    dbgApplied++;
+    dbgPresentMs += performance.now() - tp;
     ws.send('{"type":"ack"}');
     frames++;
-    bytes += buf.byteLength;
+    bytes += frameBytes;
+    const kB = frameBytes / 1e3;
+    frameBytes = 0;
+    lastFrame = { kind, sw, sh, pw, ph, kB: Math.round(kB), settled };
     const dt = performance.now() - lastCamSentAt;
     rtt.push(dt);
     if (rtt.length > 30) rtt.shift();
-    statusLine("remote", `${settled ? "native" : `${sw}\xD7${sh}`} \xB7 ${compressed ? "gz " : ""}`);
+    statusLine("remote", `${kind === 1 ? `patch ${sw}\xD7${sh}\u2192${pw}\xD7${ph}` : settled ? "samples native" : `samples ${sw}\xD7${sh}`} \xB7 ${kB.toFixed(0)} kB${compressed ? " gz" : ""} \xB7 srv ${srvSinceInput}ms (render ${srvRenderMs}) \xB7 `);
   };
   const setMode = async (m) => {
     if (m === "local") {
@@ -2019,18 +3018,62 @@ async function main() {
         return;
       }
     }
+    if (m === "remote" && ws?.readyState !== WebSocket.OPEN) {
+      status("no render server connected \u2014 staying local", true);
+      return;
+    }
     mode = m;
-    if (modeBtn) modeBtn.textContent = m === "remote" ? "Rendering: Remote (Deno)" : "Rendering: Local (your GPU)";
+    if (modeBtn) {
+      modeBtn.textContent = m === "remote" ? "Rendering on the REMOTE GPU \u2014 click to render locally" : "Rendering on YOUR GPU \u2014 click to render remotely";
+    }
     if (m === "remote") sendCam();
     else a3d?.draw();
   };
   modeBtn?.addEventListener("click", () => setMode(mode === "remote" ? "local" : "remote"));
+  if (!ws) {
+    status("no render server \u2014 rendering locally");
+    if (await ensureLocal()) await setMode("local");
+  }
   globalThis.__remoteDbg = {
     frames: () => frames,
-    connected: () => ws.readyState === WebSocket.OPEN,
+    connected: () => ws?.readyState === WebSocket.OPEN,
     hasCam: () => !!camera,
     mode: () => mode,
-    setMode: (m) => setMode(m)
+    setMode: (m) => setMode(m),
+    // Gizmo handles in CSS px, so a harness can aim a synthetic pointer at one (the remote twin of
+    // selftest-browser's __xformDbg).
+    handles: () => {
+      if (!widget || !camera) return [];
+      const r = canvas.getBoundingClientRect();
+      const focalPx = canvas.height / 2 / Math.tan(camera.viewAngle * Math.PI / 360);
+      return widget.handleList(widget.scaleFor(camera.position, focalPx)).map((h) => {
+        const m = h.data;
+        const s = projectToCanvasCss(camera, canvas.width, canvas.height, h.world, r.width, r.height);
+        return { id: h.id, kind: m.kind, axis: m.axis, x: s?.x ?? null, y: s?.y ?? null };
+      });
+    },
+    matrix: () => widget ? [...widget.matrix()] : null,
+    cam: () => camera ? { p: [...camera.position], f: [...camera.focalPoint], u: [...camera.viewUp], d: camera.distance } : null,
+    diag: () => ({
+      proto: PROTO,
+      dpr: globalThis.devicePixelRatio,
+      css: [canvas.clientWidth, canvas.clientHeight],
+      buf: [canvas.width, canvas.height],
+      tex: [viewW, viewH],
+      surfaceValid,
+      applied: dbgApplied,
+      dropped: dbgDropped,
+      resyncs: dbgResyncs,
+      lastErr
+    }),
+    last: () => lastFrame,
+    drags: () => ({ starts: dbgStarts, drags: dbgDrags }),
+    timing: () => {
+      const r = { frames, presentMs: Math.round(dbgPresentMs), gunzipMs: Math.round(dbgGunzipMs), queued: dbgQueued };
+      dbgPresentMs = 0;
+      dbgGunzipMs = 0;
+      return r;
+    }
   };
 }
 main().catch((e) => status("error: " + (e?.message ?? e), true));
