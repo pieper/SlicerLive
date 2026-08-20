@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["encode"]
+
+# Built ON the machine that runs it (the GPU host), for that machine — see .cargo/config.toml.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 1          # line tables only: keeps perf/flamegraphs useful at no runtime cost
+
+[profile.release.build-override]
+opt-level = 3

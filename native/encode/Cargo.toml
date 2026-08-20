@@ -1,0 +1,17 @@
+[package]
+name = "liverender-encode"
+version = "0.1.0"
+edition = "2021"
+description = "Hardware frame encoder for the SlicerLive LiveRenderer (NVENC AV1 intra; Vulkan Video later)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "nvenc-probe"
+path = "src/bin/nvenc_probe.rs"
+
+[dependencies]
+nvidia-video-codec-sdk = "0.4"
+# Explicit CUDA version: the NVENC crate's default asks `nvcc`, which does not exist on a driver-only
+# GPU host. The driver API is backward compatible, so 12.8 bindings run fine on a 13.x driver.
+cudarc = { version = "0.16", features = ["cuda-12080", "dynamic-loading"] }
+anyhow = "1"

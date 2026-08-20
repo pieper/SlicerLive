@@ -1,0 +1,5 @@
+# The server binaries are compiled on the host that runs them, so there is no portable-binary
+# constraint: let the compiler use every instruction the CPU has (AVX-512 on the Modal L4 hosts,
+# AVX2/NEON elsewhere) and tune scheduling/cache behaviour for that exact microarchitecture.
+[build]
+rustflags = ["-C", "target-cpu=native"]
