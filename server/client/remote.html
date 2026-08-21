@@ -43,6 +43,21 @@
   #idleOpts button { font: 600 12px system-ui; padding: 7px 11px; border-radius: 8px; border: 1px solid #2c3346; background: #171b26; color: #cfd6e8; cursor: pointer; }
   #idleOpts button.sel { background: linear-gradient(180deg, #9fe9ff, #54c6f0); color: #04121c; border-color: transparent; }
   #idlePopup .close { margin-top: 14px; font: 600 12px system-ui; padding: 7px 13px; border-radius: 8px; border: 0; background: #232838; color: #dfe4f0; cursor: pointer; }
+  #overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 30;
+    background: radial-gradient(120% 120% at 50% 40%, #0b1018 0%, #06070c 100%); }
+  #overlay.show { display: flex; }
+  #overlay .card { text-align: center; max-width: 460px; padding: 28px 30px; }
+  #overlay h2 { margin: 14px 0 8px; font-size: 20px; font-weight: 650; }
+  #overlay p { margin: 0 0 6px; font-size: 13.5px; line-height: 1.5; opacity: .78; }
+  #overlay .sub { font: 600 12px ui-monospace, monospace; color: #8fd0ff; opacity: .9; margin-top: 10px; }
+  #overlay .spin { width: 46px; height: 46px; margin: 0 auto; border-radius: 50%;
+    border: 4px solid #1c2740; border-top-color: #54c6f0; animation: spin 0.9s linear infinite; }
+  #overlay.stop .spin { display: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #ovBtns { margin-top: 18px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  #ovBtns button { font: 600 13px system-ui; padding: 9px 16px; border-radius: 9px; border: 0; cursor: pointer;
+    background: linear-gradient(180deg, #9fe9ff, #54c6f0); color: #04121c; }
+  #ovBtns button.ghost { background: #1b2130; color: #cfd6e8; }
 </style>
 </head>
 <body>
@@ -73,6 +88,15 @@
       restart). Shorter saves more; longer keeps it instantly responsive.</p>
     <div id="idleOpts"></div>
     <button class="close" id="idleClose">Done</button>
+  </div>
+</div>
+<div id="overlay">
+  <div class="card">
+    <div class="spin"></div>
+    <h2 id="ovTitle">Starting the remote GPU…</h2>
+    <p id="ovMsg"></p>
+    <p class="sub" id="ovSub"></p>
+    <div id="ovBtns"></div>
   </div>
 </div>
 <script type="module" src="./remote.js"></script>

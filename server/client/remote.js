@@ -2814,7 +2814,9 @@ var status = (msg, err = false) => {
 async function main() {
   const canvas = document.getElementById("gpu");
   const params = new URLSearchParams(location.search);
-  const serverUrl = params.has("local") ? "" : params.get("server") ?? `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`;
+  const DEFAULT_REMOTE = "wss://pieper--slicerlive-live-renderer-live-renderer.modal.run/";
+  const staticHost = !/\.modal\.run$/.test(location.host) && location.host !== "";
+  const serverUrl = params.has("local") ? "" : params.get("server") ?? (staticHost && location.protocol === "https:" ? DEFAULT_REMOTE : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`);
   const modeBtn = document.getElementById("mode");
   if (!navigator.gpu) {
     status("WebGPU not available \u2014 try Chrome/Edge 113+ or Safari 18+.", true);
@@ -3154,11 +3156,67 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let idleMs = Number(localStorage.getItem("lr_idle") ?? 12e4);
   let lastInteract = performance.now();
   let idleClosed = false;
+  let everLive = false;
   const el = (id) => document.getElementById(id);
   const setConn = (c) => {
     connState = c;
   };
+  const ov = el("overlay"), ovTitle = el("ovTitle"), ovMsg = el("ovMsg"), ovSub = el("ovSub"), ovBtns = el("ovBtns");
+  let ovMode = "";
+  const showOverlay = (mode2, title, msg, spin, btns) => {
+    ovMode = mode2;
+    if (!ov) return;
+    ov.classList.add("show");
+    ov.classList.toggle("stop", !spin);
+    if (ovTitle) ovTitle.textContent = title;
+    if (ovMsg) ovMsg.textContent = msg;
+    if (ovBtns) {
+      ovBtns.innerHTML = "";
+      for (const b of btns) {
+        const el2 = document.createElement("button");
+        el2.textContent = b.label;
+        if (b.ghost) el2.className = "ghost";
+        el2.onclick = b.fn;
+        ovBtns.appendChild(el2);
+      }
+    }
+  };
+  const hideOverlay = () => {
+    ovMode = "";
+    ov?.classList.remove("show");
+  };
+  const CAP_STEP = 0.1;
+  let spendCap = Number(localStorage.getItem("lr_cap") ?? CAP_STEP);
+  let lifeSpent = Number(localStorage.getItem("lr_life") ?? 0);
+  let capped = false, lastLifeSave = 0;
+  const grantMore = () => {
+    spendCap += CAP_STEP;
+    localStorage.setItem("lr_cap", String(spendCap));
+    capped = false;
+    hideOverlay();
+    if (connState === "sleeping" || connState === "error") connect();
+  };
+  const enforceCap = () => {
+    if (capped) return;
+    capped = true;
+    if (ws?.readyState === WebSocket.OPEN) {
+      idleClosed = true;
+      ws.close(1e3, "cap");
+    }
+    setConn("sleeping");
+    showOverlay(
+      "capped",
+      "Free GPU time used up",
+      `You've used ${(lifeSpent * 100).toFixed(1)}\xA2 of this demo's free remote-GPU time. Grant yourself a little more, or explore on your own GPU.`,
+      false,
+      [{ label: "Grant 10\xA2 more", fn: grantMore }, { label: "Render on my GPU", ghost: true, fn: () => {
+        hideOverlay();
+        setMode("local");
+      } }]
+    );
+  };
   const fmt$ = (v) => "$" + v.toFixed(2);
+  const ratePerMin = () => `${(rate * 100 / 60).toFixed(1)} \xA2/min`;
   const connect = () => {
     if (!serverUrl) return;
     idleClosed = false;
@@ -3166,6 +3224,13 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     containerDeadAt = Infinity;
     if (lastBillTs === 0) lastBillTs = performance.now();
     setConn("connecting");
+    if (!everLive) showOverlay(
+      "starting",
+      "Starting the remote GPU\u2026",
+      "The first frame spins up a dedicated L4 GPU on demand \u2014 this takes a few seconds. It sleeps when idle and only bills while awake.",
+      true,
+      []
+    );
     ws = new WebSocket(serverUrl);
     ws.binaryType = "arraybuffer";
     const sock = ws;
@@ -3181,10 +3246,23 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
       } else fallbackLocal("render server disconnected");
     });
     sock.addEventListener("error", () => {
-      if (!idleClosed) {
-        setConn("error");
-        fallbackLocal("cannot reach the render server");
-      }
+      if (idleClosed || capped) return;
+      setConn("error");
+      if (!everLive) {
+        showOverlay(
+          "dead",
+          "Remote GPU unavailable",
+          "Couldn't reach the remote renderer. It may be over this month's free budget, or briefly down. You can retry, or explore on your own GPU.",
+          false,
+          [{ label: "Retry", fn: () => {
+            hideOverlay();
+            connect();
+          } }, { label: "Render on my GPU", ghost: true, fn: () => {
+            hideOverlay();
+            setMode("local");
+          } }]
+        );
+      } else fallbackLocal("cannot reach the render server");
     });
     sock.addEventListener("message", (ev) => {
       if (sock !== ws) return;
@@ -3233,6 +3311,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         if (connectStartTs) coldEtaMs = Math.max(1500, Math.min(6e4, performance.now() - connectStartTs));
         containerDeadAt = Infinity;
         setConn("live");
+        everLive = true;
+        if (ovMode === "starting") hideOverlay();
         const reconnecting = !!camera;
         demo = m.demo ?? "single";
         widgetSeed = m.widget ?? null;
@@ -3363,7 +3443,16 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   });
   const bill = () => {
     const now = performance.now();
-    if (mode === "remote" && lastBillTs && now < containerDeadAt) costTotal += rate * (now - lastBillTs) / 36e5;
+    if (mode === "remote" && lastBillTs && now < containerDeadAt) {
+      const d = rate * (now - lastBillTs) / 36e5;
+      costTotal += d;
+      lifeSpent += d;
+      if (now - lastLifeSave > 3e3) {
+        localStorage.setItem("lr_life", String(lifeSpent));
+        lastLifeSave = now;
+      }
+      if (!capped && lifeSpent >= spendCap) enforceCap();
+    }
     lastBillTs = now;
   };
   const paintMeter = () => {
@@ -3375,25 +3464,31 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
       return;
     }
     if (connState === "connecting") {
-      const eta = Math.max(0, coldEtaMs - (performance.now() - connectStartTs));
+      const elapsed = Math.floor((performance.now() - connectStartTs) / 1e3);
+      const eta = Math.round(coldEtaMs / 1e3);
+      const verb = everLive ? "waking" : "starting remote GPU";
       connEl.className = "pill wake";
-      connEl.textContent = `waking\u2026 ~${Math.ceil(eta / 1e3)}s`;
+      connEl.textContent = elapsed <= eta ? `${verb}\u2026 ${elapsed}s / ~${eta}s` : `${verb}\u2026 ${elapsed}s (almost)`;
     } else if (connState === "live") {
       connEl.className = "pill";
       connEl.textContent = "live";
     } else if (connState === "sleeping") {
       connEl.className = "pill sleep";
-      connEl.textContent = `sleeping \xB7 tap to wake (~${Math.ceil(coldEtaMs / 1e3)}s)`;
+      connEl.textContent = "asleep \xB7 tap to wake";
     } else if (connState === "error") {
       connEl.className = "pill err";
       connEl.textContent = "offline \xB7 tap to retry";
     }
-    meterEl.textContent = fmt$(costTotal);
-    meterEl.title = `Modal L4 GPU: ${fmt$(costTotal)} since this page connected \xB7 ${fmt$(rate)}/hr while awake`;
+    meterEl.textContent = `${fmt$(costTotal)} \xB7 ${ratePerMin()}`;
+    meterEl.title = `Remote L4 GPU: ${fmt$(costTotal)} since this page connected \xB7 ${fmt$(rate)}/hr (${ratePerMin()}) while awake`;
   };
   setInterval(() => {
     bill();
     if (connState === "live" && performance.now() - lastInteract > idleMs && ws?.readyState === WebSocket.OPEN) goIdle();
+    if (ovMode === "starting" && ovSub) {
+      const elapsed = Math.floor((performance.now() - connectStartTs) / 1e3);
+      ovSub.textContent = `elapsed ${elapsed}s \xB7 usually ~${Math.round(coldEtaMs / 1e3)}s`;
+    }
     paintMeter();
   }, 500);
   if (serverUrl) {
@@ -3438,7 +3533,17 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     }),
     last: () => lastFrame,
     drags: () => ({ starts: dbgStarts, drags: dbgDrags }),
-    session: () => ({ conn: connState, cost: costTotal, rate, idleMs, coldEtaMs: Math.round(coldEtaMs), scaledownMs }),
+    session: () => ({ conn: connState, cost: costTotal, rate, idleMs, coldEtaMs: Math.round(coldEtaMs), scaledownMs, lifeSpent, spendCap, capped, ovMode }),
+    resetSpend: () => {
+      lifeSpent = 0;
+      spendCap = 0.1;
+      capped = false;
+      localStorage.setItem("lr_life", "0");
+      localStorage.setItem("lr_cap", "0.1");
+    },
+    setLife: (v) => {
+      lifeSpent = v;
+    },
     setIdle: (ms) => {
       idleMs = ms;
       lastInteract = performance.now();
