@@ -370,6 +370,17 @@ function handleWs(req: Request): Response {
 
   socket.onopen = () => {
     open = true;
+    // Each viewer starts from a CLEAN scene: the transform is module-level (one shared scene, no
+    // per-session isolation yet), so a previous viewer's gizmo edits would otherwise persist — and
+    // the hello would replay them. Reset the target to identity on connect. (Multi-viewer caveat:
+    // concurrent viewers share one scene; per-session isolation is the real fix, on the roadmap.)
+    if (xformTarget && gizmo) {
+      xformM = identity();
+      xformTarget.setWorldTransform(xformM);
+      gizmo.setPivot(xformC0);
+      gizmo.setActive(null);
+      scene.syncUniforms();
+    }
     // `widget` tells the client to mount the SAME transform widget it would mount locally, seeded
     // with the target's start centre — its drags come back as {xform} instead of touching a field.
     socket.send(JSON.stringify({

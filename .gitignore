@@ -28,3 +28,4 @@ algorithms/eval/l0-out*/results.json
 # from the public JS2 container — never in the repo
 examples/colorize/data/
 examples/colorize/*.js
+tools/modal_spike/out/
