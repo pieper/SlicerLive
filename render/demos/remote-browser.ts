@@ -358,6 +358,15 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     }
     attachWidget();
   };
+  /** Re-frame the existing camera onto a new scene's center/radius (scene switch). */
+  const reframe = (center: Vec3, radius: number) => {
+    if (!camera) return;
+    const fresh = framedCamera(center, radius);
+    camera.position = [...fresh.position] as Vec3;
+    camera.focalPoint = [...fresh.focalPoint] as Vec3;
+    camera.viewUp = [...fresh.viewUp] as Vec3;
+    camDirty = true;
+  };
 
   const gunzip = async (b: Uint8Array): Promise<Uint8Array> =>
     new Uint8Array(await new Response(new Response(b).body!.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
@@ -365,6 +374,17 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
 
   // ---- cost meter + idle/sleep lifecycle -------------------------------------------------------
   let rate = 0.80;                 // $/hr for the remote GPU (server tells us in hello)
+  let clientScene = "";            // which scene the server currently has loaded
+  const sceneSel = document.getElementById("scene") as HTMLSelectElement | null;
+  if (sceneSel) sceneSel.onchange = () => {
+    const name = sceneSel.value;
+    if (!name || name === clientScene) return;
+    if (mode !== "remote") { status("switch to REMOTE to load specimens", true); sceneSel.value = clientScene; return; }
+    sceneSel.disabled = true;
+    showOverlay("starting", "Loading " + (sceneSel.selectedOptions[0]?.textContent ?? name) + "…", "large volumes take a few seconds", true, []);
+    if (ov) ov.classList.add("wake");
+    ws?.send(JSON.stringify({ type: "scene", scene: name }));
+  };
   let scaledownMs = 20_000;        // Modal's post-disconnect tail before the container dies
   let costTotal = 0;               // cumulative $ since this page first connected
   let lastBillTs = 0, containerDeadAt = Infinity, connectStartTs = 0;
@@ -430,8 +450,11 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     containerDeadAt = Infinity;            // the container is alive (or spinning up)
     if (lastBillTs === 0) lastBillTs = performance.now();
     setConn("connecting");
-    if (!everLive) showOverlay("starting", "Starting the remote GPU…",
-      "The first frame spins up a dedicated L4 GPU on demand — this takes a few seconds. It sleeps when idle and only bills while awake.", true, []);
+    showOverlay("starting", everLive ? "Waking the remote GPU…" : "Starting the remote GPU…",
+      everLive ? "It scaled to zero while idle — bringing it back takes a few seconds. Your view is preserved."
+               : "The first frame spins up a dedicated L4 GPU on demand — this takes a few seconds. It sleeps when idle and only bills while awake.",
+      true, []);
+    if (ov) ov.classList.toggle("wake", everLive);   // lighter background on wake (stale image shows through)
     ws = new WebSocket(serverUrl);
     ws.binaryType = "arraybuffer";
     const sock = ws;
@@ -480,6 +503,17 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   const applyMessage = async (e: MessageEvent) => {
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data as string);
+      if (m.type === "loading") {
+        showOverlay("starting", "Loading " + m.scene + " on the remote GPU…", "large volumes take a few seconds", true, []);
+        if (ov) ov.classList.add("wake");
+        return;
+      }
+      if (m.type === "sceneError") {
+        status("could not load specimen: " + (m.message ?? "unknown"), true);
+        if (sceneSel) { sceneSel.disabled = false; sceneSel.value = clientScene; }
+        hideOverlay();
+        return;
+      }
       if (m.type === "hello") {
         if ((m.proto ?? 0) !== PROTO) {
           status(`page/server version mismatch (page ${PROTO}, server ${m.proto}) — reloading…`, true);
@@ -501,9 +535,31 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         if (ovMode === "starting") hideOverlay();
         const reconnecting = !!camera;   // we already had a scene → this is a wake, not a first load
         demo = m.demo ?? "single";
+        // Populate the specimen menu (once), and note which scene the server has loaded.
+        if (sceneSel && Array.isArray(m.scenes) && sceneSel.options.length === 0) {
+          for (const sc of m.scenes) {
+            const o = document.createElement("option");
+            o.value = sc.name;
+            const vram = sc.gib >= 0.5 ? ` · ${sc.gib} GB` : "";
+            o.textContent = sc.fits ? `${sc.label} (${sc.dims}${vram})` : `${sc.label} — won't fit (${sc.gib} GB)`;
+            o.disabled = !sc.fits;
+            o.title = sc.fits ? `${sc.dims} · ~${sc.gib} GB GPU memory` : (sc.reason ?? "exceeds GPU memory");
+            sceneSel.appendChild(o);
+          }
+        }
+        sceneName = m.name ?? sceneName;
+        const sceneChanged = typeof m.scene === "string" && m.scene !== clientScene && clientScene !== "";
+        if (typeof m.scene === "string") { clientScene = m.scene; if (sceneSel) { sceneSel.value = m.scene; sceneSel.disabled = false; } }
         widgetSeed = m.widget ?? null;
-        if (widgetSeed && !widget) createWidget(widgetSeed);
-        bootstrap({ name: m.name ?? "scene", sceneUrl: m.sceneUrl ?? "", center: m.center as Vec3, radius: m.radius });
+        if (sceneChanged) {
+          // A different specimen: drop the old gizmo, re-frame the camera, remount for the new one.
+          widget = null; widgetAttached = false;
+          reframe(m.center as Vec3, m.radius);
+          if (widgetSeed) { createWidget(widgetSeed); attachWidget(); }
+        } else {
+          if (widgetSeed && !widget) createWidget(widgetSeed);
+          bootstrap({ name: m.name ?? "scene", sceneUrl: m.sceneUrl ?? "", center: m.center as Vec3, radius: m.radius });
+        }
         // The server resets its shared transform on connect; if we are WAKING with edits, restore
         // them (and re-frame with our preserved camera) so a sleep is invisible.
         if (reconnecting && widget) { xformDirty = true; }

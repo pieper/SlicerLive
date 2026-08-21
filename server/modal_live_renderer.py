@@ -86,6 +86,7 @@ build_vol = modal.Volume.from_name("slicerlive-native-build", create_if_missing=
     timeout=60 * 60,          # a viewing session may sit open for an hour
     scaledown_window=SCALEDOWN_S,   # transient: GPU scales to zero this long after the last WS drops
     max_containers=4,
+    memory=24576,             # host RAM for decoding large NRRDs (ushort raw + float32 expand)
     volumes={"/build": build_vol},
 )
 # A container must serve the page AND hold a long-lived WebSocket at the same time; without this

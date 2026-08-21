@@ -1234,7 +1234,20 @@ var ImageField = class {
   constructor(dev, data, dims, spacing, lut, opts) {
     const center = opts.center ?? [0, 0, 0];
     this.volTex = dev.createTexture({ size: dims, dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    dev.queue.writeTexture({ texture: this.volTex }, data, { bytesPerRow: dims[0] * 4, rowsPerImage: dims[1] }, dims);
+    {
+      const bytesPerRow = dims[0] * 4, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
+      const CHUNK = 256 * 1024 * 1024;
+      const slab = Math.max(1, Math.min(dims[2], Math.floor(CHUNK / Math.max(1, sliceBytes))));
+      for (let z = 0; z < dims[2]; z += slab) {
+        const depth = Math.min(slab, dims[2] - z);
+        dev.queue.writeTexture(
+          { texture: this.volTex, origin: { x: 0, y: 0, z } },
+          data,
+          { offset: z * sliceBytes, bytesPerRow, rowsPerImage },
+          [dims[0], dims[1], depth]
+        );
+      }
+    }
     this.lutTex = dev.createTexture({ size: [256, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
     if (opts.ijkToRAS) {
@@ -3144,9 +3157,32 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     }
     attachWidget();
   };
+  const reframe = (center, radius) => {
+    if (!camera) return;
+    const fresh = framedCamera(center, radius);
+    camera.position = [...fresh.position];
+    camera.focalPoint = [...fresh.focalPoint];
+    camera.viewUp = [...fresh.viewUp];
+    camDirty = true;
+  };
   const gunzip = async (b) => new Uint8Array(await new Response(new Response(b).body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
   let applyChain = Promise.resolve();
   let rate = 0.8;
+  let clientScene = "";
+  const sceneSel = document.getElementById("scene");
+  if (sceneSel) sceneSel.onchange = () => {
+    const name = sceneSel.value;
+    if (!name || name === clientScene) return;
+    if (mode !== "remote") {
+      status("switch to REMOTE to load specimens", true);
+      sceneSel.value = clientScene;
+      return;
+    }
+    sceneSel.disabled = true;
+    showOverlay("starting", "Loading " + (sceneSel.selectedOptions[0]?.textContent ?? name) + "\u2026", "large volumes take a few seconds", true, []);
+    if (ov) ov.classList.add("wake");
+    ws?.send(JSON.stringify({ type: "scene", scene: name }));
+  };
   let scaledownMs = 2e4;
   let costTotal = 0;
   let lastBillTs = 0, containerDeadAt = Infinity, connectStartTs = 0;
@@ -3224,13 +3260,14 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     containerDeadAt = Infinity;
     if (lastBillTs === 0) lastBillTs = performance.now();
     setConn("connecting");
-    if (!everLive) showOverlay(
+    showOverlay(
       "starting",
-      "Starting the remote GPU\u2026",
-      "The first frame spins up a dedicated L4 GPU on demand \u2014 this takes a few seconds. It sleeps when idle and only bills while awake.",
+      everLive ? "Waking the remote GPU\u2026" : "Starting the remote GPU\u2026",
+      everLive ? "It scaled to zero while idle \u2014 bringing it back takes a few seconds. Your view is preserved." : "The first frame spins up a dedicated L4 GPU on demand \u2014 this takes a few seconds. It sleeps when idle and only bills while awake.",
       true,
       []
     );
+    if (ov) ov.classList.toggle("wake", everLive);
     ws = new WebSocket(serverUrl);
     ws.binaryType = "arraybuffer";
     const sock = ws;
@@ -3295,6 +3332,20 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   const applyMessage = async (e) => {
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data);
+      if (m.type === "loading") {
+        showOverlay("starting", "Loading " + m.scene + " on the remote GPU\u2026", "large volumes take a few seconds", true, []);
+        if (ov) ov.classList.add("wake");
+        return;
+      }
+      if (m.type === "sceneError") {
+        status("could not load specimen: " + (m.message ?? "unknown"), true);
+        if (sceneSel) {
+          sceneSel.disabled = false;
+          sceneSel.value = clientScene;
+        }
+        hideOverlay();
+        return;
+      }
       if (m.type === "hello") {
         if ((m.proto ?? 0) !== PROTO) {
           status(`page/server version mismatch (page ${PROTO}, server ${m.proto}) \u2014 reloading\u2026`, true);
@@ -3315,9 +3366,39 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         if (ovMode === "starting") hideOverlay();
         const reconnecting = !!camera;
         demo = m.demo ?? "single";
+        if (sceneSel && Array.isArray(m.scenes) && sceneSel.options.length === 0) {
+          for (const sc of m.scenes) {
+            const o = document.createElement("option");
+            o.value = sc.name;
+            const vram = sc.gib >= 0.5 ? ` \xB7 ${sc.gib} GB` : "";
+            o.textContent = sc.fits ? `${sc.label} (${sc.dims}${vram})` : `${sc.label} \u2014 won't fit (${sc.gib} GB)`;
+            o.disabled = !sc.fits;
+            o.title = sc.fits ? `${sc.dims} \xB7 ~${sc.gib} GB GPU memory` : sc.reason ?? "exceeds GPU memory";
+            sceneSel.appendChild(o);
+          }
+        }
+        sceneName = m.name ?? sceneName;
+        const sceneChanged = typeof m.scene === "string" && m.scene !== clientScene && clientScene !== "";
+        if (typeof m.scene === "string") {
+          clientScene = m.scene;
+          if (sceneSel) {
+            sceneSel.value = m.scene;
+            sceneSel.disabled = false;
+          }
+        }
         widgetSeed = m.widget ?? null;
-        if (widgetSeed && !widget) createWidget(widgetSeed);
-        bootstrap({ name: m.name ?? "scene", sceneUrl: m.sceneUrl ?? "", center: m.center, radius: m.radius });
+        if (sceneChanged) {
+          widget = null;
+          widgetAttached = false;
+          reframe(m.center, m.radius);
+          if (widgetSeed) {
+            createWidget(widgetSeed);
+            attachWidget();
+          }
+        } else {
+          if (widgetSeed && !widget) createWidget(widgetSeed);
+          bootstrap({ name: m.name ?? "scene", sceneUrl: m.sceneUrl ?? "", center: m.center, radius: m.radius });
+        }
         if (reconnecting && widget) {
           xformDirty = true;
         }

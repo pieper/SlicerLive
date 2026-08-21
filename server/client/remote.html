@@ -24,6 +24,8 @@
   #gpu { flex: 1 1 auto; width: 100%; height: 100%; display: block; background: #000; touch-action: none; cursor: grab; }
   #gpu:active { cursor: grabbing; }
   #status { position: fixed; bottom: 6px; left: 10px; font-size: 11px; color: #9fb3d0; font-family: ui-monospace, monospace; pointer-events: none; text-shadow: 0 0 3px #000; }
+  #scene { font: 600 12px -apple-system, system-ui, sans-serif; background: #12151f; color: #dfe4f0; border: 1px solid #2a3040; border-radius: 7px; padding: 6px 9px; max-width: 40vw; }
+  #scene:disabled { opacity: .5; }
   #mode { font: 600 12px -apple-system, system-ui, sans-serif; color: #04121c; cursor: pointer;
     background: linear-gradient(180deg, #9fe9ff, #54c6f0); border: 0; border-radius: 7px; padding: 6px 13px; }
   #session { margin-left: auto; display: flex; align-items: center; gap: 8px; }
@@ -46,6 +48,7 @@
   #overlay { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 30;
     background: radial-gradient(120% 120% at 50% 40%, #0b1018 0%, #06070c 100%); }
   #overlay.show { display: flex; }
+  #overlay.wake { background: rgba(6,7,12,.62); backdrop-filter: blur(2px); }
   #overlay .card { text-align: center; max-width: 460px; padding: 28px 30px; }
   #overlay h2 { margin: 14px 0 8px; font-size: 20px; font-weight: 650; }
   #overlay p { margin: 0 0 6px; font-size: 13.5px; line-height: 1.5; opacity: .78; }
@@ -63,6 +66,7 @@
 <body>
 <header>
   <h1>Remote Render<span class="badge">Deno · WebGPU · WS</span></h1>
+  <select id="scene" title="Choose a specimen (MorphoDepot / SlicerMorph)"></select>
   <button id="mode">Rendering on the REMOTE GPU — click to render locally</button>
   <div id="session">
     <span id="conn" class="pill">connecting…</span>

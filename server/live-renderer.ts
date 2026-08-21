@@ -12,7 +12,10 @@ import { loadSceneVolumeField } from "../render/scene-volume.ts";
 import { BudgetController } from "../render/budget-controller.ts";
 import { buildMultiVolume } from "../render/demos/selftest-scenes.ts";
 import { TransformGizmoField } from "../render/transform-gizmo-field.ts";
-import type { Field, ImageField } from "../render/fields.ts";
+import { ImageField } from "../render/fields.ts";
+import { loadNrrd } from "../render/nrrd.ts";
+import { fetchVP, lutFromVP } from "../render/vp-preset.ts";
+import type { Field } from "../render/fields.ts";
 import { identity, type Mat4, type Vec3 } from "../render/mat4.ts";
 import { Av1Sidecar, codedSize } from "./av1-sidecar.ts";
 
@@ -76,45 +79,119 @@ async function gzip(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await new Response(s).arrayBuffer());
 }
 
-// ---- one shared headless renderer + REAL scene (single-user localhost; per-session isolation is later) ----
+// ---- one shared headless renderer + SWITCHABLE scene ----------------------------------------
+// A menu of MorphoDepot specimens (SlicerMorph) rendered on the L4, each with one of Murat Maga's
+// published transfer functions (SlicerMorph/VPs). The big single-file NRRDs are GitHub release
+// assets — the server (no CORS) fetches them; a scan switch reloads the scene and re-hellos.
 const gpu = await initDevice();
 const scene = new SceneRenderer(gpu, "rgba8unorm");
+// The device's granted 3D-texture size gates whether a volume can be a single texture. Log it so
+// the "will it fit" answer is authoritative (NVIDIA caps 3D textures well below 2D).
+const MAX3D = (gpu.device.limits as unknown as { maxTextureDimension3D: number }).maxTextureDimension3D;
+console.log(`[live-renderer] device maxTextureDimension3D=${MAX3D} maxBufferSize=${(gpu.device.limits as unknown as {maxBufferSize:number}).maxBufferSize}`);
+
+// An r32float 3D texture needs bytes = 4·nx·ny·nz of VRAM. ImageField uploads it in Z-slabs, so the
+// staging buffer stays small (no maxBufferSize ceiling); the volume is bounded only by total VRAM.
+// The L4 has 24 GB — reserve ~6 GB for framebuffers, AV1 input, the reconstructor and LUTs, so a
+// volume "fits" when its float32 payload ≤ 18 GiB (and every axis ≤ maxTextureDimension3D).
+const VRAM_GIB = 24;
+const VRAM_FIT_LIMIT = (VRAM_GIB - 6) * 2 ** 30;   // 18 GiB of float32 payload
+function volFit(dims: [number, number, number]): { fits: boolean; gib: number; reason?: string } {
+  const bytes = 4 * dims[0] * dims[1] * dims[2];
+  const gib = bytes / 2 ** 30;
+  if (Math.max(...dims) > MAX3D) return { fits: false, gib, reason: `${Math.max(...dims)} > ${MAX3D} per-axis 3D-texture limit` };
+  if (bytes > VRAM_FIT_LIMIT) return { fits: false, gib, reason: `${gib.toFixed(1)} GiB as float32 exceeds the L4's usable VRAM` };
+  return { fits: true, gib };
+}
+interface Specimen { label: string; url: string; preset: string; dims: [number, number, number]; note?: string }
+// dims from MorphoDepot's dashboard-data.json; only volumes whose largest dim ≤ MAX3D are offered.
+const MORPHO: Record<string, Specimen> = {
+  bumblebee:      { label: "Bumblebee — diceCT", url: "https://github.com/muratmaga/Bumblebee_Stained/releases/download/v1/Bumblebee.nrrd", preset: "diceCT_16", dims: [1159, 1663, 1482] },
+  plethodon:      { label: "Salamander hindlimb — diceCT", url: "https://github.com/dinonoto/Plethodon_Hindlimb2/releases/download/v1/A159522_hind_8bit.nrrd", preset: "diceCT_16", dims: [988, 1660, 1721] },
+  herpetotherium: { label: "Fossil marsupial (Herpetotherium)", url: "https://github.com/muratmaga/Peratherium_sp/releases/download/v1/AMNH_FM_22304.nrrd", preset: "Bat-8bit", dims: [1166, 1990, 865] },
+  coweye:         { label: "Cow eye — diceCT", url: "https://github.com/PaulGignac/GignacLab_DiceCT_CowEye_2025/releases/download/v1/PaulGignac-Gignac_Cow_Eye_DiceCT-01-volume.nrrd", preset: "diceCT_16", dims: [1215, 954, 1550] },
+  xenopus:        { label: "Xenopus frog — diceCT", url: "https://github.com/dinonoto/Xenopus-diceCT/releases/download/v1/CAS-H-2234-DICECT_cropped.nrrd", preset: "diceCT_16", dims: [1711, 1376, 705] },
+  glaucomys:      { label: "Flying-squirrel skull", url: "https://js2.jetstream-cloud.org:8001/swift/v1/MorphoDepot-volumes/muratmaga/glaucomys-sabrinus-skull/UWMB-30808.nrrd", preset: "Bat-8bit", dims: [975, 1589, 750] },
+  daphnia:        { label: "Water flea (Daphnia) — diceCT", url: "https://github.com/JeanCopper/Daphnia_magna/releases/download/v1/Daphnia_Gut_AAA391.nrrd", preset: "diceCT_16", dims: [378, 750, 175] },
+};
+const SCENES = ["multi", ...Object.keys(MORPHO)];
+
+// scene state (rebuilt by loadScene)
 let mb = 0;
-let fields: Field[], center: Vec3, radius: number, sceneName: string, detail: string;
-// The gizmo's target volume + the gizmo field itself — present only in DEMO=multi. The widget
-// MATH runs in the browser (pure geometry, no GPU); what arrives here is the resulting matrix.
+let fields: Field[] = [], center: Vec3 = [0, 0, 0], radius = 200, sceneName = "", detail = "";
 let xformTarget: ImageField | null = null;
 let gizmo: TransformGizmoField | null = null;
-let xformC0: Vec3 = [0, 0, 0];    // the target's centre at IDENTITY — the widget's pivot origin
-let xformM: Mat4 = identity();    // last matrix applied, replayed to a (re)connecting client
+let xformC0: Vec3 = [0, 0, 0];
+let xformM: Mat4 = identity();
+let currentScene = "";
+const fieldCache = new Map<string, ImageField>();
 
-if (DEMO === "multi") {
-  console.log(`[live-renderer] loading the multi-volume selftest scene …`);
-  const sc = await buildMultiVolume(gpu.device, (n) => { mb += n; });
-  xformTarget = sc.pano.field;
-  xformC0 = sc.pano.field.worldCenter();
-  gizmo = new TransformGizmoField(xformC0, 88);
-  fields = [...sc.fields, gizmo];
-  center = [
-    (sc.cta.center[0] + sc.pano.center[0]) / 2,
-    (sc.cta.center[1] + sc.pano.center[1]) / 2,
-    (sc.cta.center[2] + sc.pano.center[2]) / 2,
-  ];
-  radius = Math.max(sc.cta.radius, sc.pano.radius) * 1.35;
-  sceneName = `${sc.cta.name} + ${sc.pano.name}`;
-  detail = `${sc.cta.dims.join("×")} + ${sc.pano.dims.join("×")}`;
-} else {
-  console.log(`[live-renderer] loading ${SCENE_URL} …`);
-  const sv = await loadSceneVolumeField(gpu.device, SCENE_URL, (n) => { mb += n; });
-  fields = [sv.field];
-  center = sv.center;
-  radius = sv.radius;
-  sceneName = sv.name;
-  detail = sv.dims.join("×");
+/** Load a scene by name ("multi" or a MORPHO key). Rebuilds the shared renderer. */
+async function loadScene(name: string): Promise<void> {
+  if (!SCENES.includes(name)) throw new Error(`unknown scene "${name}"`);
+  if (name === "multi") {
+    const sc = await buildMultiVolume(gpu.device, (n) => { mb += n; });
+    xformTarget = sc.pano.field;
+    xformC0 = sc.pano.field.worldCenter();
+    gizmo = new TransformGizmoField(xformC0, 88);
+    fields = [...sc.fields, gizmo];
+    center = [(sc.cta.center[0] + sc.pano.center[0]) / 2, (sc.cta.center[1] + sc.pano.center[1]) / 2, (sc.cta.center[2] + sc.pano.center[2]) / 2];
+    radius = Math.max(sc.cta.radius, sc.pano.radius) * 1.35;
+    sceneName = `${sc.cta.name} + ${sc.pano.name}`;
+    detail = `${sc.cta.dims.join("×")} + ${sc.pano.dims.join("×")}`;
+  } else {
+    const spec = MORPHO[name];
+    const fit = volFit(spec.dims);
+    if (!fit.fits) throw new Error(`${spec.label} (${spec.dims.join("×")}, ${fit.gib.toFixed(1)} GB) does not fit — ${fit.reason}`);
+    let field = fieldCache.get(name);
+    if (!field) {
+      console.log(`[live-renderer] fetching ${spec.label} …`);
+      const t0 = performance.now();
+      const nrrd = await loadNrrd(spec.url, (n) => { mb += n; });
+      const vp = await fetchVP(spec.preset).catch(() => null);
+      const { lut, clim, shade } = vp ? lutFromVP(vp, nrrd.range) : { lut: buildGrayLut(), clim: nrrd.range, shade: [0.25, 0.75, 0.5, 24] as [number, number, number, number] };
+      field = new ImageField(gpu.device, nrrd.data, nrrd.dims, [1, 1, 1], lut, { clim, ijkToRAS: nrrd.ijkToRAS, shade });
+      fieldCache.set(name, field);
+      console.log(`[live-renderer] ${spec.label} ${nrrd.dims.join("×")} range [${nrrd.range}] in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+    }
+    // a transform gizmo on the specimen, so it is interactive like the multi scene
+    xformTarget = field;
+    xformC0 = field.worldCenter();
+    gizmo = new TransformGizmoField(xformC0, 88);
+    fields = [field, gizmo];
+    const [lo, hi] = field.aabb();
+    center = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+    radius = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2 * 1.15;
+    sceneName = spec.label;
+    detail = spec.dims.join("×");
+  }
+  xformM = identity();
+  scene.build(fields);
+  scene.setBackground(0.05, 0.06, 0.09);
+  currentScene = name;
+  console.log(`[live-renderer] scene "${sceneName}" ready — ${detail} · ${(mb / 1e6).toFixed(0)} MB`);
 }
-scene.build(fields);
-scene.setBackground(0.05, 0.06, 0.09);
-console.log(`[live-renderer] scene "${sceneName}" ready — ${detail} · ${(mb / 1e6).toFixed(0)} MB · center ${center.map((v) => v.toFixed(0))} radius ${radius.toFixed(0)}`);
+
+function buildGrayLut(): Uint8Array {
+  const lut = new Uint8Array(256 * 4);
+  for (let i = 0; i < 256; i++) { const g = i, a = Math.round(Math.max(0, (i - 40) / 215) * 200); lut[i*4]=lut[i*4+1]=lut[i*4+2]=g; lut[i*4+3]=a; }
+  return lut;
+}
+
+const SCENE_MENU = [
+  { name: "multi", label: "Cardiac CTA + Abdomen (2 vols + gizmo)", dims: "512³ + 441³", gib: 0.1, fits: true },
+  ...Object.entries(MORPHO).map(([name, sp]) => {
+    const f = volFit(sp.dims);
+    return { name, label: sp.label, dims: sp.dims.join("×"), gib: Math.round(f.gib * 10) / 10, fits: f.fits, reason: f.reason };
+  }),
+];
+// Default to the largest specimen that comfortably fits (unless SCENE_NAME overrides), so the demo
+// opens on a real MorphoDepot scan rather than the selftest.
+const LARGEST_FIT = [...SCENE_MENU].filter((x) => x.name !== "multi" && x.fits).sort((a, b) => b.gib - a.gib)[0]?.name;
+console.log(`[live-renderer] specimen menu: ${SCENE_MENU.map((x) => `${x.name}${x.fits ? "" : "✗"}`).join(" ")} · largest-fit=${LARGEST_FIT}`);
+let sceneLoading = false;
+const DEFAULT_SCENE = Deno.env.get("SCENE_NAME") ?? "multi";   // safe universal default; pick a specimen from the menu
+await loadScene(DEFAULT_SCENE);
 
 interface CamMsg { type: "cam"; w: number; h: number; p: Vec3; f: Vec3; u: Vec3; a: number; dn?: number }
 // The gizmo drag, as the client computed it: the target's world matrix, the gizmo's new pivot
@@ -373,12 +450,9 @@ function handleWs(req: Request): Response {
     return true;
   }
 
-  socket.onopen = () => {
-    open = true;
-    // Each viewer starts from a CLEAN scene: the transform is module-level (one shared scene, no
-    // per-session isolation yet), so a previous viewer's gizmo edits would otherwise persist — and
-    // the hello would replay them. Reset the target to identity on connect. (Multi-viewer caveat:
-    // concurrent viewers share one scene; per-session isolation is the real fix, on the roadmap.)
+  const sendHello = () => {
+    // Each viewer starts from a CLEAN transform (module-level, one shared scene — reset so a prior
+    // viewer's gizmo edits don't leak; the hello would otherwise replay them).
     if (xformTarget && gizmo) {
       xformM = identity();
       xformTarget.setWorldTransform(xformM);
@@ -386,22 +460,37 @@ function handleWs(req: Request): Response {
       gizmo.setActive(null);
       scene.syncUniforms();
     }
-    // `widget` tells the client to mount the SAME transform widget it would mount locally, seeded
-    // with the target's start centre — its drags come back as {xform} instead of touching a field.
     socket.send(JSON.stringify({
       type: "hello", proto: PROTO, center, radius, name: sceneName, sceneUrl: SCENE_URL, demo: DEMO,
       rate: GPU_RATE_PER_HR, scaledownS: SCALEDOWN_S,
+      scenes: SCENE_MENU, scene: currentScene,
       widget: xformTarget ? { center: xformC0, m: [...xformM] } : null,
     }));
-    loop();
   };
+  socket.onopen = () => { open = true; sendHello(); loop(); };
   socket.onclose = () => { open = false; settleAck(false); };
   socket.onerror = () => { open = false; settleAck(false); };
-  socket.onmessage = (e) => {
+  socket.onmessage = async (e) => {
     try {
-      // A UNION, not an intersection: the three message shapes have incompatible `type` fields, and
-      // intersecting them collapses the lot to `never`.
-      const m = JSON.parse(e.data as string) as CamMsg | XformMsg | { type: "ack" | "resync" | "cack" | "caps"; av1?: boolean };
+      // A UNION, not an intersection: the message shapes have incompatible `type` fields.
+      const m = JSON.parse(e.data as string) as CamMsg | XformMsg | { type: "ack" | "resync" | "cack" | "caps" | "scene"; av1?: boolean; scene?: string };
+      if (m.type === "scene") {
+        const name = (m as { scene?: string }).scene;
+        if (typeof name !== "string" || name === currentScene || sceneLoading) return;
+        if (!SCENE_MENU.some((x) => x.name === name && x.fits)) {
+          socket.send(JSON.stringify({ type: "sceneError", message: `"${name}" is not available on this GPU` }));
+          return;
+        }
+        sceneLoading = true;
+        socket.send(JSON.stringify({ type: "loading", scene: name }));
+        try { await loadScene(name); }
+        catch (err) { socket.send(JSON.stringify({ type: "sceneError", message: (err as Error).message })); sceneLoading = false; return; }
+        sceneLoading = false;
+        resetClientModel("scene switch");
+        gen++; abortWait();
+        sendHello();   // new center/radius/scene name for the switched scene
+        return;
+      }
       if (m.type === "cam") {
         const c = m as CamMsg;
         // An IDENTICAL camera is not a change: re-sending it must not invalidate anything.
@@ -458,6 +547,7 @@ function handleWs(req: Request): Response {
 
   async function loop() {
     while (open) {
+      if (sceneLoading) { await sleep(50); continue; }
       if (!latest) { await sleep(10); continue; }
       const { w, h, p, f, u, a } = latest;
 

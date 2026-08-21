@@ -91,7 +91,24 @@ export class ImageField implements Field {
   constructor(dev: GPUDevice, data: Float32Array, dims: Vec3, spacing: Vec3, lut: Uint8Array, opts: ImageFieldOpts) {
     const center = opts.center ?? [0, 0, 0];
     this.volTex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    dev.queue.writeTexture({ texture: this.volTex }, data, { bytesPerRow: dims[0] * 4, rowsPerImage: dims[1] }, dims as [number, number, number]);
+    // Upload the 3D texture in Z-slabs. wgpu's writeTexture stages the whole write through ONE
+    // buffer whose size can't exceed the device's maxBufferSize (~4 GB on an L4) — a single write
+    // of a multi-GB volume crashes the backend. Chunking the depth keeps each staging buffer small,
+    // so volumes are bounded only by total VRAM, not by one upload's size.
+    {
+      const bytesPerRow = dims[0] * 4, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
+      const CHUNK = 256 * 1024 * 1024;   // ~256 MB per write — comfortably under any maxBufferSize
+      const slab = Math.max(1, Math.min(dims[2], Math.floor(CHUNK / Math.max(1, sliceBytes))));
+      for (let z = 0; z < dims[2]; z += slab) {
+        const depth = Math.min(slab, dims[2] - z);
+        dev.queue.writeTexture(
+          { texture: this.volTex, origin: { x: 0, y: 0, z } },
+          data,
+          { offset: z * sliceBytes, bytesPerRow, rowsPerImage },
+          [dims[0], dims[1], depth],
+        );
+      }
+    }
     this.lutTex = dev.createTexture({ size: [256, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
     if (opts.ijkToRAS) {   // real (rotated/anisotropic) geometry straight from the scene
