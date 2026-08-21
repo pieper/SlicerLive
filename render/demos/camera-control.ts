@@ -9,6 +9,11 @@ import { CameraInteractor } from "../vtk-interactor.ts";
 export interface CameraControlOpts {
   onChange?: () => void;          // called after every camera change (redraw)
   onLog?: (kind: string, detail: Record<string, unknown>) => void; // optional event log hook
+  // THREE-FINGER = move the picked volume (touch has no good way to grab a fine gizmo handle).
+  // Deltas are CSS px of the finger centroid; the consumer maps them to a camera-plane translate.
+  onVolumeDragStart?: () => void;
+  onVolumeDrag?: (dxCss: number, dyCss: number) => void;
+  onVolumeDragEnd?: () => void;
   /** Gate the whole interactor. Return false to hand the canvas to another controller — e.g.
    *  the endovascular flight, which owns left-drag as first-person LOOK. Suppressing only
    *  `onChange` is not enough: these handlers mutate the camera directly, so both controllers
@@ -39,6 +44,12 @@ export function attachCameraControls(
   // Multi-touch: 1 finger = orbit (via the interactor); 2 fingers = pinch-zoom + two-finger pan.
   const pointers = new Map<number, { x: number; y: number }>();
   let pinch: { dist: number; mx: number; my: number } | null = null;
+  // 3-finger volume drag: centroid at gesture start (CSS px), so deltas are absolute from the start.
+  let triple: { mx: number; my: number } | null = null;
+  const centroid = () => {
+    let mx = 0, my = 0; for (const p of pointers.values()) { mx += p.x; my += p.y; }
+    const n = pointers.size || 1; return { mx: mx / n, my: my / n };
+  };
   const pinchState = () => {
     const [a, b] = [...pointers.values()];
     return { dist: Math.hypot(b.x - a.x, b.y - a.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
@@ -58,6 +69,10 @@ export function attachCameraControls(
     } else if (pointers.size === 2) {
       interactor.end();          // stop the 1-finger orbit; enter pinch
       pinch = pinchState();
+    } else if (pointers.size === 3) {
+      pinch = null;              // 3rd finger: leave pinch, move the picked volume
+      const c = centroid(); triple = { mx: c.mx, my: c.my };
+      opts.onVolumeDragStart?.();
     }
   });
   const endPointer = (e: PointerEvent) => {
@@ -65,6 +80,7 @@ export function attachCameraControls(
     if (!on()) { interactor.end(); pinch = null; return; }
     canvas.releasePointerCapture?.(e.pointerId);
     if (pointers.size < 2) pinch = null;
+    if (pointers.size < 3 && triple) { triple = null; opts.onVolumeDragEnd?.(); }
     if (pointers.size === 1) {   // dropped from pinch back to one finger → resume orbit
       const p = [...pointers.values()][0];
       interactor.start(0, p.x, p.y, canvas.clientHeight, { shift: false, ctrl: false, alt: false });
@@ -79,7 +95,12 @@ export function attachCameraControls(
     if (!pointers.has(e.pointerId)) return;
     const { x, y } = local(e);
     pointers.set(e.pointerId, { x, y });
-    if (pointers.size >= 2) {
+    if (pointers.size >= 3) {
+      const c = centroid();
+      if (triple) opts.onVolumeDrag?.(c.mx - triple.mx, c.my - triple.my);
+      return;
+    }
+    if (pointers.size === 2) {
       const p = pinchState();
       if (pinch) {
         if (p.dist > 0 && pinch.dist > 0) camera.dolly(p.dist / pinch.dist);         // spread = zoom in

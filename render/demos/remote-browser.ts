@@ -14,7 +14,7 @@ import { loadSceneVolumeField } from "../scene-volume.ts";
 import { Reconstructor } from "../reconstructor.ts";
 import { mountAdaptive3d, type Adaptive3d } from "./accum-loop.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
-import { attachWidgetControls, type Handle, projectToCanvasCss } from "./widget-control.ts";
+import { attachWidgetControls, type Handle, projectToCanvasCss, unprojectToCameraPlane } from "./widget-control.ts";
 import { componentOf, makeXformWidget, type XformTarget, type XformWidget, type XMeta } from "./xform-widget.ts";
 import { buildMultiVolume } from "./selftest-scenes.ts";
 import { Av1Presenter } from "../av1-presenter.ts";
@@ -55,7 +55,9 @@ async function main() {
   const recon = new Reconstructor(gpu, srgb);
   recon.setBackground(0.05, 0.06, 0.09);
   // AV1 patches decode + draw through this; gzip/raw patches still go through the Reconstructor.
-  const av1 = Av1Presenter.supported ? new Av1Presenter(gpu, srgb) : null;
+  // Real decode probe (not just "is VideoDecoder defined"): old Safari / older phones lack AV1.
+  const av1CanDecode = await Av1Presenter.canDecode();
+  const av1 = av1CanDecode ? new Av1Presenter(gpu, srgb) : null;
 
   // The remote image lives here between frames; the canvas is a copy of it. Patches paint into it.
   // `surfaceValid` is the safety interlock: a patch may only be applied ON TOP of a full frame at
@@ -329,12 +331,32 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     if (c.sceneUrl) sceneUrl = c.sceneUrl;
     if (!camera) {
       camera = framedCamera(c.center, c.radius);
-      attachCameraControls(canvas, camera, { onChange: onCam });
+      attachCameraControls(canvas, camera, {
+        onChange: onCam,
+        // THREE-FINGER = move the picked volume (the touch-friendly alternative to grabbing a fine
+        // gizmo handle). Same camera-plane translate the gizmo centre does, driven by the centroid.
+        onVolumeDragStart: () => { if (widget) { widget.beginDrag(); pushXform(); } },
+        onVolumeDrag: (dx, dy) => {
+          if (!widget || !camera) return;
+          const r = canvas.getBoundingClientRect();
+          const pivot = widget.pivotWorld();
+          const w0 = unprojectToCameraPlane(camera, canvas.width, canvas.height, r.width / 2, r.height / 2, r.width, r.height, pivot);
+          const w1 = unprojectToCameraPlane(camera, canvas.width, canvas.height, r.width / 2 + dx, r.height / 2 + dy, r.width, r.height, pivot);
+          widget.drag({ kind: "translate-cam" }, w0, w1);
+          pushXform();
+        },
+        onVolumeDragEnd: () => { if (widget) pushXform(); },
+      });
     }
     attachWidget();
   };
 
-  ws?.addEventListener("open", () => status("connected — waiting for scene…"));
+  ws?.addEventListener("open", () => {
+    // Tell the server what this browser can decode; it stays on gzip until this arrives, so a
+    // decoder-less client never receives an AV1 frame it cannot show.
+    ws.send(JSON.stringify({ type: "caps", av1: av1CanDecode }));
+    status("connected — waiting for scene…");
+  });
   // No server, or it went away: fall back to rendering here. The page is never dead in the water.
   const fallbackLocal = async (why: string) => {
     if (mode === "local") return;
@@ -393,20 +415,20 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     frameBytes += buf.byteLength;
     // Big frames arrive in pieces (a cloud ws proxy closes the socket on multi-MB messages) —
     // reassemble, and ack only when the last piece lands so the credit scheme still paces us.
-    // Reassemble chunks first (a big frame is split for the WS proxy limit). AV1 is one intra
-    // image, decoded whole; gzip chunks were independently compressed, so gunzip per chunk.
+    // Reassemble chunks first (a big frame is split for the WS proxy limit), THEN decode the WHOLE:
+    // the server compresses/encodes the entire frame and chunks the RESULT, so a chunk is a slice
+    // of the gzip/AV1 stream, never independently decodable. (Gunzipping per chunk silently worked
+    // for single-chunk frames and looped forever on multi-chunk ones — the gzip-fallback settle bug.)
     let payload: Uint8Array;
     if (chunks > 1) {
       if (chunk === 0) parts.length = 0;
-      let part = new Uint8Array(buf, 32);
-      if (codec === 1) part = await gunzip(part);
-      parts.push(part);
+      parts.push(new Uint8Array(buf, 32));
       if (chunk < chunks - 1) return;
       payload = concat(parts);
     } else {
       payload = new Uint8Array(buf, 32);
-      if (codec === 1) payload = await gunzip(payload);
     }
+    if (codec === 1) payload = await gunzip(payload);
     // ---- APPLY RULES. WebSocket delivery is ordered, so these three rules keep the client's
     // surface exactly consistent with the server's model of it — or trigger a resync that resets
     // both sides to a full frame. A frame that fails a rule is DROPPED whole, never partially or

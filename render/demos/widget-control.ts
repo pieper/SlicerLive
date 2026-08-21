@@ -65,6 +65,24 @@ export function projectToCanvasCss(
   return { x: ((c[0] / c[3]) * 0.5 + 0.5) * rw, y: (1 - ((c[1] / c[3]) * 0.5 + 0.5)) * rh };
 }
 
+/** CSS px in a canvas of size (rw,rh) → world point on the camera-facing plane through `pivot`.
+ *  The inverse of projectToCanvasCss; used by the 3-finger volume drag to move a volume in the
+ *  camera plane the way the gizmo's centre handle does. */
+export function unprojectToCameraPlane(
+  cam: VtkCamera, viewW: number, viewH: number, cssX: number, cssY: number, rw: number, rh: number, pivot: Vec3,
+): Vec3 {
+  const { invVp } = camMatrices(cam, viewW, viewH);
+  const ndcx = (cssX / rw) * 2 - 1, ndcy = 1 - (cssY / rh) * 2;
+  const near = applyMat4(invVp, [ndcx, ndcy, 0]);
+  const far = applyMat4(invVp, [ndcx, ndcy, 1]);
+  const rd: Vec3 = [far[0] - near[0], far[1] - near[1], far[2] - near[2]];
+  const n: Vec3 = [cam.position[0] - cam.focalPoint[0], cam.position[1] - cam.focalPoint[1], cam.position[2] - cam.focalPoint[2]];
+  const denom = rd[0] * n[0] + rd[1] * n[1] + rd[2] * n[2];
+  if (Math.abs(denom) < 1e-9) return [...pivot] as Vec3;
+  const t = ((pivot[0] - near[0]) * n[0] + (pivot[1] - near[1]) * n[1] + (pivot[2] - near[2]) * n[2]) / denom;
+  return [near[0] + rd[0] * t, near[1] + rd[1] * t, near[2] + rd[2] * t];
+}
+
 export interface WidgetControls { detach(): void }
 
 export function attachWidgetControls(
@@ -101,11 +119,15 @@ export function attachWidgetControls(
     const { x, y, rw, rh } = cursorCss(e);
     const { w, h } = opts.getSize();
     const { vp } = camMatrices(camera, w, h);
+    // A finger is far less precise than a cursor: widen the pick radius on touch (≈ Apple's 44 px
+    // minimum) so gizmo handles are grabbable. Nearest-handle wins, so overlap stays unambiguous.
+    const touch = e.pointerType === "touch";
     let best: Handle | null = null, bestD = Infinity;
     for (const hnd of opts.getHandles()) {
       const s = project(vp, hnd.world, rw, rh);
       if (!s) continue;
-      const d = Math.hypot(s.x - x, s.y - y), r = hnd.pickPx ?? 16;
+      const r = (hnd.pickPx ?? 16) * (touch ? 2.75 : 1);
+      const d = Math.hypot(s.x - x, s.y - y);
       if (d < r && d < bestD) { bestD = d; best = hnd; }
     }
     return best;

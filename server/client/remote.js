@@ -2181,6 +2181,16 @@ function attachCameraControls(canvas, camera, opts = {}) {
   canvas.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
   const pointers = /* @__PURE__ */ new Map();
   let pinch = null;
+  let triple = null;
+  const centroid = () => {
+    let mx = 0, my = 0;
+    for (const p of pointers.values()) {
+      mx += p.x;
+      my += p.y;
+    }
+    const n = pointers.size || 1;
+    return { mx: mx / n, my: my / n };
+  };
   const pinchState = () => {
     const [a, b] = [...pointers.values()];
     return { dist: Math.hypot(b.x - a.x, b.y - a.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
@@ -2198,6 +2208,11 @@ function attachCameraControls(canvas, camera, opts = {}) {
     } else if (pointers.size === 2) {
       interactor.end();
       pinch = pinchState();
+    } else if (pointers.size === 3) {
+      pinch = null;
+      const c = centroid();
+      triple = { mx: c.mx, my: c.my };
+      opts.onVolumeDragStart?.();
     }
   });
   const endPointer = (e) => {
@@ -2209,6 +2224,10 @@ function attachCameraControls(canvas, camera, opts = {}) {
     }
     canvas.releasePointerCapture?.(e.pointerId);
     if (pointers.size < 2) pinch = null;
+    if (pointers.size < 3 && triple) {
+      triple = null;
+      opts.onVolumeDragEnd?.();
+    }
     if (pointers.size === 1) {
       const p = [...pointers.values()][0];
       interactor.start(0, p.x, p.y, canvas.clientHeight, { shift: false, ctrl: false, alt: false });
@@ -2223,7 +2242,12 @@ function attachCameraControls(canvas, camera, opts = {}) {
     if (!pointers.has(e.pointerId)) return;
     const { x, y } = local(e);
     pointers.set(e.pointerId, { x, y });
-    if (pointers.size >= 2) {
+    if (pointers.size >= 3) {
+      const c = centroid();
+      if (triple) opts.onVolumeDrag?.(c.mx - triple.mx, c.my - triple.my);
+      return;
+    }
+    if (pointers.size === 2) {
       const p = pinchState();
       if (pinch) {
         if (p.dist > 0 && pinch.dist > 0) camera.dolly(p.dist / pinch.dist);
@@ -2275,6 +2299,18 @@ function projectToCanvasCss(cam, viewW, viewH, world, rw, rh) {
   if (c[3] <= 0) return null;
   return { x: (c[0] / c[3] * 0.5 + 0.5) * rw, y: (1 - (c[1] / c[3] * 0.5 + 0.5)) * rh };
 }
+function unprojectToCameraPlane(cam, viewW, viewH, cssX, cssY, rw, rh, pivot) {
+  const { invVp } = camMatrices(cam, viewW, viewH);
+  const ndcx = cssX / rw * 2 - 1, ndcy = 1 - cssY / rh * 2;
+  const near = applyMat4(invVp, [ndcx, ndcy, 0]);
+  const far = applyMat4(invVp, [ndcx, ndcy, 1]);
+  const rd = [far[0] - near[0], far[1] - near[1], far[2] - near[2]];
+  const n = [cam.position[0] - cam.focalPoint[0], cam.position[1] - cam.focalPoint[1], cam.position[2] - cam.focalPoint[2]];
+  const denom = rd[0] * n[0] + rd[1] * n[1] + rd[2] * n[2];
+  if (Math.abs(denom) < 1e-9) return [...pivot];
+  const t = ((pivot[0] - near[0]) * n[0] + (pivot[1] - near[1]) * n[1] + (pivot[2] - near[2]) * n[2]) / denom;
+  return [near[0] + rd[0] * t, near[1] + rd[1] * t, near[2] + rd[2] * t];
+}
 function attachWidgetControls(canvas, camera, opts) {
   const cursorCss = (e) => {
     const r = canvas.getBoundingClientRect();
@@ -2301,11 +2337,13 @@ function attachWidgetControls(canvas, camera, opts) {
     const { x, y, rw, rh } = cursorCss(e);
     const { w, h } = opts.getSize();
     const { vp } = camMatrices(camera, w, h);
+    const touch = e.pointerType === "touch";
     let best = null, bestD = Infinity;
     for (const hnd of opts.getHandles()) {
       const s = project(vp, hnd.world, rw, rh);
       if (!s) continue;
-      const d = Math.hypot(s.x - x, s.y - y), r = hnd.pickPx ?? 16;
+      const r = (hnd.pickPx ?? 16) * (touch ? 2.75 : 1);
+      const d = Math.hypot(s.x - x, s.y - y);
       if (d < r && d < bestD) {
         bestD = d;
         best = hnd;
@@ -2658,6 +2696,17 @@ var Av1Presenter = class {
   static get supported() {
     return typeof VideoDecoder !== "undefined";
   }
+  /** Real capability probe: WebCodecs present AND this exact AV1 profile is decodable (many old
+   *  browsers/phones have no VideoDecoder, or no AV1). Async — call once at startup. */
+  static async canDecode() {
+    if (typeof VideoDecoder === "undefined") return false;
+    try {
+      const s = await VideoDecoder.isConfigSupported({ codec: "av01.0.04M.08", codedWidth: 1280, codedHeight: 768 });
+      return !!s.supported;
+    } catch {
+      return false;
+    }
+  }
   /** Decode one AV1 intra frame (single self-contained key chunk) to a VideoFrame. Keeps a
    *  persistent decoder, reconfiguring only when the coded size changes. */
   async decode(av1, sw, sh) {
@@ -2766,7 +2815,8 @@ async function main() {
   });
   const recon = new Reconstructor(gpu, srgb);
   recon.setBackground(0.05, 0.06, 0.09);
-  const av1 = Av1Presenter.supported ? new Av1Presenter(gpu, srgb) : null;
+  const av1CanDecode = await Av1Presenter.canDecode();
+  const av1 = av1CanDecode ? new Av1Presenter(gpu, srgb) : null;
   let viewTex = null, viewW = 0, viewH = 0, surfaceValid = false;
   const makeViewTex = (w, h) => {
     const t = gpu.device.createTexture({
@@ -3048,11 +3098,36 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     if (c.sceneUrl) sceneUrl = c.sceneUrl;
     if (!camera) {
       camera = framedCamera(c.center, c.radius);
-      attachCameraControls(canvas, camera, { onChange: onCam });
+      attachCameraControls(canvas, camera, {
+        onChange: onCam,
+        // THREE-FINGER = move the picked volume (the touch-friendly alternative to grabbing a fine
+        // gizmo handle). Same camera-plane translate the gizmo centre does, driven by the centroid.
+        onVolumeDragStart: () => {
+          if (widget) {
+            widget.beginDrag();
+            pushXform();
+          }
+        },
+        onVolumeDrag: (dx, dy) => {
+          if (!widget || !camera) return;
+          const r = canvas.getBoundingClientRect();
+          const pivot = widget.pivotWorld();
+          const w0 = unprojectToCameraPlane(camera, canvas.width, canvas.height, r.width / 2, r.height / 2, r.width, r.height, pivot);
+          const w1 = unprojectToCameraPlane(camera, canvas.width, canvas.height, r.width / 2 + dx, r.height / 2 + dy, r.width, r.height, pivot);
+          widget.drag({ kind: "translate-cam" }, w0, w1);
+          pushXform();
+        },
+        onVolumeDragEnd: () => {
+          if (widget) pushXform();
+        }
+      });
     }
     attachWidget();
   };
-  ws?.addEventListener("open", () => status("connected \u2014 waiting for scene\u2026"));
+  ws?.addEventListener("open", () => {
+    ws.send(JSON.stringify({ type: "caps", av1: av1CanDecode }));
+    status("connected \u2014 waiting for scene\u2026");
+  });
   const fallbackLocal = async (why) => {
     if (mode === "local") return;
     status(`${why} \u2014 rendering locally instead`, true);
@@ -3104,15 +3179,13 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     let payload;
     if (chunks > 1) {
       if (chunk === 0) parts.length = 0;
-      let part = new Uint8Array(buf, 32);
-      if (codec === 1) part = await gunzip(part);
-      parts.push(part);
+      parts.push(new Uint8Array(buf, 32));
       if (chunk < chunks - 1) return;
       payload = concat(parts);
     } else {
       payload = new Uint8Array(buf, 32);
-      if (codec === 1) payload = await gunzip(payload);
     }
+    if (codec === 1) payload = await gunzip(payload);
     const vw = head[2], vh = head[3];
     if (vw !== canvas.width || vh !== canvas.height) {
       requestResync();

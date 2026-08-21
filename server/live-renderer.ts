@@ -54,8 +54,8 @@ if (CODEC === "av1" && SIDECAR_BIN) {
 
 /** Encode a whole patch/frame. Returns the wire bytes + codec id; falls back to gzip if AV1 is off
  *  or the sidecar errors on this frame. `w`,`h` are the SAMPLE dims of `raw`. */
-async function encodeWhole(raw: Uint8Array, w: number, h: number): Promise<{ payload: Uint8Array; codec: number }> {
-  if (sidecar) {
+async function encodeWhole(raw: Uint8Array, w: number, h: number, allowAv1: boolean): Promise<{ payload: Uint8Array; codec: number }> {
+  if (sidecar && allowAv1) {
     const t0 = performance.now();
     dbg(`encode av1 ${w}x${h} (${raw.length / 1e3 | 0}kB) ...`);
     const av1 = await sidecar.encode(raw, w, h, AV1_QP, BG);
@@ -251,6 +251,9 @@ function handleWs(req: Request): Response {
   //   stale      union view-rect currently shown below native resolution (null = fully native)
   //   prevMotion the last probe the client's content is consistent with — committed ONLY after a
   //              frame derived from it was completely sent, so an aborted send never poisons it
+  // Codec is per CLIENT: the browser advertises what it can decode ({caps}); until then we use
+  // gzip, so a decoder-less browser (old Safari, some phones) always gets frames it can show.
+  let clientAv1 = false;
   let needFull = true;
   let stale: Rect | null = null;
   // A settle painted native content over this VIEW region that the motion diff baseline knows
@@ -347,7 +350,7 @@ function handleWs(req: Request): Response {
     // AV1 frames are independent intra images so they cannot be split before decode; the encoded
     // bytes are then chunked for the WS proxy limit and the client reassembles before decoding.
     const te = performance.now();
-    const { payload, codec } = await encodeWhole(raw, sw, sh);
+    const { payload, codec } = await encodeWhole(raw, sw, sh, clientAv1);
     encodeMs = performance.now() - te;
     if (!open || (preempt && gen !== atGen)) return false;
     sentBytes = payload.length;
@@ -395,7 +398,7 @@ function handleWs(req: Request): Response {
     try {
       // A UNION, not an intersection: the three message shapes have incompatible `type` fields, and
       // intersecting them collapses the lot to `never`.
-      const m = JSON.parse(e.data as string) as CamMsg | XformMsg | { type: "ack" | "resync" | "cack" };
+      const m = JSON.parse(e.data as string) as CamMsg | XformMsg | { type: "ack" | "resync" | "cack" | "caps"; av1?: boolean };
       if (m.type === "cam") {
         const c = m as CamMsg;
         // An IDENTICAL camera is not a change: re-sending it must not invalidate anything.
@@ -407,6 +410,10 @@ function handleWs(req: Request): Response {
         latest = c;
         lastMsg = performance.now();
         if (!same) { gen++; genAt = performance.now(); abortWait(); }
+      }
+      else if (m.type === "caps") {
+        clientAv1 = !!(m as { av1?: boolean }).av1 && sidecar !== null;
+        dbg(`client caps: av1=${(m as { av1?: boolean }).av1} -> using ${clientAv1 ? "av1" : "gzip"}`);
       }
       else if (m.type === "ack") gotAck();
       else if (m.type === "cack") gotCack();

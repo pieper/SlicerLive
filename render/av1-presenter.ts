@@ -62,6 +62,18 @@ export class Av1Presenter {
     return typeof VideoDecoder !== "undefined";
   }
 
+  /** Real capability probe: WebCodecs present AND this exact AV1 profile is decodable (many old
+   *  browsers/phones have no VideoDecoder, or no AV1). Async — call once at startup. */
+  static async canDecode(): Promise<boolean> {
+    if (typeof VideoDecoder === "undefined") return false;
+    try {
+      const s = await VideoDecoder.isConfigSupported({ codec: "av01.0.04M.08", codedWidth: 1280, codedHeight: 768 });
+      return !!s.supported;
+    } catch {
+      return false;
+    }
+  }
+
   /** Decode one AV1 intra frame (single self-contained key chunk) to a VideoFrame. Keeps a
    *  persistent decoder, reconfiguring only when the coded size changes. */
   async decode(av1: Uint8Array, sw: number, sh: number): Promise<VideoFrame> {
