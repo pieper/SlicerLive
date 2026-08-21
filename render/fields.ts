@@ -136,6 +136,9 @@ export class ImageField implements Field {
    *  the material uniform on the next syncUniforms()/render, so no pipeline rebuild. */
   setClim(lo: number, hi: number) { this.clim = [lo, hi]; }
   getClim(): [number, number] { return [this.clim[0], this.clim[1]]; }
+  /** Phong shading tuple [ka, kd, ks, shininess] — re-packed into the material uniform next
+   *  render (VR presets carry their own lighting). [1,0,0,1] = flat emission (no shading). */
+  setShade(shade: [number, number, number, number]) { this.shade = [shade[0], shade[1], shade[2], shade[3]]; }
 
   private origP2t?: Mat4;                // sampling matrix + box at identity, for setWorldTransform
   private origBox?: [Vec3, Vec3];

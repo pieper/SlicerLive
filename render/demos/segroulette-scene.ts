@@ -74,6 +74,13 @@ export interface SegrouletteScene {
    *  build; >0 composites it. Lets a semi-transparent VR sit behind the segmentation. */
   setVolumeOpacity(o: number): void;
   volumeOpacity(): number;
+  /** Swap the 3D VR transfer function to a baked CT preset (LUT + clim + lighting), or null to
+   *  restore the grayscale modality VR. Opacity + shift stay applied on top. */
+  setVolumePreset(bake: { lut: Uint8Array; clim: [number, number]; shade: [number, number, number, number] } | null): void;
+  /** Slicer's VR "Shift": offset the whole VR transfer function along the scalar axis by `hu`
+   *  (affects only the 3D volume rendering, not the 2D slice window/level). */
+  setVolumeShift(hu: number): void;
+  volumeShift(): number;
   setSegOpacity(o: number): void;
   segOpacity(): number;
   /** Per-segment opacity (0 = hidden, 0.5 = translucent, 1 = opaque) — 3D SDF shell + slice overlay.
@@ -111,14 +118,24 @@ export function buildSegrouletteScene(
 
   // The source volume: modality-appropriate VR (also the raw scalar the MPR window/levels). This is
   // the ONLY clippable field — the ROI crop spares the segmentation (seg fields are clippable:false).
-  const baseVolLut = modalityLUT(ct.modality);   // kept so the VR opacity control can scale its alpha live
+  // VR transfer function: the grayscale modality LUT is the default; a CT preset can swap in a
+  // colored LUT + its own clim + lighting. `base*` hold the ACTIVE VR TF (grayscale or preset);
+  // the originals restore it. `volShift` offsets the whole TF along the scalar axis (Slicer's VR
+  // "Shift"). scaledVolLut scales the active LUT's alpha for the live opacity control.
+  const grayLut = modalityLUT(ct.modality);
+  const grayClim: [number, number] = [clim[0], clim[1]];
+  const grayShade: [number, number, number, number] = [0.25, 0.7, 0.45, 20];
+  let baseVolLut = grayLut;
+  let baseClim: [number, number] = [clim[0], clim[1]];
+  let baseShade: [number, number, number, number] = [grayShade[0], grayShade[1], grayShade[2], grayShade[3]];
+  let volShift = 0;
   const scaledVolLut = (o: number): Uint8Array => {
     const l = baseVolLut.slice();
     for (let i = 0; i < 256; i++) l[i * 4 + 3] = Math.round(l[i * 4 + 3] * o);
     return l;
   };
   const volumeField = new ImageField(dev, data, dims, [1, 1, 1], baseVolLut, {
-    clim, ijkToRAS: ct.ijkToRAS, shade: [0.25, 0.7, 0.45, 20],
+    clim, ijkToRAS: ct.ijkToRAS, shade: baseShade,
   });
 
   // Pass 1: enumerate renderable segments (skip background/black/whole-grid labels) + build the
@@ -230,6 +247,20 @@ export function buildSegrouletteScene(
       if (was !== showVolume) rebuild();                        // add/remove the VR field only when crossing 0
     },
     volumeOpacity: () => volumeOpacity,
+    setVolumePreset(bake) {
+      if (bake) { baseVolLut = bake.lut; baseClim = [bake.clim[0], bake.clim[1]]; baseShade = bake.shade; }
+      else { baseVolLut = grayLut; baseClim = [grayClim[0], grayClim[1]]; baseShade = grayShade; }
+      volumeField.setLUT(scaledVolLut(volumeOpacity));
+      volumeField.setClim(baseClim[0] + volShift, baseClim[1] + volShift);
+      volumeField.setShade(baseShade);
+      scene.syncUniforms();
+    },
+    setVolumeShift(hu) {
+      volShift = hu;
+      volumeField.setClim(baseClim[0] + volShift, baseClim[1] + volShift);
+      scene.syncUniforms();
+    },
+    volumeShift: () => volShift,
     setSegOpacity(o) {
       segLayerOpacity = Math.max(0, Math.min(1, o));
       const was = showSeg; showSeg = hasSeg && segLayerOpacity > 0.001;

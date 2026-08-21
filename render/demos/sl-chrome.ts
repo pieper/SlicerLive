@@ -18,6 +18,12 @@ export interface VizControl {
   getOpacity?: () => number;
   setOpacity?: (o: number) => void;   // continuous 0..1 (hot-updates while dragging)
   color?: [number, number, number];   // fill tint for the opacity chip (default cyan)
+  /** Plain range slider (e.g. Slicer's VR "Shift") — rendered as a label + native <input range>
+   *  + live value, on its own row. Distinct from the tri-state opacity chip. */
+  slider?: { min: number; max: number; step?: number; get: () => number; set: (v: number) => void; format?: (v: number) => string };
+  /** A value pill that opens a demo-supplied dialog (e.g. the VR-preset thumbnail menu). The row
+   *  shows text() on the right; clicking runs run(). */
+  button?: { text: () => string; run: () => void };
 }
 /** A labelled dropdown — e.g. picking which transfer function to apply to a CT. */
 export interface SelectControl {
@@ -270,8 +276,44 @@ export function installChrome(opts: ChromeOpts): Chrome {
       if (sec !== sectionSeen) { heading(sec, firstHead); sectionSeen = sec; firstHead = false; }
       const row = document.createElement("div");
       row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:14px;padding:5px 0;";
+      if (c.slider) {   // plain range slider (Slicer VR "Shift") — label + value on top, slider below
+        row.style.cssText = "display:flex;flex-direction:column;gap:4px;padding:6px 0;";
+        const top = document.createElement("div");
+        top.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;";
+        const lab = document.createElement("span"); lab.textContent = c.label;
+        const val = document.createElement("span");
+        val.style.cssText = "font:600 11px ui-monospace,Menlo,monospace;color:#9fe9ff;font-variant-numeric:tabular-nums;";
+        top.appendChild(lab); top.appendChild(val);
+        const inp = document.createElement("input");
+        inp.type = "range";
+        inp.min = String(c.slider.min); inp.max = String(c.slider.max); inp.step = String(c.slider.step ?? 1);
+        inp.value = String(c.slider.get());
+        inp.style.cssText = "width:100%;accent-color:#54c6f0;cursor:pointer;";
+        const fmt = c.slider.format ?? ((v: number) => String(Math.round(v)));
+        const paint = () => { val.textContent = fmt(c.slider!.get()); };
+        inp.oninput = () => { c.slider!.set(parseFloat(inp.value)); paint(); opts.onChange?.(); };
+        inp.onpointerdown = (e) => e.stopPropagation();  // don't count as an outside-click
+        paint();
+        row.appendChild(top); row.appendChild(inp);
+        pop.appendChild(row);
+        rows.push({ c, row, repaint: () => { inp.value = String(c.slider!.get()); paint(); } });
+        continue;
+      }
       const lab = document.createElement("span"); lab.textContent = c.label;
       row.appendChild(lab);
+      if (c.button) {   // value pill that opens a demo dialog (VR-preset thumbnail menu)
+        const pill = document.createElement("span");
+        pill.style.cssText = "max-width:60%;border-radius:7px;padding:4px 10px;cursor:pointer;white-space:nowrap;" +
+          "overflow:hidden;text-overflow:ellipsis;font:600 12px -apple-system,system-ui,sans-serif;color:#eaf0ff;" +
+          "background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.20);";
+        pill.textContent = c.button.text();
+        pill.onclick = (e) => { e.stopPropagation(); c.button!.run(); };
+        pill.onpointerdown = (e) => e.stopPropagation();
+        row.appendChild(pill);
+        pop.appendChild(row);
+        rows.push({ c, row, repaint: () => { pill.textContent = c.button!.text(); } });
+        continue;
+      }
       if (c.getOpacity && c.setOpacity) {   // unified opacity control (tri-state click + drag slider)
         const box = document.createElement("span");
         box.style.cssText = OPBOX_CSS;

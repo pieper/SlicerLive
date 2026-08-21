@@ -28,6 +28,8 @@ import { installChrome, type VizControl } from "./sl-chrome.ts";
 import { loadSeries } from "../vendor/idc_tools/index.js";
 import { type BirApi, mountBir, type Plane } from "./bir.ts";
 import { downloadStudyWithDialog, type SeriesRef, shareStudy } from "./idc-share.ts";
+import { CT_VR_PRESETS, presetLUT } from "../ct-vr-presets.ts";
+import { openVrPresetMenu, type VrPresetItem } from "./vr-preset-menu.ts";
 import type { Vec3 } from "../mat4.ts";
 
 // The demo case: an arbitrary KiTS kidney-tumour study (IDC c4kc_kits · KiTS-00051) — the
@@ -550,6 +552,68 @@ async function main() {
     onJump: jumpAll,
   });
 
+  // ---- 3D volume-rendering preset + shift (Slicer/OHIF CT presets) ------------------------
+  // vrPreset = active preset id (null = grayscale W/L VR). vrShift = Slicer's VR "Shift" (offset
+  // the whole transfer function along the scalar axis). Shift range derives from the actual data
+  // range (sampled), like Slicer's shift slider spanning the scalar range.
+  let vrPreset: string | null = null;
+  let vrShift = 0;
+  const vd = res.ct.vol;
+  let vmin = Infinity, vmax = -Infinity;
+  const vstride = Math.max(1, Math.floor(vd.length / 2_000_000));
+  for (let i = 0; i < vd.length; i += vstride) { const v = vd[i]; if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
+  const shiftRange = Math.max(200, (vmax - vmin) / 2);
+  const bakeOf = (name: string | null) => name ? presetLUT(CT_VR_PRESETS.find((p) => p.name === name)!) : null;
+  const presetLabel = () => vrPreset ? (CT_VR_PRESETS.find((p) => p.name === vrPreset)?.label ?? vrPreset) : "Default (W/L)";
+  const applyVrPreset = (name: string | null) => {
+    vrPreset = name;
+    sc.setVolumePreset(bakeOf(name));
+    if (sc.volumeOpacity() <= 0) sc.setVolumeOpacity(1); // reveal the VR so the preset is visible
+    draw3d();
+    xhair?.redraw();
+  };
+  const applyVrShift = (hu: number) => { vrShift = hu; sc.setVolumeShift(hu); draw3d(); xhair?.redraw(); };
+
+  // On-the-fly thumbnails: render THIS volume at the CURRENT camera with each preset into a small
+  // WebGPU canvas. Full opacity, no shift, segmentation hidden for a clean preview; live state is
+  // restored afterward.
+  const renderPresetThumbnails = (): VrPresetItem[] => {
+    const THUMB = 116;
+    const savedOp = sc.volumeOpacity(), savedShift = sc.volumeShift(), savedSeg = sc.segOpacity();
+    sc.setVolumeShift(0);
+    if (savedSeg > 0) sc.setSegOpacity(0);
+    if (savedOp < 1) sc.setVolumeOpacity(1);
+    const entries: { name: string | null; label: string }[] = [
+      { name: null, label: "Default (W/L)" },
+      ...CT_VR_PRESETS.map((p) => ({ name: p.name, label: p.label })),
+    ];
+    const items: VrPresetItem[] = [];
+    for (const e of entries) {
+      const c = document.createElement("canvas");
+      c.width = THUMB; c.height = THUMB;
+      const cxt = c.getContext("webgpu") as GPUCanvasContext;
+      cxt.configure({ device: gpu.device, format: preferred, viewFormats: [srgb], alphaMode: "opaque" });
+      sc.setVolumePreset(bakeOf(e.name));
+      sc.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, THUMB, THUMB);
+      sc.scene.renderToView(cxt.getCurrentTexture().createView({ format: srgb }), THUMB, THUMB);
+      items.push({ name: e.name, label: e.label, canvas: c });
+    }
+    // restore live VR state
+    sc.setVolumePreset(bakeOf(vrPreset));
+    sc.setVolumeShift(savedShift);
+    if (savedSeg > 0) sc.setSegOpacity(savedSeg);
+    if (savedOp < 1) sc.setVolumeOpacity(savedOp);
+    draw3d();
+    return items;
+  };
+  Object.assign((globalThis as Record<string, unknown>).__birDbg as object, {
+    presets: () => CT_VR_PRESETS.map((p) => p.name),
+    setPreset: (name: string | null) => applyVrPreset(name),
+    setShift: (hu: number) => applyVrShift(hu),
+    vrState: () => ({ preset: vrPreset, shift: vrShift, shiftRange, dataRange: [vmin, vmax] }),
+    thumbCount: () => renderPresetThumbnails().length,
+  });
+
   // SlicerLive badge popup: 3D volume-rendering + segmentation controls (NON-BIR), anchored
   // to the 3D cell — the SlicerLive-native version of the reader's "Live" controls.
   const controls: VizControl[] = [
@@ -562,6 +626,24 @@ async function main() {
         xhair?.redraw();
       },
       color: [0.75, 0.78, 0.85],
+    },
+    // Slicer's VR "Shift" — a plain slider directly below the opacity control.
+    {
+      label: "Shift",
+      slider: {
+        min: -shiftRange,
+        max: shiftRange,
+        step: Math.max(1, Math.round(shiftRange / 200)),
+        get: () => vrShift,
+        set: (v) => applyVrShift(v),
+        format: (v) => (v > 0 ? "+" : "") + Math.round(v),
+      },
+      disabled: () => sc.volumeOpacity() <= 0,
+    },
+    // Volume-rendering preset — opens the on-the-fly thumbnail menu (Slicer/OHIF CT presets).
+    {
+      label: "Preset",
+      button: { text: () => presetLabel(), run: () => openVrPresetMenu({ items: renderPresetThumbnails(), current: vrPreset, onPick: applyVrPreset }) },
     },
     {
       label: "Segmentation",
