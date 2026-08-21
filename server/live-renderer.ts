@@ -128,10 +128,30 @@ let xformC0: Vec3 = [0, 0, 0];
 let xformM: Mat4 = identity();
 let currentScene = "";
 const fieldCache = new Map<string, ImageField>();
+let loadToken = 0;                                             // bumped per scene switch; stale upgrades check it
+let pendingUpgrade: { field: ImageField; token: number } | null = null;   // full-res field awaiting swap-in
+let notifyRefined: (() => void) | null = null;                // tell the client the swap happened
+interface ZarrLevel { level: number; dir?: string; dataset?: string; shape: [number, number, number]; chunks: [number, number, number]; chunkGrid: [number, number, number]; dtype: string; bytes?: number; ijkToRAS: number[]; dims: [number, number, number]; }
+interface ZarrMeta { levels?: ZarrLevel[]; zarr?: ZarrDesc; ijkToRAS: number[]; dims: [number, number, number]; range: [number, number]; preset?: string; bytes?: number; }
+
+/** Point the shared scene (gizmo + camera framing) at one specimen field. Shared by proxy, full, and
+ *  the cached path so the transform gizmo and framing are identical however the volume arrived. */
+function setupSpecimenScene(field: ImageField, _spec: Specimen): void {
+  xformTarget = field;
+  xformC0 = field.worldCenter();
+  gizmo = new TransformGizmoField(xformC0, 88);
+  fields = [field, gizmo];
+  const [lo, hi] = field.aabb();
+  center = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+  radius = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2 * 1.15;
+}
 
 /** Load a scene by name ("multi" or a MORPHO key). Rebuilds the shared renderer. */
-async function loadScene(name: string, onProgress?: (done: number, total: number) => void): Promise<void> {
+async function loadScene(name: string, onProgress?: (done: number, total: number) => void, onRefined?: () => void): Promise<void> {
   if (!SCENES.includes(name)) throw new Error(`unknown scene "${name}"`);
+  loadToken++;                       // invalidate any in-flight upgrade from a previous scene
+  pendingUpgrade = null;
+  notifyRefined = onRefined ?? null;
   if (name === "multi") {
     const sc = await buildMultiVolume(gpu.device, (n) => { mb += n; });
     xformTarget = sc.pano.field;
@@ -146,43 +166,58 @@ async function loadScene(name: string, onProgress?: (done: number, total: number
     const spec = MORPHO[name];
     const fit = volFit(spec.dims);
     if (!fit.fits) throw new Error(`${spec.label} (${spec.dims.join("×")}, ${fit.gib.toFixed(1)} GB) does not fit — ${fit.reason}`);
-    let field = fieldCache.get(name);
-    if (!field) {
-      const t0 = performance.now();
-      let data: Float32Array, dims: [number, number, number], range: [number, number], ijkToRAS: number[], presetName = spec.preset;
-      if (spec.zarrBase) {
-        // Chunked zarr on JS2: fetch the tiny meta.json, then pull all chunks in PARALLEL (much
-        // faster wall-clock than one big NRRD stream) — render/zarr.ts gunzips each and assembles.
-        console.log(`[live-renderer] fetching ${spec.label} (zarr, parallel) …`);
-        const meta = await (await fetch(spec.zarrBase + "meta.json")).json() as { zarr: ZarrDesc; ijkToRAS: number[]; range: [number, number]; preset?: string; bytes?: number };
-        const total = meta.bytes ?? 0;
-        let done = 0, lastSent = 0;
-        onProgress?.(0, total);   // let the client show the bar + seed its ETA immediately
-        const zv = await fetchZarrVolume(spec.zarrBase, meta.zarr, (n) => {
-          mb += n; done += n;
-          const now = performance.now();
-          if (onProgress && (now - lastSent > 100 || done >= total)) { lastSent = now; onProgress(done, total); }
-        });
-        data = zv.data; dims = zv.dims; range = zv.range; ijkToRAS = meta.ijkToRAS; presetName = meta.preset || spec.preset;
+    const cached = fieldCache.get(name);
+    if (cached) {
+      setupSpecimenScene(cached, spec);            // full res already in VRAM — no proxy needed
+    } else if (spec.zarrBase) {
+      // MULTISCALE: render the coarsest level immediately (a low-res proxy), then fetch the full
+      // resolution in the BACKGROUND and swap it in — so a big volume is interactive in ~1s instead
+      // of after the whole download + upload.
+      const base = spec.zarrBase;   // capture (narrowing is lost inside the async upgrade closure)
+      const meta = await (await fetch(base + "meta.json")).json() as ZarrMeta;
+      const vp = await fetchVP(meta.preset || spec.preset).catch(() => null);
+      const mkField = (zv: { data: Float32Array; dims: [number, number, number]; range: [number, number] }, ijk: number[]) => {
+        const { lut, clim, shade } = vp ? lutFromVP(vp, zv.range) : { lut: buildGrayLut(), clim: zv.range, shade: [0.25, 0.75, 0.5, 24] as [number, number, number, number] };
+        return new ImageField(gpu.device, zv.data, zv.dims, [1, 1, 1], lut, { clim, ijkToRAS: ijk, shade });
+      };
+      const levels: ZarrLevel[] = meta.levels ?? [{ ...(meta.zarr as ZarrDesc), ijkToRAS: meta.ijkToRAS, dims: meta.dims, bytes: meta.bytes ?? 0, level: 0 }];
+      const descOf = (L: ZarrLevel): ZarrDesc => ({ dir: L.dir, dataset: L.dataset, shape: L.shape, chunks: L.chunks, chunkGrid: L.chunkGrid, dtype: L.dtype });
+
+      const coarse = levels[levels.length - 1];
+      console.log(`[live-renderer] ${spec.label} proxy L${coarse.level} ${coarse.dims.join("×")} …`);
+      const cz = await fetchZarrVolume(base, descOf(coarse), (n) => { mb += n; });
+      const proxy = mkField(cz, coarse.ijkToRAS);
+      setupSpecimenScene(proxy, spec);
+
+      if (levels.length > 1) {
+        const myToken = loadToken;
+        const full0 = levels[0];
+        (async () => {
+          const total = full0.bytes ?? 0;
+          let done = 0, lastSent = 0;
+          onProgress?.(0, total);
+          const zv = await fetchZarrVolume(base, descOf(full0), (n) => {
+            mb += n; done += n; const now = performance.now();
+            if (onProgress && (now - lastSent > 100 || done >= total)) { lastSent = now; onProgress(done, total); }
+          });
+          if (myToken !== loadToken) return;      // a newer scene switch superseded this upgrade
+          const fullField = mkField(zv, full0.ijkToRAS);
+          if (myToken !== loadToken) return;
+          fieldCache.set(name, fullField);
+          pendingUpgrade = { field: fullField, token: myToken };   // the render loop swaps it in
+        })().catch((e) => console.error(`[live-renderer] ${name} upgrade failed:`, e));
       } else {
-        console.log(`[live-renderer] fetching ${spec.label} (nrrd) …`);
-        const nrrd = await loadNrrd(spec.url, (n) => { mb += n; });
-        data = nrrd.data; dims = nrrd.dims; range = nrrd.range; ijkToRAS = nrrd.ijkToRAS;
+        fieldCache.set(name, proxy);
       }
-      const vp = await fetchVP(presetName).catch(() => null);
-      const { lut, clim, shade } = vp ? lutFromVP(vp, range) : { lut: buildGrayLut(), clim: range, shade: [0.25, 0.75, 0.5, 24] as [number, number, number, number] };
-      field = new ImageField(gpu.device, data, dims, [1, 1, 1], lut, { clim, ijkToRAS, shade });
+    } else {
+      console.log(`[live-renderer] fetching ${spec.label} (nrrd) …`);
+      const nrrd = await loadNrrd(spec.url, (n) => { mb += n; });
+      const vp = await fetchVP(spec.preset).catch(() => null);
+      const { lut, clim, shade } = vp ? lutFromVP(vp, nrrd.range) : { lut: buildGrayLut(), clim: nrrd.range, shade: [0.25, 0.75, 0.5, 24] as [number, number, number, number] };
+      const field = new ImageField(gpu.device, nrrd.data, nrrd.dims, [1, 1, 1], lut, { clim, ijkToRAS: nrrd.ijkToRAS, shade });
       fieldCache.set(name, field);
-      console.log(`[live-renderer] ${spec.label} ${dims.join("×")} range [${range}] in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+      setupSpecimenScene(field, spec);
     }
-    // a transform gizmo on the specimen, so it is interactive like the multi scene
-    xformTarget = field;
-    xformC0 = field.worldCenter();
-    gizmo = new TransformGizmoField(xformC0, 88);
-    fields = [field, gizmo];
-    const [lo, hi] = field.aabb();
-    center = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
-    radius = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2 * 1.15;
     sceneName = spec.label;
     detail = spec.dims.join("×");
   }
@@ -504,7 +539,13 @@ function handleWs(req: Request): Response {
         }
         sceneLoading = true;
         socket.send(JSON.stringify({ type: "loading", scene: name }));
-        try { await loadScene(name, (done, total) => socket.send(JSON.stringify({ type: "loadProgress", scene: name, done, total }))); }
+        try {
+          await loadScene(
+            name,
+            (done, total) => socket.send(JSON.stringify({ type: "loadProgress", scene: name, done, total })),
+            () => socket.send(JSON.stringify({ type: "refined", scene: name })),
+          );
+        }
         catch (err) { socket.send(JSON.stringify({ type: "sceneError", message: (err as Error).message })); sceneLoading = false; return; }
         sceneLoading = false;
         resetClientModel("scene switch");
@@ -569,6 +610,15 @@ function handleWs(req: Request): Response {
   async function loop() {
     while (open) {
       if (sceneLoading) { await sleep(50); continue; }
+      if (pendingUpgrade && pendingUpgrade.token === loadToken) {
+        const f = pendingUpgrade.field; pendingUpgrade = null;
+        xformTarget = f; f.setWorldTransform(xformM);   // keep the transform the user set on the proxy
+        fields = [f, gizmo!];
+        scene.build(fields); scene.syncUniforms();
+        gen++; abortWait();
+        console.log("[live-renderer] upgraded to full resolution");
+        notifyRefined?.();
+      }
       if (!latest) { await sleep(10); continue; }
       const { w, h, p, f, u, a } = latest;
 

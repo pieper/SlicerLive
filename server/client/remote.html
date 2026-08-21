@@ -28,6 +28,10 @@
             color: #8a93a6; background: rgba(10,12,18,.55); padding: 3px 8px; border-radius: 6px; max-width: 70vw;
             pointer-events: none; }
   #credit:empty { display: none; }
+  #refine { position: fixed; right: 12px; bottom: 10px; z-index: 6; font: 600 12px -apple-system, system-ui, sans-serif;
+            color: #cfe6ff; background: rgba(20,40,66,.82); border: 1px solid #2e6ea0; padding: 5px 11px; border-radius: 999px;
+            box-shadow: 0 2px 10px rgba(0,0,0,.35); pointer-events: none; }
+  #refine:empty { display: none; }
   #scene { font: 600 12px -apple-system, system-ui, sans-serif; background: #12151f; color: #dfe4f0; border: 1px solid #2a3040; border-radius: 7px; padding: 6px 9px; max-width: 40vw; }
   #scene:disabled { opacity: .5; }
   #mode { font: 600 12px -apple-system, system-ui, sans-serif; color: #04121c; cursor: pointer;
@@ -108,6 +112,7 @@
   </div>
 </div>
 <div id="credit"></div>
+<div id="refine"></div>
 <script type="module" src="./remote.js"></script>
 </body>
 </html>

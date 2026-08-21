@@ -3196,6 +3196,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let coldEtaMs = 14e3;
   let loadActive = false, loadStartTs = 0, loadDone = 0, loadTotal = 0, loadLastTs = 0, loadLastDone = 0;
   let bucketBps = Number(localStorage.getItem("lr_bucket_bps")) || 6e7;
+  let refining = false;
+  const refineEl = document.getElementById("refine");
   let connState = serverUrl ? "connecting" : "off";
   const IDLE_OPTS = [["5s", 5e3], ["15s", 15e3], ["30s", 3e4], ["1m", 6e4], ["2m", 12e4], ["5m", 3e5], ["10m", 6e5]];
   let idleMs = Number(localStorage.getItem("lr_idle") ?? 12e4);
@@ -3341,6 +3343,11 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   const applyMessage = async (e) => {
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data);
+      if (m.type === "refined") {
+        refining = false;
+        if (refineEl) refineEl.textContent = "";
+        return;
+      }
       if (m.type === "loading") {
         loadActive = true;
         loadStartTs = performance.now();
@@ -3348,6 +3355,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         loadTotal = 0;
         loadLastTs = loadStartTs;
         loadLastDone = 0;
+        refining = false;
+        if (refineEl) refineEl.textContent = "";
         showOverlay("starting", "Loading " + m.scene + " \u2026", "", true, []);
         if (ov) ov.classList.add("wake");
         return;
@@ -3361,6 +3370,14 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
           localStorage.setItem("lr_bucket_bps", String(Math.round(bucketBps)));
           loadLastTs = now;
           loadLastDone = loadDone;
+        }
+        if (ovMode !== "starting") {
+          refining = true;
+          if (refineEl) {
+            const pct = loadTotal > 0 ? Math.floor(loadDone / loadTotal * 100) : 0;
+            const left = loadTotal > 0 ? Math.max(0, (loadTotal - loadDone) / Math.max(1, bucketBps)) : 0;
+            refineEl.textContent = `refining ${pct}% \xB7 ~${Math.round(left)}s`;
+          }
         }
         return;
       }

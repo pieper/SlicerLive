@@ -399,6 +399,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   // Per-operation scene-load progress (download from the bucket), separate from the wake timer.
   let loadActive = false, loadStartTs = 0, loadDone = 0, loadTotal = 0, loadLastTs = 0, loadLastDone = 0;
   let bucketBps = Number(localStorage.getItem("lr_bucket_bps")) || 60e6;  // bytes/s EMA, measured this + prior sessions
+  let refining = false;                 // full-res streaming in behind the low-res proxy
+  const refineEl = document.getElementById("refine");
   type Conn = "off" | "connecting" | "live" | "sleeping" | "error";
   let connState: Conn = serverUrl ? "connecting" : "off";
   const IDLE_OPTS: [string, number][] = [["5s", 5e3], ["15s", 15e3], ["30s", 30e3], ["1m", 60e3], ["2m", 120e3], ["5m", 300e3], ["10m", 600e3]];
@@ -513,9 +515,11 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   const applyMessage = async (e: MessageEvent) => {
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data as string);
+      if (m.type === "refined") { refining = false; if (refineEl) refineEl.textContent = ""; return; }
       if (m.type === "loading") {
         loadActive = true; loadStartTs = performance.now(); loadDone = 0; loadTotal = 0;
         loadLastTs = loadStartTs; loadLastDone = 0;
+        refining = false; if (refineEl) refineEl.textContent = "";
         showOverlay("starting", "Loading " + m.scene + " …", "", true, []);
         if (ov) ov.classList.add("wake");
         return;
@@ -527,6 +531,14 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
           bucketBps = 0.7 * bucketBps + 0.3 * (db / (dt / 1000));
           localStorage.setItem("lr_bucket_bps", String(Math.round(bucketBps)));
           loadLastTs = now; loadLastDone = loadDone;
+        }
+        if (ovMode !== "starting") {   // proxy is already on screen -> this is the background upgrade
+          refining = true;
+          if (refineEl) {
+            const pct = loadTotal > 0 ? Math.floor((loadDone / loadTotal) * 100) : 0;
+            const left = loadTotal > 0 ? Math.max(0, (loadTotal - loadDone) / Math.max(1, bucketBps)) : 0;
+            refineEl.textContent = `refining ${pct}% · ~${Math.round(left)}s`;
+          }
         }
         return;
       }
