@@ -9,7 +9,7 @@ import { loadNrrd } from "../render/nrrd.ts";
 const [name, url, preset, credit] = Deno.args;
 if (!name || !url) { console.error("usage: zarr_convert <name> <nrrd-url> <preset> <credit>"); Deno.exit(1); }
 const OUT = `/private/tmp/claude-501/-Users-pieper-slicer-SlicerLive/62f9fa2c-b0b6-4416-8e46-0eb7748e23fc/scratchpad/zarr/${name}`;
-const CHUNK: [number, number, number] = [64, 128, 128]; // (cz,cy,cx)
+const CHUNK: [number, number, number] = [128, 256, 256]; // (cz,cy,cx) ~8-16MB raw -> hundreds of objects
 
 console.log(`[zarr] loading ${name} …`);
 const t0 = performance.now();
