@@ -38,12 +38,16 @@ export interface ChromeOpts {
   controls?: VizControl[];                                   // viz toggles (empty → branding only)
   selects?: SelectControl[];                                 // dropdowns, rendered above the toggles
   segments?: SegmentControls;                                // per-segment visibility list (swatch + toggle)
-  help?: { title: string; rows: [string, string][] }[];     // override the default cheat-sheet
+  help?: { title: string; rows: [string, string][] }[] | false; // override the cheat-sheet; false = no "?" button (host has its own help)
   onChange?: () => void;                                     // after a toggle (redraw)
   anchor?: HTMLElement;                                      // float the badge over this element's top-right corner (e.g. the 3D cell); falls back to the viewport corner when hidden/absent
   about?: { label?: string; url?: string } | false;         // "About" row at the popup bottom (default: About SlicerLive → repo); false to omit
+  container?: HTMLElement;                                   // where to append the fixed badge/popup/help (default document.body). Set to a high-z host overlay so the badge isn't painted under it (SlicerRad's viewer).
 }
-export interface Chrome { refresh(): void }
+/** refresh() re-reads control state into the popup. destroy() removes all chrome DOM +
+ *  listeners — REQUIRED for a host that opens/closes the viewer (e.g. SlicerRad), so the
+ *  fixed badge/popup don't leak; single-page demos can ignore it. */
+export interface Chrome { refresh(): void; destroy(): void }
 
 const DEFAULT_HELP: { title: string; rows: [string, string][] }[] = [
   { title: "3D view", rows: [
@@ -73,18 +77,22 @@ function glass(el: HTMLElement, extra = "") {
 
 export function installChrome(opts: ChromeOpts): Chrome {
   const controls = opts.controls ?? [];
-  const help = opts.help ?? DEFAULT_HELP;
+  const host = opts.container ?? document.body;
+  const help = (opts.help === false ? [] : opts.help) ?? DEFAULT_HELP;
 
-  // ---- "?" help button (top-left) ----
-  const helpBtn = document.createElement("button");
-  helpBtn.textContent = "?";
-  helpBtn.title = "Controls & key bindings";
-  helpBtn.style.cssText = "position:fixed;top:12px;left:12px;z-index:74;width:32px;height:32px;padding:0;cursor:pointer;" +
-    "display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:#cfe6ff;" +
-    "font:700 15px -apple-system,system-ui,sans-serif;";
-  glass(helpBtn);
-  helpBtn.onclick = openHelp;
-  document.body.appendChild(helpBtn);
+  // ---- "?" help button (top-left) — omitted when help === false (host supplies its own) ----
+  let helpBtn: HTMLButtonElement | null = null;
+  if (opts.help !== false) {
+    helpBtn = document.createElement("button");
+    helpBtn.textContent = "?";
+    helpBtn.title = "Controls & key bindings";
+    helpBtn.style.cssText = "position:fixed;top:12px;left:12px;z-index:74;width:32px;height:32px;padding:0;cursor:pointer;" +
+      "display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:#cfe6ff;" +
+      "font:700 15px -apple-system,system-ui,sans-serif;";
+    glass(helpBtn);
+    helpBtn.onclick = openHelp;
+    host.appendChild(helpBtn);
+  }
 
   let helpEl: HTMLElement | null = null;
   function openHelp() {
@@ -107,7 +115,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
     }
     panel.innerHTML += `<div style="margin-top:16px;font-size:12px;color:rgba(232,238,255,.55)">Press <b style="color:#fff5d6">esc</b> or click outside to dismiss.</div>`;
     helpEl.appendChild(panel);
-    document.body.appendChild(helpEl);
+    host.appendChild(helpEl);
     document.addEventListener("keydown", escClose, true);
   }
   function escClose(e: KeyboardEvent) { if (e.key === "Escape") closeHelp(); }
@@ -116,6 +124,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
   // ---- SlicerLive logo BADGE (dark rounded mark + "SlicerLive" wordmark), floated over the corner
   // of the 3D view (opts.anchor) like the legacy demo — readable, and the hover target for the popup.
   const logo = document.createElement("div");
+  logo.id = "sl-badge";
   logo.title = "SlicerLive — visualization";
   logo.style.cssText = "position:fixed;z-index:74;cursor:pointer;user-select:none;display:flex;flex-direction:column;" +
     "align-items:center;gap:4px;padding:7px 12px 6px;border-radius:14px;background:#121826;" +
@@ -129,7 +138,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
   word.style.cssText = "font:800 12px/1 -apple-system,system-ui,sans-serif;letter-spacing:.5px;color:#eef7ff;" +
     "text-shadow:0 0 14px rgba(255,210,90,.4);";
   logo.appendChild(mark); logo.appendChild(word);
-  document.body.appendChild(logo);
+  host.appendChild(logo);
 
   // Keep the badge pinned to the anchor's (3D cell) top-right corner; fall back to the viewport corner
   // when the anchor is hidden (another view maximized) or absent.
@@ -138,7 +147,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
     const r = a && a.getClientRects().length ? a.getBoundingClientRect() : null;
     if (r && r.width > 2 && r.height > 2) {
       logo.style.top = Math.round(r.top + 8) + "px";
-      logo.style.right = Math.round(window.innerWidth - r.right + 8) + "px";
+      logo.style.right = Math.round(globalThis.innerWidth - r.right + 8) + "px";
     } else {
       logo.style.top = "10px"; logo.style.right = "12px";
     }
@@ -146,14 +155,16 @@ export function installChrome(opts: ChromeOpts): Chrome {
   place();
   requestAnimationFrame(place);
   globalThis.addEventListener("resize", place);
-  if (opts.anchor && "ResizeObserver" in globalThis) new ResizeObserver(place).observe(opts.anchor);
+  const anchorRO = opts.anchor && "ResizeObserver" in globalThis ? new ResizeObserver(place) : null;
+  anchorRO?.observe(opts.anchor!);
 
   const pop = document.createElement("div");
+  pop.id = "sl-popup";
   pop.style.cssText = "position:fixed;z-index:73;min-width:210px;max-width:300px;max-height:84vh;overflow-y:auto;padding:10px 12px;border-radius:12px;" +
     "color:#eaf0ff;font:13px -apple-system,system-ui,sans-serif;opacity:0;pointer-events:none;transform:translateY(-6px);" +
     "transition:opacity 120ms ease-out,transform 120ms ease-out;";
   glass(pop);
-  document.body.appendChild(pop);
+  host.appendChild(pop);
 
   // Toggle responsiveness (user report): a change can be heavy (re-bake + scene rebuild), and running
   // it synchronously in the click handler froze even the checkbox until the render finished. Instead:
@@ -358,7 +369,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
     refresh();
     const b = logo.getBoundingClientRect();     // anchor the popup just below the badge
     pop.style.top = Math.round(b.bottom + 6) + "px";
-    pop.style.right = Math.round(window.innerWidth - b.right) + "px";
+    pop.style.right = Math.round(globalThis.innerWidth - b.right) + "px";
     pop.style.opacity = "1"; pop.style.pointerEvents = "auto"; pop.style.transform = "translateY(0)";
   };
   const hide = () => { pop.style.opacity = "0"; pop.style.pointerEvents = "none"; pop.style.transform = "translateY(-6px)"; };
@@ -368,5 +379,15 @@ export function installChrome(opts: ChromeOpts): Chrome {
   logo.onmouseleave = () => { logo.style.transform = "scale(1)"; if (!pinned) setTimeout(() => { if (!pop.matches(":hover") && !pinned) hide(); }, 120); };
   pop.onmouseleave = () => { if (!pinned) hide(); };
 
-  return { refresh };
+  const destroy = () => {
+    globalThis.removeEventListener("resize", place);
+    anchorRO?.disconnect();
+    document.removeEventListener("keydown", escClose, true);
+    helpBtn?.remove();
+    helpEl?.remove();
+    logo.remove();
+    pop.remove();
+  };
+
+  return { refresh, destroy };
 }

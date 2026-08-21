@@ -506,10 +506,71 @@ export function mountBir(cfg: BirCfg): BirApi {
   sep();
 
   // -- windowing group --
-  btn("presets", "presets", "Window Presets (CT: Soft Tissue / Lung / Bone / Brain + Auto)", () => {
-    // deno-lint-ignore no-explicit-any
-    (cfg.presetsEl as any).showPicker?.() ?? cfg.presetsEl.focus();
-  });
+  // Window Presets popup: a hovered preset HOT-APPLIES to the live volume as a preview; the
+  // clicked one sticks; leaving without a click reverts to the window at open time.
+  let presetPop: HTMLElement | null = null;
+  let presetOrigWL: [number, number] | null = null;
+  let presetEsc: ((e: KeyboardEvent) => void) | null = null;
+  const closePresetPop = (revertWL?: [number, number]) => {
+    if (revertWL) cfg.wl.set(revertWL[0], revertWL[1]);
+    presetPop?.remove();
+    presetPop = null;
+    document.removeEventListener("pointerdown", onPresetOutside, true);
+    if (presetEsc) document.removeEventListener("keydown", presetEsc, true);
+    presetEsc = null;
+  };
+  const onPresetOutside = (e: PointerEvent) => {
+    if (presetPop && !presetPop.contains(e.target as Node) && (e.target as HTMLElement)?.id !== "bir-presets") {
+      closePresetPop(presetOrigWL ?? undefined);
+    }
+  };
+  const openPresetPop = () => {
+    if (presetPop) {
+      closePresetPop(presetOrigWL ?? undefined);
+      return;
+    }
+    presetOrigWL = cfg.wl.get();
+    const orig = presetOrigWL;
+    const anchor = buttons.get("presets")!.getBoundingClientRect();
+    presetPop = document.createElement("div");
+    presetPop.id = "bir-preset-pop";
+    presetPop.style.cssText =
+      `position:fixed;top:${Math.round(anchor.bottom + 4)}px;left:${Math.round(anchor.left)}px;z-index:1200;` +
+      "min-width:180px;background:#11141d;border:1px solid #33507e;border-radius:8px;padding:5px;" +
+      "box-shadow:0 10px 30px rgba(0,0,0,.6);font:12px -apple-system,system-ui,sans-serif;color:#d6e2f2;";
+    const head = document.createElement("div");
+    head.textContent = "Window presets — hover to preview";
+    head.style.cssText = "font-size:10px;color:#5a6b85;padding:3px 8px 5px;text-transform:uppercase;letter-spacing:.5px;";
+    presetPop.appendChild(head);
+    // Options come from the host's preset <select> (skip the live "current" row).
+    for (const opt of [...cfg.presetsEl.options].filter((o) => o.value !== "current")) {
+      const item = document.createElement("div");
+      item.className = "bir-preset-item";
+      item.dataset.value = opt.value;
+      item.textContent = opt.textContent;
+      item.style.cssText = "padding:6px 10px;border-radius:5px;cursor:pointer;white-space:nowrap;";
+      item.addEventListener("pointerenter", () => {
+        for (const el of presetPop!.querySelectorAll(".bir-preset-item")) {
+          (el as HTMLElement).style.background = "transparent";
+        }
+        item.style.background = "#2b6cb0";
+        cfg.presetsEl.value = opt.value; // preview: drive the host's preset handler live
+        cfg.presetsEl.dispatchEvent(new Event("change"));
+      });
+      item.addEventListener("click", () => closePresetPop()); // no revert → the preview sticks
+      presetPop.appendChild(item);
+    }
+    presetEsc = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closePresetPop(orig);
+    };
+    document.body.appendChild(presetPop);
+    // Defer wiring the dismiss handlers so the opening click/keys don't immediately close it.
+    setTimeout(() => {
+      document.addEventListener("pointerdown", onPresetOutside, true);
+      document.addEventListener("keydown", presetEsc!, true);
+    }, 0);
+  };
+  btn("presets", "presets", "Window Presets — hover to preview on the volume, click to keep (CT: Soft Tissue / Lung / Bone / Brain + Auto)", openPresetPop);
   btn("wl-clamp", "wlMode", "Window mode — Center/Width vs Clamped (lower limit fixed at 0; default for NM/PET)", () => {
     clamped = !clamped;
     buttons.get("wl-clamp")!.classList.toggle("active", clamped);

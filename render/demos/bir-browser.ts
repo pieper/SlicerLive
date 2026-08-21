@@ -21,23 +21,198 @@ import { type Crosshair4up, mountCrosshair } from "./crosshair.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachSliceControls } from "./slice-control.ts";
 import { attachDoubleClick, attachViewGrid } from "./view-grid.ts";
+import { attachWidgetControls } from "./widget-control.ts";
+import type { Box, HandleMeta } from "./roi-widget.ts";
+import { createMosaic } from "./mosaic.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
 import { loadSeries } from "../vendor/idc_tools/index.js";
 import { type BirApi, mountBir, type Plane } from "./bir.ts";
+import { downloadStudyWithDialog, type SeriesRef, shareStudy } from "./idc-share.ts";
 import type { Vec3 } from "../mat4.ts";
 
-// The demo case: an arbitrary KiTS abdomen CT (IDC c4kc_kits · KiTS-00108, 99 slices, CC BY
-// 3.0). `?series=<uuid>&bucket=<b>` overrides it to review any IDC series.
+// The demo case: an arbitrary KiTS kidney-tumour study (IDC c4kc_kits · KiTS-00051) — the
+// noncontrast CT (95 slices) WITH its DICOM SEG (kidney + tumour). Which case loads is
+// resolved from the URL (see resolveSource) — a drop-in for OHIF on the IDC portal:
+//   OHIF / IDC-portal form:  ?StudyInstanceUIDs=<uid>[&SeriesInstanceUIDs=<uid[,uid]>]
+//   IHE IID form:            ?requestType=STUDY&studyUID=<uid>[&seriesUID=<uid>]
+//   Fast direct-S3 form:     ?series=<crdc_uuid>&bucket=<b>[&seg=<uuid>&segBucket=<b>]
+//   (no params → the default KiTS-00051 CT+SEG demo)
 const P = new URLSearchParams(location.search);
-const DEMO = {
-  c: P.get("series") || "9c8b6382-bdf6-4253-b2d1-7d011a59eb59",
-  cb: P.get("bucket") || "idc-open-data",
+
+interface Source {
+  c: string; // CT/MR/PET series S3 prefix (crdc uuid)
+  cb: string; // its bucket
+  s?: string; // optional SEG series prefix
+  sb?: string; // SEG bucket
+  m: string; // modality
+  col: string; // collection
+  st: string; // StudyInstanceUID
+  sd: string; // patient · series label
+  lic: string; // license/attribution
+}
+
+const KITS_DEFAULT: Source = {
+  c: "e3e86cde-da96-44b0-9e3b-b0b7bdd5a675",
+  cb: "idc-open-data",
+  s: "04a800eb-2f06-4e29-a10d-934a6f5c7d47",
+  sb: "idc-open-data",
   m: "CT",
   col: "c4kc_kits",
-  st: "1.3.6.1.4.1.14519.5.2.1.6919.4624.986013693303407740653302415642",
-  sd: "KiTS-00108 · three-phase abdomen",
+  st: "1.3.6.1.4.1.14519.5.2.1.6919.4624.368281589441706814147998236429",
+  sd: "KiTS-00051 · noncontrast abdomen + kidney/tumour SEG",
   lic: "CC BY 3.0 · IDC c4kc_kits · doi:10.7937/tcia.2019.ix49e8nx",
 };
+
+// OHIF/IID UID resolution uses a SLIM, radiology-only IDC index (built offline by
+// build-idc-slim.ts) hosted in a CORS-enabled bucket. Two artifacts sit under IDC_INDEX_BASE:
+//   idc-rad-groups.json  — tiny (~43 KB) directory: full min/max StudyInstanceUID per 2000-row
+//                          group of the parquet, sorted by StudyInstanceUID.
+//   idc-rad-slim.parquet — 617k radiology series (drops pathology/SR/etc.), sorted by study,
+//                          columns trimmed to what resolution needs.
+// A lookup fetches the sidecar ONCE (Cache Storage, then in-memory), binary-searches it for the
+// 1–2 groups whose [min,max] span the study, and RANGE-reads only those groups (~0.6 MB) — the
+// 51 MB parquet is never fully downloaded. Resolved studies are memoized in localStorage, so a
+// repeat launch of the same study skips the index entirely ("hit the penalty once").
+//
+// The public full-index hosts (GCS mirror, GitHub release) send no CORS, so a cross-origin
+// browser can't read them — hence the slim copy in a CORS bucket. Default base is same-origin
+// ./idc-rad/ (drop the two files next to bir.html); point ?indexBase= / __IDC_INDEX_BASE at the
+// js2 bucket for the deployed gallery.
+const IDC_INDEX_BASE = ((globalThis as Record<string, unknown>).__IDC_INDEX_BASE as string) ||
+  P.get("indexBase") || "https://js2.jetstream-cloud.org:8001/swift/v1/idc-index/";
+const GROUPS_URL = new URL("idc-rad-groups.json", IDC_INDEX_BASE).href;
+const PARQUET_URL = new URL("idc-rad-slim.parquet", IDC_INDEX_BASE).href;
+const HYPARQUET_ESM = "https://cdn.jsdelivr.net/npm/hyparquet@1.28.2/+esm";
+const splitList = (v: string | null): string[] => (v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+
+interface GroupDir { version: string; rowGroupSize: number; total: number; groups: { min: string; max: string }[] }
+let _dirCache: GroupDir | null = null;
+
+/** Fetch the slim-index group directory once (Cache Storage → in-memory memo). */
+async function loadGroupDir(onStatus: (m: string) => void): Promise<GroupDir> {
+  if (_dirCache) return _dirCache;
+  onStatus("fetching the IDC index directory…");
+  let resp: Response | undefined;
+  try {
+    // deno-lint-ignore no-explicit-any
+    const cache = (globalThis as any).caches ? await (globalThis as any).caches.open("idc-rad") : null;
+    if (cache) resp = await cache.match(GROUPS_URL);
+    if (!resp) {
+      resp = await fetch(GROUPS_URL);
+      if (resp.ok && cache) await cache.put(GROUPS_URL, resp.clone());
+    }
+  } catch {
+    resp = await fetch(GROUPS_URL);
+  }
+  if (!resp || !resp.ok) throw new Error(`index directory not reachable at ${GROUPS_URL} (HTTP ${resp?.status ?? "?"})`);
+  _dirCache = await resp.json() as GroupDir;
+  return _dirCache;
+}
+
+const SLIM_COLS = [
+  "StudyInstanceUID", "SeriesInstanceUID", "crdc_series_uuid", "aws_bucket", "Modality",
+  "instanceCount", "SeriesDescription", "PatientID", "collection_id", "license_short_name", "source_DOI",
+];
+
+/** Range-read every series row of a study from the slim index: find the 1–2 sorted row groups
+ *  whose [min,max] span the study and read only those (~0.6 MB), never the whole parquet. */
+// deno-lint-ignore no-explicit-any
+async function readStudyRows(studyUID: string, onStatus: (m: string) => void): Promise<any[]> {
+  const dir = await loadGroupDir(onStatus);
+  const RGS = dir.rowGroupSize;
+  const spans: [number, number][] = [];
+  for (let i = 0; i < dir.groups.length; i++) {
+    const g = dir.groups[i];
+    if (studyUID >= g.min && studyUID <= g.max) spans.push([i * RGS, Math.min((i + 1) * RGS, dir.total)]);
+  }
+  if (!spans.length) {
+    throw new Error(
+      `StudyInstanceUID not found in the slim IDC index (${dir.version}): ${studyUID}. ` +
+        `It may be a non-radiology study, or from a newer index. The direct form always works: ` +
+        `?series=<crdc_series_uuid>&bucket=idc-open-data.`,
+    );
+  }
+  onStatus(`range-reading the IDC index (${spans.length} group${spans.length > 1 ? "s" : ""})…`);
+  try {
+    // deno-lint-ignore no-explicit-any
+    const hp: any = await import(HYPARQUET_ESM);
+    const file = await hp.asyncBufferFromUrl({ url: PARQUET_URL });
+    const metadata = await hp.parquetMetadataAsync(file); // footer once, reused per group
+    const parts = await Promise.all(
+      spans.map(([rowStart, rowEnd]) => hp.parquetReadObjects({ file, metadata, columns: SLIM_COLS, rowStart, rowEnd })),
+    );
+    const rows = parts.flat().filter((r: { StudyInstanceUID: string }) => r.StudyInstanceUID === studyUID);
+    if (!rows.length) throw new Error(`StudyInstanceUID not found in the IDC index: ${studyUID}`);
+    return rows;
+  } catch (e) {
+    if ((e as Error).message.includes("not found")) throw e;
+    throw new Error(
+      `couldn't range-read the slim IDC index at ${PARQUET_URL} — check the CORS bucket (?indexBase=). ` +
+        `Meanwhile the direct form works: ?series=<crdc_series_uuid>&bucket=idc-open-data. (${(e as Error).message})`,
+    );
+  }
+}
+
+/** Decide which series to load from the URL: fast direct-S3, OHIF/IID UID (index lookup), or default. */
+async function resolveSource(onStatus: (m: string) => void): Promise<Source> {
+  const series = P.get("series");
+  if (series) { // direct S3 prefix — no index needed
+    return {
+      c: series, cb: P.get("bucket") || "idc-open-data",
+      s: P.get("seg") || undefined, sb: P.get("segBucket") || "idc-open-data",
+      m: (P.get("modality") || "CT").toUpperCase(), col: P.get("collection") || "IDC", st: "",
+      sd: `${P.get("patient") || "IDC"} · ${series.slice(0, 8)}…`, lic: "NCI Imaging Data Commons",
+    };
+  }
+  const studyUIDs = [...splitList(P.get("StudyInstanceUIDs")), ...splitList(P.get("studyUID"))];
+  if (studyUIDs.length) {
+    const want = [
+      ...splitList(P.get("SeriesInstanceUIDs")),
+      ...splitList(P.get("initialSeriesInstanceUID")),
+      ...splitList(P.get("seriesUID")),
+    ];
+    return await resolveFromIndex(studyUIDs[0], want, onStatus);
+  }
+  return KITS_DEFAULT;
+}
+
+/** Resolve a StudyInstanceUID (+ optional SeriesInstanceUIDs) to an S3 image series (+ SEG)
+ *  via the SLIM idc-index — the OHIF/IDC-portal drop-in path. Reads only the 1–2 sorted row
+ *  groups whose [min,max] span the study (~0.6 MB), never the whole parquet. */
+async function resolveFromIndex(
+  studyUID: string,
+  wantSeries: string[],
+  onStatus: (m: string) => void,
+): Promise<Source> {
+  const memoKey = `idc-rad:${studyUID}:${wantSeries.join(",")}`;
+  try {
+    const hit = localStorage.getItem(memoKey);
+    if (hit) return JSON.parse(hit) as Source;
+  } catch { /* private mode / no storage */ }
+
+  const inStudy = await readStudyRows(studyUID, onStatus);
+  const want = new Set(wantSeries);
+  const IMG = new Set(["CT", "MR", "PT", "PET", "NM"]);
+  const imgs = inStudy.filter((r) => IMG.has(String(r.Modality).toUpperCase()));
+  const segs = inStudy.filter((r) => String(r.Modality).toUpperCase() === "SEG");
+  // Prefer an explicitly-requested image series; else the largest (primary) one.
+  const chosen = imgs.find((r) => want.has(r.SeriesInstanceUID)) ??
+    imgs.slice().sort((a, b) => Number(b.instanceCount) - Number(a.instanceCount))[0];
+  if (!chosen) throw new Error("no CT/MR/PET/NM image series found in this study");
+  // If a SEG was explicitly requested, honour it; else pick one whose SEG references the chosen
+  // image (best-effort: just take the first SEG in the study).
+  const seg = segs.find((r) => want.has(r.SeriesInstanceUID)) ?? segs[0];
+  const mod = String(chosen.Modality).toUpperCase();
+  const src: Source = {
+    c: String(chosen.crdc_series_uuid), cb: String(chosen.aws_bucket),
+    s: seg ? String(seg.crdc_series_uuid) : undefined, sb: seg ? String(seg.aws_bucket) : undefined,
+    m: mod === "PET" ? "PT" : mod, col: String(chosen.collection_id), st: studyUID,
+    sd: `${chosen.PatientID} · ${chosen.SeriesDescription || mod}`,
+    lic: `${chosen.license_short_name || "IDC"} · ${chosen.collection_id}${chosen.source_DOI ? " · doi:" + chosen.source_DOI : ""}`,
+  };
+  try { localStorage.setItem(memoKey, JSON.stringify(src)); } catch { /* ignore */ }
+  return src;
+}
 
 const status = (msg: string, err = false) => {
   const el = document.getElementById("status");
@@ -49,6 +224,7 @@ const status = (msg: string, err = false) => {
 const cvEl = (id: string) => document.getElementById(id) as HTMLCanvasElement;
 
 const PLANES: Plane[] = ["axial", "coronal", "sagittal"];
+const SEG_FILL = 0.5; // 2D MPR segmentation-overlay alpha at 100% (buildSegrouletteScene default)
 const CT_WL_PRESETS = [
   { name: "Soft Tissue", win: 400, lev: 40 },
   { name: "Lung", win: 1500, lev: -600 },
@@ -75,12 +251,70 @@ async function main() {
     cx[n].configure({ device: gpu.device, format: preferred, viewFormats: [srgb], alphaMode: "opaque" });
   }
 
+  // Download-progress mosaic (the SEGRoulette loading visual): the series' slice thumbnails
+  // tile in as the DICOM streams from S3 — informative + a little fun instead of a blank wait.
+  const mosaic = createMosaic(document.getElementById("viewer")!);
+  mosaic.status("contacting the NCI Imaging Data Commons…");
+
+  // Which case? Resolve the URL — OHIF/IID StudyInstanceUID (via the IDC index), direct S3
+  // prefix, or the default demo. This is what makes it a drop-in for OHIF on the IDC portal.
+  const setLoad = (m: string) => {
+    status(m);
+    mosaic.status(m);
+  };
+  const source = await resolveSource(setLoad);
+
   // Load the series straight from S3, reconstruct + build the scene (grayscale MPR + 3D VR).
-  const res = await loadSeries(DEMO, {
-    onProgress: (p: { msg: string; frac?: number }) =>
-      status(`${p.msg}${p.frac ? ` — ${Math.round(p.frac * 100)}%` : ""}`),
+  const res = await loadSeries(source, {
+    onProgress: (p: { msg: string; frac?: number }) => {
+      setLoad(`${p.msg}${p.frac ? ` — ${Math.round(p.frac * 100)}%` : ""}`);
+    },
+    onSliceCount: (n: number) => mosaic.setCount(n),
+    onThumb: (n: number, w: number, h: number, rgba: ArrayBuffer) => mosaic.thumb(n, w, h, rgba),
   });
   const sc: SegrouletteScene = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
+  sc.setVolumeOpacity(0.5); // 3D volume rendering starts semi-transparent (composites with SEG)
+
+  // SlicerLive display state (toggled from the badge popup, below).
+  let sliceOutline = false; // segmentation overlay: fill (default) vs outline
+  let roiEnabled = false, roiVisible = false, roiFirstEnable = true; // 3D volume-render crop box
+  let annOn = true; // DICOM corner annotations (IHE BIR §4.16.4.2.2.5.8 "official radiology look")
+
+  // ---- corner annotations (IHE BIR §4.16.4.2.2.5.8) ---------------------------------------
+  // The profile mandates overlaid corner text: patient identity (TL), institution/study (TR),
+  // series/technique (BR); the slice position/number sits bottom-left with the readout. IDC
+  // public data is de-identified, so we show what's present (ID, collection, modality, series,
+  // geometry, live W/L). Sourced from the loaded metadata — real deployments read full tags.
+  const annEls: Record<string, { br: HTMLElement }> = {};
+  const buildAnnotations = () => {
+    for (const p of PLANES) {
+      const cell = document.querySelector(`[data-cell="${p}"]`) as HTMLElement;
+      if (!cell) continue;
+      const mk = (cls: string, html: string) => {
+        const e = document.createElement("div");
+        e.className = "ann " + cls;
+        e.innerHTML = html;
+        e.style.cssText = "position:absolute;z-index:2;font:600 10px ui-monospace,Menlo,monospace;" +
+          "color:#cfe0f5;text-shadow:0 0 3px #000,0 0 3px #000;pointer-events:none;line-height:1.35;max-width:46%;" +
+          (cls === "tl" ? "top:22px;left:7px;" : cls === "tr" ? "top:22px;right:7px;text-align:right;" : "bottom:22px;right:7px;text-align:right;");
+        cell.appendChild(e);
+        return e;
+      };
+      const pid = (source.sd.split("·")[0] || "").trim() || source.col;
+      mk("tl", `${pid}<br>${source.col} · ${res.ct.modality}`);
+      mk("tr", `${res.ct.modality} · ${sc.dims[2]} slices${sc.hasSeg ? " · SEG" : ""}<br>${sc.dims[0]}×${sc.dims[1]}`);
+      annEls[p] = { br: mk("br", "") };
+    }
+    updateAnnWL();
+  };
+  const updateAnnWL = () => {
+    for (const p of PLANES) {
+      if (annEls[p]) annEls[p].br.innerHTML = `W ${Math.round(wl.win)} / L ${Math.round(wl.lev)}`;
+    }
+  };
+  const applyAnn = () => {
+    for (const e of document.querySelectorAll(".ann")) (e as HTMLElement).style.display = annOn ? "" : "none";
+  };
 
   const off: Record<Plane, number> = {
     axial: slicerDefaultOffset01("axial", sc.dims, sc.ijkToRAS, sc.rasLo, sc.rasHi),
@@ -141,6 +375,7 @@ async function main() {
     for (const p of PLANES) drawSlice(p);
     xhair?.redraw();
     syncWl();
+    updateAnnWL(); // live W/L in the corner annotation
   };
   // Hidden preset <select> the BIR "Presets" button drives (mountBir wants a presetsEl).
   const presets = document.getElementById("wl-readout") as HTMLSelectElement;
@@ -170,6 +405,21 @@ async function main() {
 
   // The IHE Basic Image Review reader chrome (shared demos/bir.ts).
   const sliceControls: { resetView(): void }[] = [];
+  // Whole-study download: re-read the study's every (radiology) series from the slim index. Only
+  // available when we came in by StudyInstanceUID; the direct-S3 path downloads the loaded pair.
+  const listAllStudySeries = source.st
+    ? async (): Promise<SeriesRef[]> => {
+      const rows = await readStudyRows(source.st, () => {});
+      return rows.map((r) => ({
+        prefix: String(r.crdc_series_uuid),
+        bucket: String(r.aws_bucket),
+        modality: String(r.Modality).toUpperCase(),
+        seriesUID: String(r.SeriesInstanceUID),
+        seriesDescription: r.SeriesDescription ? String(r.SeriesDescription) : undefined,
+      }));
+    }
+    : undefined;
+
   bir = mountBir({
     overlay: document.getElementById("viewer")!,
     bar: document.getElementById("bir-bar")!,
@@ -196,12 +446,41 @@ async function main() {
     close: () => status("This is the SlicerLive Basic Image Review demo — reload to restart."),
     jumpAll,
     modality: res.ct.modality,
+    extraTools: [
+      {
+        id: "idc-share",
+        icon: "share",
+        title: "Share — copy a link that reopens this study here (or in the IDC OHIF portal)",
+        run: () => shareStudy(source),
+      },
+      {
+        id: "idc-download",
+        icon: "download",
+        title: "Download this study's DICOM to a local folder (streamed, parallel)",
+        run: () => downloadStudyWithDialog(source, listAllStudySeries),
+      },
+    ],
   });
   (globalThis as Record<string, unknown>).__birDbg = {
     ready: () => !!bir,
     dims: () => sc.dims,
     tool: () => bir?.tool(),
     cellOrder: () => [...document.querySelectorAll("#grid .cell")].map((c) => (c as HTMLElement).dataset.cell),
+    // test hooks
+    setRoi: (en: boolean, vis: boolean) => {
+      roiEnabled = en;
+      roiVisible = vis;
+      if (en) roiFirstEnable = false;
+      sc.setRoiEnabled(en);
+      sc.setRoiVisible(vis);
+      draw3d();
+    },
+    roiState: () => ({ visible: sc.roiVisible(), handles: sc.roi.handleList().length }),
+    setSegOpacity: (o: number) => {
+      sc.setSegOpacity(o);
+      sc.slice.setOverlayOpacity(o * SEG_FILL);
+      drawAll();
+    },
   };
 
   for (const p of PLANES) {
@@ -233,6 +512,35 @@ async function main() {
   }
   attachCameraControls(cv.threeD, camera, { onChange: () => { draw3d(); xhair?.redraw(); } });
 
+  // 3D ROI-crop widget: grab a face/corner/centre handle to resize/move the crop box; the
+  // cursor changes over a handle while the box is visible. Capture-phase, so grabbing a
+  // handle doesn't reach the camera; empty space bubbles through to orbit.
+  let roiBox0: Box | null = null;
+  attachWidgetControls(cv.threeD, camera, {
+    getHandles: () =>
+      sc.roiVisible()
+        ? sc.roi.handleList().map((h) => ({ id: h.id, world: h.world, data: h.data, cursor: h.cursor }))
+        : [],
+    getSize: () => ({ w: cv.threeD.width, h: cv.threeD.height }),
+    onDragStart: () => {
+      roiBox0 = sc.roi.snapshot();
+    },
+    onDrag: (h, world) => {
+      if (!roiBox0) return;
+      const d: Vec3 = [world[0] - h.world[0], world[1] - h.world[1], world[2] - h.world[2]];
+      sc.roi.applyDrag(h.data as HandleMeta, roiBox0, d);
+      sc.reclip(); // re-crop + upload box/handle/clip in one syncUniforms
+      draw3d();
+      xhair?.redraw();
+    },
+    onHover: (h) => {
+      sc.roi.setHover(h ? h.id : null);
+      sc.scene.syncUniforms();
+      draw3d();
+    },
+    onChange: () => draw3d(),
+  });
+
   xhair = mountCrosshair({
     cells: { axial: cv.axial, coronal: cv.coronal, sagittal: cv.sagittal, threeD: cv.threeD },
     getScene: () => sc.scene,
@@ -259,11 +567,60 @@ async function main() {
       label: "Segmentation",
       getOpacity: () => sc.segOpacity(),
       setOpacity: (o) => {
-        sc.setSegOpacity(o);
+        sc.setSegOpacity(o); // 3D surface global opacity
+        sc.slice.setOverlayOpacity(o * SEG_FILL); // AND the 2D MPR overlay (fill/outline)
         drawAll();
       },
       disabled: () => !sc.hasSeg,
       color: [0.62, 0.9, 1.0],
+    },
+    // Segmentation overlay: fill (default) vs outline on the MPR planes.
+    {
+      label: "Segmentation outline",
+      get: () => sliceOutline,
+      set: (on) => {
+        sliceOutline = on;
+        sc.slice.setOverlayOutline(on);
+        for (const p of PLANES) drawSlice(p);
+        xhair?.redraw();
+      },
+      disabled: () => !sc.hasSeg,
+    },
+    // 3D volume-render crop: enabling it reveals the ROI box the first time (Slicer behaviour).
+    {
+      label: "Crop volume (3D)",
+      get: () => roiEnabled,
+      set: (on) => {
+        roiEnabled = on;
+        if (on && roiFirstEnable) {
+          roiVisible = true;
+          roiFirstEnable = false;
+        }
+        sc.setRoiEnabled(roiEnabled);
+        sc.setRoiVisible(roiVisible);
+        draw3d();
+        xhair?.redraw();
+      },
+      disabled: () => sc.volumeOpacity() <= 0,
+    },
+    {
+      label: "Show ROI box",
+      get: () => roiVisible,
+      set: (on) => {
+        roiVisible = on;
+        sc.setRoiVisible(on);
+        draw3d();
+        xhair?.redraw();
+      },
+    },
+    // DICOM corner annotations (IHE BIR) — the "official radiology look".
+    {
+      label: "Corner annotations",
+      get: () => annOn,
+      set: (on) => {
+        annOn = on;
+        applyAnn();
+      },
     },
   ];
   installChrome({
@@ -280,9 +637,12 @@ async function main() {
     },
   });
 
+  buildAnnotations();
+  applyAnn();
   const info = document.getElementById("info");
-  if (info) info.textContent = `${DEMO.sd} · CT ${sc.dims.join("×")} · ${DEMO.lic}`;
+  if (info) info.textContent = `${source.sd} · ${res.ct.modality} ${sc.dims.join("×")} · ${source.lic}`;
   resize();
+  mosaic.done(); // scene is up → fade the download mosaic out
   status("KiTS abdomen CT — scroll to page slices, pick a tool from the toolbar, drag 3D to orbit");
 }
 

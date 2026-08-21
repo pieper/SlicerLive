@@ -116,7 +116,9 @@ export function attachSliceControls(canvas: HTMLCanvasElement, cfg: SliceControl
       const dx = e.clientX - view.x, dy = e.clientY - view.y;
       const r = canvas.getBoundingClientRect();
       if (view.mode === "pan") cfg.getSlice().panByPixels(cfg.orient, dx, dy, r.width, r.height);
-      else cfg.getSlice().zoomAbout(cfg.orient, Math.exp(dy * 0.006), view.pu, view.pv, r.width, r.height);  // drag DOWN = zoom in
+      // Slicer-style: drag-zoom pivots about the VIEW CENTRE (0.5,0.5), not the drag-start
+      // point — so pan and zoom stay predictable and the centred anatomy doesn't drift.
+      else cfg.getSlice().zoomAbout(cfg.orient, Math.exp(dy * 0.006), 0.5, 0.5, r.width, r.height);  // drag DOWN = zoom in
       view.x = e.clientX; view.y = e.clientY; cfg.redraw();
       return;
     }

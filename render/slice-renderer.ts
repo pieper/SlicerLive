@@ -303,10 +303,17 @@ export class SliceRenderer {
     return s;
   }
 
-  /** Fitted (zoom=1) in-plane extent for an orientation. */
-  private baseSpan(orient: Orientation): number {
+  /** Letterbox fit at zoom=1 (Slicer's FitSliceToVolume): the in-plane FOV (uS0×vS0) that
+   *  exactly contains the slice's bounding box in a viewport of the given aspect — the whole
+   *  slice is visible and the LIMITING axis touches the window edge (so the largest fitting
+   *  axis fills the window, no needless margin). Replaces the old max(uExt,vExt) span, which
+   *  under-zoomed whenever the larger extent wasn't on the viewport's limiting axis. */
+  private fitUV(orient: Orientation, aspectWH: number): { uS0: number; vS0: number } {
     const b = BASES[orient];
-    return Math.max(this.rasHi[b.uAxis] - this.rasLo[b.uAxis], this.rasHi[b.vAxis] - this.rasLo[b.vAxis]);
+    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
+    const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
+    const uS0 = Math.max(uExt, vExt * aspectWH);
+    return { uS0, vS0: uS0 / aspectWH };
   }
 
   /** The complete in-plane view frame for an orientation at a given viewport aspect, folding
@@ -317,8 +324,8 @@ export class SliceRenderer {
   private frameFor(orient: Orientation, offset01: number, aspectWH: number): { b: typeof BASES[Orientation]; c: Vec3; uS: number; vS: number } {
     const b = BASES[orient];
     const vs = this.viewState[orient];
-    const span = this.baseSpan(orient) / vs.zoom;
-    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
+    const { uS0, vS0 } = this.fitUV(orient, aspectWH);
+    const uS = uS0 / vs.zoom, vS = vS0 / vs.zoom;
     const c: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
     c[b.nAxis] = this.rasLo[b.nAxis] + Math.max(0, Math.min(1, offset01)) * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
     c[0] += b.uDir[0] * vs.panU + b.vDir[0] * vs.panV;
@@ -332,8 +339,9 @@ export class SliceRenderer {
 
   /** Pan the in-plane view by a pixel delta (drag): the anatomy under the cursor follows it. */
   panByPixels(orient: Orientation, dxPx: number, dyPx: number, w: number, h: number) {
-    const span = this.baseSpan(orient) / this.viewState[orient].zoom;
-    const uS = span * Math.max(1, w / h), vS = span * Math.max(1, h / w);
+    const z = this.viewState[orient].zoom;
+    const { uS0, vS0 } = this.fitUV(orient, w / h);
+    const uS = uS0 / z, vS = vS0 / z;
     this.viewState[orient].panU -= (dxPx / w) * uS;   // drag right -> centre moves left -> image follows
     this.viewState[orient].panV += (dyPx / h) * vS;   // drag down  -> centre moves up   -> image follows
   }
@@ -341,13 +349,10 @@ export class SliceRenderer {
   /** Zoom by `factor` (>1 zooms in) about a pivot (u,v in [0,1]); the pivot point stays fixed. */
   zoomAbout(orient: Orientation, factor: number, pu: number, pv: number, w: number, h: number) {
     const vs = this.viewState[orient];
-    const base = this.baseSpan(orient);
-    const spanOld = base / vs.zoom;
+    const { uS0, vS0 } = this.fitUV(orient, w / h);
     const z = Math.max(0.2, Math.min(50, vs.zoom * factor));
-    const spanNew = base / z;
-    const au = Math.max(1, w / h), av = Math.max(1, h / w);
-    vs.panU += (pu - 0.5) * (spanOld - spanNew) * au;   // keep the pivot's RAS point under the cursor
-    vs.panV += (0.5 - pv) * (spanOld - spanNew) * av;
+    vs.panU += (pu - 0.5) * (uS0 / vs.zoom - uS0 / z);   // keep the pivot's RAS point under the cursor
+    vs.panV += (0.5 - pv) * (vS0 / vs.zoom - vS0 / z);
     vs.zoom = z;
   }
 

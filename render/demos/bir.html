@@ -12,6 +12,9 @@
   #bir-bar .brand { font-weight: 700; color: #fff; }
   #bir-bar #info { color: #9fb3d0; font-size: 12px; }
   #grid { flex: 1; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 2px; min-height: 0; background: #1b2740; }
+  /* double-click a view to maximize it (attachViewGrid toggles .has-max / .max) */
+  #grid.has-max .cell { display: none; }
+  #grid.has-max .cell.max { display: block; grid-area: 1 / 1 / -1 / -1; }
   .cell { position: relative; min-width: 0; min-height: 0; background: #000; }
   .cell canvas { width: 100%; height: 100%; display: block; background: #000; touch-action: none; }
   /* The BIR reader adds a transparent measurement/localizer overlay canvas per slice cell —
@@ -25,8 +28,10 @@
   .sr { position: absolute; bottom: 5px; left: 7px; font: 600 11px -apple-system, system-ui, sans-serif; color: #d6e2f2;
         opacity: .9; font-variant-numeric: tabular-nums; background: rgba(11,14,22,.6); padding: 1px 6px; border-radius: 4px; }
   .iuo { position: absolute; bottom: 5px; right: 7px; font: 700 9px -apple-system, system-ui, sans-serif; color: #8a1f1f; opacity: .9; letter-spacing: .5px; pointer-events: none; }
-  #status { position: absolute; top: 52px; left: 50%; transform: translateX(-50%); z-index: 5; background: rgba(5,6,10,.78);
-            padding: 3px 12px; border-radius: 6px; color: #9fb3d0; max-width: 80%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Bottom-left so it never covers the (possibly two-row) BIR toolbar. */
+  #status { position: fixed; bottom: 6px; left: 10px; z-index: 5; background: rgba(5,6,10,.78);
+            padding: 3px 12px; border-radius: 6px; color: #9fb3d0; font-family: ui-monospace, monospace; font-size: 11px;
+            max-width: 70vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
 </style>
 </head>
 <body>
