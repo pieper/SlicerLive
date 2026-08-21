@@ -14,6 +14,7 @@ import { buildMultiVolume } from "../render/demos/selftest-scenes.ts";
 import { TransformGizmoField } from "../render/transform-gizmo-field.ts";
 import { ImageField } from "../render/fields.ts";
 import { loadNrrd } from "../render/nrrd.ts";
+import { fetchZarrVolume, type ZarrDesc } from "../render/zarr.ts";
 import { fetchVP, lutFromVP } from "../render/vp-preset.ts";
 import type { Field } from "../render/fields.ts";
 import { identity, type Mat4, type Vec3 } from "../render/mat4.ts";
@@ -103,7 +104,7 @@ function volFit(dims: [number, number, number]): { fits: boolean; gib: number; r
   if (bytes > VRAM_FIT_LIMIT) return { fits: false, gib, reason: `${gib.toFixed(1)} GiB as float32 exceeds the L4's usable VRAM` };
   return { fits: true, gib };
 }
-interface Specimen { label: string; url: string; preset: string; dims: [number, number, number]; credit: string; note?: string }
+interface Specimen { label: string; url: string; preset: string; dims: [number, number, number]; credit: string; zarrBase?: string; note?: string }
 // dims from MorphoDepot's dashboard-data.json; only volumes whose largest dim ≤ MAX3D are offered.
 const MORPHO: Record<string, Specimen> = {
   // CC-BY 4.0 ONLY (attribution, commercial OK). Licenses verified from MorphoDepot's dashboard
@@ -114,7 +115,7 @@ const MORPHO: Record<string, Specimen> = {
   stickleback: { label: "Three-spine stickleback — µCT", url: "https://github.com/CDonatelli/Gasterosteus_aculeatus_16um/releases/download/v1/Gasterosteus_aculeatus_15.9um.nrrd", preset: "Bat-8bit", dims: [904, 441, 3698], credit: "CDonatelli / Gasterosteus_aculeatus_16um (MorphoDepot, CC-BY 4.0)" },
   bat:         { label: "Dog-faced bat — µCT", url: "https://github.com/elisechmitchell/Para_dog-face_bat/releases/download/v1/C0008901_00000.nrrd", preset: "Bat-8bit", dims: [1262, 1733, 390], credit: "elisechmitchell / Para_dog-face_bat (MorphoDepot, CC-BY 4.0)" },
   poacher:     { label: "Poacher fish tail — µCT", url: "https://github.com/CDonatelli/DamagedPoacherTail/releases/download/v1/BathyCrush05Tail_8.8um_Al1__rec0170.nrrd", preset: "Bat-8bit", dims: [560, 560, 1358], credit: "CDonatelli / DamagedPoacherTail (MorphoDepot, CC-BY 4.0)" },
-  daphnia:     { label: "Water flea (Daphnia) — diceCT", url: "https://github.com/JeanCopper/Daphnia_magna/releases/download/v1/Daphnia_Gut_AAA391.nrrd", preset: "diceCT_16", dims: [378, 750, 175], credit: "JeanCopper / Daphnia_magna (MorphoDepot, CC-BY 4.0)" },
+  daphnia:     { label: "Water flea (Daphnia) — diceCT", url: "https://github.com/JeanCopper/Daphnia_magna/releases/download/v1/Daphnia_Gut_AAA391.nrrd", zarrBase: "https://js2.jetstream-cloud.org:8001/swift/v1/slicerlive/zarr/daphnia/", preset: "diceCT_16", dims: [378, 750, 175], credit: "JeanCopper / Daphnia_magna (MorphoDepot, CC-BY 4.0)" },
 };
 const SCENES = ["multi", ...Object.keys(MORPHO)];
 
@@ -147,14 +148,25 @@ async function loadScene(name: string): Promise<void> {
     if (!fit.fits) throw new Error(`${spec.label} (${spec.dims.join("×")}, ${fit.gib.toFixed(1)} GB) does not fit — ${fit.reason}`);
     let field = fieldCache.get(name);
     if (!field) {
-      console.log(`[live-renderer] fetching ${spec.label} …`);
       const t0 = performance.now();
-      const nrrd = await loadNrrd(spec.url, (n) => { mb += n; });
-      const vp = await fetchVP(spec.preset).catch(() => null);
-      const { lut, clim, shade } = vp ? lutFromVP(vp, nrrd.range) : { lut: buildGrayLut(), clim: nrrd.range, shade: [0.25, 0.75, 0.5, 24] as [number, number, number, number] };
-      field = new ImageField(gpu.device, nrrd.data, nrrd.dims, [1, 1, 1], lut, { clim, ijkToRAS: nrrd.ijkToRAS, shade });
+      let data: Float32Array, dims: [number, number, number], range: [number, number], ijkToRAS: number[], presetName = spec.preset;
+      if (spec.zarrBase) {
+        // Chunked zarr on JS2: fetch the tiny meta.json, then pull all chunks in PARALLEL (much
+        // faster wall-clock than one big NRRD stream) — render/zarr.ts gunzips each and assembles.
+        console.log(`[live-renderer] fetching ${spec.label} (zarr, parallel) …`);
+        const meta = await (await fetch(spec.zarrBase + "meta.json")).json() as { zarr: ZarrDesc; ijkToRAS: number[]; range: [number, number]; preset?: string };
+        const zv = await fetchZarrVolume(spec.zarrBase, meta.zarr, (n) => { mb += n; });
+        data = zv.data; dims = zv.dims; range = zv.range; ijkToRAS = meta.ijkToRAS; presetName = meta.preset || spec.preset;
+      } else {
+        console.log(`[live-renderer] fetching ${spec.label} (nrrd) …`);
+        const nrrd = await loadNrrd(spec.url, (n) => { mb += n; });
+        data = nrrd.data; dims = nrrd.dims; range = nrrd.range; ijkToRAS = nrrd.ijkToRAS;
+      }
+      const vp = await fetchVP(presetName).catch(() => null);
+      const { lut, clim, shade } = vp ? lutFromVP(vp, range) : { lut: buildGrayLut(), clim: range, shade: [0.25, 0.75, 0.5, 24] as [number, number, number, number] };
+      field = new ImageField(gpu.device, data, dims, [1, 1, 1], lut, { clim, ijkToRAS, shade });
       fieldCache.set(name, field);
-      console.log(`[live-renderer] ${spec.label} ${nrrd.dims.join("×")} range [${nrrd.range}] in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+      console.log(`[live-renderer] ${spec.label} ${dims.join("×")} range [${range}] in ${((performance.now() - t0) / 1000).toFixed(1)}s`);
     }
     // a transform gizmo on the specimen, so it is interactive like the multi scene
     xformTarget = field;
