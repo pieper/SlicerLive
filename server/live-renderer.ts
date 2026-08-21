@@ -130,7 +130,7 @@ let currentScene = "";
 const fieldCache = new Map<string, ImageField>();
 
 /** Load a scene by name ("multi" or a MORPHO key). Rebuilds the shared renderer. */
-async function loadScene(name: string): Promise<void> {
+async function loadScene(name: string, onProgress?: (done: number, total: number) => void): Promise<void> {
   if (!SCENES.includes(name)) throw new Error(`unknown scene "${name}"`);
   if (name === "multi") {
     const sc = await buildMultiVolume(gpu.device, (n) => { mb += n; });
@@ -154,8 +154,15 @@ async function loadScene(name: string): Promise<void> {
         // Chunked zarr on JS2: fetch the tiny meta.json, then pull all chunks in PARALLEL (much
         // faster wall-clock than one big NRRD stream) — render/zarr.ts gunzips each and assembles.
         console.log(`[live-renderer] fetching ${spec.label} (zarr, parallel) …`);
-        const meta = await (await fetch(spec.zarrBase + "meta.json")).json() as { zarr: ZarrDesc; ijkToRAS: number[]; range: [number, number]; preset?: string };
-        const zv = await fetchZarrVolume(spec.zarrBase, meta.zarr, (n) => { mb += n; });
+        const meta = await (await fetch(spec.zarrBase + "meta.json")).json() as { zarr: ZarrDesc; ijkToRAS: number[]; range: [number, number]; preset?: string; bytes?: number };
+        const total = meta.bytes ?? 0;
+        let done = 0, lastSent = 0;
+        onProgress?.(0, total);   // let the client show the bar + seed its ETA immediately
+        const zv = await fetchZarrVolume(spec.zarrBase, meta.zarr, (n) => {
+          mb += n; done += n;
+          const now = performance.now();
+          if (onProgress && (now - lastSent > 100 || done >= total)) { lastSent = now; onProgress(done, total); }
+        });
         data = zv.data; dims = zv.dims; range = zv.range; ijkToRAS = meta.ijkToRAS; presetName = meta.preset || spec.preset;
       } else {
         console.log(`[live-renderer] fetching ${spec.label} (nrrd) …`);
@@ -497,7 +504,7 @@ function handleWs(req: Request): Response {
         }
         sceneLoading = true;
         socket.send(JSON.stringify({ type: "loading", scene: name }));
-        try { await loadScene(name); }
+        try { await loadScene(name, (done, total) => socket.send(JSON.stringify({ type: "loadProgress", scene: name, done, total }))); }
         catch (err) { socket.send(JSON.stringify({ type: "sceneError", message: (err as Error).message })); sceneLoading = false; return; }
         sceneLoading = false;
         resetClientModel("scene switch");

@@ -3194,6 +3194,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let costTotal = 0;
   let lastBillTs = 0, containerDeadAt = Infinity, connectStartTs = 0;
   let coldEtaMs = 14e3;
+  let loadActive = false, loadStartTs = 0, loadDone = 0, loadTotal = 0, loadLastTs = 0, loadLastDone = 0;
+  let bucketBps = Number(localStorage.getItem("lr_bucket_bps")) || 6e7;
   let connState = serverUrl ? "connecting" : "off";
   const IDLE_OPTS = [["5s", 5e3], ["15s", 15e3], ["30s", 3e4], ["1m", 6e4], ["2m", 12e4], ["5m", 3e5], ["10m", 6e5]];
   let idleMs = Number(localStorage.getItem("lr_idle") ?? 12e4);
@@ -3340,11 +3342,30 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data);
       if (m.type === "loading") {
-        showOverlay("starting", "Loading " + m.scene + " on the remote GPU\u2026", "large volumes take a few seconds", true, []);
+        loadActive = true;
+        loadStartTs = performance.now();
+        loadDone = 0;
+        loadTotal = 0;
+        loadLastTs = loadStartTs;
+        loadLastDone = 0;
+        showOverlay("starting", "Loading " + m.scene + " \u2026", "", true, []);
         if (ov) ov.classList.add("wake");
         return;
       }
+      if (m.type === "loadProgress") {
+        loadTotal = m.total || 0;
+        loadDone = m.done || 0;
+        const now = performance.now(), dt2 = now - loadLastTs, db = loadDone - loadLastDone;
+        if (dt2 > 0 && db > 0) {
+          bucketBps = 0.7 * bucketBps + 0.3 * (db / (dt2 / 1e3));
+          localStorage.setItem("lr_bucket_bps", String(Math.round(bucketBps)));
+          loadLastTs = now;
+          loadLastDone = loadDone;
+        }
+        return;
+      }
       if (m.type === "sceneError") {
+        loadActive = false;
         status("could not load specimen: " + (m.message ?? "unknown"), true);
         if (sceneSel) {
           sceneSel.disabled = false;
@@ -3370,6 +3391,7 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         containerDeadAt = Infinity;
         setConn("live");
         everLive = true;
+        loadActive = false;
         if (ovMode === "starting") hideOverlay();
         const reconnecting = !!camera;
         demo = m.demo ?? "single";
@@ -3576,8 +3598,18 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     bill();
     if (connState === "live" && performance.now() - lastInteract > idleMs && ws?.readyState === WebSocket.OPEN) goIdle();
     if (ovMode === "starting" && ovSub) {
-      const elapsed = Math.floor((performance.now() - connectStartTs) / 1e3);
-      ovSub.textContent = `elapsed ${elapsed}s \xB7 usually ~${Math.round(coldEtaMs / 1e3)}s`;
+      if (loadActive) {
+        const el2 = (performance.now() - loadStartTs) / 1e3;
+        const remain = loadTotal > 0 ? Math.max(0, loadTotal - loadDone) : 0;
+        const eta = loadTotal > 0 ? loadTotal / Math.max(1, bucketBps) : 0;
+        const left = remain > 0 ? remain / Math.max(1, bucketBps) : Math.max(0, eta - el2);
+        const pct = loadTotal > 0 ? Math.min(99, Math.floor(loadDone / loadTotal * 100)) : 0;
+        const mb = loadTotal > 0 ? ` \xB7 ${(loadDone / 1e6).toFixed(0)}/${(loadTotal / 1e6).toFixed(0)} MB` : "";
+        ovSub.textContent = loadTotal > 0 ? `${pct}%${mb} \xB7 ${el2.toFixed(0)}s elapsed \xB7 ~${Math.max(0, Math.round(left))}s left` : `${el2.toFixed(0)}s elapsed\u2026`;
+      } else {
+        const elapsed = Math.floor((performance.now() - connectStartTs) / 1e3);
+        ovSub.textContent = `elapsed ${elapsed}s \xB7 usually ~${Math.round(coldEtaMs / 1e3)}s`;
+      }
     }
     paintMeter();
   }, 500);

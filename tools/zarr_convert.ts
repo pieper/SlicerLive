@@ -49,6 +49,6 @@ for (let kk = 0; kk < ncz; kk++) for (let jj = 0; jj < ncy; jj++) for (let ii = 
 }
 
 const desc = { dir: `${name}.zarr`, dataset: "0", shape, chunks: CHUNK, chunkGrid: [ncz, ncy, ncx], dtype };
-const meta = { zarr: desc, ijkToRAS: nrrd.ijkToRAS, range: [lo, hi], preset: preset ?? "", credit: credit ?? "", dims: nrrd.dims };
+const meta = { zarr: desc, ijkToRAS: nrrd.ijkToRAS, range: [lo, hi], preset: preset ?? "", credit: credit ?? "", dims: nrrd.dims, bytes: cbytes };
 await Deno.writeTextFile(`${OUT}/meta.json`, JSON.stringify(meta, null, 1));
 console.log(`[zarr] wrote ${nchunks} chunks · ${(cbytes/1e6).toFixed(1)} MB compressed · grid ${ncz}×${ncy}×${ncx} · ${OUT}`);
