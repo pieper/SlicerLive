@@ -17,18 +17,20 @@ const codedSize = (w: number, h: number): [number, number] => [
 const WGSL = /* wgsl */ `
 @group(0) @binding(0) var t : texture_external;
 @group(0) @binding(1) var s : sampler;
-// (u0,v0,u1,v1) — the sub-rect of the external texture to sample (crops the coded-size padding).
-@group(0) @binding(2) var<uniform> uv : vec4<f32>;
-struct V { @builtin(position) p : vec4<f32>, @location(0) t : vec2<f32> };
-@vertex fn vs(@builtin(vertex_index) i : u32) -> V {
-  // a full-viewport triangle; the scissor rect (set by the caller) limits it to the patch.
+// rect = (x,y,w,h) DEST pixels; crop = (u1,v1) source sub-rect max (top-left corner is 0,0).
+struct U { rect : vec4<f32>, crop : vec4<f32> };
+@group(0) @binding(2) var<uniform> u : U;
+@vertex fn vs(@builtin(vertex_index) i : u32) -> @builtin(position) vec4<f32> {
+  // a full-viewport triangle; the scissor rect limits rasterisation to the patch.
   let x = select(-1.0, 3.0, i == 1u);
   let y = select(-1.0, 3.0, i == 2u);
-  var o : V; o.p = vec4<f32>(x, y, 0.0, 1.0); o.t = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5); return o;
+  return vec4<f32>(x, y, 0.0, 1.0);
 }
-@fragment fn fs(v : V) -> @location(0) vec4<f32> {
-  // map this fragment's position within the DEST rect to the sampled sub-rect of the source.
-  let src = mix(uv.xy, uv.zw, v.t);
+@fragment fn fs(@builtin(position) p : vec4<f32>) -> @location(0) vec4<f32> {
+  // Map THIS fragment's position within the DEST RECT (not the viewport) to the source content.
+  // Using the viewport-global position instead is what enlarged and misplaced motion patches.
+  let local = (p.xy - u.rect.xy) / u.rect.zw;   // 0..1 across the patch rect
+  let src = local * u.crop.xy;                  // scale into the cropped source region
   return vec4<f32>(textureSampleBaseClampToEdge(t, s, src).rgb, 1.0);
 }`;
 
@@ -53,7 +55,7 @@ export class Av1Presenter {
       primitive: { topology: "triangle-list" },
     });
     this.#sampler = gpu.device.createSampler({ magFilter: "linear", minFilter: "linear" });
-    this.#uni = gpu.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.#uni = gpu.device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   }
 
   static get supported(): boolean {
@@ -85,7 +87,10 @@ export class Av1Presenter {
    *  rect (x,y,w,h). Everything already in `dst` outside the rect is preserved (scissor + load). */
   present(dst: GPUTextureView, frame: VideoFrame, sw: number, sh: number, rect: { x: number; y: number; w: number; h: number }, format: GPUTextureFormat) {
     const [cw, ch] = codedSize(sw, sh);
-    this.#gpu.device.queue.writeBuffer(this.#uni, 0, new Float32Array([0, 0, sw / cw, sh / ch]));
+    this.#gpu.device.queue.writeBuffer(this.#uni, 0, new Float32Array([
+      rect.x, rect.y, rect.w, rect.h,   // dest rect (framebuffer px)
+      sw / cw, sh / ch, 0, 0,           // source crop (drop the coded-size padding)
+    ]));
     const ext = this.#gpu.device.importExternalTexture({ source: frame });
     const bind = this.#gpu.device.createBindGroup({
       layout: this.#pipeline.getBindGroupLayout(0),
