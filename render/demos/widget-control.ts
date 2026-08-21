@@ -133,23 +133,43 @@ export function attachWidgetControls(
     return best;
   };
 
-  let grabbed: Handle | null = null, hovered: Handle | null = null;
+  let grabbed: Handle | null = null, hovered: Handle | null = null, grabbedId = -1;
+
+  // Fully release the widget grab (or do nothing if not grabbed). Central so pointerup, a second
+  // finger, and pointercancel all clear the same state — the "stuck in gizmo after a multi-touch
+  // gesture" bug on the phone was a grab that never released (missed pointerup / pointercancel).
+  const release = (pointerId: number) => {
+    if (!grabbed) return;
+    const g = grabbed; grabbed = null; grabbedId = -1;
+    try { canvas.releasePointerCapture(pointerId); } catch { /* already released */ }
+    window.removeEventListener("pointermove", onMove, true);
+    window.removeEventListener("pointerup", onUp, true);
+    window.removeEventListener("pointercancel", onCancel, true);
+    canvas.style.cursor = "";
+    opts.onDragEnd?.(g);
+  };
 
   const onDown = (e: PointerEvent) => {
     if (e.button !== 0) return;                 // left button only; others bubble to camera
+    // A second pointer while dragging a handle = a multi-touch gesture is starting (pinch / pan /
+    // 3-finger volume move). Let go of the gizmo and hand the whole gesture to the camera.
+    if (grabbed) { release(e.pointerId); return; }
+    // Only the PRIMARY pointer may grab a handle; secondary touches are always camera/volume.
+    if (e.isPrimary === false) return;
     const h = pick(e);
     if (!h) return;                             // BUBBLE: camera (root interactor) handles it
     e.stopPropagation(); e.preventDefault();    // GRAB: camera never sees this gesture
-    grabbed = h;
+    grabbed = h; grabbedId = e.pointerId;
     canvas.setPointerCapture(e.pointerId);
     canvas.style.cursor = h.cursor ? h.cursor : "grabbing";
     opts.onDragStart?.(h);
     window.addEventListener("pointermove", onMove, true);
     window.addEventListener("pointerup", onUp, true);
+    window.addEventListener("pointercancel", onCancel, true);
   };
 
   const onMove = (e: PointerEvent) => {
-    if (!grabbed) return;
+    if (!grabbed || e.pointerId !== grabbedId) return;   // only the grabbing pointer drives the drag
     e.stopPropagation();
     const { x, y, rw, rh } = cursorCss(e);
     const { w, h } = opts.getSize();
@@ -160,14 +180,13 @@ export function attachWidgetControls(
   };
 
   const onUp = (e: PointerEvent) => {
-    if (!grabbed) return;
+    if (!grabbed || e.pointerId !== grabbedId) return;
     e.stopPropagation();
-    const g = grabbed; grabbed = null;
-    try { canvas.releasePointerCapture(e.pointerId); } catch { /* already released */ }
-    window.removeEventListener("pointermove", onMove, true);
-    window.removeEventListener("pointerup", onUp, true);
-    opts.onDragEnd?.(g);
+    release(e.pointerId);
   };
+  // Touch frequently ends a gesture with pointercancel (scroll takeover, gesture recogniser) rather
+  // than pointerup — without handling it the grab would stick.
+  const onCancel = (e: PointerEvent) => { if (grabbed && e.pointerId === grabbedId) release(e.pointerId); };
 
   // Hover: cheap, non-authoritative — highlight the grabbable handle + set the cursor.
   const onHoverMove = (e: PointerEvent) => {
@@ -189,6 +208,7 @@ export function attachWidgetControls(
       canvas.removeEventListener("pointermove", onHoverMove);
       window.removeEventListener("pointermove", onMove, true);
       window.removeEventListener("pointerup", onUp, true);
+      window.removeEventListener("pointercancel", onCancel, true);
     },
   };
 }

@@ -2351,22 +2351,44 @@ function attachWidgetControls(canvas, camera, opts) {
     }
     return best;
   };
-  let grabbed = null, hovered = null;
+  let grabbed = null, hovered = null, grabbedId = -1;
+  const release = (pointerId) => {
+    if (!grabbed) return;
+    const g = grabbed;
+    grabbed = null;
+    grabbedId = -1;
+    try {
+      canvas.releasePointerCapture(pointerId);
+    } catch {
+    }
+    window.removeEventListener("pointermove", onMove, true);
+    window.removeEventListener("pointerup", onUp, true);
+    window.removeEventListener("pointercancel", onCancel, true);
+    canvas.style.cursor = "";
+    opts.onDragEnd?.(g);
+  };
   const onDown = (e) => {
     if (e.button !== 0) return;
+    if (grabbed) {
+      release(e.pointerId);
+      return;
+    }
+    if (e.isPrimary === false) return;
     const h = pick(e);
     if (!h) return;
     e.stopPropagation();
     e.preventDefault();
     grabbed = h;
+    grabbedId = e.pointerId;
     canvas.setPointerCapture(e.pointerId);
     canvas.style.cursor = h.cursor ? h.cursor : "grabbing";
     opts.onDragStart?.(h);
     window.addEventListener("pointermove", onMove, true);
     window.addEventListener("pointerup", onUp, true);
+    window.addEventListener("pointercancel", onCancel, true);
   };
   const onMove = (e) => {
-    if (!grabbed) return;
+    if (!grabbed || e.pointerId !== grabbedId) return;
     e.stopPropagation();
     const { x, y, rw, rh } = cursorCss(e);
     const { w, h } = opts.getSize();
@@ -2376,17 +2398,12 @@ function attachWidgetControls(canvas, camera, opts) {
     opts.onChange?.();
   };
   const onUp = (e) => {
-    if (!grabbed) return;
+    if (!grabbed || e.pointerId !== grabbedId) return;
     e.stopPropagation();
-    const g = grabbed;
-    grabbed = null;
-    try {
-      canvas.releasePointerCapture(e.pointerId);
-    } catch {
-    }
-    window.removeEventListener("pointermove", onMove, true);
-    window.removeEventListener("pointerup", onUp, true);
-    opts.onDragEnd?.(g);
+    release(e.pointerId);
+  };
+  const onCancel = (e) => {
+    if (grabbed && e.pointerId === grabbedId) release(e.pointerId);
   };
   const onHoverMove = (e) => {
     if (grabbed) return;
@@ -2406,6 +2423,7 @@ function attachWidgetControls(canvas, camera, opts) {
       canvas.removeEventListener("pointermove", onHoverMove);
       window.removeEventListener("pointermove", onMove, true);
       window.removeEventListener("pointerup", onUp, true);
+      window.removeEventListener("pointercancel", onCancel, true);
     }
   };
 }
