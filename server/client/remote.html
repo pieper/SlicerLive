@@ -24,6 +24,10 @@
   #gpu { flex: 1 1 auto; width: 100%; height: 100%; display: block; background: #000; touch-action: none; cursor: grab; }
   #gpu:active { cursor: grabbing; }
   #status { position: fixed; bottom: 6px; left: 10px; font-size: 11px; color: #9fb3d0; font-family: ui-monospace, monospace; pointer-events: none; text-shadow: 0 0 3px #000; }
+  #credit { position: fixed; left: 10px; bottom: 8px; z-index: 5; font: 500 11px -apple-system, system-ui, sans-serif;
+            color: #8a93a6; background: rgba(10,12,18,.55); padding: 3px 8px; border-radius: 6px; max-width: 70vw;
+            pointer-events: none; }
+  #credit:empty { display: none; }
   #scene { font: 600 12px -apple-system, system-ui, sans-serif; background: #12151f; color: #dfe4f0; border: 1px solid #2a3040; border-radius: 7px; padding: 6px 9px; max-width: 40vw; }
   #scene:disabled { opacity: .5; }
   #mode { font: 600 12px -apple-system, system-ui, sans-serif; color: #04121c; cursor: pointer;
@@ -103,6 +107,7 @@
     <div id="ovBtns"></div>
   </div>
 </div>
+<div id="credit"></div>
 <script type="module" src="./remote.js"></script>
 </body>
 </html>

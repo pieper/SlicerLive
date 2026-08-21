@@ -3170,6 +3170,13 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let rate = 0.8;
   let clientScene = "";
   const sceneSel = document.getElementById("scene");
+  const creditEl = document.getElementById("credit");
+  let sceneMenu = [];
+  const showCredit = (name) => {
+    if (!creditEl) return;
+    const c = sceneMenu.find((s) => s.name === name)?.credit;
+    creditEl.textContent = c ? `Data: ${c}` : "";
+  };
   if (sceneSel) sceneSel.onchange = () => {
     const name = sceneSel.value;
     if (!name || name === clientScene) return;
@@ -3366,6 +3373,7 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         if (ovMode === "starting") hideOverlay();
         const reconnecting = !!camera;
         demo = m.demo ?? "single";
+        if (Array.isArray(m.scenes)) sceneMenu = m.scenes;
         if (sceneSel && Array.isArray(m.scenes) && sceneSel.options.length === 0) {
           for (const sc of m.scenes) {
             const o = document.createElement("option");
@@ -3385,6 +3393,7 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
             sceneSel.value = m.scene;
             sceneSel.disabled = false;
           }
+          showCredit(m.scene);
         }
         widgetSeed = m.widget ?? null;
         if (sceneChanged) {

@@ -376,6 +376,13 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let rate = 0.80;                 // $/hr for the remote GPU (server tells us in hello)
   let clientScene = "";            // which scene the server currently has loaded
   const sceneSel = document.getElementById("scene") as HTMLSelectElement | null;
+  const creditEl = document.getElementById("credit");
+  let sceneMenu: Array<{ name: string; credit?: string }> = [];
+  const showCredit = (name: string) => {
+    if (!creditEl) return;
+    const c = sceneMenu.find((s) => s.name === name)?.credit;
+    creditEl.textContent = c ? `Data: ${c}` : "";
+  };
   if (sceneSel) sceneSel.onchange = () => {
     const name = sceneSel.value;
     if (!name || name === clientScene) return;
@@ -536,6 +543,7 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         const reconnecting = !!camera;   // we already had a scene → this is a wake, not a first load
         demo = m.demo ?? "single";
         // Populate the specimen menu (once), and note which scene the server has loaded.
+        if (Array.isArray(m.scenes)) sceneMenu = m.scenes;
         if (sceneSel && Array.isArray(m.scenes) && sceneSel.options.length === 0) {
           for (const sc of m.scenes) {
             const o = document.createElement("option");
@@ -549,7 +557,7 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         }
         sceneName = m.name ?? sceneName;
         const sceneChanged = typeof m.scene === "string" && m.scene !== clientScene && clientScene !== "";
-        if (typeof m.scene === "string") { clientScene = m.scene; if (sceneSel) { sceneSel.value = m.scene; sceneSel.disabled = false; } }
+        if (typeof m.scene === "string") { clientScene = m.scene; if (sceneSel) { sceneSel.value = m.scene; sceneSel.disabled = false; } showCredit(m.scene); }
         widgetSeed = m.widget ?? null;
         if (sceneChanged) {
           // A different specimen: drop the old gizmo, re-frame the camera, remount for the new one.

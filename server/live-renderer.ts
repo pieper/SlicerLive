@@ -103,16 +103,18 @@ function volFit(dims: [number, number, number]): { fits: boolean; gib: number; r
   if (bytes > VRAM_FIT_LIMIT) return { fits: false, gib, reason: `${gib.toFixed(1)} GiB as float32 exceeds the L4's usable VRAM` };
   return { fits: true, gib };
 }
-interface Specimen { label: string; url: string; preset: string; dims: [number, number, number]; note?: string }
+interface Specimen { label: string; url: string; preset: string; dims: [number, number, number]; credit: string; note?: string }
 // dims from MorphoDepot's dashboard-data.json; only volumes whose largest dim ≤ MAX3D are offered.
 const MORPHO: Record<string, Specimen> = {
-  bumblebee:      { label: "Bumblebee — diceCT", url: "https://github.com/muratmaga/Bumblebee_Stained/releases/download/v1/Bumblebee.nrrd", preset: "diceCT_16", dims: [1159, 1663, 1482] },
-  plethodon:      { label: "Salamander hindlimb — diceCT", url: "https://github.com/dinonoto/Plethodon_Hindlimb2/releases/download/v1/A159522_hind_8bit.nrrd", preset: "diceCT_16", dims: [988, 1660, 1721] },
-  herpetotherium: { label: "Fossil marsupial (Herpetotherium)", url: "https://github.com/muratmaga/Peratherium_sp/releases/download/v1/AMNH_FM_22304.nrrd", preset: "Bat-8bit", dims: [1166, 1990, 865] },
-  coweye:         { label: "Cow eye — diceCT", url: "https://github.com/PaulGignac/GignacLab_DiceCT_CowEye_2025/releases/download/v1/PaulGignac-Gignac_Cow_Eye_DiceCT-01-volume.nrrd", preset: "diceCT_16", dims: [1215, 954, 1550] },
-  xenopus:        { label: "Xenopus frog — diceCT", url: "https://github.com/dinonoto/Xenopus-diceCT/releases/download/v1/CAS-H-2234-DICECT_cropped.nrrd", preset: "diceCT_16", dims: [1711, 1376, 705] },
-  glaucomys:      { label: "Flying-squirrel skull", url: "https://js2.jetstream-cloud.org:8001/swift/v1/MorphoDepot-volumes/muratmaga/glaucomys-sabrinus-skull/UWMB-30808.nrrd", preset: "Bat-8bit", dims: [975, 1589, 750] },
-  daphnia:        { label: "Water flea (Daphnia) — diceCT", url: "https://github.com/JeanCopper/Daphnia_magna/releases/download/v1/Daphnia_Gut_AAA391.nrrd", preset: "diceCT_16", dims: [378, 750, 175] },
+  // CC-BY 4.0 ONLY (attribution, commercial OK). Licenses verified from MorphoDepot's dashboard
+  // accession.license field; the CC-BY-NC specimens (bumblebee, plethodon, Peratherium, cow eye,
+  // dinonoto Xenopus) are deliberately excluded. Every entry requires attribution -> `credit`.
+  alligator:   { label: "Juvenile alligator — diceCT", url: "https://github.com/raranda22/Juvenile_Alligator_Volume/releases/download/v1/dinonoto-AM112911-05_Juv_Alligator-volume.nrrd", preset: "diceCT_16", dims: [4634, 1120, 705], credit: "raranda22 / Juvenile_Alligator_Volume (MorphoDepot, CC-BY 4.0)" },
+  xenopus:     { label: "Xenopus frog — diceCT", url: "https://github.com/isafinamor/sapo/releases/download/v1/dinonoto-Xenopus-diceCT-volume.nrrd", preset: "diceCT_16", dims: [1711, 1376, 705], credit: "isafinamor / sapo (MorphoDepot, CC-BY 4.0)" },
+  stickleback: { label: "Three-spine stickleback — µCT", url: "https://github.com/CDonatelli/Gasterosteus_aculeatus_16um/releases/download/v1/Gasterosteus_aculeatus_15.9um.nrrd", preset: "Bat-8bit", dims: [904, 441, 3698], credit: "CDonatelli / Gasterosteus_aculeatus_16um (MorphoDepot, CC-BY 4.0)" },
+  bat:         { label: "Dog-faced bat — µCT", url: "https://github.com/elisechmitchell/Para_dog-face_bat/releases/download/v1/C0008901_00000.nrrd", preset: "Bat-8bit", dims: [1262, 1733, 390], credit: "elisechmitchell / Para_dog-face_bat (MorphoDepot, CC-BY 4.0)" },
+  poacher:     { label: "Poacher fish tail — µCT", url: "https://github.com/CDonatelli/DamagedPoacherTail/releases/download/v1/BathyCrush05Tail_8.8um_Al1__rec0170.nrrd", preset: "Bat-8bit", dims: [560, 560, 1358], credit: "CDonatelli / DamagedPoacherTail (MorphoDepot, CC-BY 4.0)" },
+  daphnia:     { label: "Water flea (Daphnia) — diceCT", url: "https://github.com/JeanCopper/Daphnia_magna/releases/download/v1/Daphnia_Gut_AAA391.nrrd", preset: "diceCT_16", dims: [378, 750, 175], credit: "JeanCopper / Daphnia_magna (MorphoDepot, CC-BY 4.0)" },
 };
 const SCENES = ["multi", ...Object.keys(MORPHO)];
 
@@ -179,10 +181,10 @@ function buildGrayLut(): Uint8Array {
 }
 
 const SCENE_MENU = [
-  { name: "multi", label: "Cardiac CTA + Abdomen (2 vols + gizmo)", dims: "512³ + 441³", gib: 0.1, fits: true },
+  { name: "multi", label: "Cardiac CTA + Abdomen (2 vols + gizmo)", dims: "512³ + 441³", gib: 0.1, fits: true, credit: "3D Slicer sample data (CTACardio, Panoramix)" },
   ...Object.entries(MORPHO).map(([name, sp]) => {
     const f = volFit(sp.dims);
-    return { name, label: sp.label, dims: sp.dims.join("×"), gib: Math.round(f.gib * 10) / 10, fits: f.fits, reason: f.reason };
+    return { name, label: sp.label, dims: sp.dims.join("×"), gib: Math.round(f.gib * 10) / 10, fits: f.fits, reason: f.reason, credit: sp.credit };
   }),
 ];
 // Default to the largest specimen that comfortably fits (unless SCENE_NAME overrides), so the demo
