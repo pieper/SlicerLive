@@ -36,6 +36,8 @@ const COMPRESS = (Deno.env.get("COMPRESS") ?? "1") !== "0";   // gzip the rgba8 
 // spawns it and encodes patches to AV1 intra; on any failure it falls back to gzip per-frame, so
 // the demo never depends on the encoder being up. QP is the quality/size dial.
 const CODEC = Deno.env.get("CODEC") ?? "gzip";
+const GPU_RATE_PER_HR = Number(Deno.env.get("GPU_RATE_PER_HR") ?? 0.80);   // shown in the client cost meter
+const SCALEDOWN_S = Number(Deno.env.get("SCALEDOWN_S") ?? 20);             // Modal's post-disconnect tail
 const SIDECAR_BIN = Deno.env.get("SIDECAR_BIN") ?? "";
 const AV1_QP = Number(Deno.env.get("AV1_QP") ?? 31);
 const BG: [number, number, number] = [Math.round(0.05 * 255), Math.round(0.06 * 255), Math.round(0.09 * 255)];
@@ -388,6 +390,7 @@ function handleWs(req: Request): Response {
     // with the target's start centre — its drags come back as {xform} instead of touching a field.
     socket.send(JSON.stringify({
       type: "hello", proto: PROTO, center, radius, name: sceneName, sceneUrl: SCENE_URL, demo: DEMO,
+      rate: GPU_RATE_PER_HR, scaledownS: SCALEDOWN_S,
       widget: xformTarget ? { center: xformC0, m: [...xformM] } : null,
     }));
     loop();

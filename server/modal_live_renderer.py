@@ -24,6 +24,10 @@ import modal
 DENO_VERSION = "v2.9.5"
 PORT = 8787
 CODEC = "av1"   # hardware AV1 via the Rust sidecar; falls back to gzip if it can't start
+# Short scaledown so the container scales to ZERO (billing stops) soon after the last client
+# releases its WebSocket — the client owns the user-chosen idle timeout, this is just the tail.
+SCALEDOWN_S = 20
+GPU_RATE_PER_HR = 0.80   # L4 list price (modal.com/pricing); shown in the client's cost meter
 ROOT = pathlib.Path(__file__).resolve().parents[1] if modal.is_local() else pathlib.Path("/app")
 
 app = modal.App("slicerlive-live-renderer")
@@ -60,6 +64,8 @@ image = (
         "DENO_DIR": "/tmp/deno",
         "DENO_NO_UPDATE_CHECK": "1",
         "DEMO": "multi",
+        "GPU_RATE_PER_HR": str(GPU_RATE_PER_HR),
+        "SCALEDOWN_S": str(SCALEDOWN_S),
     })
     # The renderer is dependency-free TS: shipping these trees IS the deploy.
     .add_local_dir(ROOT / "render", "/app/render")
@@ -78,7 +84,7 @@ build_vol = modal.Volume.from_name("slicerlive-native-build", create_if_missing=
     image=image,
     gpu="L4",
     timeout=60 * 60,          # a viewing session may sit open for an hour
-    scaledown_window=300,     # transient: the GPU goes away 5 min after the last request
+    scaledown_window=SCALEDOWN_S,   # transient: GPU scales to zero this long after the last WS drops
     max_containers=4,
     volumes={"/build": build_vol},
 )

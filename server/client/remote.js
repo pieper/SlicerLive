@@ -3025,6 +3025,7 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   canvas.addEventListener("pointerdown", () => {
     pdown = true;
     camDirty = true;
+    noteInteract();
     scheduleSend();
   }, true);
   globalThis.addEventListener("pointerup", () => {
@@ -3032,8 +3033,7 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     camDirty = true;
     scheduleSend();
   }, true);
-  const ws = serverUrl ? new WebSocket(serverUrl) : null;
-  if (ws) ws.binaryType = "arraybuffer";
+  let ws = null;
   let lastSent = -1e12;
   let trailing = 0;
   const sendCam = () => {
@@ -3142,27 +3142,78 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     }
     attachWidget();
   };
-  ws?.addEventListener("open", () => {
-    ws.send(JSON.stringify({ type: "caps", av1: av1CanDecode }));
-    status("connected \u2014 waiting for scene\u2026");
-  });
+  const gunzip = async (b) => new Uint8Array(await new Response(new Response(b).body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
+  let applyChain = Promise.resolve();
+  let rate = 0.8;
+  let scaledownMs = 2e4;
+  let costTotal = 0;
+  let lastBillTs = 0, containerDeadAt = Infinity, connectStartTs = 0;
+  let coldEtaMs = 14e3;
+  let connState = serverUrl ? "connecting" : "off";
+  const IDLE_OPTS = [["5s", 5e3], ["15s", 15e3], ["30s", 3e4], ["1m", 6e4], ["2m", 12e4], ["5m", 3e5], ["10m", 6e5]];
+  let idleMs = Number(localStorage.getItem("lr_idle") ?? 12e4);
+  let lastInteract = performance.now();
+  let idleClosed = false;
+  const el = (id) => document.getElementById(id);
+  const setConn = (c) => {
+    connState = c;
+  };
+  const fmt$ = (v) => "$" + v.toFixed(2);
+  const connect = () => {
+    if (!serverUrl) return;
+    idleClosed = false;
+    connectStartTs = performance.now();
+    containerDeadAt = Infinity;
+    if (lastBillTs === 0) lastBillTs = performance.now();
+    setConn("connecting");
+    ws = new WebSocket(serverUrl);
+    ws.binaryType = "arraybuffer";
+    const sock = ws;
+    sock.addEventListener("open", () => {
+      sock.send(JSON.stringify({ type: "caps", av1: av1CanDecode }));
+      status("connected \u2014 waiting for scene\u2026");
+    });
+    sock.addEventListener("close", () => {
+      containerDeadAt = performance.now() + scaledownMs;
+      if (idleClosed) {
+        setConn("sleeping");
+        status("sleeping \u2014 touch to wake");
+      } else fallbackLocal("render server disconnected");
+    });
+    sock.addEventListener("error", () => {
+      if (!idleClosed) {
+        setConn("error");
+        fallbackLocal("cannot reach the render server");
+      }
+    });
+    sock.addEventListener("message", (ev) => {
+      if (sock !== ws) return;
+      if (typeof ev.data !== "string" && sock.readyState === WebSocket.OPEN) sock.send('{"type":"cack"}');
+      applyChain = applyChain.then(() => applyMessage(ev)).catch((err) => {
+        lastErr = String(err?.message ?? err);
+        status("frame decode error: " + lastErr + " \u2014 try a hard reload", true);
+        requestResync();
+      });
+    });
+  };
+  const goIdle = () => {
+    if (ws?.readyState === WebSocket.OPEN) {
+      idleClosed = true;
+      ws.close(1e3, "idle");
+    }
+  };
+  const wake = () => {
+    if (serverUrl && (connState === "sleeping" || connState === "error")) connect();
+  };
+  const noteInteract = () => {
+    lastInteract = performance.now();
+    wake();
+  };
   const fallbackLocal = async (why) => {
     if (mode === "local") return;
     status(`${why} \u2014 rendering locally instead`, true);
     if (await ensureLocal()) await setMode("local");
   };
-  ws?.addEventListener("close", () => fallbackLocal("render server disconnected"));
-  ws?.addEventListener("error", () => fallbackLocal("cannot reach the render server"));
-  const gunzip = async (b) => new Uint8Array(await new Response(new Response(b).body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer());
-  let applyChain = Promise.resolve();
-  ws?.addEventListener("message", (ev) => {
-    if (typeof ev.data !== "string" && ws.readyState === WebSocket.OPEN) ws.send('{"type":"cack"}');
-    applyChain = applyChain.then(() => applyMessage(ev)).catch((err) => {
-      lastErr = String(err?.message ?? err);
-      status("frame decode error: " + lastErr + " \u2014 try a hard reload", true);
-      requestResync();
-    });
-  });
   const applyMessage = async (e) => {
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data);
@@ -3177,10 +3228,20 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
           return;
         }
         sessionStorage.removeItem("lr_reloaded");
+        if (typeof m.rate === "number") rate = m.rate;
+        if (typeof m.scaledownS === "number") scaledownMs = m.scaledownS * 1e3;
+        if (connectStartTs) coldEtaMs = Math.max(1500, Math.min(6e4, performance.now() - connectStartTs));
+        containerDeadAt = Infinity;
+        setConn("live");
+        const reconnecting = !!camera;
         demo = m.demo ?? "single";
         widgetSeed = m.widget ?? null;
         if (widgetSeed && !widget) createWidget(widgetSeed);
         bootstrap({ name: m.name ?? "scene", sceneUrl: m.sceneUrl ?? "", center: m.center, radius: m.radius });
+        if (reconnecting && widget) {
+          xformDirty = true;
+        }
+        camDirty = true;
         sendCam();
         statusLine("remote", widget ? "drag a gizmo handle to move Panoramix \xB7 " : "drag to orbit \xB7 ");
       }
@@ -3267,9 +3328,81 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     else a3d?.draw();
   };
   modeBtn?.addEventListener("click", () => setMode(mode === "remote" ? "local" : "remote"));
-  if (!ws) {
+  const connEl = el("conn"), meterEl = el("meter"), gearEl = el("gear");
+  const popup = el("idlePopup"), optsEl = el("idleOpts"), closeEl = el("idleClose");
+  const idleLabel = () => IDLE_OPTS.find(([, v]) => v === idleMs)?.[0] ?? idleMs / 1e3 + "s";
+  if (gearEl) gearEl.textContent = "\u23F1 " + idleLabel();
+  const buildOpts = () => {
+    if (!optsEl) return;
+    optsEl.innerHTML = "";
+    for (const [label, v] of IDLE_OPTS) {
+      const b = document.createElement("button");
+      b.textContent = label;
+      if (v === idleMs) b.className = "sel";
+      b.onclick = () => {
+        idleMs = v;
+        localStorage.setItem("lr_idle", String(v));
+        if (gearEl) gearEl.textContent = "\u23F1 " + label;
+        buildOpts();
+        lastInteract = performance.now();
+      };
+      optsEl.appendChild(b);
+    }
+  };
+  buildOpts();
+  gearEl?.addEventListener("click", () => popup?.classList.add("show"));
+  closeEl?.addEventListener("click", () => popup?.classList.remove("show"));
+  popup?.addEventListener("click", (e) => {
+    if (e.target === popup) popup.classList.remove("show");
+  });
+  connEl?.addEventListener("click", () => {
+    if (connState === "sleeping" || connState === "error") {
+      lastInteract = performance.now();
+      wake();
+    }
+  });
+  const bill = () => {
+    const now = performance.now();
+    if (mode === "remote" && lastBillTs && now < containerDeadAt) costTotal += rate * (now - lastBillTs) / 36e5;
+    lastBillTs = now;
+  };
+  const paintMeter = () => {
+    if (!connEl || !meterEl) return;
+    if (mode === "local") {
+      connEl.className = "pill";
+      connEl.textContent = "local GPU";
+      meterEl.textContent = fmt$(costTotal);
+      return;
+    }
+    if (connState === "connecting") {
+      const eta = Math.max(0, coldEtaMs - (performance.now() - connectStartTs));
+      connEl.className = "pill wake";
+      connEl.textContent = `waking\u2026 ~${Math.ceil(eta / 1e3)}s`;
+    } else if (connState === "live") {
+      connEl.className = "pill";
+      connEl.textContent = "live";
+    } else if (connState === "sleeping") {
+      connEl.className = "pill sleep";
+      connEl.textContent = `sleeping \xB7 tap to wake (~${Math.ceil(coldEtaMs / 1e3)}s)`;
+    } else if (connState === "error") {
+      connEl.className = "pill err";
+      connEl.textContent = "offline \xB7 tap to retry";
+    }
+    meterEl.textContent = fmt$(costTotal);
+    meterEl.title = `Modal L4 GPU: ${fmt$(costTotal)} since this page connected \xB7 ${fmt$(rate)}/hr while awake`;
+  };
+  setInterval(() => {
+    bill();
+    if (connState === "live" && performance.now() - lastInteract > idleMs && ws?.readyState === WebSocket.OPEN) goIdle();
+    paintMeter();
+  }, 500);
+  if (serverUrl) {
+    lastBillTs = performance.now();
+    connect();
+  } else {
     status("no render server \u2014 rendering locally");
     if (await ensureLocal()) await setMode("local");
+    paintMeter();
   }
   globalThis.__remoteDbg = {
     frames: () => frames,
@@ -3305,6 +3438,13 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     }),
     last: () => lastFrame,
     drags: () => ({ starts: dbgStarts, drags: dbgDrags }),
+    session: () => ({ conn: connState, cost: costTotal, rate, idleMs, coldEtaMs: Math.round(coldEtaMs), scaledownMs }),
+    setIdle: (ms) => {
+      idleMs = ms;
+      lastInteract = performance.now();
+    },
+    forceIdle: () => goIdle(),
+    wake: () => wake(),
     timing: () => {
       const r = { frames, presentMs: Math.round(dbgPresentMs), gunzipMs: Math.round(dbgGunzipMs), queued: dbgQueued };
       dbgPresentMs = 0;

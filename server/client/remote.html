@@ -26,12 +26,34 @@
   #status { position: fixed; bottom: 6px; left: 10px; font-size: 11px; color: #9fb3d0; font-family: ui-monospace, monospace; pointer-events: none; text-shadow: 0 0 3px #000; }
   #mode { font: 600 12px -apple-system, system-ui, sans-serif; color: #04121c; cursor: pointer;
     background: linear-gradient(180deg, #9fe9ff, #54c6f0); border: 0; border-radius: 7px; padding: 6px 13px; }
+  #session { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .pill { font: 600 12px ui-monospace, monospace; padding: 4px 9px; border-radius: 999px; white-space: nowrap; }
+  #conn { background: #12331c; color: #7ff0a0; }
+  #conn.wake { background: #33280f; color: #ffcf6b; }
+  #conn.sleep { background: #2a2030; color: #c79be0; cursor: pointer; }
+  #conn.err { background: #3a1520; color: #ff8a9a; }
+  #meter { background: #14202e; color: #8fd0ff; cursor: help; }
+  #gear { background: #1b1b28; color: #cfd4e6; border: 0; border-radius: 7px; padding: 5px 9px; cursor: pointer; font-size: 13px; }
+  #idlePopup { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; z-index: 20; }
+  #idlePopup.show { display: flex; }
+  #idlePopup .pop { background: #10131c; border: 1px solid #262b3a; border-radius: 12px; padding: 18px 20px; max-width: 420px; }
+  #idlePopup h3 { margin: 0 0 6px; font-size: 15px; }
+  #idlePopup p { margin: 0 0 12px; font-size: 12.5px; line-height: 1.45; opacity: .8; }
+  #idleOpts { display: flex; flex-wrap: wrap; gap: 8px; }
+  #idleOpts button { font: 600 12px system-ui; padding: 7px 11px; border-radius: 8px; border: 1px solid #2c3346; background: #171b26; color: #cfd6e8; cursor: pointer; }
+  #idleOpts button.sel { background: linear-gradient(180deg, #9fe9ff, #54c6f0); color: #04121c; border-color: transparent; }
+  #idlePopup .close { margin-top: 14px; font: 600 12px system-ui; padding: 7px 13px; border-radius: 8px; border: 0; background: #232838; color: #dfe4f0; cursor: pointer; }
 </style>
 </head>
 <body>
 <header>
   <h1>Remote Render<span class="badge">Deno · WebGPU · WS</span></h1>
   <button id="mode">Rendering on the REMOTE GPU — click to render locally</button>
+  <div id="session">
+    <span id="conn" class="pill">connecting…</span>
+    <span id="meter" class="pill" title="Modal L4 GPU cost since this page connected (rounded to the cent)">$0.00</span>
+    <button id="gear" title="Sleep-after-idle setting">⏱ idle</button>
+  </div>
   <details><summary>what am I looking at?</summary><p>The <b>same</b> TS/WebGPU renderer, running headless in a Deno process, streaming traced
     samples over a WebSocket. This page just sends its camera and <b>reconstructs</b> the samples
     (Catmull-Rom upsample + background composite) — the identical Reconstructor the local demos use.
@@ -43,6 +65,16 @@
 </header>
 <main><canvas id="gpu"></canvas></main>
 <div id="status">connecting…</div>
+<div id="idlePopup">
+  <div class="pop">
+    <h3>Sleep after idle</h3>
+    <p>Drop the GPU connection after this long with no interaction — the remote L4 then scales to
+      zero and billing stops. It wakes automatically on your next touch or drag (a few seconds to
+      restart). Shorter saves more; longer keeps it instantly responsive.</p>
+    <div id="idleOpts"></div>
+    <button class="close" id="idleClose">Done</button>
+  </div>
+</div>
 <script type="module" src="./remote.js"></script>
 </body>
 </html>
