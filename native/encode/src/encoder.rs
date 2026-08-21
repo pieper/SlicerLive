@@ -75,9 +75,14 @@ impl Av1Encoder {
         let session: Box<Session> = Box::new(enc.start_session(NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_ABGR, init)?);
         // Borrow the boxed session's encoder; the borrows are valid for as long as the Box lives
         // and we never move out of it (we do not) — so extend them to 'static.
-        let input = session.create_input_buffer()?;
+        let mut input = session.create_input_buffer()?;
         let output = session.create_output_bitstream()?;
-        let pitch = (input.pitch() as usize).max(w as usize * 4);
+        // Prime the pitch: NVENC reports the REAL, hardware-aligned input stride only AFTER the
+        // buffer has been locked once; before that input.pitch() returns the width in PIXELS. If we
+        // pack at cw*4 the encoder reads at its (larger, aligned) stride and every wide frame shears
+        // into horizontal bands. Lock-and-drop once, then read the authoritative pitch.
+        { let _prime = input.lock()?; }
+        let pitch = input.pitch() as usize;
         let input = unsafe { std::mem::transmute::<_, nvidia_video_codec_sdk::Buffer<'static>>(input) };
         let output = unsafe { std::mem::transmute::<_, nvidia_video_codec_sdk::Bitstream<'static>>(output) };
         Ok(Sized { _session: session, input, output, pitch, used: 0 })

@@ -89,8 +89,9 @@ def run() -> dict:
     pathlib.Path("/app/driver.ts").write_text(DRIVER)
     pathlib.Path("/tmp/frames").mkdir(exist_ok=True)
     # start the sidecar, wait for READY on its stdout
+    errf = open("/tmp/sidecar.err", "w")
     proc = subprocess.Popen([bin_path, "/tmp/enc.sock"],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                            stdout=subprocess.PIPE, stderr=errf, text=True)
     ready = False
     for _ in range(200):
         line = proc.stdout.readline()
@@ -102,6 +103,8 @@ def run() -> dict:
         d = sh("deno run --allow-read --allow-write --allow-net --unstable-net /app/driver.ts /tmp/enc.sock /tmp/frames", timeout=120)
         out["driver"] = d.stdout + d.stderr
     proc.terminate()
+    errf.flush()
+    out["sidecar_err"] = pathlib.Path("/tmp/sidecar.err").read_text()[-2000:]
     frames = {}
     for f in sorted(pathlib.Path("/tmp/frames").glob("*.av1")):
         frames[f.name] = f.read_bytes()
@@ -114,6 +117,7 @@ def main(out_dir: str = ""):
     res = run.remote()
     print(res["build"][-400:])
     print("ready:", res["ready"])
+    print("--- sidecar stderr ---"); print(res.get("sidecar_err",""))
     print(res.get("driver", ""))
     if out_dir:
         d = pathlib.Path(out_dir); d.mkdir(parents=True, exist_ok=True)
