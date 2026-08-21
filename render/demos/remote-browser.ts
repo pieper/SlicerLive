@@ -17,6 +17,7 @@ import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachWidgetControls, type Handle, projectToCanvasCss } from "./widget-control.ts";
 import { componentOf, makeXformWidget, type XformTarget, type XformWidget, type XMeta } from "./xform-widget.ts";
 import { buildMultiVolume } from "./selftest-scenes.ts";
+import { Av1Presenter } from "../av1-presenter.ts";
 import type { ImageField } from "../fields.ts";
 import { identity, type Mat4, type Vec3 } from "../mat4.ts";
 import type { VtkCamera } from "../vtk-camera.ts";
@@ -53,6 +54,8 @@ async function main() {
   });
   const recon = new Reconstructor(gpu, srgb);
   recon.setBackground(0.05, 0.06, 0.09);
+  // AV1 patches decode + draw through this; gzip/raw patches still go through the Reconstructor.
+  const av1 = Av1Presenter.supported ? new Av1Presenter(gpu, srgb) : null;
 
   // The remote image lives here between frames; the canvas is a copy of it. Patches paint into it.
   // `surfaceValid` is the safety interlock: a patch may only be applied ON TOP of a full frame at
@@ -164,7 +167,7 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     resyncSent = true; dbgResyncs++;
     ws.send('{"type":"resync"}');
   };
-  let lastFrame: { kind: number; sw: number; sh: number; pw: number; ph: number; kB: number; settled: number } | null = null;
+  let lastFrame: { kind: number; sw: number; sh: number; pw: number; ph: number; kB: number; settled: number; codec: number } | null = null;
   let dbgStarts = 0, dbgDrags = 0;   // widget-drag counters for the CDP harness
   let dbgPresentMs = 0, dbgGunzipMs = 0, dbgQueued = 0;   // where client-side frame time goes
   const concat = (bs: Uint8Array[]) => {
@@ -238,7 +241,9 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
 
   // Track the finger itself (capture phase, observation only): a pause mid-gesture must not look
   // like a release to the server, or it starts a heavyweight settle it will only have to preempt.
-  canvas.addEventListener("pointerdown", () => { pdown = true; }, true);
+  // Finger state rides the camera message so the server knows a pause is mid-gesture (gizmo drags
+  // send xform, not cam — without this the server would think the finger is up and settle too soon).
+  canvas.addEventListener("pointerdown", () => { pdown = true; camDirty = true; scheduleSend(); }, true);
   globalThis.addEventListener("pointerup", () => { pdown = false; camDirty = true; scheduleSend(); }, true);
 
   // ---- REMOTE path (optional) ----
@@ -380,7 +385,7 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     if (mode !== "remote") return;   // ignore stale remote frames while in Local mode
     const buf = e.data as ArrayBuffer;
     const head = new Uint16Array(buf, 0, 16);
-    const sw = head[0], sh = head[1], settled = head[4], compressed = head[5];
+    const sw = head[0], sh = head[1], settled = head[4], codec = head[5];   // codec: 0 raw · 1 gzip · 2 av1
     const chunk = head[6], chunks = head[7];
     // kind 1 = PATCH: these samples cover only the view rect (px,py,pw,ph)
     const kind = head[8], px = head[9], py = head[10], pw = head[11], ph = head[12];
@@ -388,17 +393,19 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     frameBytes += buf.byteLength;
     // Big frames arrive in pieces (a cloud ws proxy closes the socket on multi-MB messages) —
     // reassemble, and ack only when the last piece lands so the credit scheme still paces us.
-    let samples: Uint8Array;
+    // Reassemble chunks first (a big frame is split for the WS proxy limit). AV1 is one intra
+    // image, decoded whole; gzip chunks were independently compressed, so gunzip per chunk.
+    let payload: Uint8Array;
     if (chunks > 1) {
       if (chunk === 0) parts.length = 0;
       let part = new Uint8Array(buf, 32);
-      if (compressed) part = await gunzip(part);   // chunks are independently gzipped
+      if (codec === 1) part = await gunzip(part);
       parts.push(part);
       if (chunk < chunks - 1) return;
-      samples = concat(parts);
+      payload = concat(parts);
     } else {
-      samples = new Uint8Array(buf, 32);
-      if (compressed) samples = await gunzip(samples);
+      payload = new Uint8Array(buf, 32);
+      if (codec === 1) payload = await gunzip(payload);
     }
     // ---- APPLY RULES. WebSocket delivery is ordered, so these three rules keep the client's
     // surface exactly consistent with the server's model of it — or trigger a resync that resets
@@ -406,26 +413,31 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     // stretchily applied: better a moment of the old image than any amount of debris.
     const vw = head[2], vh = head[3];
     if (vw !== canvas.width || vh !== canvas.height) { requestResync(); return; }   // rendered for a view that no longer exists
+    if (kind === 1 && (!surfaceValid || px + pw > viewW || py + ph > viewH)) { requestResync(); return; }
     const tp = performance.now();
     const dst = ensureViewTex().createView({ format: srgb });
-    if (kind === 1) {
-      // PATCH: only ever ON TOP of a complete same-size image.
-      if (!surfaceValid || px + pw > viewW || py + ph > viewH) { requestResync(); return; }
-      recon.present(dst, samples, sw, sh, viewW, viewH, { x: px, y: py, w: pw, h: ph });
+    const rect = kind === 1 ? { x: px, y: py, w: pw, h: ph } : { x: 0, y: 0, w: viewW, h: viewH };
+    if (codec === 2 && av1) {
+      // AV1: decode to a VideoFrame, draw (already composited over bg) into the rect.
+      let frame: VideoFrame;
+      try { frame = await av1.decode(payload, sw, sh); }
+      catch (err) { lastErr = "av1 decode: " + (err as Error).message; requestResync(); return; }
+      av1.present(dst, frame, sw, sh, rect, srgb);
+      frame.close();
     } else {
-      recon.present(dst, samples, sw, sh, viewW, viewH);
-      surfaceValid = true;
-      resyncSent = false;   // the reset round-trip is complete
+      // gzip / raw samples through the Reconstructor (Catmull-Rom upsample + composite over bg).
+      recon.present(dst, payload, sw, sh, viewW, viewH, kind === 1 ? rect : undefined);
     }
+    if (kind === 0) { surfaceValid = true; resyncSent = false; }
     blitToCanvas();
     dbgApplied++;
     dbgPresentMs += performance.now() - tp;
     ws!.send('{"type":"ack"}');      // ack-based credit: server sends the next frame once we present
     frames++; bytes += frameBytes;
     const kB = frameBytes / 1e3; frameBytes = 0;
-    lastFrame = { kind, sw, sh, pw, ph, kB: Math.round(kB), settled };
+    lastFrame = { kind, sw, sh, pw, ph, kB: Math.round(kB), settled, codec };
     const dt = performance.now() - lastCamSentAt; rtt.push(dt); if (rtt.length > 30) rtt.shift();
-    statusLine("remote", `${kind === 1 ? `patch ${sw}×${sh}→${pw}×${ph}` : settled ? "samples native" : `samples ${sw}×${sh}`} · ${kB.toFixed(0)} kB${compressed ? " gz" : ""} · srv ${srvSinceInput}ms (render ${srvRenderMs}) · `);
+    statusLine("remote", `${kind === 1 ? `patch ${sw}×${sh}→${pw}×${ph}` : settled ? "samples native" : `samples ${sw}×${sh}`} · ${kB.toFixed(0)} kB ${["raw","gz","av1"][codec] ?? codec} · srv ${srvSinceInput}ms (render ${srvRenderMs}) · `);
   };
 
   // ---- RenderMode toggle ----

@@ -1,0 +1,52 @@
+on:
+  push:
+    branches: [ "master" ]
+
+env: 
+  CARGO_TERM_COLOR: always
+
+# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
+# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+name: docs
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: doc
+          args: --features ci-check --no-deps
+      - shell: sh
+        run: |
+          chmod -c -R +rX "target/doc" |
+          while read line; do
+              echo "::warning title=Invalid file permissions automatically fixed::$line"
+          done
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: ./target/doc
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    needs: build
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment

@@ -23,6 +23,7 @@ import modal
 
 DENO_VERSION = "v2.9.5"
 PORT = 8787
+CODEC = "av1"   # hardware AV1 via the Rust sidecar; falls back to gzip if it can't start
 ROOT = pathlib.Path(__file__).resolve().parents[1] if modal.is_local() else pathlib.Path("/app")
 
 app = modal.App("slicerlive-live-renderer")
@@ -48,7 +49,11 @@ image = (
         f"curl -fsSL -o /tmp/deno.zip https://github.com/denoland/deno/releases/download/{DENO_VERSION}"
         "/deno-x86_64-unknown-linux-gnu.zip",
         "unzip -o /tmp/deno.zip -d /usr/local/bin && chmod +x /usr/local/bin/deno && rm /tmp/deno.zip",
+        # Rust, for the AV1 encode sidecar (native/encode). It links the driver's libnvidia-encode,
+        # injected only at RUNTIME — so the sidecar is BUILT at container start, not in the image.
+        "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable",
     )
+    .apt_install("build-essential", "pkg-config")
     .env({
         "NVIDIA_DRIVER_CAPABILITIES": "all",
         "NVIDIA_VISIBLE_DEVICES": "all",
@@ -56,12 +61,17 @@ image = (
         "DENO_NO_UPDATE_CHECK": "1",
         "DEMO": "multi",
     })
-    # The renderer is dependency-free TS: shipping these four trees IS the deploy.
+    # The renderer is dependency-free TS: shipping these trees IS the deploy.
     .add_local_dir(ROOT / "render", "/app/render")
     .add_local_dir(ROOT / "algorithms", "/app/algorithms")
     .add_local_dir(ROOT / "logic", "/app/logic")
     .add_local_dir(ROOT / "server", "/app/server", ignore=["*.py"])
+    .add_local_dir(ROOT / "native", "/app/native", ignore=["target", "**/target"])
 )
+
+# The compiled sidecar is cached here between cold starts (keyed by CPU flags — target-cpu=native
+# binaries SIGILL on a different host).
+build_vol = modal.Volume.from_name("slicerlive-native-build", create_if_missing=True)
 
 
 @app.function(
@@ -70,15 +80,52 @@ image = (
     timeout=60 * 60,          # a viewing session may sit open for an hour
     scaledown_window=300,     # transient: the GPU goes away 5 min after the last request
     max_containers=4,
+    volumes={"/build": build_vol},
 )
 # A container must serve the page AND hold a long-lived WebSocket at the same time; without this
 # the WS occupies the container's only input slot and nothing else is answered.
 @modal.concurrent(max_inputs=32)
 # The Deno process binds the port only AFTER the scene is on the GPU, so allow for the load.
-@modal.web_server(PORT, startup_timeout=180)
+@modal.web_server(PORT, startup_timeout=300)
 def live_renderer():
+    import hashlib
+    import os
+
+    env = dict(os.environ)
+    # Build (or reuse) the AV1 encode sidecar for THIS host, then hand its path to the server.
+    if CODEC == "av1":
+        try:
+            # driver libs are injected as versioned .so only; the crate links the unversioned names
+            subprocess.run(["bash", "-c",
+                "cd /usr/lib/x86_64-linux-gnu && for l in nvidia-encode nvcuvid cuda; do "
+                "[ -e lib$l.so ] || ln -s $(ls lib$l.so.* | head -1) lib$l.so; done"], check=False)
+            flags = subprocess.run(["bash", "-c", "lscpu | grep Flags"], capture_output=True, text=True).stdout
+            # Key the build dir on CPU (target-cpu=native SIGILLs across hosts) AND on the source
+            # (mounted-file mtimes are stable, so cargo's fingerprint never notices edits — a stale
+            # cached binary silently served the wrong protocol/codec before this).
+            srchash = subprocess.run(
+                ["bash", "-c", "find /app/native -name '*.rs' -o -name Cargo.toml | sort | xargs cat | md5sum"],
+                capture_output=True, text=True).stdout[:12]
+            key = hashlib.md5((flags + srchash).encode()).hexdigest()[:12]
+            target = f"/build/target-{key}"
+            binp = f"{target}/release/liverender-sidecar"
+            if not pathlib.Path(binp).exists():
+                subprocess.run(["bash", "-c", "find /app/native -name '*.rs' -exec touch {} +"], check=False)
+                subprocess.run(
+                    ["cargo", "build", "--release", "-p", "liverender-encode", "--bin", "liverender-sidecar"],
+                    cwd="/app/native",
+                    env={**env, "CARGO_HOME": "/build/cargo", "CARGO_TARGET_DIR": target,
+                         "PATH": "/root/.cargo/bin:" + env.get("PATH", "")},
+                    check=True, timeout=600,
+                )
+                build_vol.commit()
+            env["SIDECAR_BIN"] = binp
+            env["CODEC"] = "av1"
+        except Exception as e:  # noqa: BLE001
+            print(f"[modal] sidecar build failed, gzip fallback: {e}")
+
     subprocess.Popen(
-        ["deno", "run", "--unstable-webgpu", "--allow-net", "--allow-read", "--allow-env",
-         "/app/server/live-renderer.ts"],
-        cwd="/app",
+        ["deno", "run", "--unstable-webgpu", "--unstable-net", "--allow-net", "--allow-read",
+         "--allow-env", "--allow-run", "--allow-write", "/app/server/live-renderer.ts"],
+        cwd="/app", env=env,
     )

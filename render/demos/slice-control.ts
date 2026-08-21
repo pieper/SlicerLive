@@ -30,6 +30,24 @@ export interface SliceControlCfg {
   redraw: () => void;                   // redraw this cell after scroll/pan/zoom
   scrollPx?: number;                    // px per slice step for left-drag scroll (default 7)
   hooks?: SliceControlHooks;
+  /** Slicer's AdjustWindowLevel mouse mode (vtkMRMLWindowLevelWidget): while `enabled()`,
+   *  an unmodified left-drag adjusts window/level instead of slice-scrolling, with the
+   *  faithful math: gain = scalarRange / min(viewport w,h); window += gain*Δx (clamped
+   *  ≥ 0); level += gain*Δy in DISPLAY coords (y up — DOM Δy is negated); level clamped
+   *  to [lo − window/2, hi + window/2]. Ctrl+left double-click = reset (Slicer's
+   *  WidgetEventResetWindowLevel). Pan/zoom/grab bindings keep working in this mode. */
+  wl?: {
+    enabled: () => boolean;
+    get: () => [number, number];            // [window, level]
+    set: (window: number, level: number) => void;
+    range: () => [number, number];          // volume scalar range [lo, hi]
+    reset?: () => void;
+  };
+  /** Generalized left-drag mode (IHE BIR-style modal tools): when provided, overrides the
+   *  wl.enabled() switch and selects what an unmodified left-drag does — "scroll" (default),
+   *  "wl" (AdjustWindowLevel), "zoom" (drag down = in, same math as right-drag), or "pan".
+   *  All other bindings (wheel, middle/shift pan, right zoom) are unaffected. */
+  leftMode?: () => "scroll" | "wl" | "zoom" | "pan";
 }
 
 export interface SliceControls { resetView(): void; detach(): void }
@@ -46,6 +64,7 @@ export function attachSliceControls(canvas: HTMLCanvasElement, cfg: SliceControl
   let view: { mode: "pan" | "zoom"; x: number; y: number; pu: number; pv: number } | null = null;
   let scroll: { x: number; y: number; acc: number } | null = null;
   let grabbed: { moved: number } | null = null;
+  let wlDrag: { x: number; y: number; win: number; lev: number } | null = null;
 
   const onContext = (e: Event) => e.preventDefault();
   const onWheel = (e: WheelEvent) => {
@@ -62,6 +81,9 @@ export function attachSliceControls(canvas: HTMLCanvasElement, cfg: SliceControl
     if (e.button === 0) {                                          // double-click detection
       const now = e.timeStamp, dbl = now - lastDown < 350 && Math.hypot(e.clientX - lastX, e.clientY - lastY) < 6;
       lastDown = dbl ? 0 : now; lastX = e.clientX; lastY = e.clientY;
+      if (dbl && (e.ctrlKey || e.metaKey) && cfg.wl?.enabled() && cfg.wl.reset) {   // Slicer: Ctrl+dblclick = reset W/L
+        e.preventDefault(); cfg.wl.reset(); cfg.redraw(); return;
+      }
       if (dbl && h.onDoubleClick?.()) { e.preventDefault(); return; }
     }
     const wantPan = e.button === 1 || (e.button === 0 && e.shiftKey);
@@ -77,8 +99,16 @@ export function attachSliceControls(canvas: HTMLCanvasElement, cfg: SliceControl
     if (e.button !== 0) return;
     e.preventDefault();
     const { u, v, w, h: hh } = uv(e);
+    const mode = cfg.leftMode?.() ?? (cfg.wl?.enabled() ? "wl" : "scroll");
     if (h.onLeftGrab?.(u, v, w, hh)) { grabbed = { moved: 0 }; }    // demo consumed it (e.g. markup)
-    else scroll = { x: e.clientX, y: e.clientY, acc: 0 };
+    else if (mode === "wl" && cfg.wl) {                              // AdjustWindowLevel mouse mode
+      const [win, lev] = cfg.wl.get();
+      wlDrag = { x: e.clientX, y: e.clientY, win, lev };
+      canvas.style.cursor = "crosshair";
+    } else if (mode === "zoom" || mode === "pan") {                  // BIR modal Zoom / Pan on left-drag
+      view = { mode, x: e.clientX, y: e.clientY, pu: u, pv: v };
+      canvas.style.cursor = mode === "zoom" ? "ns-resize" : "grabbing";
+    } else scroll = { x: e.clientX, y: e.clientY, acc: 0 };
     canvas.setPointerCapture(e.pointerId);
   };
   const onMove = (e: PointerEvent) => {
@@ -96,6 +126,22 @@ export function attachSliceControls(canvas: HTMLCanvasElement, cfg: SliceControl
       h.onLeftDrag?.(u, v, w, hh);
       return;
     }
+    if (wlDrag && cfg.wl) {
+      // vtkMRMLWindowLevelWidget::ProcessAdjustWindowLevel, incremental from the previous
+      // event position. DOM y grows downward; VTK display y grows upward → negate Δy.
+      const [lo, hi] = cfg.wl.range();
+      const r = canvas.getBoundingClientRect();
+      const gain = (hi - lo) / Math.max(1, Math.min(r.width, r.height));
+      let win = wlDrag.win + gain * (e.clientX - wlDrag.x);
+      if (win < 0) win = 0;
+      let lev = wlDrag.lev + gain * (wlDrag.y - e.clientY);
+      if (lev < lo - win / 2) lev = lo - win / 2;
+      if (lev > hi + win / 2) lev = hi + win / 2;
+      cfg.wl.set(win, lev);
+      wlDrag = { x: e.clientX, y: e.clientY, win, lev };
+      cfg.redraw();
+      return;
+    }
     if (scroll) {
       scroll.acc += (e.clientX - scroll.x) - (e.clientY - scroll.y);   // right/up = forward
       scroll.x = e.clientX; scroll.y = e.clientY;
@@ -109,6 +155,7 @@ export function attachSliceControls(canvas: HTMLCanvasElement, cfg: SliceControl
     try { canvas.releasePointerCapture(e.pointerId); } catch { /* already released */ }
     if (view) { view = null; canvas.style.cursor = "default"; return; }
     if (grabbed) { const m = grabbed.moved; grabbed = null; h.onLeftDrop?.(m); return; }
+    if (wlDrag) { wlDrag = null; canvas.style.cursor = "default"; return; }
     scroll = null;
   };
 

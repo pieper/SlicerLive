@@ -1,5 +1,9 @@
 // load dcmjs, retrying across CDN mirrors (jsdelivr/unpkg are occasionally flaky from some networks)
 (function loadDcmjs() {
+    // Host apps (e.g. SlicerRad) may preload a local/vendored dcmjs via a wrapper worker
+    // (importScripts their copy first) — respect it instead of hitting the CDN.
+    if (typeof dcmjs !== "undefined")
+        return;
     const mirrors = [
         'https://cdn.jsdelivr.net/npm/dcmjs@0.41.0/build/dcmjs.min.js',
         'https://unpkg.com/dcmjs@0.41.0/build/dcmjs.min.js',

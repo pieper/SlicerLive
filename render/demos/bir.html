@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SlicerLive — Basic Image Review</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; background: #05060a; font: 13px -apple-system, system-ui, sans-serif; color: #cdd7e6; }
+  #viewer { position: relative; display: flex; flex-direction: column; width: 100vw; height: 100vh; }
+  #bir-bar { display: flex; align-items: center; gap: 14px; padding: 7px 14px; background: #0b0e16; border-bottom: 1px solid #1b2740; }
+  #bir-bar .brand { font-weight: 700; color: #fff; }
+  #bir-bar #info { color: #9fb3d0; font-size: 12px; }
+  #grid { flex: 1; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 2px; min-height: 0; background: #1b2740; }
+  .cell { position: relative; min-width: 0; min-height: 0; background: #000; }
+  .cell canvas { width: 100%; height: 100%; display: block; background: #000; touch-action: none; }
+  /* The BIR reader adds a transparent measurement/localizer overlay canvas per slice cell —
+     it must NOT inherit the black background, or it hides the slice render underneath. */
+  .cell canvas.bir-overlay { background: transparent; }
+  .cell .lab { position: absolute; top: 5px; left: 7px; font-weight: 700; font-size: 11px; opacity: .9; pointer-events: none; }
+  .lab.axial { color: #f05a5a; } .lab.coronal { color: #5ad07a; } .lab.sagittal { color: #f0d24a; } .lab.threeD { color: #9fb3d0; }
+  .orient { position: absolute; font-weight: 700; font-size: 12px; color: #9fb3d0; opacity: .8; pointer-events: none; }
+  .o-t { top: 5px; left: 50%; transform: translateX(-50%); } .o-b { bottom: 5px; left: 50%; transform: translateX(-50%); }
+  .o-l { left: 7px; top: 50%; transform: translateY(-50%); } .o-r { right: 7px; top: 50%; transform: translateY(-50%); }
+  .sr { position: absolute; bottom: 5px; left: 7px; font: 600 11px -apple-system, system-ui, sans-serif; color: #d6e2f2;
+        opacity: .9; font-variant-numeric: tabular-nums; background: rgba(11,14,22,.6); padding: 1px 6px; border-radius: 4px; }
+  .iuo { position: absolute; bottom: 5px; right: 7px; font: 700 9px -apple-system, system-ui, sans-serif; color: #8a1f1f; opacity: .9; letter-spacing: .5px; pointer-events: none; }
+  #status { position: absolute; top: 52px; left: 50%; transform: translateX(-50%); z-index: 5; background: rgba(5,6,10,.78);
+            padding: 3px 12px; border-radius: 6px; color: #9fb3d0; max-width: 80%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+  <div id="viewer">
+    <div id="bir-bar">
+      <span class="brand">SlicerLive · Basic Image Review</span>
+      <span id="info"></span>
+      <select id="wl-readout" style="display:none"></select>
+    </div>
+    <div id="grid">
+      <div class="cell" data-cell="axial">
+        <canvas id="c-axial"></canvas><span class="lab axial">Axial</span>
+        <span class="orient o-t">A</span><span class="orient o-b">P</span><span class="orient o-l">R</span><span class="orient o-r">L</span>
+        <span id="sr-axial" class="sr"></span><span class="iuo">INVESTIGATIONAL USE ONLY</span>
+      </div>
+      <div class="cell" data-cell="threeD">
+        <canvas id="c-threeD"></canvas><span class="lab threeD">3D</span>
+        <span class="iuo">INVESTIGATIONAL USE ONLY</span>
+      </div>
+      <div class="cell" data-cell="coronal">
+        <canvas id="c-coronal"></canvas><span class="lab coronal">Coronal</span>
+        <span class="orient o-t">S</span><span class="orient o-b">I</span><span class="orient o-l">R</span><span class="orient o-r">L</span>
+        <span id="sr-coronal" class="sr"></span><span class="iuo">INVESTIGATIONAL USE ONLY</span>
+      </div>
+      <div class="cell" data-cell="sagittal">
+        <canvas id="c-sagittal"></canvas><span class="lab sagittal">Sagittal</span>
+        <span class="orient o-t">S</span><span class="orient o-b">I</span><span class="orient o-l">A</span><span class="orient o-r">P</span>
+        <span id="sr-sagittal" class="sr"></span><span class="iuo">INVESTIGATIONAL USE ONLY</span>
+      </div>
+    </div>
+    <div id="status">loading…</div>
+  </div>
+  <script type="module" src="bir.js"></script>
+</body>
+</html>

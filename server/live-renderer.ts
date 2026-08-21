@@ -14,6 +14,7 @@ import { buildMultiVolume } from "../render/demos/selftest-scenes.ts";
 import { TransformGizmoField } from "../render/transform-gizmo-field.ts";
 import type { Field, ImageField } from "../render/fields.ts";
 import { identity, type Mat4, type Vec3 } from "../render/mat4.ts";
+import { Av1Sidecar, codedSize } from "./av1-sidecar.ts";
 
 const PORT = Number(Deno.env.get("PORT") ?? 8787);
 // DEMO=single  one big volume (CTACardio) — the original M3 scene.
@@ -30,7 +31,39 @@ const CLIENT_DIR = Deno.env.get("CLIENT_DIR") ?? new URL("./client/", import.met
 const DBG = (Deno.env.get("DBG") ?? "0") !== "0";
 const dbg = (...a: unknown[]) => { if (DBG) console.log(`[${performance.now().toFixed(0)}]`, ...a); };
 const IDLE_MS = 80;                          // after this long with no camera update, send one native frame
-const COMPRESS = (Deno.env.get("COMPRESS") ?? "1") !== "0";   // gzip the rgba8 samples (M5 rung 1)
+const COMPRESS = (Deno.env.get("COMPRESS") ?? "1") !== "0";   // gzip the rgba8 samples (fallback codec)
+// Hardware AV1 via the Rust sidecar (native/encode). CODEC=av1 + SIDECAR_BIN set → the server
+// spawns it and encodes patches to AV1 intra; on any failure it falls back to gzip per-frame, so
+// the demo never depends on the encoder being up. QP is the quality/size dial.
+const CODEC = Deno.env.get("CODEC") ?? "gzip";
+const SIDECAR_BIN = Deno.env.get("SIDECAR_BIN") ?? "";
+const AV1_QP = Number(Deno.env.get("AV1_QP") ?? 31);
+const BG: [number, number, number] = [Math.round(0.05 * 255), Math.round(0.06 * 255), Math.round(0.09 * 255)];
+// codec ids on the wire (header field [5]): 0 raw · 1 gzip · 2 av1
+const CODEC_GZIP = 1, CODEC_AV1 = 2;
+
+let sidecar: Av1Sidecar | null = null;
+if (CODEC === "av1" && SIDECAR_BIN) {
+  try {
+    sidecar = await Av1Sidecar.start(SIDECAR_BIN, "/tmp/lr-enc.sock");
+    console.log("[live-renderer] AV1 sidecar ready");
+  } catch (e) {
+    console.error("[live-renderer] AV1 sidecar failed to start, using gzip:", (e as Error).message);
+  }
+}
+
+/** Encode a whole patch/frame. Returns the wire bytes + codec id; falls back to gzip if AV1 is off
+ *  or the sidecar errors on this frame. `w`,`h` are the SAMPLE dims of `raw`. */
+async function encodeWhole(raw: Uint8Array, w: number, h: number): Promise<{ payload: Uint8Array; codec: number }> {
+  if (sidecar) {
+    const t0 = performance.now();
+    dbg(`encode av1 ${w}x${h} (${raw.length / 1e3 | 0}kB) ...`);
+    const av1 = await sidecar.encode(raw, w, h, AV1_QP, BG);
+    dbg(`encode av1 ${w}x${h} -> ${av1 ? (av1.length + " bytes " + ((performance.now() - t0) | 0) + "ms") : "NULL (fallback)"}`);
+    if (av1) return { payload: av1, codec: CODEC_AV1 };
+  }
+  return { payload: COMPRESS ? await gzip(raw) : raw, codec: COMPRESS ? CODEC_GZIP : 0 };
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // gzip a byte buffer (CompressionStream). The premultiplied rgba8 trace is very compressible (large
@@ -220,11 +253,21 @@ function handleWs(req: Request): Response {
   //              frame derived from it was completely sent, so an aborted send never poisons it
   let needFull = true;
   let stale: Rect | null = null;
+  // A settle painted native content over this VIEW region that the motion diff baseline knows
+  // nothing about. The first motion frame after a settle must re-cover it, or slow motion overwrites
+  // it sliver by sliver and the old position ghosts (a trail). Union it into that frame's rect —
+  // just this region, at motion density, not a whole-view wash.
+  let settleRect: Rect | null = null;
   let motionStreak = 0;   // committed motion frames in this burst — 0 = the engage frame
   let lastMotionCommit = 0;
   let prevMotion: Uint8Array | null = null, motionW = 0, motionH = 0;
   const dirty = new Uint8Array(NTILES);
 
+  const unionRect = (a: Rect | null, b: Rect): Rect => {
+    if (!a) return { ...b };
+    const x0 = Math.min(a.x, b.x), y0 = Math.min(a.y, b.y);
+    return { x: x0, y: y0, w: Math.max(a.x + a.w, b.x + b.w) - x0, h: Math.max(a.y + a.h, b.y + b.h) - y0 };
+  };
   const addStale = (r: Rect) => {
     if (!stale) { stale = { ...r }; return; }
     const x0 = Math.min(stale.x, r.x), y0 = Math.min(stale.y, r.y);
@@ -232,7 +275,7 @@ function handleWs(req: Request): Response {
     stale = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
   };
   const resetClientModel = (why: string) => {
-    needFull = true; stale = null; prevMotion = null; probeF = 0;
+    needFull = true; stale = null; prevMotion = null; probeF = 0; settleRect = null;
     dbg(`client model reset (${why})`);
   };
 
@@ -298,28 +341,27 @@ function handleWs(req: Request): Response {
    *  one frame period) and it is newer than anything the client holds — discarding it on every
    *  new event is how continuous input LIVELOCKED the pipeline into ~1 update/s. */
   async function sendFrameP(atGen: number, sw: number, sh: number, vw: number, vh: number, settled: number, raw: Uint8Array, kind = 0, px = 0, py = 0, pw = 0, ph = 0, renderMs = 0, preempt = true): Promise<boolean> {
-    sentBytes = 0; encodeMs = 0;
+    sentBytes = 0;
     const sinceInput = Math.min(65535, Math.round(performance.now() - genAt));
-    const n = Math.max(1, Math.ceil(raw.length / CHUNK));
+    // Encode the WHOLE frame first — AV1 (~0.05 ms hardware + a ~1 ms socket round-trip) or gzip.
+    // AV1 frames are independent intra images so they cannot be split before decode; the encoded
+    // bytes are then chunked for the WS proxy limit and the client reassembles before decoding.
+    const te = performance.now();
+    const { payload, codec } = await encodeWhole(raw, sw, sh);
+    encodeMs = performance.now() - te;
+    if (!open || (preempt && gen !== atGen)) return false;
+    sentBytes = payload.length;
+    const n = Math.max(1, Math.ceil(payload.length / CHUNK));
     for (let i = 0; i < n; i++) {
       if (!open || (preempt && gen !== atGen)) return false;
-      // Compression happens PER CHUNK, in here: a 32 MB native frame gzipped in one blob is a
-      // ~200 ms un-preemptable await (measured as the whole latency regression); per chunk it is
-      // ~10 ms between preemption checks, and it overlaps the previous chunk's transmission.
-      const slice = raw.subarray(i * CHUNK, Math.min(raw.length, (i + 1) * CHUNK));
-      const te = performance.now();
-      const part = COMPRESS ? await gzip(slice) : slice;
-      encodeMs += performance.now() - te;
-      if (!open || (preempt && gen !== atGen)) return false;
-      // spare fields carry the server's own finger-to-photon split: [13] ms from input to this
-      // send, [14] render ms — so the status line can show where time went, live.
-      const head = new Uint16Array([sw, sh, vw, vh, settled, COMPRESS ? 1 : 0, i, n, kind, px, py, pw, ph, sinceInput, Math.min(65535, Math.round(renderMs)), 0]);   // 32-byte header
+      const part = payload.subarray(i * CHUNK, Math.min(payload.length, (i + 1) * CHUNK));
+      // header [5] = codec id; spare fields [13]/[14] carry the server's input→send / render split.
+      const head = new Uint16Array([sw, sh, vw, vh, settled, codec, i, n, kind, px, py, pw, ph, sinceInput, Math.min(65535, Math.round(renderMs)), 0]);   // 32-byte header
       const frame = new Uint8Array(32 + part.length);
       frame.set(new Uint8Array(head.buffer), 0);
       frame.set(part, 32);
       if (!await cackRoom(atGen, preempt)) return false;   // ≤ CHUNK_WINDOW chunks in flight, end to end
       inflight.push({ bytes: frame.length, t: performance.now(), pre: inflight.reduce((n, c) => n + c.bytes, 0) });
-      sentBytes += frame.length;
       socket.send(frame);
       if (!await drained(atGen, CHUNK, preempt)) return false;
     }
@@ -431,6 +473,7 @@ function handleWs(req: Request): Response {
             if (!open || gen !== atGen) { dbg("settle abandoned after trace"); done = false; break; }
             const ok = await sendFrameP(atGen, tw, th, w, h, den === 1 ? 1 : 0, raw, full ? 0 : 1, r.x, r.y, r.w, r.h, renderMs);
             if (!ok) { dbg("settle send preempted"); done = false; break; }
+            settleRect = unionRect(settleRect, r);   // motion must re-cover this on resume
             if (raw.length) bppC = Math.max(0.05, ew(bppC, sentBytes / (tw * th), 0.3));
             dbg(`settled ${den === 1 ? "native" : "half"} ${full ? "full" : "patch"} ${tw}x${th} ${(sentBytes / 1e3) | 0}kB`);
             await waitAck(2000);
@@ -465,10 +508,19 @@ function handleWs(req: Request): Response {
 
       const box = baseOk && nDirty / NTILES < 0.5 ? tileBBox(dirty, sw, sh) : null;
       const kx = w / sw, ky = h / sh;   // probe samples → view pixels
-      const view = box && {
+      let view = box && {
         x: Math.round(box.x * kx), y: Math.round(box.y * ky),
         w: Math.round(box.w * kx), h: Math.round(box.h * ky),
       };
+      // First motion frame after a settle: also re-cover the region the settle painted, so the old
+      // position cannot ghost through. If that pushes past half the view, drop to a full frame.
+      if (settleRect && view) {
+        view = unionRect(view, settleRect);
+        const cx = Math.max(0, view.x), cy = Math.max(0, view.y);
+        view = { x: cx, y: cy, w: Math.min(w - cx, view.w), h: Math.min(h - cy, view.h) };
+        if (view.w * view.h > 0.5 * w * h) view = null;
+      }
+      settleRect = null;
 
       // Re-trace the changed rect at the density the LINK affords — up to NATIVE. Feed-forward
       // from measured bandwidth/RTT/bytes-per-pixel, so it adapts the moment the rect changes

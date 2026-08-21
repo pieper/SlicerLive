@@ -2603,6 +2603,124 @@ async function buildMultiVolume(dev, onBytes) {
   return { cta, pano, fields: [cta.field, pano.field] };
 }
 
+// render/codec.ts
+var AV1_GRID = 64;
+
+// render/av1-presenter.ts
+var codedSize = (w, h) => [
+  Math.ceil(w / AV1_GRID) * AV1_GRID,
+  Math.ceil(h / AV1_GRID) * AV1_GRID
+];
+var WGSL2 = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var t : texture_external;
+@group(0) @binding(1) var s : sampler;
+// (u0,v0,u1,v1) \u2014 the sub-rect of the external texture to sample (crops the coded-size padding).
+@group(0) @binding(2) var<uniform> uv : vec4<f32>;
+struct V { @builtin(position) p : vec4<f32>, @location(0) t : vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i : u32) -> V {
+  // a full-viewport triangle; the scissor rect (set by the caller) limits it to the patch.
+  let x = select(-1.0, 3.0, i == 1u);
+  let y = select(-1.0, 3.0, i == 2u);
+  var o : V; o.p = vec4<f32>(x, y, 0.0, 1.0); o.t = vec2<f32>((x + 1.0) * 0.5, 1.0 - (y + 1.0) * 0.5); return o;
+}
+@fragment fn fs(v : V) -> @location(0) vec4<f32> {
+  // map this fragment's position within the DEST rect to the sampled sub-rect of the source.
+  let src = mix(uv.xy, uv.zw, v.t);
+  return vec4<f32>(textureSampleBaseClampToEdge(t, s, src).rgb, 1.0);
+}`
+);
+var Av1Presenter = class {
+  #gpu;
+  #pipeline;
+  #sampler;
+  #uni;
+  #decoder = null;
+  #cw = 0;
+  #ch = 0;
+  #pending = null;
+  #fail = null;
+  constructor(gpu, format) {
+    this.#gpu = gpu;
+    const mod = gpu.device.createShaderModule({ code: WGSL2 });
+    this.#pipeline = gpu.device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: mod, entryPoint: "vs" },
+      fragment: { module: mod, entryPoint: "fs", targets: [{ format }] },
+      primitive: { topology: "triangle-list" }
+    });
+    this.#sampler = gpu.device.createSampler({ magFilter: "linear", minFilter: "linear" });
+    this.#uni = gpu.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  }
+  static get supported() {
+    return typeof VideoDecoder !== "undefined";
+  }
+  /** Decode one AV1 intra frame (single self-contained key chunk) to a VideoFrame. Keeps a
+   *  persistent decoder, reconfiguring only when the coded size changes. */
+  async decode(av1, sw, sh) {
+    const [cw, ch] = codedSize(sw, sh);
+    if (!this.#decoder || this.#cw !== cw || this.#ch !== ch) {
+      if (this.#decoder) {
+        try {
+          this.#decoder.close();
+        } catch {
+        }
+      }
+      this.#cw = cw;
+      this.#ch = ch;
+      this.#decoder = new VideoDecoder({
+        output: (f) => {
+          const cb = this.#pending;
+          this.#pending = null;
+          this.#fail = null;
+          cb?.(f);
+        },
+        error: (e) => {
+          const cb = this.#fail;
+          this.#pending = null;
+          this.#fail = null;
+          cb?.(new Error(e.message));
+        }
+      });
+      this.#decoder.configure({ codec: "av01.0.04M.08", codedWidth: cw, codedHeight: ch, optimizeForLatency: true });
+    }
+    const dec = this.#decoder;
+    const frame = new Promise((res, rej) => {
+      this.#pending = res;
+      this.#fail = rej;
+    });
+    dec.decode(new EncodedVideoChunk({ type: "key", timestamp: 0, data: av1 }));
+    await dec.flush().catch(() => {
+    });
+    return frame;
+  }
+  /** Draw a decoded frame (whose real content is sw×sh in its top-left) into `dst` at the view
+   *  rect (x,y,w,h). Everything already in `dst` outside the rect is preserved (scissor + load). */
+  present(dst, frame, sw, sh, rect, format) {
+    const [cw, ch] = codedSize(sw, sh);
+    this.#gpu.device.queue.writeBuffer(this.#uni, 0, new Float32Array([0, 0, sw / cw, sh / ch]));
+    const ext = this.#gpu.device.importExternalTexture({ source: frame });
+    const bind = this.#gpu.device.createBindGroup({
+      layout: this.#pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: ext },
+        { binding: 1, resource: this.#sampler },
+        { binding: 2, resource: { buffer: this.#uni } }
+      ]
+    });
+    const enc = this.#gpu.device.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: dst, loadOp: "load", storeOp: "store" }] });
+    pass.setPipeline(this.#pipeline);
+    pass.setScissorRect(rect.x, rect.y, rect.w, rect.h);
+    pass.setBindGroup(0, bind);
+    pass.draw(3);
+    pass.end();
+    this.#gpu.device.queue.submit([enc.finish()]);
+    void format;
+  }
+};
+
 // render/demos/remote-browser.ts
 var SINGLE_SCENE = "https://pieper.github.io/live/scenes/CTACardio.json";
 var PROTO = 4;
@@ -2635,6 +2753,7 @@ async function main() {
   });
   const recon = new Reconstructor(gpu, srgb);
   recon.setBackground(0.05, 0.06, 0.09);
+  const av1 = Av1Presenter.supported ? new Av1Presenter(gpu, srgb) : null;
   let viewTex = null, viewW = 0, viewH = 0, surfaceValid = false;
   const makeViewTex = (w, h) => {
     const t = gpu.device.createTexture({
@@ -2824,6 +2943,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   };
   canvas.addEventListener("pointerdown", () => {
     pdown = true;
+    camDirty = true;
+    scheduleSend();
   }, true);
   globalThis.addEventListener("pointerup", () => {
     pdown = false;
@@ -2962,38 +3083,50 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     if (mode !== "remote") return;
     const buf = e.data;
     const head = new Uint16Array(buf, 0, 16);
-    const sw = head[0], sh = head[1], settled = head[4], compressed = head[5];
+    const sw = head[0], sh = head[1], settled = head[4], codec = head[5];
     const chunk = head[6], chunks = head[7];
     const kind = head[8], px = head[9], py = head[10], pw = head[11], ph = head[12];
     const srvSinceInput = head[13], srvRenderMs = head[14];
     frameBytes += buf.byteLength;
-    let samples;
+    let payload;
     if (chunks > 1) {
       if (chunk === 0) parts.length = 0;
       let part = new Uint8Array(buf, 32);
-      if (compressed) part = await gunzip(part);
+      if (codec === 1) part = await gunzip(part);
       parts.push(part);
       if (chunk < chunks - 1) return;
-      samples = concat(parts);
+      payload = concat(parts);
     } else {
-      samples = new Uint8Array(buf, 32);
-      if (compressed) samples = await gunzip(samples);
+      payload = new Uint8Array(buf, 32);
+      if (codec === 1) payload = await gunzip(payload);
     }
     const vw = head[2], vh = head[3];
     if (vw !== canvas.width || vh !== canvas.height) {
       requestResync();
       return;
     }
+    if (kind === 1 && (!surfaceValid || px + pw > viewW || py + ph > viewH)) {
+      requestResync();
+      return;
+    }
     const tp = performance.now();
     const dst = ensureViewTex().createView({ format: srgb });
-    if (kind === 1) {
-      if (!surfaceValid || px + pw > viewW || py + ph > viewH) {
+    const rect = kind === 1 ? { x: px, y: py, w: pw, h: ph } : { x: 0, y: 0, w: viewW, h: viewH };
+    if (codec === 2 && av1) {
+      let frame;
+      try {
+        frame = await av1.decode(payload, sw, sh);
+      } catch (err) {
+        lastErr = "av1 decode: " + err.message;
         requestResync();
         return;
       }
-      recon.present(dst, samples, sw, sh, viewW, viewH, { x: px, y: py, w: pw, h: ph });
+      av1.present(dst, frame, sw, sh, rect, srgb);
+      frame.close();
     } else {
-      recon.present(dst, samples, sw, sh, viewW, viewH);
+      recon.present(dst, payload, sw, sh, viewW, viewH, kind === 1 ? rect : void 0);
+    }
+    if (kind === 0) {
       surfaceValid = true;
       resyncSent = false;
     }
@@ -3005,11 +3138,11 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
     bytes += frameBytes;
     const kB = frameBytes / 1e3;
     frameBytes = 0;
-    lastFrame = { kind, sw, sh, pw, ph, kB: Math.round(kB), settled };
+    lastFrame = { kind, sw, sh, pw, ph, kB: Math.round(kB), settled, codec };
     const dt = performance.now() - lastCamSentAt;
     rtt.push(dt);
     if (rtt.length > 30) rtt.shift();
-    statusLine("remote", `${kind === 1 ? `patch ${sw}\xD7${sh}\u2192${pw}\xD7${ph}` : settled ? "samples native" : `samples ${sw}\xD7${sh}`} \xB7 ${kB.toFixed(0)} kB${compressed ? " gz" : ""} \xB7 srv ${srvSinceInput}ms (render ${srvRenderMs}) \xB7 `);
+    statusLine("remote", `${kind === 1 ? `patch ${sw}\xD7${sh}\u2192${pw}\xD7${ph}` : settled ? "samples native" : `samples ${sw}\xD7${sh}`} \xB7 ${kB.toFixed(0)} kB ${["raw", "gz", "av1"][codec] ?? codec} \xB7 srv ${srvSinceInput}ms (render ${srvRenderMs}) \xB7 `);
   };
   const setMode = async (m) => {
     if (m === "local") {

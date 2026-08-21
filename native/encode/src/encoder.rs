@@ -86,9 +86,12 @@ impl Av1Encoder {
     /// Encode one PREMULTIPLIED-RGBA patch (tight rows, w*h*4 bytes) to an AV1 intra bitstream,
     /// compositing over `bg` first (AV1 carries no alpha). `bg` is linear 0..255 RGB.
     pub fn encode(&mut self, rgba: &[u8], w: u32, h: u32, qp: u32, bg: [u8; 3]) -> Result<Vec<u8>> {
-        // NVENC wants even dimensions; round UP and let the extra column/row be edge padding.
-        let cw = (w + 1) & !1;
-        let ch = (h + 1) & !1;
+        // Coded size = sample dims rounded UP to GRID, so fixed-size NVENC sessions (costly to
+        // create) are reused across the handful of sizes a drag produces. MUST equal render/codec.ts
+        // AV1_GRID and server/av1-sidecar.ts. The extra rows/cols are edge-replicated below.
+        const GRID: u32 = 64;
+        let cw = (w + GRID - 1) / GRID * GRID;
+        let ch = (h + GRID - 1) / GRID * GRID;
         self.tick += 1;
         let tick = self.tick;
 

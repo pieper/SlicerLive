@@ -46,7 +46,7 @@ function synth(w, h, seed) {
   }
   return a;
 }
-const sizes = [[512, 512], [360, 400], [360, 400], [640, 512], [512, 512]];
+const sizes = [[750, 435], [750, 435], [1500, 870], [3000, 1740], [750, 435]];
 const enc = new TextEncoder();
 for (let k = 0; k < sizes.length; k++) {
   const [w, h] = sizes[k];
