@@ -35,7 +35,19 @@ export function lutFromVP(vp: Vp, volRange: [number, number]): PresetLut {
   const comp = vprop.components[0];
   const cpts = comp.rgbTransferFunction.points;
   const eff = vprop.effectiveRange ?? [cpts[0].x, cpts[cpts.length - 1].x];
-  const [vpLo, vpHi] = eff;
+  // Some presets (e.g. diceCT_16) set effectiveRange[0] at the TOP of their opacity ramp, above the
+  // transparent foot — stretching that onto the volume range clips the transparent lead-in, so air
+  // (the low tail) renders as opaque black fog. Extend the low bound down to the last opacity=0
+  // control point below the ramp, so air stays transparent (presets already anchored at their foot,
+  // like Bat-8bit, are unaffected).
+  const opRaw = comp.scalarOpacity.points.map((p: { x: number; y?: number }) => [p.x, p.y ?? 0] as [number, number]);
+  const firstNZ = opRaw.find((p) => p[1] > 0);
+  let effLo = eff[0];
+  if (firstNZ) {
+    const zerosBelow = opRaw.filter((p) => p[1] === 0 && p[0] < firstNZ[0]).map((p) => p[0]);
+    if (zerosBelow.length) effLo = Math.min(effLo, Math.max(...zerosBelow));
+  }
+  const [vpLo, vpHi] = [effLo, eff[1]];
   const [vLo, vHi] = volRange;
   const remap = (x: number) => vLo + ((x - vpLo) / Math.max(vpHi - vpLo, 1e-9)) * (vHi - vLo);
   const colorTF: TF = cpts.map((p) => [remap(p.x), p.color![0], p.color![1], p.color![2]]);
