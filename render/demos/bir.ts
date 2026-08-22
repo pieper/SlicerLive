@@ -329,12 +329,23 @@ export function mountBir(cfg: BirCfg): BirApi {
 
     // Measurements on this plane, shown while the viewport is on (or near) their slice.
     const near = (m: Measurement) => m.plane === p && Math.abs(m.mm - cfg.offsetMm(p)) <= cfg.spacing(p) / 2;
-    ctx.font = "600 11px -apple-system,system-ui,sans-serif";
+    // Larger, high-contrast measurement labels: a dark rounded halo behind the green text so the
+    // readout stays legible over bright bone or dark air alike.
+    ctx.font = "700 15px -apple-system,system-ui,sans-serif";
+    ctx.lineJoin = "round";
+    ctx.textBaseline = "alphabetic";
+    const label = (text: string, x: number, y: number) => {
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "rgba(6,10,16,.92)";
+      ctx.strokeText(text, x, y);
+      ctx.fillStyle = "#8dffc4";
+      ctx.fillText(text, x, y);
+    };
     for (const m of [...measurements.filter(near), ...(pending && pending.plane === p ? [pending] : [])]) {
       const px = m.pts.map((r) => toPx(p, r, w, h));
       ctx.strokeStyle = "#6ce0a8";
       ctx.fillStyle = "#6ce0a8";
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 2;
       for (let i = 0; i + 1 < px.length; i += 2) {
         ctx.beginPath();
         ctx.moveTo(px[i].x, px[i].y);
@@ -343,7 +354,7 @@ export function mountBir(cfg: BirCfg): BirApi {
       }
       for (const q of px) {
         ctx.beginPath();
-        ctx.arc(q.x, q.y, 2.5, 0, Math.PI * 2);
+        ctx.arc(q.x, q.y, 3.5, 0, Math.PI * 2);
         ctx.fill();
       }
       // Label: mm for a complete distance, degrees for a complete angle (sub-pixel per spec).
@@ -353,7 +364,7 @@ export function mountBir(cfg: BirCfg): BirApi {
           m.pts[0][1] - m.pts[1][1],
           m.pts[0][2] - m.pts[1][2],
         );
-        ctx.fillText(`${d.toFixed(1)} mm`, (px[0].x + px[1].x) / 2 + 6, (px[0].y + px[1].y) / 2 - 6);
+        label(`${d.toFixed(1)} mm`, (px[0].x + px[1].x) / 2 + 8, (px[0].y + px[1].y) / 2 - 8);
       } else if (m.kind === "angle" && m.pts.length === 4) {
         const v1 = [m.pts[1][0] - m.pts[0][0], m.pts[1][1] - m.pts[0][1], m.pts[1][2] - m.pts[0][2]];
         const v2 = [m.pts[3][0] - m.pts[2][0], m.pts[3][1] - m.pts[2][1], m.pts[3][2] - m.pts[2][2]];
@@ -361,7 +372,7 @@ export function mountBir(cfg: BirCfg): BirApi {
         const deg = Math.acos(
           Math.min(1, Math.abs(dot) / (Math.hypot(...v1) * Math.hypot(...v2) || 1)),
         ) * 180 / Math.PI;
-        ctx.fillText(`${deg.toFixed(1)}°`, px[3].x + 6, px[3].y - 6);
+        label(`${deg.toFixed(1)}°`, px[3].x + 8, px[3].y - 8);
       }
     }
   };
