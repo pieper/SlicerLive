@@ -36,7 +36,7 @@ import { createCrosshair, drawCross, rasToScreen3D } from "../../render/demos/cr
 import { installChrome, type VizControl } from "../../render/demos/sl-chrome.ts";
 import { installIdcInfo } from "../../render/demos/idc-info.ts";
 import { ohifViewerURL } from "../../render/vendor/idc_tools/s3.js";
-import { DEFAULT_TF_POINTS, RAMP_NAMES, RAMPS, RemindScene, type Row } from "./remind-compare-scene.ts";
+import { DEFAULT_TF_POINTS, defaultRamp, RAMP_NAMES, RAMPS, RemindScene, type Row } from "./remind-compare-scene.ts";
 import {
   defaultPairs, loadIndex, rgbCss, seriesLabel, TIMEPOINTS,
   type CaseEntry, type ReMINDIndex, type SeriesEntry,
@@ -48,7 +48,7 @@ const CELLS = [...ORIENTS, "threeD"] as const;
 type CellKind = typeof CELLS[number];
 type CmpMode = "fade" | "rock" | "toggle";
 const PARAMS = new URLSearchParams(location.search);
-const ROCK_MS = 1600;
+const SPEED_MS: Record<string, number> = { fast: 1400, medium: 3200, slow: 6800 };
 
 const el = (id: string) => document.getElementById(id) as HTMLElement;
 const status = (msg: string, err = false) => {
@@ -97,7 +97,8 @@ async function main() {
   const cmpRows: CmpRow[] = [];
   const PAIRS = defaultPairs(kase);
   let cmpMode: CmpMode = "fade";
-  let blend = 0;                       // 0 = A, 1 = B — opens on A so the first frame is the plan
+  let blend = 0.5;                     // 0 = A, 1 = B — opens half-and-half, both sides visible
+  let rockMs = SPEED_MS.medium;        // period of the rock/toggle cycle
   let rowSeq = 0;
 
   let focus: Vec3 = [0, 0, 0];
@@ -137,8 +138,11 @@ async function main() {
     root.className = "crow";
     root.dataset.row = id;
     const label = document.createElement("div");
-    label.className = "clabel";
+    label.className = "chead";
     root.appendChild(label);
+    const cells = document.createElement("div");
+    cells.className = "ccells";
+    root.appendChild(cells);
     for (const c of CELLS) {
       const cell = document.createElement("div");
       cell.className = "cell";
@@ -158,7 +162,7 @@ async function main() {
       ov.className = "xh";
       cell.appendChild(ov);
       overlays.set(`${id}|${c}`, { c: ov, g: ov.getContext("2d")! });
-      root.appendChild(cell);
+      cells.appendChild(cell);
     }
     rowsEl.appendChild(root);
     const row: CmpRow = { id, a: a?.u ?? null, b: b?.u ?? null, why, root, label };
@@ -192,16 +196,28 @@ async function main() {
     cx.set(id, ctx);
   };
 
-  /** Load what the rows reference, free what nothing references any more. */
+  // SMALLEST FIRST — get something on screen as soon as possible.
+  //
+  // The intuition is that ultrasound should come first: it is a single object, while an MR
+  // series is ~176 separate ones, each with its own request latency and dcmjs parse. Measured
+  // cold (HTTP cache disabled, a case never opened before), it is the other way round —
+  // bytes dominate, and a US series is 70-100 MB against an MR's ~23 MB:
+  //
+  //     US mean 8.6 s over 2 series   |   MR mean 2.2 s over 5      (ReMIND-020)
+  //
+  // Loading the ultrasound first pushed the first image from ~1 s out to ~7 s. So order by
+  // what will ARRIVE soonest, which the index already knows: bytes. Whichever side of a pair
+  // lands first is shown immediately (see effBlend), so this is what the user actually feels.
+  const fastestFirst = (a: string, b: string) => sc.row(a)!.entry.b - sc.row(b)!.entry.b;
+
+  /** Load what the rows reference — US first — then quietly pull the rest of the case in
+   *  behind them, so switching a selector later is instant instead of another minute. */
   async function reconcile() {
     const needed = new Set<string>();
     for (const r of cmpRows) { if (r.a) needed.add(r.a); if (r.b) needed.add(r.b); }
-    for (const row of sc.rows) {
-      if (row.state === "ready" && !needed.has(row.key)) sc.releaseRow(row.key);
-    }
     updateBar();
     resize();
-    const pending = [...needed].filter((k) => sc.row(k)?.state === "idle");
+    const pending = [...needed].filter((k) => sc.row(k)?.state === "idle").sort(fastestFirst);
     for (const k of pending) {
       const loaded = await sc.ensureRow(k);
       if (autoFrame && loaded.state === "ready") frameToBounds();
@@ -210,17 +226,51 @@ async function main() {
       renderTF();
       updateBar();
       resize();
+      requestDraw();
     }
+    // Every row that is now on screen gets the shared frame — including ones that were
+    // ALREADY resident from the background prefetch and so never appeared in `pending`.
+    // Without this a newly selected volume kept its default pan/zoom and sat misaligned
+    // until the next gesture happened to re-apply the frame.
+    applyFrames();
+    requestDraw();
     status(statusLine());
+    prefetchRest();
+  }
+
+  // Background prefetch. Only starts once the first comparison is actually on screen, runs
+  // one series at a time behind the loader's own concurrency limit, and yields immediately
+  // whenever a row asks for something (that goes through ensureRow first). Capped, because
+  // every resident volume is a GPU texture and a case can hold eleven series.
+  const PREFETCH_MAX = Number(PARAMS.get("prefetch") ?? 10);
+  let prefetching = false;
+  async function prefetchRest() {
+    if (prefetching || PREFETCH_MAX <= 0) return;
+    if (!cmpRows.some((r) => rowReady(r.a) || rowReady(r.b))) return;   // nothing shown yet
+    prefetching = true;
+    try {
+      for (;;) {
+        if (sc.readyRows().length >= PREFETCH_MAX) break;
+        const next = sc.rows.filter((r) => r.state === "idle").map((r) => r.key).sort(fastestFirst)[0];
+        if (!next) break;
+        await sc.ensureRow(next);
+        applyFrames();               // a prefetched volume must be frame-ready the instant it is picked
+        syncRowLabels();
+        renderTF();
+        updateBar();
+        status(statusLine());
+      }
+    } finally { prefetching = false; }
   }
 
   const statusLine = () => {
     const res = sc.readyRows();
     const loading = sc.rows.filter((r) => r.state === "loading").length;
     const bytes = res.reduce((n, r) => n + r.entry.b, 0);
+    const idle = sc.rows.filter((r) => r.state === "idle").length;
     return `${kase.pid} — ${cmpRows.length} comparison${cmpRows.length === 1 ? "" : "s"}, ` +
-      `${res.length} volume${res.length === 1 ? "" : "s"} resident (${mb(bytes)})` +
-      (loading ? `, ${loading} loading…` : "");
+      `${res.length}/${sc.rows.length} series loaded (${mb(bytes)})` +
+      (loading ? `, ${loading} loading…` : idle && prefetching ? `, ${idle} queued in background` : "");
   };
 
   // ── row labels: the pair selectors, the question, and load progress ────────
@@ -229,19 +279,19 @@ async function main() {
       const ra = rowOf(r.a), rb = rowOf(r.b);
       const busy = [ra, rb].filter((x) => x?.state === "loading");
       const prog = busy.length
-        ? `<div class="prog">${busy[0]!.progress.msg}<i style="width:${Math.round(busy[0]!.progress.frac * 100)}%"></i></div>`
-        : "";
+        ? `<span class="prog">${busy[0]!.progress.msg}<i style="width:${Math.round(busy[0]!.progress.frac * 100)}%"></i></span>`
+        : `<span class="prog"></span>`;
       const err = [ra, rb].find((x) => x?.state === "error");
       const accent = (row?: Row) => row ? rgbCss(TIMEPOINTS[row.entry.tp].color) : "#7d92b5";
       r.label.innerHTML =
-        `<div class="why">${r.why}</div>` +
-        `<div class="pick" style="--ac:${accent(ra)}"><span class="ab">A</span>` +
-        `<select class="sel-a" data-row="${r.id}">${seriesOptions(r.a)}</select></div>` +
-        `<div class="pick" style="--ac:${accent(rb)}"><span class="ab">B</span>` +
-        `<select class="sel-b" data-row="${r.id}">${seriesOptions(r.b)}</select></div>` +
-        (err ? `<div class="err">failed: ${err.error}</div>` : prog) +
-        `<div class="rowbtns"><button class="mini swap" data-row="${r.id}" title="swap A and B">⇄</button>` +
-        `<button class="mini rm" data-row="${r.id}" title="remove this comparison">×</button></div>`;
+        `<span class="why">${r.why}</span>` +
+        `<span class="pick" style="--ac:${accent(ra)}"><span class="ab">A</span>` +
+        `<select class="sel-a" data-row="${r.id}">${seriesOptions(r.a)}</select></span>` +
+        `<button class="mini swap" data-row="${r.id}" title="swap A and B">⇄</button>` +
+        `<span class="pick" style="--ac:${accent(rb)}"><span class="ab">B</span>` +
+        `<select class="sel-b" data-row="${r.id}">${seriesOptions(r.b)}</select></span>` +
+        (err ? `<span class="err">failed: ${err.error}</span>` : prog) +
+        `<button class="mini rm" data-row="${r.id}" title="remove this comparison">×</button>`;
       r.root.classList.toggle("live", rowReady(r.a) && rowReady(r.b));
     }
     el("addrow").toggleAttribute("disabled", cmpRows.length >= 6);
@@ -267,11 +317,21 @@ async function main() {
   });
 
   // ── the global compare controls ────────────────────────────────────────────
+  /** What this row can actually show right now. While one side is still downloading the
+   *  other is shown outright, so the first thing to arrive is visible immediately rather
+   *  than sitting at 50% over a black canvas. */
+  const effBlend = (r: CmpRow) => {
+    const a = rowReady(r.a), b = rowReady(r.b);
+    if (a && b) return blend;
+    if (b) return 1;
+    return 0;
+  };
   const applyBlend = () => {
     for (const r of cmpRows) {
+      const eb = effBlend(r);
       for (const c of CELLS) {
         const b = cv.get(canvasKey(r, c, "b"));
-        if (b) b.style.opacity = String(rowReady(r.b) ? blend : 0);
+        if (b) b.style.opacity = String(eb);
       }
     }
     const f = el("cmp-fade") as HTMLInputElement;
@@ -283,7 +343,10 @@ async function main() {
   const animate = (t: number) => {
     if (cmpMode === "fade") { animRaf = 0; return; }
     if (!animT0) animT0 = t;
-    const phase = ((t - animT0) % ROCK_MS) / ROCK_MS;
+    // rock is a CROSS-FADE — it needs longer to read than a hard flip, so it runs 50% slower
+    // than the same speed setting on toggle
+    const period = cmpMode === "rock" ? rockMs * 1.5 : rockMs;
+    const phase = ((t - animT0) % period) / period;
     blend = cmpMode === "rock" ? (1 - Math.cos(phase * 2 * Math.PI)) / 2 : (phase < 0.5 ? 0 : 1);
     applyBlend();
     animRaf = requestAnimationFrame(animate);
@@ -298,16 +361,24 @@ async function main() {
     for (const b of el("cmpbar").querySelectorAll("[data-mode]")) {
       b.classList.toggle("on", (b as HTMLElement).dataset.mode === m);
     }
+    (el("cmp-speed") as HTMLSelectElement).disabled = m === "fade";
     syncAnim();
     applyBlend();
   };
+  /** rock and toggle latch: pressing the live one releases it back to fade, and pressing
+   *  the other one swaps — they can never both be running. */
+  const pressMode = (m: CmpMode) => setMode(cmpMode === m ? "fade" : m);
   const updateBar = () => {
     el("cmp-count").textContent = `${cmpRows.length} row${cmpRows.length === 1 ? "" : "s"}`;
   };
 
   for (const b of el("cmpbar").querySelectorAll("[data-mode]")) {
-    b.addEventListener("click", () => setMode((b as HTMLElement).dataset.mode as CmpMode));
+    b.addEventListener("click", () => pressMode((b as HTMLElement).dataset.mode as CmpMode));
   }
+  (el("cmp-speed") as HTMLSelectElement).addEventListener("change", (e) => {
+    rockMs = SPEED_MS[(e.target as HTMLSelectElement).value] ?? SPEED_MS.medium;
+    animT0 = 0;                        // restart the cycle so the change is felt immediately
+  });
   (el("cmp-fade") as HTMLInputElement).addEventListener("input", (e) => {
     blend = Number((e.target as HTMLInputElement).value) / 100;
     if (cmpMode !== "fade") setMode("fade");
@@ -435,7 +506,7 @@ async function main() {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
     for (const r of cmpRows) {
       // project through whichever side is showing, so the cross tracks what you can see
-      const row = rowOf(blend > 0.5 && rowReady(r.b) ? r.b : r.a) ?? rowOf(r.b);
+      const row = rowOf(effBlend(r) > 0.5 ? r.b : r.a) ?? rowOf(r.a) ?? rowOf(r.b);
       for (const k of CELLS) {
         const o = overlays.get(overlayKey(r, k));
         const host = cv.get(canvasKey(r, k, "b")) ?? cv.get(canvasKey(r, k, "a"));
@@ -490,7 +561,7 @@ async function main() {
 
   function attachRowInteraction(r: CmpRow) {
     // the leader is whichever side is currently visible; gestures drive it, everyone follows
-    const leader = () => rowOf(blend > 0.5 && rowReady(r.b) ? r.b : r.a) ?? rowOf(r.b);
+    const leader = () => rowOf(effBlend(r) > 0.5 ? r.b : r.a) ?? rowOf(r.a) ?? rowOf(r.b);
     for (const o of ORIENTS) {
       const canvas = cv.get(canvasKey(r, o, "b"))!;     // B sits on top → it takes the events
       attachSliceControls(canvas, {
@@ -715,7 +786,7 @@ async function main() {
     tfWin.value = "0"; tfLev.value = "0";
     sc.setRowWindowLevel(row.key, row.vol!.win, row.vol!.lev);
     row.hist = undefined;
-    sc.setRowTF(row.key, { points: [...DEFAULT_TF_POINTS], ramp: row.entry.m === "US" ? "amber" : "grey" });
+    sc.setRowTF(row.key, { points: [...DEFAULT_TF_POINTS], ramp: defaultRamp(row.entry) });
     renderTF(); requestDraw();
   });
   let dragPt = -1;
@@ -814,6 +885,13 @@ async function main() {
   // ── go ─────────────────────────────────────────────────────────────────────
   applyColumns();
   setMode("fade");
+  el("col-segs").classList.toggle("on", sc.segVisible());
+  el("col-segs").addEventListener("click", () => {
+    const on = !sc.segVisible();
+    sc.setSegVisible(on);
+    el("col-segs").classList.toggle("on", on);
+    requestDraw();
+  });
   el("col-link").addEventListener("click", () => {
     link3d = !link3d;
     el("col-link").classList.toggle("on", link3d);
@@ -853,6 +931,13 @@ async function main() {
       return { a: r.a, b: r.b };
     },
     mode: () => cmpMode,
+    speedMs: () => rockMs,
+    periodMs: () => (cmpMode === "rock" ? rockMs * 1.5 : rockMs),
+    setSpeed: (name: string) => {
+      rockMs = SPEED_MS[name] ?? SPEED_MS.medium; animT0 = 0;
+      (el("cmp-speed") as HTMLSelectElement).value = name;
+      return rockMs;
+    },
     setMode: (m: CmpMode) => { setMode(m); return cmpMode; },
     blend: () => blend,
     setBlend: (v: number) => { blend = v; applyBlend(); },
@@ -877,6 +962,19 @@ async function main() {
       r.slice!.zoomAbout(o, factor, 0.5, 0.5, c.clientWidth, c.clientHeight);
       adoptFrame(r, o, c);
       requestDraw();
+    },
+    segsOn: () => sc.segVisible(),
+    setSegs: (on: boolean) => { sc.setSegVisible(on); el("col-segs")?.classList.toggle("on", on); requestDraw(); },
+    prefetching: () => prefetching,
+    /** The frame a given volume is actually rendering with — the thing that was stale when a
+     *  prefetched volume got selected. fov and centre must match the shared view. */
+    frameOf: (k: string, o: Orientation) => {
+      const r = sc.row(k);
+      if (r?.state !== "ready") return null;
+      return {
+        fov: r.slice!.spanMmFor(o) / Math.max(1e-6, r.slice!.zoom(o)),
+        center: r.slice!.viewToRas(o, sc.offset01(r, o, focus), 0.5, 0.5, 1),
+      };
     },
     link3d: () => link3d,
     setLink3d: (on: boolean) => { link3d = on; el("col-link")?.classList.toggle("on", on); },

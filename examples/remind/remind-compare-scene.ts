@@ -95,7 +95,23 @@ export const RAMPS: Record<string, [number, number, number, number][]> = {
   hot: [[0, 0, 0, 0], [0.35, 0.62, 0.06, 0.02], [0.7, 0.96, 0.62, 0.05], [1, 1, 1, 0.86]],
   cool: [[0, 0.02, 0.02, 0.08], [0.5, 0.16, 0.45, 0.72], [1, 0.85, 0.96, 1]],
 };
+// Each ultrasound renders in ITS OWN timepoint's colour — the same hue the dashboard's
+// timeline bars and coverage grid use for that stage. So a pre-dura block and a pre-iMRI
+// block are told apart by hue in the volume rendering exactly as they are on the dashboard,
+// and the two pages read as one encoding rather than two. Built from the same TIMEPOINTS
+// values the dashboard declares, so they cannot drift apart.
+const rampFromColor = (c: [number, number, number]): [number, number, number, number][] => [
+  [0, c[0] * 0.06, c[1] * 0.06, c[2] * 0.06],
+  [0.45, c[0] * 0.72, c[1] * 0.72, c[2] * 0.72],
+  [1, c[0] + (1 - c[0]) * 0.5, c[1] + (1 - c[1]) * 0.5, c[2] + (1 - c[2]) * 0.5],
+];
+for (const [key, tp] of Object.entries(TIMEPOINTS)) RAMPS[tp.short] = rampFromColor(tp.color);
+
 export const RAMP_NAMES = Object.keys(RAMPS);
+
+/** The ramp a freshly loaded series gets: ultrasound in its stage colour, MR in grey —
+ *  grey is what anatomy is read on, and the MR is the reference the US is compared against. */
+export const defaultRamp = (e: SeriesEntry) => e.m === "US" ? TIMEPOINTS[e.tp].short : "grey";
 
 /** The default opacity curve — the quadratic foot the demo shipped with, as control points:
  *  transparent to the window midpoint, then climbing, so a post-contrast MR shows the head
@@ -118,6 +134,8 @@ export class RemindScene {
   private overlayOp: number;
   private palette = new Float32Array(256 * 4);
   private overlayTex = new Map<string, GPUTexture>();
+  private segsOn = false;   // segmentations start hidden — they sit on top of the anatomy being compared
+  private shellOp = 1;
 
   constructor(gpu: Gpu, format: GPUTextureFormat, readonly kase: CaseEntry, opts: RemindSceneOpts = {}) {
     this.gpu = gpu;
@@ -263,7 +281,7 @@ export class RemindScene {
     row.lev = vol.lev;
     // ultrasound gets the warm ramp by default — it reads the way sonographers expect, and
     // it tells a US row apart from an MR row at a glance in the 3D column
-    row.tf = { ramp: row.entry.m === "US" ? "amber" : "grey", points: [...DEFAULT_TF_POINTS] };
+    row.tf = { ramp: defaultRamp(row.entry), points: [...DEFAULT_TF_POINTS] };
     row.vol = vol;
     const field = new ImageField(dev, vol.vol, vol.dims, [1, 1, 1], this.lutFor(row), {
       clim: [vol.lev - vol.win / 2, vol.lev + vol.win / 2],
@@ -275,8 +293,8 @@ export class RemindScene {
     slice.setVolume(field.patientToTexture(), lo, hi);
     slice.setTextures(field.volumeTexture());
     slice.setWindowLevel(vol.win, vol.lev);
-    slice.setOverlayOpacity(this.overlayOp);
-    slice.setOutlineOpacity(1);
+    slice.setOverlayOpacity(this.segsOn ? this.overlayOp : 0);
+    slice.setOutlineOpacity(this.segsOn ? 1 : 0);
     const scene = new SceneRenderer(this.gpu, this.format);
     row.vol = vol; row.field = field; row.slice = slice; row.scene = scene;
     row.rasLo = lo; row.rasHi = hi;
@@ -340,6 +358,7 @@ export class RemindScene {
       renderMode: "sdf", boundaryMode: "outer", opacity: 1, clippable: true,
     });
     for (const s of row.segs) logic.setLabelColor(s.label, s.color);
+    logic.setGlobalOpacity(this.segsOn ? this.shellOp : 0);
     logic.onRedraw(() => this.opts.onRedraw?.());
     logic.refineNow();
     row.logic = logic;
@@ -382,14 +401,34 @@ export class RemindScene {
 
   setOverlayOpacity(o: number) {
     this.overlayOp = Math.max(0, Math.min(1, o));
+    if (!this.segsOn) return;
     for (const r of this.readyRows()) r.slice!.setOverlayOpacity(this.overlayOp);
   }
   overlayOpacity() { return this.overlayOp; }
 
   /** 3D shell opacity across every row that has segmentations. */
   setShellOpacity(o: number) {
-    for (const r of this.readyRows()) r.logic?.setGlobalOpacity(Math.max(0, Math.min(1, o)));
+    this.shellOp = Math.max(0, Math.min(1, o));
+    if (!this.segsOn) return;
+    for (const r of this.readyRows()) { r.logic?.setGlobalOpacity(this.shellOp); r.scene?.syncUniforms(); }
   }
+
+  /** One switch for ALL segmentation display — 2D fill, 2D outline and the 3D shells.
+   *  Segmentations are drawn over the anatomy being compared, so there has to be a way to
+   *  get them out of the way without hunting through three separate opacity controls. */
+  setSegVisible(on: boolean) {
+    this.segsOn = on;
+    for (const r of this.readyRows()) {
+      r.slice!.setOverlayOpacity(on ? this.overlayOp : 0);
+      r.slice!.setOutlineOpacity(on ? 1 : 0);
+      r.logic?.setGlobalOpacity(on ? this.shellOp : 0);
+      // the 2D path re-writes its uniform on every draw, but the 3D shell's opacity lives in
+      // the scene's material uniform — without this sync the slices hide the segmentation and
+      // the 3D view goes on showing it
+      r.scene?.syncUniforms();
+    }
+  }
+  segVisible() { return this.segsOn; }
 
   /** Structures present anywhere in this case's loaded rows, with total voxel counts. */
   structures(): { structure: string; color: [number, number, number]; rows: number }[] {

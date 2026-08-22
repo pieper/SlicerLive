@@ -61,15 +61,46 @@ checked rather than assumed by `worker/build_index.py`:
   with no `T1_postcontrast` degrades to `T1_precontrast`, one with no pre-dura US to
   post-dura. With the ladders, all three pairs resolve for **114/114 cases**.
 
-  **One set of compare controls drives every row and every column at once** — fade, rock,
-  toggle, and `space` to flip A/B — so the whole grid stays phase-locked and differences
-  across rows are comparable. What is per-row is only the pair itself: each row has its own A
-  and B selectors over every series in the case, plus swap and remove.
+  **One set of compare controls drives every row and every column at once**, so the whole
+  grid stays phase-locked and differences across rows are comparable. **Fade is the resting
+  state** — the slider, plus `space` to flip A/B — and it opens at 50% so both sides are
+  visible from the start. **rock** (cross-fade) and **toggle** (hard flip) are mutually
+  exclusive latches: pressing the live one releases it back to fade, and each has a
+  fast/medium/slow period. Rock runs 50% slower than toggle at the same setting, because a
+  cross-fade needs longer to read than a flip. What is per-row is only the pair itself: each
+  row has its own A and B selectors, plus swap and remove — laid out in a **header strip above
+  the images** rather than a side column, because a label column costs every row ~200px of the
+  width the images are there to use.
 
-  Only the volumes some row references are resident, and a shared volume is loaded once
-  however many rows use it (three rows typically need four volumes, not six). Dropping a row
-  or re-pointing a selector frees whatever nothing else needs.
-  `?case=<pid>&rows=1|2|3`.
+  **Segmentations are one switch** (`Segs`, off by default) covering 2D fill, 2D outline and
+  the 3D shells together. They sit on top of the anatomy being compared, so hiding them has to
+  be one click — and the 3D half needs an explicit `syncUniforms`, since the 2D path re-writes
+  its uniform every draw and the shell's opacity lives in the scene's material uniform.
+
+  **Ultrasound renders in its own timepoint's colour** — the same hue the dashboard's timeline
+  bars and coverage grid use for that stage, generated from the same `TIMEPOINTS` values so the
+  two pages cannot drift apart. MR stays grey: it is the anatomy the ultrasound is read
+  against.
+
+  **Loading is smallest-first, then the rest of the case in the background.** The pair loads
+  before anything else; once something is on screen the remaining series stream in behind it,
+  so re-pointing a selector later is instant instead of another minute. A shared volume is
+  held once however many rows name it.
+
+  Ordering by size is measured, not assumed. The intuition is that ultrasound should come
+  first — one object, against ~176 for an MR series, each with its own request latency and
+  dcmjs parse. Cold (HTTP cache disabled, a case never opened), it is the other way round,
+  because bytes dominate: a US series is 70–100 MB against an MR's ~23 MB.
+
+  | | mean load | per series |
+  |---|---|---|
+  | ultrasound | **8.6 s** | 1 object, 70–100 MB |
+  | MR | **2.2 s** | ~176 objects, ~23 MB |
+
+  Loading ultrasound first pushed the first image from ~1 s out to ~7 s, so the order is by
+  bytes ascending. Whichever side of a pair lands first is shown outright until the other
+  arrives, so this is what you actually feel.
+  `?case=<pid>&rows=1|2|3&prefetch=<n>`.
 
 ### Navigating it
 
@@ -85,6 +116,10 @@ checked rather than assumed by `worker/build_index.py`:
 - **Slice ↔ 3D** are two expressions of the same thing — a centre and a span — so zooming a
   slice dollies the 3D camera and dollying the 3D zooms the slices (`Link 3D`, on by default).
   Orbiting is deliberately *not* coupled: it changes direction, not extent.
+- **A newly selected volume is aligned immediately.** A volume already resident from the
+  prefetch never goes through the load path, so the shared frame has to be re-applied on
+  selection — without that it kept its default pan/zoom and sat misaligned until some gesture
+  happened to fix it.
 - **Framing** starts from the **smallest** resident volume's extent, not a bounding-sphere
   diagonal. In a comparison that is the region anyone actually cares about — an ultrasound
   block is ~10 cm inside a 25 cm head — and every other row zooms to the same patient-space
@@ -149,6 +184,14 @@ Two encodings, both validated rather than chosen by eye (see
 
 Queries the IDC public API (no auth, no BigQuery) and writes ~370 KB. Re-run it
 when IDC publishes a new data version; the file records which one it came from.
+
+## Iterating
+
+    deno run -A examples/remind/serve.ts        # http://localhost:8788/
+
+Serves the dashboard at `/` and the viewer at `/compare`, and **re-bundles on demand**: a
+request for `remind-compare.js` checks source mtimes and rebuilds if any is newer, so the loop
+is edit → reload with no separate build step to forget. Nothing is cached.
 
 ## Tests
 

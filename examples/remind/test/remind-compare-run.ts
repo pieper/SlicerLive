@@ -59,9 +59,12 @@ interface DbgPair {
 }
 const rows = () => evalJson("__remindDbg.rows()") as Promise<DbgRow[]>;
 const pairs = () => evalJson("__remindDbg.cmpRows()") as Promise<DbgPair[]>;
+/** Wait for every compare row to have BOTH sides ready — not for the background prefetch,
+ *  which keeps loading the rest of the case long afterwards. */
 const settle = async (maxMs = 450_000) => {
   for (let i = 0; i < maxMs / 500; i++) {
-    if (!(await rows()).some((r) => r.state === "loading")) return;
+    const ps = await pairs();
+    if (ps.length && ps.every((p) => p.live)) return;
     await sleep(500);
   }
 };
@@ -93,11 +96,15 @@ if (present) {
     `${r1?.aDesc} (${r1?.aTp})  ⇄  ${r1?.bDesc} (${r1?.bTp})`);
   check("row 1 says what it is for", r1?.why === "plan vs first look", r1?.why ?? "");
   check("both sides of row 1 decoded", r1?.live === true);
+  check("opens with segmentations hidden", (await evalJson("__remindDbg.segsOn()")) === false);
+  check("opens in fade at 50%", (await evalJson("__remindDbg.mode()")) === "fade" &&
+    (await evalJson("__remindDbg.blend()")) === 0.5,
+    `mode ${await evalJson("__remindDbg.mode()")}, blend ${await evalJson("__remindDbg.blend()")}`);
 
-  // only what the row references is resident — the whole point of not being series-centric
+  // the pair comes FIRST; the rest of the case follows in the background
   const resident = await evalJson("__remindDbg.residentKeys()") as string[];
-  check("only the pair's two volumes are resident", resident.length === 2,
-    `${resident.length} resident of ${rs0.length} series in the case`);
+  check("the pair loads before anything else", resident.length <= 3,
+    `${resident.length} resident of ${rs0.length} series when the pair went live`);
 
   const ready = rs0.filter((r) => r.state === "ready");
   for (const r of ready) {
@@ -183,7 +190,38 @@ if (present) {
   await sleep(200);
   const bt = await evalJson("__remindDbg.blend()") as number;
   check("toggle is a hard A/B flip", bt === 0 || bt === 1, `blend ${bt}`);
+
+  // rock and toggle latch against each other; pressing the live one releases to fade
+  await evalJson("document.querySelector('#cmpbar [data-mode=\"rock\"]').click()");
+  const m1 = await evalJson("__remindDbg.mode()");
+  await evalJson("document.querySelector('#cmpbar [data-mode=\"toggle\"]').click()");
+  const m2 = await evalJson("__remindDbg.mode()");
+  await evalJson("document.querySelector('#cmpbar [data-mode=\"toggle\"]').click()");
+  const m3 = await evalJson("__remindDbg.mode()");
+  check("rock and toggle latch, and release back to fade", m1 === "rock" && m2 === "toggle" && m3 === "fade",
+    `${m1} → ${m2} → ${m3}`);
+  await evalJson("__remindDbg.setSpeed('medium')");
+  await evalJson("__remindDbg.setMode('rock')");
+  const pRock = await evalJson("__remindDbg.periodMs()") as number;
+  await evalJson("__remindDbg.setMode('toggle')");
+  const pTog = await evalJson("__remindDbg.periodMs()") as number;
+  check("rock cross-fades 50% slower than toggle flips", Math.abs(pRock - pTog * 1.5) < 1 && pTog === 3200,
+    `rock ${pRock} ms vs toggle ${pTog} ms`);
   await evalJson("__remindDbg.setMode('fade')");
+
+  // ── segmentations: one switch, both 2D and 3D ─────────────────────────────
+  await evalJson("__remindDbg.setSegs(true)");
+  check("segmentation switch turns them on", (await evalJson("__remindDbg.segsOn()")) === true);
+  await evalJson("__remindDbg.setSegs(false)");
+  check("…and off again", (await evalJson("__remindDbg.segsOn()")) === false);
+
+  // ── ultrasound renders in its dashboard timepoint colour ──────────────────
+  const usRow2 = (await rows()).find((r) => r.m === "US" && r.state === "ready");
+  if (usRow2) {
+    const tf = await evalJson(`__remindDbg.tf(${JSON.stringify(usRow2.key)})`) as { ramp: string };
+    const want = { pre_dura: "PRE-DURA", post_dura: "POST-DURA", pre_imri: "PRE-iMRI" }[usRow2.tp];
+    check("ultrasound uses its dashboard timepoint colour", tf.ramp === want, `${usRow2.tp} → ramp "${tf.ramp}"`);
+  }
 
   // ── adding rows walks the staged defaults ─────────────────────────────────
   await evalJson("__remindDbg.addRow()");
@@ -203,9 +241,15 @@ if (present) {
   check("row 3 prefers a matching sequence when one exists",
     !!r3?.aDesc && !!r3?.bDesc, `${r3?.aDesc} vs ${r3?.bDesc}`);
 
-  // three rows share volumes with each other — resident count must be < 6
+  // Three rows reference six slots, but several name the SAME series — each must be held
+  // once. (Resident count no longer proves this on its own: the background prefetch pulls in
+  // the rest of the case too, so assert the invariant directly.)
   const res3 = await evalJson("__remindDbg.residentKeys()") as string[];
-  check("shared volumes are loaded once, not per row", res3.length < 6, `${res3.length} resident for 3 rows`);
+  const refs = p3.flatMap((r) => [r.a, r.b]).filter(Boolean) as string[];
+  const distinct = new Set(refs);
+  check("shared volumes are held once, not once per row",
+    new Set(res3).size === res3.length && [...distinct].every((k) => res3.includes(k)),
+    `${refs.length} slots → ${distinct.size} distinct series, ${res3.length} resident, no duplicates`);
 
   // the compare controls are GLOBAL — one blend for every row
   await evalJson("__remindDbg.setBlend(0.8)");
@@ -215,14 +259,36 @@ if (present) {
   check("one blend applies to every row's every column", live >= 8 && ops.every((o) => ["0", "0.8"].includes(Number(o).toFixed(1) === "0.8" ? "0.8" : "0")),
     `${live}/${ops.length} canvases at 0.8`);
 
-  // ── removing a row frees what nothing else needs ──────────────────────────
-  const before = (await evalJson("__remindDbg.residentKeys()") as string[]).length;
+  // ── background prefetch ───────────────────────────────────────────────────
+  for (let i = 0; i < 240; i++) {
+    if (((await evalJson("__remindDbg.residentKeys()")) as string[]).length >= 5) break;
+    await sleep(500);
+  }
+  const pre = (await evalJson("__remindDbg.residentKeys()") as string[]).length;
+  check("the rest of the case loads in the background", pre >= 5, `${pre}/${rs0.length} resident`);
+
+  // selecting a PREFETCHED volume must be aligned immediately — it never went through the
+  // load path that applies the shared frame, which is exactly how it used to come up wrong
+  const p4a = await pairs();
+  const residentNow = await evalJson("__remindDbg.residentKeys()") as string[];
+  const fresh = residentNow.find((k) => k !== p4a[0].a && k !== p4a[0].b);
+  if (fresh) {
+    const fovNow = await evalJson("__remindDbg.fov()") as number;
+    await evalJson(`__remindDbg.setPair(${JSON.stringify(p4a[0].id)}, ${JSON.stringify(fresh)}, ${JSON.stringify(p4a[0].b)})`);
+    await sleep(700);
+    const fr = await evalJson(`__remindDbg.frameOf(${JSON.stringify(fresh)}, 'axial')`) as { fov: number; center: number[] };
+    const vc = await evalJson("__remindDbg.viewCenter()") as number[];
+    const d = Math.hypot(fr.center[0] - vc[0], fr.center[1] - vc[1], fr.center[2] - vc[2]);
+    check("a prefetched volume is aligned the moment it is selected",
+      Math.abs(fr.fov - fovNow) < fovNow * 0.01 && d < 0.5,
+      `fov ${fr.fov.toFixed(1)} vs ${fovNow.toFixed(1)} mm, centre off ${d.toFixed(3)} mm`);
+  }
+
+  // ── removing a row ────────────────────────────────────────────────────────
   await evalJson(`__remindDbg.removeRow(${JSON.stringify(p3[2].id)})`);
   await sleep(400);
-  const after = (await evalJson("__remindDbg.residentKeys()") as string[]).length;
   const p4 = await pairs();
   check("removing a row drops it", p4.length === 2, `${p4.length} rows left`);
-  check("and frees volumes nothing else references", after <= before, `${before} → ${after} resident`);
 
   // ── per-row customisation still works ─────────────────────────────────────
   const anyOther = rs0.find((r) => r.m === "MR" && r.key !== p4[0].a && r.key !== p4[0].b);

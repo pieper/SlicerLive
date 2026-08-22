@@ -6529,7 +6529,29 @@ var RAMPS = {
     ]
   ]
 };
+var rampFromColor = (c) => [
+  [
+    0,
+    c[0] * 0.06,
+    c[1] * 0.06,
+    c[2] * 0.06
+  ],
+  [
+    0.45,
+    c[0] * 0.72,
+    c[1] * 0.72,
+    c[2] * 0.72
+  ],
+  [
+    1,
+    c[0] + (1 - c[0]) * 0.5,
+    c[1] + (1 - c[1]) * 0.5,
+    c[2] + (1 - c[2]) * 0.5
+  ]
+];
+for (const [key, tp] of Object.entries(TIMEPOINTS)) RAMPS[tp.short] = rampFromColor(tp.color);
 var RAMP_NAMES = Object.keys(RAMPS);
+var defaultRamp = (e) => e.m === "US" ? TIMEPOINTS[e.tp].short : "grey";
 var DEFAULT_TF_POINTS = [
   [
     0,
@@ -6566,11 +6588,15 @@ var RemindScene = class {
   overlayOp;
   palette;
   overlayTex;
+  segsOn;
+  shellOp;
   constructor(gpu, format, kase, opts = {}) {
     this.kase = kase;
     this.rows = [];
     this.palette = new Float32Array(256 * 4);
     this.overlayTex = /* @__PURE__ */ new Map();
+    this.segsOn = false;
+    this.shellOp = 1;
     this.mergedLab = /* @__PURE__ */ new Map();
     this.gpu = gpu;
     this.format = format;
@@ -6762,7 +6788,7 @@ var RemindScene = class {
     row.win = vol.win;
     row.lev = vol.lev;
     row.tf = {
-      ramp: row.entry.m === "US" ? "amber" : "grey",
+      ramp: defaultRamp(row.entry),
       points: [
         ...DEFAULT_TF_POINTS
       ]
@@ -6790,8 +6816,8 @@ var RemindScene = class {
     slice.setVolume(field.patientToTexture(), lo, hi);
     slice.setTextures(field.volumeTexture());
     slice.setWindowLevel(vol.win, vol.lev);
-    slice.setOverlayOpacity(this.overlayOp);
-    slice.setOutlineOpacity(1);
+    slice.setOverlayOpacity(this.segsOn ? this.overlayOp : 0);
+    slice.setOutlineOpacity(this.segsOn ? 1 : 0);
     const scene = new SceneRenderer(this.gpu, this.format);
     row.vol = vol;
     row.field = field;
@@ -6876,6 +6902,7 @@ var RemindScene = class {
       clippable: true
     });
     for (const s of row.segs) logic.setLabelColor(s.label, s.color);
+    logic.setGlobalOpacity(this.segsOn ? this.shellOp : 0);
     logic.onRedraw(() => this.opts.onRedraw?.());
     logic.refineNow();
     row.logic = logic;
@@ -6915,6 +6942,7 @@ var RemindScene = class {
   }
   setOverlayOpacity(o) {
     this.overlayOp = Math.max(0, Math.min(1, o));
+    if (!this.segsOn) return;
     for (const r of this.readyRows()) r.slice.setOverlayOpacity(this.overlayOp);
   }
   overlayOpacity() {
@@ -6922,7 +6950,27 @@ var RemindScene = class {
   }
   /** 3D shell opacity across every row that has segmentations. */
   setShellOpacity(o) {
-    for (const r of this.readyRows()) r.logic?.setGlobalOpacity(Math.max(0, Math.min(1, o)));
+    this.shellOp = Math.max(0, Math.min(1, o));
+    if (!this.segsOn) return;
+    for (const r of this.readyRows()) {
+      r.logic?.setGlobalOpacity(this.shellOp);
+      r.scene?.syncUniforms();
+    }
+  }
+  /** One switch for ALL segmentation display — 2D fill, 2D outline and the 3D shells.
+   *  Segmentations are drawn over the anatomy being compared, so there has to be a way to
+   *  get them out of the way without hunting through three separate opacity controls. */
+  setSegVisible(on) {
+    this.segsOn = on;
+    for (const r of this.readyRows()) {
+      r.slice.setOverlayOpacity(on ? this.overlayOp : 0);
+      r.slice.setOutlineOpacity(on ? 1 : 0);
+      r.logic?.setGlobalOpacity(on ? this.shellOp : 0);
+      r.scene?.syncUniforms();
+    }
+  }
+  segVisible() {
+    return this.segsOn;
   }
   /** Structures present anywhere in this case's loaded rows, with total voxel counts. */
   structures() {
@@ -6958,7 +7006,11 @@ var CELLS = [
   "threeD"
 ];
 var PARAMS = new URLSearchParams(location.search);
-var ROCK_MS = 1600;
+var SPEED_MS = {
+  fast: 1400,
+  medium: 3200,
+  slow: 6800
+};
 var el = (id) => document.getElementById(id);
 var status = (msg, err = false) => {
   const s = el("status");
@@ -7000,7 +7052,8 @@ async function main() {
   const cmpRows = [];
   const PAIRS = defaultPairs(kase);
   let cmpMode = "fade";
-  let blend = 0;
+  let blend = 0.5;
+  let rockMs = SPEED_MS.medium;
   let rowSeq = 0;
   let focus = [
     0,
@@ -7053,8 +7106,11 @@ async function main() {
     root.className = "crow";
     root.dataset.row = id;
     const label = document.createElement("div");
-    label.className = "clabel";
+    label.className = "chead";
     root.appendChild(label);
+    const cells = document.createElement("div");
+    cells.className = "ccells";
+    root.appendChild(cells);
     for (const c of CELLS) {
       const cell = document.createElement("div");
       cell.className = "cell";
@@ -7080,7 +7136,7 @@ async function main() {
         c: ov,
         g: ov.getContext("2d")
       });
-      root.appendChild(cell);
+      cells.appendChild(cell);
     }
     rowsEl.appendChild(root);
     const row = {
@@ -7134,20 +7190,18 @@ async function main() {
     });
     cx.set(id, ctx);
   };
+  const fastestFirst = (a, b) => sc.row(a).entry.b - sc.row(b).entry.b;
   async function reconcile() {
     const needed = /* @__PURE__ */ new Set();
     for (const r of cmpRows) {
       if (r.a) needed.add(r.a);
       if (r.b) needed.add(r.b);
     }
-    for (const row of sc.rows) {
-      if (row.state === "ready" && !needed.has(row.key)) sc.releaseRow(row.key);
-    }
     updateBar();
     resize();
     const pending = [
       ...needed
-    ].filter((k) => sc.row(k)?.state === "idle");
+    ].filter((k) => sc.row(k)?.state === "idle").sort(fastestFirst);
     for (const k of pending) {
       const loaded = await sc.ensureRow(k);
       if (autoFrame && loaded.state === "ready") frameToBounds();
@@ -7156,14 +7210,41 @@ async function main() {
       renderTF();
       updateBar();
       resize();
+      requestDraw();
     }
+    applyFrames();
+    requestDraw();
     status(statusLine());
+    prefetchRest();
+  }
+  const PREFETCH_MAX = Number(PARAMS.get("prefetch") ?? 10);
+  let prefetching = false;
+  async function prefetchRest() {
+    if (prefetching || PREFETCH_MAX <= 0) return;
+    if (!cmpRows.some((r) => rowReady(r.a) || rowReady(r.b))) return;
+    prefetching = true;
+    try {
+      for (; ; ) {
+        if (sc.readyRows().length >= PREFETCH_MAX) break;
+        const next = sc.rows.filter((r) => r.state === "idle").map((r) => r.key).sort(fastestFirst)[0];
+        if (!next) break;
+        await sc.ensureRow(next);
+        applyFrames();
+        syncRowLabels();
+        renderTF();
+        updateBar();
+        status(statusLine());
+      }
+    } finally {
+      prefetching = false;
+    }
   }
   const statusLine = () => {
     const res = sc.readyRows();
     const loading = sc.rows.filter((r) => r.state === "loading").length;
     const bytes = res.reduce((n, r) => n + r.entry.b, 0);
-    return `${kase.pid} \u2014 ${cmpRows.length} comparison${cmpRows.length === 1 ? "" : "s"}, ${res.length} volume${res.length === 1 ? "" : "s"} resident (${mb(bytes)})` + (loading ? `, ${loading} loading\u2026` : "");
+    const idle = sc.rows.filter((r) => r.state === "idle").length;
+    return `${kase.pid} \u2014 ${cmpRows.length} comparison${cmpRows.length === 1 ? "" : "s"}, ${res.length}/${sc.rows.length} series loaded (${mb(bytes)})` + (loading ? `, ${loading} loading\u2026` : idle && prefetching ? `, ${idle} queued in background` : "");
   };
   function syncRowLabels() {
     for (const r of cmpRows) {
@@ -7172,13 +7253,13 @@ async function main() {
         ra,
         rb
       ].filter((x) => x?.state === "loading");
-      const prog = busy.length ? `<div class="prog">${busy[0].progress.msg}<i style="width:${Math.round(busy[0].progress.frac * 100)}%"></i></div>` : "";
+      const prog = busy.length ? `<span class="prog">${busy[0].progress.msg}<i style="width:${Math.round(busy[0].progress.frac * 100)}%"></i></span>` : `<span class="prog"></span>`;
       const err = [
         ra,
         rb
       ].find((x) => x?.state === "error");
       const accent = (row) => row ? rgbCss(TIMEPOINTS[row.entry.tp].color) : "#7d92b5";
-      r.label.innerHTML = `<div class="why">${r.why}</div><div class="pick" style="--ac:${accent(ra)}"><span class="ab">A</span><select class="sel-a" data-row="${r.id}">${seriesOptions(r.a)}</select></div><div class="pick" style="--ac:${accent(rb)}"><span class="ab">B</span><select class="sel-b" data-row="${r.id}">${seriesOptions(r.b)}</select></div>` + (err ? `<div class="err">failed: ${err.error}</div>` : prog) + `<div class="rowbtns"><button class="mini swap" data-row="${r.id}" title="swap A and B">\u21C4</button><button class="mini rm" data-row="${r.id}" title="remove this comparison">\xD7</button></div>`;
+      r.label.innerHTML = `<span class="why">${r.why}</span><span class="pick" style="--ac:${accent(ra)}"><span class="ab">A</span><select class="sel-a" data-row="${r.id}">${seriesOptions(r.a)}</select></span><button class="mini swap" data-row="${r.id}" title="swap A and B">\u21C4</button><span class="pick" style="--ac:${accent(rb)}"><span class="ab">B</span><select class="sel-b" data-row="${r.id}">${seriesOptions(r.b)}</select></span>` + (err ? `<span class="err">failed: ${err.error}</span>` : prog) + `<button class="mini rm" data-row="${r.id}" title="remove this comparison">\xD7</button>`;
       r.root.classList.toggle("live", rowReady(r.a) && rowReady(r.b));
     }
     el("addrow").toggleAttribute("disabled", cmpRows.length >= 6);
@@ -7208,11 +7289,18 @@ async function main() {
       requestDraw();
     }
   });
+  const effBlend = (r) => {
+    const a = rowReady(r.a), b = rowReady(r.b);
+    if (a && b) return blend;
+    if (b) return 1;
+    return 0;
+  };
   const applyBlend = () => {
     for (const r of cmpRows) {
+      const eb = effBlend(r);
       for (const c of CELLS) {
         const b = cv.get(canvasKey(r, c, "b"));
-        if (b) b.style.opacity = String(rowReady(r.b) ? blend : 0);
+        if (b) b.style.opacity = String(eb);
       }
     }
     const f = el("cmp-fade");
@@ -7226,7 +7314,8 @@ async function main() {
       return;
     }
     if (!animT0) animT0 = t;
-    const phase = (t - animT0) % ROCK_MS / ROCK_MS;
+    const period = cmpMode === "rock" ? rockMs * 1.5 : rockMs;
+    const phase = (t - animT0) % period / period;
     blend = cmpMode === "rock" ? (1 - Math.cos(phase * 2 * Math.PI)) / 2 : phase < 0.5 ? 0 : 1;
     applyBlend();
     animRaf = requestAnimationFrame(animate);
@@ -7247,15 +7336,21 @@ async function main() {
     for (const b of el("cmpbar").querySelectorAll("[data-mode]")) {
       b.classList.toggle("on", b.dataset.mode === m);
     }
+    el("cmp-speed").disabled = m === "fade";
     syncAnim();
     applyBlend();
   };
+  const pressMode = (m) => setMode(cmpMode === m ? "fade" : m);
   const updateBar = () => {
     el("cmp-count").textContent = `${cmpRows.length} row${cmpRows.length === 1 ? "" : "s"}`;
   };
   for (const b of el("cmpbar").querySelectorAll("[data-mode]")) {
-    b.addEventListener("click", () => setMode(b.dataset.mode));
+    b.addEventListener("click", () => pressMode(b.dataset.mode));
   }
+  el("cmp-speed").addEventListener("change", (e) => {
+    rockMs = SPEED_MS[e.target.value] ?? SPEED_MS.medium;
+    animT0 = 0;
+  });
   el("cmp-fade").addEventListener("input", (e) => {
     blend = Number(e.target.value) / 100;
     if (cmpMode !== "fade") setMode("fade");
@@ -7403,7 +7498,7 @@ async function main() {
   const xhairRedraw = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
     for (const r of cmpRows) {
-      const row = rowOf(blend > 0.5 && rowReady(r.b) ? r.b : r.a) ?? rowOf(r.b);
+      const row = rowOf(effBlend(r) > 0.5 ? r.b : r.a) ?? rowOf(r.a) ?? rowOf(r.b);
       for (const k of CELLS) {
         const o = overlays.get(overlayKey(r, k));
         const host = cv.get(canvasKey(r, k, "b")) ?? cv.get(canvasKey(r, k, "a"));
@@ -7469,7 +7564,7 @@ async function main() {
     syncCameraToFov();
   };
   function attachRowInteraction(r) {
-    const leader = () => rowOf(blend > 0.5 && rowReady(r.b) ? r.b : r.a) ?? rowOf(r.b);
+    const leader = () => rowOf(effBlend(r) > 0.5 ? r.b : r.a) ?? rowOf(r.a) ?? rowOf(r.b);
     for (const o of ORIENTS) {
       const canvas = cv.get(canvasKey(r, o, "b"));
       attachSliceControls(canvas, {
@@ -7789,7 +7884,7 @@ async function main() {
       points: [
         ...DEFAULT_TF_POINTS
       ],
-      ramp: row.entry.m === "US" ? "amber" : "grey"
+      ramp: defaultRamp(row.entry)
     });
     renderTF();
     requestDraw();
@@ -7914,6 +8009,13 @@ async function main() {
   globalThis.addEventListener("resize", resize);
   applyColumns();
   setMode("fade");
+  el("col-segs").classList.toggle("on", sc.segVisible());
+  el("col-segs").addEventListener("click", () => {
+    const on = !sc.segVisible();
+    sc.setSegVisible(on);
+    el("col-segs").classList.toggle("on", on);
+    requestDraw();
+  });
   el("col-link").addEventListener("click", () => {
     link3d = !link3d;
     el("col-link").classList.toggle("on", link3d);
@@ -7982,6 +8084,14 @@ async function main() {
       };
     },
     mode: () => cmpMode,
+    speedMs: () => rockMs,
+    periodMs: () => cmpMode === "rock" ? rockMs * 1.5 : rockMs,
+    setSpeed: (name) => {
+      rockMs = SPEED_MS[name] ?? SPEED_MS.medium;
+      animT0 = 0;
+      el("cmp-speed").value = name;
+      return rockMs;
+    },
     setMode: (m) => {
       setMode(m);
       return cmpMode;
@@ -8031,6 +8141,23 @@ async function main() {
       r.slice.zoomAbout(o, factor, 0.5, 0.5, c.clientWidth, c.clientHeight);
       adoptFrame(r, o, c);
       requestDraw();
+    },
+    segsOn: () => sc.segVisible(),
+    setSegs: (on) => {
+      sc.setSegVisible(on);
+      el("col-segs")?.classList.toggle("on", on);
+      requestDraw();
+    },
+    prefetching: () => prefetching,
+    /** The frame a given volume is actually rendering with — the thing that was stale when a
+     *  prefetched volume got selected. fov and centre must match the shared view. */
+    frameOf: (k, o) => {
+      const r = sc.row(k);
+      if (r?.state !== "ready") return null;
+      return {
+        fov: r.slice.spanMmFor(o) / Math.max(1e-6, r.slice.zoom(o)),
+        center: r.slice.viewToRas(o, sc.offset01(r, o, focus), 0.5, 0.5, 1)
+      };
     },
     link3d: () => link3d,
     setLink3d: (on) => {

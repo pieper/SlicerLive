@@ -34,6 +34,7 @@
             background: #0d1119; border-bottom: 1px solid #1b2740; font-size: 11px; color: #7d92b5; }
   #cmpbar .cmplabel { font: 800 9.5px -apple-system, system-ui, sans-serif; letter-spacing: .08em; color: #f0d24a; }
   #cmp-fade { width: 220px; accent-color: #f0d24a; }
+  #cmp-speed:disabled { opacity: .4; }
   #cmp-note { font-variant-numeric: tabular-nums; min-width: 128px; }
   #cmp-count { margin-left: auto; color: #4d5c78; }
   .hintkey { color: #4d5c78; }
@@ -41,23 +42,26 @@
 
   /* ── compare rows ────────────────────────────────────────────────────────── */
   #rows { flex: 1; display: flex; flex-direction: column; gap: 2px; min-height: 0; padding: 2px; }
-  .crow { flex: 1; display: flex; gap: 2px; min-height: 0; background: #080b12; border-radius: 3px;
-          border-left: 3px solid #33507e; }
+  /* header OVER the images, not beside them: a left-hand label column costs every row
+     ~214px of image width, and the images are the point. */
+  .crow { flex: 1; display: flex; flex-direction: column; gap: 2px; min-height: 0;
+          background: #080b12; border-radius: 3px; border-left: 3px solid #33507e; }
   .crow.live { border-left-color: #f0d24a; }
-  .clabel { flex: 0 0 214px; padding: 5px 8px; overflow: hidden; min-width: 0;
-            display: flex; flex-direction: column; gap: 4px; }
-  .clabel .why { font: 800 9px -apple-system, system-ui, sans-serif; letter-spacing: .07em;
-                 color: #9fb3d0; text-transform: uppercase; }
-  .clabel .pick { display: flex; align-items: center; gap: 5px; min-width: 0; }
-  .clabel .pick .ab { font: 800 9px -apple-system, system-ui, sans-serif; color: var(--ac, #7d92b5);
-                      border: 1px solid var(--ac, #33507e); border-radius: 3px; padding: 1px 4px; flex: 0 0 auto; }
-  .clabel select { flex: 1; min-width: 0; font: 11px -apple-system, system-ui, sans-serif; color: #d6e2f2;
-                   background: #131a2a; border: 1px solid #2a3a5c;
-                   border-radius: 4px; padding: 2px 3px; }
-  .clabel .prog { font-size: 10px; color: #7d92b5; position: relative; padding-bottom: 3px; }
-  .clabel .prog i { position: absolute; left: 0; bottom: 0; height: 2px; background: #3f86d0; border-radius: 2px; }
-  .clabel .err { font-size: 10px; color: #ff9aa2; overflow-wrap: anywhere; }
-  .clabel .rowbtns { margin-top: auto; display: flex; gap: 4px; }
+  .ccells { flex: 1; display: flex; gap: 2px; min-height: 0; }
+  .chead { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 3px 8px;
+           min-width: 0; overflow: hidden; }
+  .chead .why { font: 800 9px -apple-system, system-ui, sans-serif; letter-spacing: .07em;
+                color: #9fb3d0; text-transform: uppercase; white-space: nowrap; flex: 0 0 auto; }
+  .chead .pick { display: flex; align-items: center; gap: 4px; min-width: 0; flex: 1 1 260px; max-width: 340px; }
+  .chead .pick .ab { font: 800 9px -apple-system, system-ui, sans-serif; color: var(--ac, #7d92b5);
+                     border: 1px solid var(--ac, #33507e); border-radius: 3px; padding: 1px 4px; flex: 0 0 auto; }
+  .chead select { flex: 1; min-width: 0; font: 11px -apple-system, system-ui, sans-serif; color: #d6e2f2;
+                  background: #131a2a; border: 1px solid #2a3a5c; border-radius: 4px; padding: 1px 3px; }
+  .chead .prog { flex: 1 1 auto; font-size: 10px; color: #7d92b5; position: relative;
+                 padding-bottom: 3px; min-width: 0; white-space: nowrap; overflow: hidden; }
+  .chead .prog i { position: absolute; left: 0; bottom: 0; height: 2px; background: #3f86d0; border-radius: 2px; }
+  .chead .err { font-size: 10px; color: #ff9aa2; overflow: hidden; white-space: nowrap; flex: 1 1 auto; }
+  .chead .mini { flex: 0 0 auto; }
   .mini { font: 600 11px -apple-system, system-ui, sans-serif; color: #9fb3d0; background: #131a2a;
           border: 1px solid #2a3a5c; border-radius: 4px; padding: 1px 7px; cursor: pointer; }
   .mini:hover { color: #fff; background: #1b2740; }
@@ -73,6 +77,7 @@
   /* double-click a cell to maximize it */
   #rows.maxmode .crow { display: none; }
   #rows.maxmode .crow.hasmax { display: flex; flex: 1; }
+  #rows.maxmode .crow.hasmax .ccells { display: flex; }
   #rows.maxmode .crow.hasmax .cell { display: none; }
   #rows.maxmode .crow.hasmax .cell.max { display: block; flex: 1; }
 
@@ -129,6 +134,7 @@
         <button id="col-coronal" class="chip on">Coronal</button>
         <button id="col-threeD" class="chip on">3D</button>
       </div>
+      <button id="col-segs" class="chip" title="show or hide every segmentation — 2D fill, 2D outline and 3D shells">Segs</button>
       <button id="col-link" class="chip on" title="link the 3D camera to the slice zoom/pan (orbit is never linked)">Link 3D</button>
       <div id="hdr-right">
         <span id="status">loading…</span>
@@ -139,10 +145,14 @@
 
     <div id="cmpbar">
       <span class="cmplabel">COMPARE</span>
-      <button class="chip" data-mode="fade">fade</button>
-      <button class="chip" data-mode="rock">rock</button>
-      <button class="chip" data-mode="toggle">toggle</button>
-      <input id="cmp-fade" type="range" min="0" max="100" value="0" title="blend A ⇄ B (applies to every row)">
+      <button class="chip" data-mode="rock" title="cross-fade back and forth automatically (press again to stop)">rock</button>
+      <button class="chip" data-mode="toggle" title="flip hard between A and B automatically (press again to stop)">toggle</button>
+      <select id="cmp-speed" title="how fast rock/toggle cycles">
+        <option value="fast">fast</option>
+        <option value="medium" selected>medium</option>
+        <option value="slow">slow</option>
+      </select>
+      <input id="cmp-fade" type="range" min="0" max="100" value="50" title="blend A ⇄ B (applies to every row)">
       <span id="cmp-note"></span>
       <span class="hintkey"><b>space</b> flips A/B · <b>shift+move</b> crosshair · <b>dbl-click</b> maximize</span>
       <button id="addrow" class="chip" title="add another comparison">+ row</button>
@@ -168,6 +178,6 @@
     <div id="rows"></div>
     <div id="strip"><div id="jumps"></div></div>
   </div>
-  <script type="module" src="remind-compare.js?v=20260822a"></script>   <!-- bump per deploy: stale cached bundles read as phantom behaviour -->
+  <script type="module" src="remind-compare.js?v=20260822f"></script>   <!-- bump per deploy: stale cached bundles read as phantom behaviour -->
 </body>
 </html>
