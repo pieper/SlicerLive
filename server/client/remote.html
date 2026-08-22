@@ -28,10 +28,12 @@
             color: #8a93a6; background: rgba(10,12,18,.55); padding: 3px 8px; border-radius: 6px; max-width: 70vw;
             pointer-events: none; }
   #credit:empty { display: none; }
-  #refine { position: fixed; right: 16px; bottom: 16px; z-index: 6; font: 700 22px -apple-system, system-ui, sans-serif;
-            color: #dff0ff; background: rgba(20,40,66,.9); border: 1px solid #3f88c5; padding: 10px 20px; border-radius: 999px;
-            box-shadow: 0 3px 16px rgba(0,0,0,.45); pointer-events: none; letter-spacing: .2px; }
-  #refine::before { content: "◐ "; }
+  #refine { position: fixed; right: 16px; bottom: 16px; z-index: 6; font-family: -apple-system, system-ui, sans-serif;
+            color: #dff0ff; background: rgba(20,40,66,.92); border: 1px solid #3f88c5; padding: 11px 20px; border-radius: 16px;
+            box-shadow: 0 3px 16px rgba(0,0,0,.45); pointer-events: none; text-align: right; }
+  #refine:empty { display: none; }
+  #refine .rl { font: 600 14px -apple-system, system-ui, sans-serif; color: #a9cdf0; }
+  #refine .rb { font: 700 22px -apple-system, system-ui, sans-serif; letter-spacing: .2px; margin-top: 2px; }
   #refine:empty { display: none; }
   #logo { font: 700 13px -apple-system, system-ui, sans-serif; background: linear-gradient(180deg,#1b3350,#12203a);
            color: #cfe6ff; border: 1px solid #33628f; border-radius: 8px; padding: 6px 11px; cursor: pointer; margin-right: 4px; }

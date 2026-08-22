@@ -110,12 +110,19 @@ export class ImageField implements Field {
       const bytesPerRow = dims[0] * bpe, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
       const CHUNK = 256 * 1024 * 1024;   // ~256 MB per write — comfortably under any maxBufferSize
       const slab = Math.max(1, Math.min(dims[2], Math.floor(CHUNK / Math.max(1, sliceBytes))));
+      // Copy each slab into a FRESH small buffer (offset 0) rather than passing the whole volume with
+      // a byte offset. wgpu's writeTexture mishandles data offsets past ~2 GB (32-bit overflow), so a
+      // multi-GB volume uploaded with a running offset corrupts every slab beyond 2 GB — the volume
+      // renders as mostly-zero with a small valid fragment. A per-slab copy keeps every offset 0.
+      const u8 = new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
       for (let z = 0; z < dims[2]; z += slab) {
         const depth = Math.min(slab, dims[2] - z);
+        const slabBytes = depth * sliceBytes;
+        const slabData = u8.slice(z * sliceBytes, z * sliceBytes + slabBytes);   // fresh buffer, offset 0
         dev.queue.writeTexture(
           { texture: this.volTex, origin: { x: 0, y: 0, z } },
-          src,
-          { offset: z * sliceBytes, bytesPerRow, rowsPerImage },
+          slabData,
+          { offset: 0, bytesPerRow, rowsPerImage },
           [dims[0], dims[1], depth],
         );
       }
@@ -162,6 +169,10 @@ export class ImageField implements Field {
   /** r8unorm volumes sample /255, so clim is packed /normScale in the shader; a slice plane sharing this
    *  texture must use the same factor. 1 for f32 volumes. */
   normScaleOf(): number { return this.normScale; }
+
+  /** Free this field's GPU textures (call when replacing it, e.g. a low-res proxy upgraded to full,
+   *  or an LRU-evicted specimen) so VRAM isn't leaked across a menu of large volumes. */
+  destroy() { this.volTex.destroy(); this.lutTex.destroy(); }
 
   /** Centre of the volume in world (RAS) at identity — a natural pivot for a transform widget. */
   worldCenter(): Vec3 {

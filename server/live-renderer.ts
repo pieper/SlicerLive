@@ -85,6 +85,13 @@ async function gzip(bytes: Uint8Array): Promise<Uint8Array> {
 // published transfer functions (SlicerMorph/VPs). The big single-file NRRDs are GitHub release
 // assets — the server (no CORS) fetches them; a scan switch reloads the scene and re-hellos.
 const gpu = await initDevice();
+// Surface GPU faults: WebGPU errors don't throw (they hit these), so a bad texture/allocation on a
+// giant volume would otherwise just silently stop producing frames.
+try {
+  (gpu.device as unknown as { addEventListener?: (t: string, cb: (e: unknown) => void) => void }).addEventListener?.(
+    "uncapturederror", (e) => console.error("[gpu] UNCAPTURED:", (e as { error?: { message?: string } }).error?.message));
+  (gpu.device.lost as Promise<{ reason?: string; message?: string }>).then((i) => console.error(`[gpu] DEVICE LOST: ${i.reason} — ${i.message}`));
+} catch { /* environment without these hooks */ }
 const scene = new SceneRenderer(gpu, "rgba8unorm");
 // The device's granted 3D-texture size gates whether a volume can be a single texture. Log it so
 // the "will it fit" answer is authoritative (NVIDIA caps 3D textures well below 2D).
@@ -129,7 +136,13 @@ let xformM: Mat4 = identity();
 let currentScene = "";
 let curRange: [number, number] = [0, 255];   // current specimen scalar range (for shift)
 let curPreset = "";                          // current specimen VP preset name
+let curProxyLevel = 0, curProxyDims = "", curFullDims = "";   // what the proxy shows vs the full target
 const fieldCache = new Map<string, ImageField>();
+function cacheField(name: string, field: ImageField): void {
+  // NOTE: no GPU-texture destroy here yet — freeing a texture that may still be referenced by
+  // in-flight render commands crashed the container. VRAM eviction needs a deferred/idle-time free.
+  fieldCache.set(name, field);
+}
 let loadToken = 0;                                             // bumped per scene switch; stale upgrades check it
 let pendingUpgrade: { field: ImageField; token: number } | null = null;   // full-res field awaiting swap-in
 let notifyRefined: (() => void) | null = null;                // tell the client the swap happened
@@ -154,6 +167,7 @@ async function loadScene(name: string, onProgress?: (done: number, total: number
   loadToken++;                       // invalidate any in-flight upgrade from a previous scene
   pendingUpgrade = null;
   notifyRefined = onRefined ?? null;
+  curProxyLevel = 0; curProxyDims = ""; curFullDims = "";
   if (name === "multi") {
     const sc = await buildMultiVolume(gpu.device, (n) => { mb += n; });
     xformTarget = sc.pano.field;
@@ -189,15 +203,25 @@ async function loadScene(name: string, onProgress?: (done: number, total: number
       const levels: ZarrLevel[] = meta.levels ?? [{ ...(meta.zarr as ZarrDesc), ijkToRAS: meta.ijkToRAS, dims: meta.dims, bytes: meta.bytes ?? 0, level: 0 }];
       const descOf = (L: ZarrLevel): ZarrDesc => ({ dir: L.dir, dataset: L.dataset, shape: L.shape, chunks: L.chunks, chunkGrid: L.chunkGrid, dtype: L.dtype });
 
+      // A single 3D texture past ~1 GB doesn't render reliably on the L4 (the 3.66 GB alligator L0
+      // produced garbage / no frames while the 0.85 GB bat L0 is perfect). Serve as the "full" res the
+      // FINEST pyramid level whose byte size fits under this cap — still far sharper than the proxy,
+      // and rock-solid. True full res for the giants needs bricking (multiple textures); TODO.
+      const FULL_CAP = 1024 * 1024 * 1024;   // 1 GiB single-texture budget
+      const bpv = meta.range[1] <= 255 ? 1 : meta.range[1] <= 65535 ? 2 : 4;   // native bytes/voxel
+      const bytesOf = (L: ZarrLevel) => L.dims[0] * L.dims[1] * L.dims[2] * bpv;
+      let fullIdx = 0;
+      while (fullIdx < levels.length - 1 && bytesOf(levels[fullIdx]) > FULL_CAP) fullIdx++;
       const coarse = levels[levels.length - 1];
-      console.log(`[live-renderer] ${spec.label} proxy L${coarse.level} ${coarse.dims.join("×")} …`);
+      curProxyLevel = coarse.level; curProxyDims = coarse.dims.join("×"); curFullDims = levels[fullIdx].dims.join("×");
+      console.log(`[live-renderer] ${spec.label} proxy L${coarse.level} ${coarse.dims.join("×")} → full L${fullIdx} ${levels[fullIdx].dims.join("×")} (${(bytesOf(levels[fullIdx])/2**20|0)} MB) …`);
       const cz = await fetchZarrVolumeNative(base, descOf(coarse), (n) => { mb += n; });
       const proxy = mkField(cz, coarse.ijkToRAS);
       setupSpecimenScene(proxy, spec);
 
-      if (levels.length > 1) {
+      if (fullIdx < levels.length - 1) {   // a finer level than the proxy fits under the cap
         const myToken = loadToken;
-        const full0 = levels[0];
+        const full0 = levels[fullIdx];
         (async () => {
           const total = full0.bytes ?? 0;
           let done = 0, lastSent = 0;
@@ -205,15 +229,15 @@ async function loadScene(name: string, onProgress?: (done: number, total: number
           const zv = await fetchZarrVolumeNative(base, descOf(full0), (n) => {
             mb += n; done += n; const now = performance.now();
             if (onProgress && (now - lastSent > 100 || done >= total)) { lastSent = now; onProgress(done, total); }
-          });
-          if (myToken !== loadToken) return;      // a newer scene switch superseded this upgrade
+          }, 8);
+          if (myToken !== loadToken) return;   // a newer scene switch superseded this upgrade
           const fullField = mkField(zv, full0.ijkToRAS);
           if (myToken !== loadToken) return;
-          fieldCache.set(name, fullField);
-          pendingUpgrade = { field: fullField, token: myToken };   // the render loop swaps it in
+          cacheField(name, fullField);
+          pendingUpgrade = { field: fullField, token: myToken };
         })().catch((e) => console.error(`[live-renderer] ${name} upgrade failed:`, e));
       } else {
-        fieldCache.set(name, proxy);
+        cacheField(name, proxy);
       }
     } else {
       console.log(`[live-renderer] fetching ${spec.label} (nrrd) …`);
@@ -221,7 +245,7 @@ async function loadScene(name: string, onProgress?: (done: number, total: number
       const vp = await fetchVP(spec.preset).catch(() => null);
       const { lut, clim, shade } = vp ? lutFromVP(vp, nrrd.range) : { lut: buildGrayLut(), clim: nrrd.range, shade: [0.25, 0.75, 0.5, 24] as [number, number, number, number] };
       const field = new ImageField(gpu.device, nrrd.data, nrrd.dims, [1, 1, 1], lut, { clim, ijkToRAS: nrrd.ijkToRAS, shade });
-      fieldCache.set(name, field);
+      cacheField(name, field);
       setupSpecimenScene(field, spec);
     }
     sceneName = spec.label;
@@ -252,6 +276,7 @@ const SCENE_MENU = [
 const LARGEST_FIT = [...SCENE_MENU].filter((x) => x.name !== "multi" && x.fits).sort((a, b) => b.gib - a.gib)[0]?.name;
 console.log(`[live-renderer] specimen menu: ${SCENE_MENU.map((x) => `${x.name}${x.fits ? "" : "✗"}`).join(" ")} · largest-fit=${LARGEST_FIT}`);
 let sceneLoading = false;
+let loopPaused = false;   // the render loop confirms it has no trace in flight (safe to rebuild the scene)
 const DEFAULT_SCENE = Deno.env.get("SCENE_NAME") ?? "multi";   // safe universal default; pick a specimen from the menu
 await loadScene(DEFAULT_SCENE);
 
@@ -527,10 +552,11 @@ function handleWs(req: Request): Response {
       rate: GPU_RATE_PER_HR, scaledownS: SCALEDOWN_S,
       scenes: SCENE_MENU, scene: currentScene,
       lutPresets: Object.keys(VP_PRESETS), preset: curPreset,
+      proxyLevel: curProxyLevel, proxyDims: curProxyDims, fullDims: curFullDims,
       widget: xformTarget ? { center: xformC0, m: [...xformM] } : null,
     }));
   };
-  socket.onopen = () => { open = true; sendHello(); loop(); };
+  socket.onopen = () => { open = true; sendHello(); loop().catch((e) => console.error("[live-renderer] render loop died:", e)); };
   socket.onclose = () => { open = false; settleAck(false); };
   socket.onerror = () => { open = false; settleAck(false); };
   socket.onmessage = async (e) => {
@@ -546,6 +572,10 @@ function handleWs(req: Request): Response {
         }
         sceneLoading = true;
         socket.send(JSON.stringify({ type: "loading", scene: name }));
+        // Wait for the render loop to finish any in-flight trace before loadScene rebuilds the scene.
+        // The multiscale proxy loads in ~1s — fast enough to race a slow full-res settle trace, and
+        // rebuilding the GPU scene mid-trace hangs the loop. This handshake removes the race.
+        { const t0 = performance.now(); while (!loopPaused && open && performance.now() - t0 < 8000) await sleep(10); }
         try {
           await loadScene(
             name,
@@ -635,7 +665,8 @@ function handleWs(req: Request): Response {
 
   async function loop() {
     while (open) {
-      if (sceneLoading) { await sleep(50); continue; }
+      if (sceneLoading) { loopPaused = true; await sleep(30); continue; }
+      loopPaused = false;
       if (pendingUpgrade && pendingUpgrade.token === loadToken) {
         const f = pendingUpgrade.field; pendingUpgrade = null;
         xformTarget = f; f.setWorldTransform(xformM);   // keep the transform the user set on the proxy

@@ -1251,12 +1251,15 @@ var ImageField = class {
       const bytesPerRow = dims[0] * bpe, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
       const CHUNK = 256 * 1024 * 1024;
       const slab = Math.max(1, Math.min(dims[2], Math.floor(CHUNK / Math.max(1, sliceBytes))));
+      const u8 = new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
       for (let z = 0; z < dims[2]; z += slab) {
         const depth = Math.min(slab, dims[2] - z);
+        const slabBytes = depth * sliceBytes;
+        const slabData = u8.slice(z * sliceBytes, z * sliceBytes + slabBytes);
         dev.queue.writeTexture(
           { texture: this.volTex, origin: { x: 0, y: 0, z } },
-          src,
-          { offset: z * sliceBytes, bytesPerRow, rowsPerImage },
+          slabData,
+          { offset: 0, bytesPerRow, rowsPerImage },
           [dims[0], dims[1], depth]
         );
       }
@@ -1311,6 +1314,12 @@ var ImageField = class {
   /** The r32float 3D scalar texture (e.g. to share with a SliceRenderer for MPR). */
   volumeTexture() {
     return this.volTex;
+  }
+  /** Free this field's GPU textures (call when replacing it, e.g. a low-res proxy upgraded to full,
+   *  or an LRU-evicted specimen) so VRAM isn't leaked across a menu of large volumes. */
+  destroy() {
+    this.volTex.destroy();
+    this.lutTex.destroy();
   }
   /** Centre of the volume in world (RAS) at identity — a natural pivot for a transform widget. */
   worldCenter() {
@@ -3242,6 +3251,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let loadActive = false, loadStartTs = 0, loadDone = 0, loadTotal = 0, loadLastTs = 0, loadLastDone = 0;
   let bucketBps = Number(localStorage.getItem("lr_bucket_bps")) || 6e7;
   let refining = false;
+  let fullStartTs = 0;
+  let proxyDims = "", fullDims = "";
   const refineEl = document.getElementById("refine");
   let connState = serverUrl ? "connecting" : "off";
   const IDLE_OPTS = [["5s", 5e3], ["15s", 15e3], ["30s", 3e4], ["1m", 6e4], ["2m", 12e4], ["5m", 3e5], ["10m", 6e5]];
@@ -3390,7 +3401,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
       const m = JSON.parse(e.data);
       if (m.type === "refined") {
         refining = false;
-        if (refineEl) refineEl.textContent = "";
+        fullStartTs = 0;
+        if (refineEl) refineEl.innerHTML = "";
         return;
       }
       if (m.type === "loading") {
@@ -3401,6 +3413,7 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         loadLastTs = loadStartTs;
         loadLastDone = 0;
         refining = false;
+        fullStartTs = 0;
         if (refineEl) refineEl.textContent = "";
         showOverlay("starting", "Loading " + m.scene + " \u2026", "", true, []);
         if (ov) ov.classList.add("wake");
@@ -3418,10 +3431,14 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         }
         if (ovMode !== "starting") {
           refining = true;
+          if (!fullStartTs && loadDone > 0) fullStartTs = now;
           if (refineEl) {
-            const pct = loadTotal > 0 ? Math.floor(loadDone / loadTotal * 100) : 0;
-            const left = loadTotal > 0 ? Math.max(0, (loadTotal - loadDone) / Math.max(1, bucketBps)) : 0;
-            refineEl.textContent = `refining ${pct}% \xB7 ~${Math.round(left)}s`;
+            const leftMB = Math.max(0, (loadTotal - loadDone) / 1e6);
+            const secs = fullStartTs ? (now - fullStartTs) / 1e3 : 0;
+            const avgBps = secs > 0.5 && loadDone > 0 ? loadDone / secs : bucketBps;
+            const etaS = avgBps > 0 ? Math.round((loadTotal - loadDone) / avgBps) : 0;
+            const layer = proxyDims && fullDims ? `proxy ${proxyDims} \u2192 full ${fullDims}` : "loading full res";
+            refineEl.innerHTML = `<div class="rl">\u25D0 ${layer}</div><div class="rb">${leftMB.toFixed(0)} MB left \xB7 ~${etaS}s</div>`;
           }
         }
         return;
@@ -3458,6 +3475,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         const reconnecting = !!camera;
         demo = m.demo ?? "single";
         if (Array.isArray(m.scenes)) sceneMenu = m.scenes;
+        if (typeof m.proxyDims === "string") proxyDims = m.proxyDims;
+        if (typeof m.fullDims === "string") fullDims = m.fullDims;
         if (lutSel && Array.isArray(m.lutPresets) && lutSel.options.length === 0) {
           for (const name of m.lutPresets) lutSel.appendChild(new Option(name, name));
         }

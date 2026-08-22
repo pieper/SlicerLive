@@ -418,6 +418,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let loadActive = false, loadStartTs = 0, loadDone = 0, loadTotal = 0, loadLastTs = 0, loadLastDone = 0;
   let bucketBps = Number(localStorage.getItem("lr_bucket_bps")) || 60e6;  // bytes/s EMA, measured this + prior sessions
   let refining = false;                 // full-res streaming in behind the low-res proxy
+  let fullStartTs = 0;                  // when the background full-res download began (for a STABLE avg-rate ETA)
+  let proxyDims = "", fullDims = "";    // what the proxy shows vs the full target (from hello)
   const refineEl = document.getElementById("refine");
   type Conn = "off" | "connecting" | "live" | "sleeping" | "error";
   let connState: Conn = serverUrl ? "connecting" : "off";
@@ -533,11 +535,11 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   const applyMessage = async (e: MessageEvent) => {
     if (typeof e.data === "string") {
       const m = JSON.parse(e.data as string);
-      if (m.type === "refined") { refining = false; if (refineEl) refineEl.textContent = ""; return; }
+      if (m.type === "refined") { refining = false; fullStartTs = 0; if (refineEl) refineEl.innerHTML = ""; return; }
       if (m.type === "loading") {
         loadActive = true; loadStartTs = performance.now(); loadDone = 0; loadTotal = 0;
         loadLastTs = loadStartTs; loadLastDone = 0;
-        refining = false; if (refineEl) refineEl.textContent = "";
+        refining = false; fullStartTs = 0; if (refineEl) refineEl.textContent = "";
         showOverlay("starting", "Loading " + m.scene + " …", "", true, []);
         if (ov) ov.classList.add("wake");
         return;
@@ -552,10 +554,15 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         }
         if (ovMode !== "starting") {   // proxy is already on screen -> this is the background upgrade
           refining = true;
+          if (!fullStartTs && loadDone > 0) fullStartTs = now;
           if (refineEl) {
-            const pct = loadTotal > 0 ? Math.floor((loadDone / loadTotal) * 100) : 0;
-            const left = loadTotal > 0 ? Math.max(0, (loadTotal - loadDone) / Math.max(1, bucketBps)) : 0;
-            refineEl.textContent = `refining ${pct}% · ~${Math.round(left)}s`;
+            const leftMB = Math.max(0, (loadTotal - loadDone) / 1e6);
+            // STABLE ETA: average bytes/s over THIS download (not a jumpy instantaneous rate).
+            const secs = fullStartTs ? (now - fullStartTs) / 1000 : 0;
+            const avgBps = secs > 0.5 && loadDone > 0 ? loadDone / secs : bucketBps;
+            const etaS = avgBps > 0 ? Math.round((loadTotal - loadDone) / avgBps) : 0;
+            const layer = proxyDims && fullDims ? `proxy ${proxyDims} → full ${fullDims}` : "loading full res";
+            refineEl.innerHTML = `<div class="rl">◐ ${layer}</div><div class="rb">${leftMB.toFixed(0)} MB left · ~${etaS}s</div>`;
           }
         }
         return;
@@ -591,6 +598,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         demo = m.demo ?? "single";
         // Populate the specimen menu (once), and note which scene the server has loaded.
         if (Array.isArray(m.scenes)) sceneMenu = m.scenes;
+        if (typeof m.proxyDims === "string") proxyDims = m.proxyDims;
+        if (typeof m.fullDims === "string") fullDims = m.fullDims;
         if (lutSel && Array.isArray(m.lutPresets) && lutSel.options.length === 0) {
           for (const name of m.lutPresets) lutSel.appendChild(new Option(name, name));
         }
