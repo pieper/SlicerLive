@@ -377,24 +377,39 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let clientScene = "";            // which scene the server currently has loaded
   const sceneSel = document.getElementById("scene") as HTMLSelectElement | null;
   const creditEl = document.getElementById("credit");
-  // SlicerLive logo popup: live LUT preset + transfer-function shift on the remote specimen.
+  // SlicerLive logo popup: live volume-property (VP) preview + transfer-function shift.
   const lutPopup = document.getElementById("lutPopup");
-  const lutSel = document.getElementById("lutSel") as HTMLSelectElement | null;
+  const lutList = document.getElementById("lutList");
   const lutShift = document.getElementById("lutShift") as HTMLInputElement | null;
   const lutShiftVal = document.getElementById("lutShiftVal");
   const logoBtn = document.getElementById("logo");
+  let activePreset = "";
   logoBtn?.addEventListener("click", () => lutPopup?.classList.add("show"));
   document.getElementById("lutClose")?.addEventListener("click", () => lutPopup?.classList.remove("show"));
   lutPopup?.addEventListener("click", (e) => { if (e.target === lutPopup) lutPopup.classList.remove("show"); });
-  const sendLut = () => {
-    if (mode !== "remote") { status("switch to REMOTE to change the lookup table", true); return; }
-    const preset = lutSel?.value ?? "";
+  const sendLut = (preset: string) => {
+    if (mode !== "remote") { status("switch to REMOTE to change the volume property", true); return; }
+    activePreset = preset;
+    if (lutList) for (const b of Array.from(lutList.children)) (b as HTMLElement).classList.toggle("active", (b as HTMLElement).dataset.preset === preset);
     const shift = lutShift ? Number(lutShift.value) : 0;
-    if (lutShiftVal) lutShiftVal.textContent = shift.toFixed(2);
+    if (lutShiftVal) lutShiftVal.textContent = shift.toFixed(3);
     ws?.send(JSON.stringify({ type: "lut", preset, shift }));
   };
-  lutSel?.addEventListener("change", sendLut);
-  lutShift?.addEventListener("input", sendLut);
+  // Rebuild the VP button list from the server's manifest (once). Clicking a VP applies it LIVE and
+  // keeps it as the active one; the shift slider re-applies the active VP as you drag.
+  const buildLutList = (vps: Array<{ name: string; description?: string }>) => {
+    if (!lutList || lutList.childElementCount) return;
+    for (const vp of vps) {
+      const b = document.createElement("button");
+      b.dataset.preset = vp.name;
+      b.innerHTML = `<span class="vpname"></span><span class="vpdesc"></span>`;
+      (b.querySelector(".vpname") as HTMLElement).textContent = vp.name;
+      (b.querySelector(".vpdesc") as HTMLElement).textContent = vp.description ?? "";
+      b.addEventListener("click", () => sendLut(vp.name));
+      lutList.appendChild(b);
+    }
+  };
+  lutShift?.addEventListener("input", () => { if (activePreset) sendLut(activePreset); });
   let sceneMenu: Array<{ name: string; credit?: string }> = [];
   const showCredit = (name: string) => {
     if (!creditEl) return;
@@ -600,12 +615,10 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         if (Array.isArray(m.scenes)) sceneMenu = m.scenes;
         if (typeof m.proxyDims === "string") proxyDims = m.proxyDims;
         if (typeof m.fullDims === "string") fullDims = m.fullDims;
-        if (lutSel && Array.isArray(m.lutPresets) && lutSel.options.length === 0) {
-          for (const name of m.lutPresets) lutSel.appendChild(new Option(name, name));
-        }
-        if (lutSel && typeof m.preset === "string" && m.preset) {
-          if (![...lutSel.options].some((o) => o.value === m.preset)) lutSel.appendChild(new Option(m.preset, m.preset));
-          lutSel.value = m.preset;
+        if (Array.isArray(m.lutPresets)) buildLutList(m.lutPresets.map((v: unknown) => typeof v === "string" ? { name: v } : v as { name: string; description?: string }));
+        if (typeof m.preset === "string" && m.preset) {
+          activePreset = m.preset;
+          if (lutList) for (const b of Array.from(lutList.children)) (b as HTMLElement).classList.toggle("active", (b as HTMLElement).dataset.preset === m.preset);
         }
         if (sceneSel && Array.isArray(m.scenes) && sceneSel.options.length === 0) {
           for (const sc of m.scenes) {

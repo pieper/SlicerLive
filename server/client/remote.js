@@ -3204,27 +3204,42 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   const sceneSel = document.getElementById("scene");
   const creditEl = document.getElementById("credit");
   const lutPopup = document.getElementById("lutPopup");
-  const lutSel = document.getElementById("lutSel");
+  const lutList = document.getElementById("lutList");
   const lutShift = document.getElementById("lutShift");
   const lutShiftVal = document.getElementById("lutShiftVal");
   const logoBtn = document.getElementById("logo");
+  let activePreset = "";
   logoBtn?.addEventListener("click", () => lutPopup?.classList.add("show"));
   document.getElementById("lutClose")?.addEventListener("click", () => lutPopup?.classList.remove("show"));
   lutPopup?.addEventListener("click", (e) => {
     if (e.target === lutPopup) lutPopup.classList.remove("show");
   });
-  const sendLut = () => {
+  const sendLut = (preset) => {
     if (mode !== "remote") {
-      status("switch to REMOTE to change the lookup table", true);
+      status("switch to REMOTE to change the volume property", true);
       return;
     }
-    const preset = lutSel?.value ?? "";
+    activePreset = preset;
+    if (lutList) for (const b of Array.from(lutList.children)) b.classList.toggle("active", b.dataset.preset === preset);
     const shift = lutShift ? Number(lutShift.value) : 0;
-    if (lutShiftVal) lutShiftVal.textContent = shift.toFixed(2);
+    if (lutShiftVal) lutShiftVal.textContent = shift.toFixed(3);
     ws?.send(JSON.stringify({ type: "lut", preset, shift }));
   };
-  lutSel?.addEventListener("change", sendLut);
-  lutShift?.addEventListener("input", sendLut);
+  const buildLutList = (vps) => {
+    if (!lutList || lutList.childElementCount) return;
+    for (const vp of vps) {
+      const b = document.createElement("button");
+      b.dataset.preset = vp.name;
+      b.innerHTML = `<span class="vpname"></span><span class="vpdesc"></span>`;
+      b.querySelector(".vpname").textContent = vp.name;
+      b.querySelector(".vpdesc").textContent = vp.description ?? "";
+      b.addEventListener("click", () => sendLut(vp.name));
+      lutList.appendChild(b);
+    }
+  };
+  lutShift?.addEventListener("input", () => {
+    if (activePreset) sendLut(activePreset);
+  });
   let sceneMenu = [];
   const showCredit = (name) => {
     if (!creditEl) return;
@@ -3477,12 +3492,10 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         if (Array.isArray(m.scenes)) sceneMenu = m.scenes;
         if (typeof m.proxyDims === "string") proxyDims = m.proxyDims;
         if (typeof m.fullDims === "string") fullDims = m.fullDims;
-        if (lutSel && Array.isArray(m.lutPresets) && lutSel.options.length === 0) {
-          for (const name of m.lutPresets) lutSel.appendChild(new Option(name, name));
-        }
-        if (lutSel && typeof m.preset === "string" && m.preset) {
-          if (![...lutSel.options].some((o) => o.value === m.preset)) lutSel.appendChild(new Option(m.preset, m.preset));
-          lutSel.value = m.preset;
+        if (Array.isArray(m.lutPresets)) buildLutList(m.lutPresets.map((v) => typeof v === "string" ? { name: v } : v));
+        if (typeof m.preset === "string" && m.preset) {
+          activePreset = m.preset;
+          if (lutList) for (const b of Array.from(lutList.children)) b.classList.toggle("active", b.dataset.preset === m.preset);
         }
         if (sceneSel && Array.isArray(m.scenes) && sceneSel.options.length === 0) {
           for (const sc of m.scenes) {

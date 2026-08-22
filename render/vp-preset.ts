@@ -22,7 +22,7 @@ interface VpComp { rgbTransferFunction: { points: VpPoint[] }; scalarOpacity: { 
 interface Vp { volumeProperties: { components: VpComp[]; effectiveRange?: [number, number] }[] }
 
 export async function fetchVP(name: string): Promise<Vp> {
-  const file = VP_PRESETS[name] ?? name;
+  const file = VP_PRESETS[name] ?? (name.endsWith(".json") || name.startsWith("http") ? name : name + ".vp.json");
   const url = file.startsWith("http") ? file : VP_BASE + file;
   const r = await fetch(url);
   if (!r.ok) throw new Error(`VP fetch ${r.status} ${url}`);

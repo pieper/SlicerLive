@@ -84,6 +84,18 @@ async function gzip(bytes: Uint8Array): Promise<Uint8Array> {
 // A menu of MorphoDepot specimens (SlicerMorph) rendered on the L4, each with one of Murat Maga's
 // published transfer functions (SlicerMorph/VPs). The big single-file NRRDs are GitHub release
 // assets — the server (no CORS) fetches them; a scan switch reloads the scene and re-hellos.
+// Volume-property candidates from @muratmaga's SlicerMorph/VPs repo (manifest.json = the authoritative
+// list with human descriptions). Fetched once at startup; the client renders these as a live-preview
+// picker. Falls back to the hardcoded keys if the fetch fails (offline / rate-limited).
+let VP_LIST: Array<{ name: string; description: string }> = Object.keys(VP_PRESETS).map((name) => ({ name, description: "" }));
+try {
+  const man = await (await fetch("https://raw.githubusercontent.com/SlicerMorph/VPs/main/manifest.json")).json() as { presets: Array<{ prefix: string; description?: string }> };
+  if (Array.isArray(man.presets) && man.presets.length) {
+    VP_LIST = man.presets.map((p) => ({ name: p.prefix, description: p.description ?? "" }));
+    console.log(`[live-renderer] VP manifest: ${VP_LIST.map((v) => v.name).join(", ")}`);
+  }
+} catch (e) { console.error("[live-renderer] VP manifest fetch failed, using defaults:", (e as Error).message); }
+
 const gpu = await initDevice();
 // Surface GPU faults: WebGPU errors don't throw (they hit these), so a bad texture/allocation on a
 // giant volume would otherwise just silently stop producing frames.
@@ -152,10 +164,10 @@ interface ZarrMeta { levels?: ZarrLevel[]; zarr?: ZarrDesc; ijkToRAS: number[]; 
 /** Point the shared scene (gizmo + camera framing) at one specimen field. Shared by proxy, full, and
  *  the cached path so the transform gizmo and framing are identical however the volume arrived. */
 function setupSpecimenScene(field: ImageField, _spec: Specimen): void {
-  xformTarget = field;
+  xformTarget = field;                 // still the LUT/shift target, just no interactive gizmo
   xformC0 = field.worldCenter();
-  gizmo = new TransformGizmoField(xformC0, 88);
-  fields = [field, gizmo];
+  gizmo = null;                        // single volume: no transform gizmo (nothing to move it against)
+  fields = [field];
   const [lo, hi] = field.aabb();
   center = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
   radius = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2 * 1.15;
@@ -551,9 +563,9 @@ function handleWs(req: Request): Response {
       type: "hello", proto: PROTO, center, radius, name: sceneName, sceneUrl: SCENE_URL, demo: DEMO,
       rate: GPU_RATE_PER_HR, scaledownS: SCALEDOWN_S,
       scenes: SCENE_MENU, scene: currentScene,
-      lutPresets: Object.keys(VP_PRESETS), preset: curPreset,
+      lutPresets: VP_LIST, preset: curPreset,
       proxyLevel: curProxyLevel, proxyDims: curProxyDims, fullDims: curFullDims,
-      widget: xformTarget ? { center: xformC0, m: [...xformM] } : null,
+      widget: gizmo ? { center: xformC0, m: [...xformM] } : null,
     }));
   };
   socket.onopen = () => { open = true; sendHello(); loop().catch((e) => console.error("[live-renderer] render loop died:", e)); };
@@ -670,7 +682,7 @@ function handleWs(req: Request): Response {
       if (pendingUpgrade && pendingUpgrade.token === loadToken) {
         const f = pendingUpgrade.field; pendingUpgrade = null;
         xformTarget = f; f.setWorldTransform(xformM);   // keep the transform the user set on the proxy
-        fields = [f, gizmo!];
+        fields = gizmo ? [f, gizmo] : [f];
         scene.build(fields); scene.syncUniforms();
         gen++; abortWait();
         console.log("[live-renderer] upgraded to full resolution");
