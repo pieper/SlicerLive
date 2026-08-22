@@ -381,6 +381,19 @@ function attachCameraControls(canvas, camera, opts = {}) {
   });
   const pointers = /* @__PURE__ */ new Map();
   let pinch = null;
+  let triple = null;
+  const centroid = () => {
+    let mx = 0, my = 0;
+    for (const p of pointers.values()) {
+      mx += p.x;
+      my += p.y;
+    }
+    const n = pointers.size || 1;
+    return {
+      mx: mx / n,
+      my: my / n
+    };
+  };
   const pinchState = () => {
     const [a, b] = [
       ...pointers.values()
@@ -391,8 +404,10 @@ function attachCameraControls(canvas, camera, opts = {}) {
       my: (a.y + b.y) / 2
     };
   };
+  const on = () => opts.enabled?.() ?? true;
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointerdown", (e) => {
+    if (!on()) return;
     const { x, y } = local(e);
     pointers.set(e.pointerId, {
       x,
@@ -417,12 +432,29 @@ function attachCameraControls(canvas, camera, opts = {}) {
     } else if (pointers.size === 2) {
       interactor.end();
       pinch = pinchState();
+    } else if (pointers.size === 3) {
+      pinch = null;
+      const c = centroid();
+      triple = {
+        mx: c.mx,
+        my: c.my
+      };
+      opts.onVolumeDragStart?.();
     }
   });
   const endPointer = (e) => {
     if (!pointers.delete(e.pointerId)) return;
+    if (!on()) {
+      interactor.end();
+      pinch = null;
+      return;
+    }
     canvas.releasePointerCapture?.(e.pointerId);
     if (pointers.size < 2) pinch = null;
+    if (pointers.size < 3 && triple) {
+      triple = null;
+      opts.onVolumeDragEnd?.();
+    }
     if (pointers.size === 1) {
       const p = [
         ...pointers.values()
@@ -439,13 +471,19 @@ function attachCameraControls(canvas, camera, opts = {}) {
   canvas.addEventListener("pointerup", endPointer);
   canvas.addEventListener("pointercancel", endPointer);
   canvas.addEventListener("pointermove", (e) => {
+    if (!on()) return;
     if (!pointers.has(e.pointerId)) return;
     const { x, y } = local(e);
     pointers.set(e.pointerId, {
       x,
       y
     });
-    if (pointers.size >= 2) {
+    if (pointers.size >= 3) {
+      const c = centroid();
+      if (triple) opts.onVolumeDrag?.(c.mx - triple.mx, c.my - triple.my);
+      return;
+    }
+    if (pointers.size === 2) {
       const p = pinchState();
       if (pinch) {
         if (p.dist > 0 && pinch.dist > 0) camera.dolly(p.dist / pinch.dist);
@@ -458,6 +496,7 @@ function attachCameraControls(canvas, camera, opts = {}) {
     }
   });
   canvas.addEventListener("wheel", (e) => {
+    if (!on()) return;
     e.preventDefault();
     interactor.wheel(e.deltaY < 0);
     opts.onLog?.("cameraWheel", {
@@ -500,6 +539,7 @@ function attachSliceControls(canvas, cfg) {
   let view = null;
   let scroll = null;
   let grabbed = null;
+  let wlDrag = null;
   const onContext = (e) => e.preventDefault();
   const onWheel = (e) => {
     e.preventDefault();
@@ -520,6 +560,12 @@ function attachSliceControls(canvas, cfg) {
       lastDown = dbl ? 0 : now;
       lastX = e.clientX;
       lastY = e.clientY;
+      if (dbl && (e.ctrlKey || e.metaKey) && cfg.wl?.enabled() && cfg.wl.reset) {
+        e.preventDefault();
+        cfg.wl.reset();
+        cfg.redraw();
+        return;
+      }
       if (dbl && h.onDoubleClick?.()) {
         e.preventDefault();
         return;
@@ -544,10 +590,29 @@ function attachSliceControls(canvas, cfg) {
     if (e.button !== 0) return;
     e.preventDefault();
     const { u, v, w, h: hh } = uv(e);
+    const mode = cfg.leftMode?.() ?? (cfg.wl?.enabled() ? "wl" : "scroll");
     if (h.onLeftGrab?.(u, v, w, hh)) {
       grabbed = {
         moved: 0
       };
+    } else if (mode === "wl" && cfg.wl) {
+      const [win, lev] = cfg.wl.get();
+      wlDrag = {
+        x: e.clientX,
+        y: e.clientY,
+        win,
+        lev
+      };
+      canvas.style.cursor = "crosshair";
+    } else if (mode === "zoom" || mode === "pan") {
+      view = {
+        mode,
+        x: e.clientX,
+        y: e.clientY,
+        pu: u,
+        pv: v
+      };
+      canvas.style.cursor = mode === "zoom" ? "ns-resize" : "grabbing";
     } else scroll = {
       x: e.clientX,
       y: e.clientY,
@@ -560,7 +625,7 @@ function attachSliceControls(canvas, cfg) {
       const dx = e.clientX - view.x, dy = e.clientY - view.y;
       const r = canvas.getBoundingClientRect();
       if (view.mode === "pan") cfg.getSlice().panByPixels(cfg.orient, dx, dy, r.width, r.height);
-      else cfg.getSlice().zoomAbout(cfg.orient, Math.exp(dy * 6e-3), view.pu, view.pv, r.width, r.height);
+      else cfg.getSlice().zoomAbout(cfg.orient, Math.exp(dy * 6e-3), 0.5, 0.5, r.width, r.height);
       view.x = e.clientX;
       view.y = e.clientY;
       cfg.redraw();
@@ -570,6 +635,25 @@ function attachSliceControls(canvas, cfg) {
       grabbed.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
       const { u, v, w, h: hh } = uv(e);
       h.onLeftDrag?.(u, v, w, hh);
+      return;
+    }
+    if (wlDrag && cfg.wl) {
+      const [lo, hi] = cfg.wl.range();
+      const r = canvas.getBoundingClientRect();
+      const gain = (hi - lo) / Math.max(1, Math.min(r.width, r.height));
+      let win = wlDrag.win + gain * (e.clientX - wlDrag.x);
+      if (win < 0) win = 0;
+      let lev = wlDrag.lev + gain * (wlDrag.y - e.clientY);
+      if (lev < lo - win / 2) lev = lo - win / 2;
+      if (lev > hi + win / 2) lev = hi + win / 2;
+      cfg.wl.set(win, lev);
+      wlDrag = {
+        x: e.clientX,
+        y: e.clientY,
+        win,
+        lev
+      };
+      cfg.redraw();
       return;
     }
     if (scroll) {
@@ -603,6 +687,11 @@ function attachSliceControls(canvas, cfg) {
       const m = grabbed.moved;
       grabbed = null;
       h.onLeftDrop?.(m);
+      return;
+    }
+    if (wlDrag) {
+      wlDrag = null;
+      canvas.style.cursor = "default";
       return;
     }
     scroll = null;
@@ -670,6 +759,21 @@ function perspectiveZO(fovy, aspect, near, far) {
   m[5] = f;
   m[11] = -1;
   m[10] = far / (near - far);
+  m[14] = far * near / (near - far);
+  return m;
+}
+function perspectiveZOTile(fovy, viewW, viewH, x, y, w, h, near, far) {
+  const t = near * Math.tan(fovy / 2), b = -t;
+  const r = t * (viewW / viewH), l = -r;
+  const l2 = l + (r - l) * x / viewW, r2 = l + (r - l) * (x + w) / viewW;
+  const t2 = t - (t - b) * y / viewH, b2 = t - (t - b) * (y + h) / viewH;
+  const m = new Float32Array(16);
+  m[0] = 2 * near / (r2 - l2);
+  m[5] = 2 * near / (t2 - b2);
+  m[8] = (r2 + l2) / (r2 - l2);
+  m[9] = (t2 + b2) / (t2 - b2);
+  m[10] = far / (near - far);
+  m[11] = -1;
   m[14] = far * near / (near - far);
   return m;
 }
@@ -918,6 +1022,51 @@ var DEFAULT_HELP = [
     ]
   },
   {
+    title: "Endovascular flight (fly-inside / endo demo)",
+    rows: [
+      [
+        "Up / Down",
+        "Move in / out along the view axis"
+      ],
+      [
+        "Left / Right",
+        "Yaw"
+      ],
+      [
+        "Shift + Left/Right",
+        "Pitch"
+      ],
+      [
+        "Ctrl + Left/Right",
+        "Roll"
+      ],
+      [
+        "Space",
+        "Toggle forward cruise"
+      ],
+      [
+        "Shift + Space",
+        "Toggle reverse cruise"
+      ],
+      [
+        "Escape",
+        "Stop"
+      ],
+      [
+        "Left-drag",
+        "Look around"
+      ],
+      [
+        "Shift + click",
+        "Autopilot target"
+      ],
+      [
+        "Speed slider",
+        "Travel speed in mm/s (live, applies mid-flight)"
+      ]
+    ]
+  },
+  {
     title: "Slice views",
     rows: [
       [
@@ -952,14 +1101,18 @@ function glass(el2, extra = "") {
 }
 function installChrome(opts) {
   const controls = opts.controls ?? [];
-  const help = opts.help ?? DEFAULT_HELP;
-  const helpBtn = document.createElement("button");
-  helpBtn.textContent = "?";
-  helpBtn.title = "Controls & key bindings";
-  helpBtn.style.cssText = "position:fixed;top:12px;left:12px;z-index:74;width:32px;height:32px;padding:0;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:#cfe6ff;font:700 15px -apple-system,system-ui,sans-serif;";
-  glass(helpBtn);
-  helpBtn.onclick = openHelp;
-  document.body.appendChild(helpBtn);
+  const host = opts.container ?? document.body;
+  const help = (opts.help === false ? [] : opts.help) ?? DEFAULT_HELP;
+  let helpBtn = null;
+  if (opts.help !== false) {
+    helpBtn = document.createElement("button");
+    helpBtn.textContent = "?";
+    helpBtn.title = "Controls & key bindings";
+    helpBtn.style.cssText = "position:fixed;top:12px;left:12px;z-index:74;width:32px;height:32px;padding:0;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:#cfe6ff;font:700 15px -apple-system,system-ui,sans-serif;";
+    glass(helpBtn);
+    helpBtn.onclick = openHelp;
+    host.appendChild(helpBtn);
+  }
   let helpEl = null;
   function openHelp() {
     if (helpEl) return;
@@ -978,7 +1131,7 @@ function installChrome(opts) {
     }
     panel.innerHTML += `<div style="margin-top:16px;font-size:12px;color:rgba(232,238,255,.55)">Press <b style="color:#fff5d6">esc</b> or click outside to dismiss.</div>`;
     helpEl.appendChild(panel);
-    document.body.appendChild(helpEl);
+    host.appendChild(helpEl);
     document.addEventListener("keydown", escClose, true);
   }
   function escClose(e) {
@@ -992,6 +1145,7 @@ function installChrome(opts) {
     }
   }
   const logo = document.createElement("div");
+  logo.id = "sl-badge";
   logo.title = "SlicerLive \u2014 visualization";
   logo.style.cssText = "position:fixed;z-index:74;cursor:pointer;user-select:none;display:flex;flex-direction:column;align-items:center;gap:4px;padding:7px 12px 6px;border-radius:14px;background:#121826;border:1px solid rgba(255,255,255,.12);box-shadow:0 10px 30px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06);transition:transform 120ms ease-out;";
   const mark = document.createElement("img");
@@ -1003,13 +1157,13 @@ function installChrome(opts) {
   word.style.cssText = "font:800 12px/1 -apple-system,system-ui,sans-serif;letter-spacing:.5px;color:#eef7ff;text-shadow:0 0 14px rgba(255,210,90,.4);";
   logo.appendChild(mark);
   logo.appendChild(word);
-  document.body.appendChild(logo);
+  host.appendChild(logo);
   const place = () => {
     const a = opts.anchor;
     const r = a && a.getClientRects().length ? a.getBoundingClientRect() : null;
     if (r && r.width > 2 && r.height > 2) {
       logo.style.top = Math.round(r.top + 8) + "px";
-      logo.style.right = Math.round(window.innerWidth - r.right + 8) + "px";
+      logo.style.right = Math.round(globalThis.innerWidth - r.right + 8) + "px";
     } else {
       logo.style.top = "10px";
       logo.style.right = "12px";
@@ -1018,11 +1172,13 @@ function installChrome(opts) {
   place();
   requestAnimationFrame(place);
   globalThis.addEventListener("resize", place);
-  if (opts.anchor && "ResizeObserver" in globalThis) new ResizeObserver(place).observe(opts.anchor);
+  const anchorRO = opts.anchor && "ResizeObserver" in globalThis ? new ResizeObserver(place) : null;
+  anchorRO?.observe(opts.anchor);
   const pop = document.createElement("div");
+  pop.id = "sl-popup";
   pop.style.cssText = "position:fixed;z-index:73;min-width:210px;max-width:300px;max-height:84vh;overflow-y:auto;padding:10px 12px;border-radius:12px;color:#eaf0ff;font:13px -apple-system,system-ui,sans-serif;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 120ms ease-out,transform 120ms ease-out;";
   glass(pop);
-  document.body.appendChild(pop);
+  host.appendChild(pop);
   const paintSw = (sw, on) => {
     sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
     sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
@@ -1081,18 +1237,126 @@ function installChrome(opts) {
     return paint;
   };
   const OPBOX_CSS = "width:44px;height:18px;border-radius:6px;position:relative;overflow:hidden;flex:0 0 auto;background:rgba(255,255,255,.14);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);touch-action:none;";
+  const heading = (text, first) => {
+    const h = document.createElement("div");
+    h.textContent = text;
+    h.style.cssText = "font:700 10px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#9fe9ff;margin:" + (first ? "0 0 8px" : "12px 0 6px") + ";" + (first ? "" : "border-top:1px solid rgba(255,255,255,.12);padding-top:10px;");
+    pop.appendChild(h);
+  };
+  const selects = opts.selects ?? [];
+  const selEls = [];
+  let sectionSeen = null;
+  let firstHead = true;
+  for (const c of selects) {
+    const sec = c.section ?? "Visualization";
+    if (sec !== sectionSeen) {
+      heading(sec, firstHead);
+      sectionSeen = sec;
+      firstHead = false;
+    }
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:5px 0;";
+    const lab = document.createElement("span");
+    lab.textContent = c.label;
+    const sel = document.createElement("select");
+    sel.style.cssText = "flex:1 1 auto;max-width:60%;border-radius:7px;padding:4px 6px;cursor:pointer;font:500 12px -apple-system,system-ui,sans-serif;color:#e8eeff;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.20);";
+    for (const o of c.options) {
+      const op = document.createElement("option");
+      op.value = o.value;
+      op.textContent = o.label;
+      op.style.cssText = "background:#1b2030;color:#e8eeff;";
+      sel.appendChild(op);
+    }
+    sel.value = c.get();
+    sel.onclick = (e) => e.stopPropagation();
+    sel.onchange = () => {
+      c.set(sel.value);
+      opts.onChange?.();
+      refresh();
+    };
+    row.appendChild(lab);
+    row.appendChild(sel);
+    pop.appendChild(row);
+    selEls.push({
+      c,
+      el: sel
+    });
+  }
   const rows = [];
   if (controls.length) {
-    const head = document.createElement("div");
-    head.textContent = "Visualization";
-    head.style.cssText = "font:700 10px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#9fe9ff;margin:0 0 8px;";
-    pop.appendChild(head);
     for (const c of controls) {
+      const sec = c.section ?? "Visualization";
+      if (sec !== sectionSeen) {
+        heading(sec, firstHead);
+        sectionSeen = sec;
+        firstHead = false;
+      }
       const row = document.createElement("div");
       row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:14px;padding:5px 0;";
+      if (c.slider) {
+        row.style.cssText = "display:flex;flex-direction:column;gap:4px;padding:6px 0;";
+        const top = document.createElement("div");
+        top.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;";
+        const lab2 = document.createElement("span");
+        lab2.textContent = c.label;
+        const val = document.createElement("span");
+        val.style.cssText = "font:600 11px ui-monospace,Menlo,monospace;color:#9fe9ff;font-variant-numeric:tabular-nums;";
+        top.appendChild(lab2);
+        top.appendChild(val);
+        const inp = document.createElement("input");
+        inp.type = "range";
+        inp.min = String(c.slider.min);
+        inp.max = String(c.slider.max);
+        inp.step = String(c.slider.step ?? 1);
+        inp.value = String(c.slider.get());
+        inp.style.cssText = "width:100%;accent-color:#54c6f0;cursor:pointer;";
+        const fmt = c.slider.format ?? ((v) => String(Math.round(v)));
+        const paint = () => {
+          val.textContent = fmt(c.slider.get());
+        };
+        inp.oninput = () => {
+          c.slider.set(parseFloat(inp.value));
+          paint();
+          opts.onChange?.();
+        };
+        inp.onpointerdown = (e) => e.stopPropagation();
+        paint();
+        row.appendChild(top);
+        row.appendChild(inp);
+        pop.appendChild(row);
+        rows.push({
+          c,
+          row,
+          repaint: () => {
+            inp.value = String(c.slider.get());
+            paint();
+          }
+        });
+        continue;
+      }
       const lab = document.createElement("span");
       lab.textContent = c.label;
       row.appendChild(lab);
+      if (c.button) {
+        const pill = document.createElement("span");
+        pill.style.cssText = "max-width:60%;border-radius:7px;padding:4px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:600 12px -apple-system,system-ui,sans-serif;color:#eaf0ff;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.20);";
+        pill.textContent = c.button.text();
+        pill.onclick = (e) => {
+          e.stopPropagation();
+          c.button.run();
+        };
+        pill.onpointerdown = (e) => e.stopPropagation();
+        row.appendChild(pill);
+        pop.appendChild(row);
+        rows.push({
+          c,
+          row,
+          repaint: () => {
+            pill.textContent = c.button.text();
+          }
+        });
+        continue;
+      }
       if (c.getOpacity && c.setOpacity) {
         const box = document.createElement("span");
         box.style.cssText = OPBOX_CSS;
@@ -1130,7 +1394,7 @@ function installChrome(opts) {
       }
       pop.appendChild(row);
     }
-  } else if (opts.about === false && !opts.segments) {
+  } else if (opts.about === false && !opts.segments && !selects.length) {
     pop.textContent = "SlicerLive \u2014 WebGPU renderer";
   }
   const segHost = document.createElement("div");
@@ -1201,6 +1465,10 @@ function installChrome(opts) {
     pop.appendChild(about);
   }
   function refresh() {
+    for (const { c, el: el2 } of selEls) {
+      const v = c.get();
+      if (el2.value !== v) el2.value = v;
+    }
     for (const { c, row, sw, repaint } of rows) {
       const dis = c.disabled?.() ?? false;
       row.style.opacity = dis ? "0.4" : "1";
@@ -1221,7 +1489,7 @@ function installChrome(opts) {
     refresh();
     const b = logo.getBoundingClientRect();
     pop.style.top = Math.round(b.bottom + 6) + "px";
-    pop.style.right = Math.round(window.innerWidth - b.right) + "px";
+    pop.style.right = Math.round(globalThis.innerWidth - b.right) + "px";
     pop.style.opacity = "1";
     pop.style.pointerEvents = "auto";
     pop.style.transform = "translateY(0)";
@@ -1249,8 +1517,18 @@ function installChrome(opts) {
   pop.onmouseleave = () => {
     if (!pinned) hide();
   };
+  const destroy = () => {
+    globalThis.removeEventListener("resize", place);
+    anchorRO?.disconnect();
+    document.removeEventListener("keydown", escClose, true);
+    helpBtn?.remove();
+    helpEl?.remove();
+    logo.remove();
+    pop.remove();
+  };
   return {
-    refresh
+    refresh,
+    destroy
   };
 }
 
@@ -1931,6 +2209,9 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     } else {
       this.dev.queue.writeBuffer(this.camBuf, 0, this.baseInvVP);
     }
+    this.dev.queue.writeBuffer(this.camBuf, 76, new Float32Array([
+      n - 1
+    ]));
     this.flush();
     this.dev.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array([
       this.mat[12],
@@ -2013,9 +2294,9 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     });
     this.clipOff = uoff;
     this.pickOff = uoff + CLIP_FLOATS;
-    this.mat = new Float32Array(uoff + CLIP_FLOATS + 4);
+    this.mat = new Float32Array(uoff + CLIP_FLOATS + 12);
     this.matBuf = this.dev.createBuffer({
-      size: (uoff + CLIP_FLOATS + 4) * 4,
+      size: (uoff + CLIP_FLOATS + 12) * 4,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
     const module = this.dev.createShaderModule({
@@ -2184,6 +2465,8 @@ ${members}
   clip_planes : array<vec4<f32>, 8>,   // (nx, ny, nz, offset) inward; tail so field offsets are stable
   clip_count : vec4<f32>,              // (count, _, _, _)
   pick_cursor : vec4<f32>,             // (ndc_x, ndc_y, _, _) \u2014 the ray for fs_pick
+  probe_origin : vec4<f32>,            // explicit-ray probe: world origin
+  probe_dir : vec4<f32>,               // (dx, dy, dz, enabled) \u2014 w>0 uses this ray instead of the cursor
 };
 @group(0) @binding(0) var<uniform> u_cam : Camera;
 @group(0) @binding(1) var<uniform> u_material : Material;
@@ -2244,7 +2527,23 @@ fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
 ${skipInit}
   loop {
     if (t >= t_far || safety >= 5000${hasGhost ? "" : " || integrated.a >= 0.99"}) { break; }
-    let js = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5; // per-(pixel,sample) jitter \u2014 frame-invariant; temporal AA rides on the sub-pixel NDC jitter (frame.xy), which is exact identity at 0
+    // Per-(pixel, step, ACCUM FRAME) ray-offset jitter. The frame term (u_cam.size.w, the
+    // accumulation index) is what makes temporal AA actually converge: with a frame-invariant
+    // offset the jitter turns banding into FIXED-PATTERN noise that averaging can never remove
+    // (measured: 32 samples was as grainy as 1). Varying it per frame decorrelates the samples
+    // so the mean approaches the true integral \u2014 no banding AND no noise. size.w is 0 for every
+    // non-accumulating path, so frame 1 stays byte-identical to a plain renderToView.
+    // Base offset: decorrelated per (pixel, step) so a single frame shows noise, not banding.
+    let jbase = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    // Advance it across accumulation frames by the golden-ratio additive recurrence
+    // (Cranley-Patterson rotation). MEASURED: this converges at the same 1/sqrt(n) rate as an
+    // independent random offset per frame (high-freq energy 1.36 vs 1.31 at n=64) \u2014 the low-
+    // discrepancy walk is NOT faster here, because the variance is dominated by the step size
+    // against a sharp transfer function, not by the sequence. Kept because it is deterministic
+    // and costs nothing; reduce sampleStep if you need less residual speckle.
+    // At size.w = 0 this is exactly jbase, so the first accumulated frame stays byte-identical
+    // to a plain renderToView \u2014 the property render/test baselines depend on.
+    let js = fract(jbase + u_cam.size.w * 0.6180339887) - 0.5;
     let wp = ro + rd * (t + js * step);
     var sum = vec4<f32>(0.0);
     var all_defer = true;        // every field guarantees emptiness here -> we may leap
@@ -2284,8 +2583,16 @@ ${ghostDispatch}
 // Output: (wp.x, wp.y, wp.z, hit). hit=0 means the ray never reached 50% (empty/miss).
 @fragment
 fn fs_pick() -> @location(0) vec4<f32> {
-  let ro = ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 0.0, 1.0));
-  let rd = normalize(ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 1.0, 1.0)) - ro);
+  // Two ray sources: the screen cursor (pick) or an explicit world ray (probe). The explicit
+  // form exists because the cursor ray can only ever probe what is ON SCREEN \u2014 useless for
+  // "how much room is BEHIND me?", which endovascular navigation needs for reverse and for
+  // lateral clearance.
+  var ro = ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 0.0, 1.0));
+  var rd = normalize(ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 1.0, 1.0)) - ro);
+  if (u_material.probe_dir.w > 0.5) {
+    ro = u_material.probe_origin.xyz;
+    rd = normalize(u_material.probe_dir.xyz);
+  }
   let inv = vec3<f32>(1.0) / rd;
   let tb = (u_material.bmin.xyz - ro) * inv;
   let tt = (u_material.bmax.xyz - ro) * inv;
@@ -2492,6 +2799,28 @@ ${pickDispatch}
     cam[16] = width;
     cam[17] = height;
     cam[18] = height / 2 / Math.tan(fovyDeg * Math.PI / 360);
+    cam[19] = 0;
+    cam[20] = eye[0];
+    cam[21] = eye[1];
+    cam[22] = eye[2];
+    this.dev.queue.writeBuffer(this.camBuf, 0, cam);
+  }
+  /** Camera for ONE TILE of the view: the same rays the full frame would cast for `rect`, into a
+   *  rect.w×rect.h target. Screen-space glyph sizing stays keyed to the FULL view height, so a
+   *  patch of the gizmo is drawn at exactly the size the full frame drew it. Pair with
+   *  traceSamples(rect.w, rect.h) — its focal rewrite is then a no-op. */
+  setCameraTile(eye, center, up, fovyDeg, viewW, viewH, rect) {
+    const view = lookAt(eye, center, up);
+    const proj = perspectiveZOTile(fovyDeg * Math.PI / 180, viewW, viewH, rect.x, rect.y, rect.w, rect.h, 1, 1e5);
+    const invVP = invert(multiply(proj, view));
+    this.baseInvVP = invVP;
+    const cam = new Float32Array(24);
+    cam.set(invVP, 0);
+    this.focalPx = viewH / 2 / Math.tan(fovyDeg * Math.PI / 360);
+    cam[16] = rect.w;
+    cam[17] = rect.h;
+    cam[18] = this.focalPx;
+    cam[19] = 0;
     cam[20] = eye[0];
     cam[21] = eye[1];
     cam[22] = eye[2];
@@ -2506,9 +2835,50 @@ ${pickDispatch}
    *  Uses the camera set by the last setCamera(); returns null if the ray never reaches 50%. */
   async pick(u, v) {
     if (!this.pickPipeline || !this.pickBind || !this.placed.length) return null;
-    this.mat[this.pickOff] = u * 2 - 1;
-    this.mat[this.pickOff + 1] = 1 - v * 2;
-    this.flush();
+    return this.serialise(async () => {
+      this.mat[this.pickOff] = u * 2 - 1;
+      this.mat[this.pickOff + 1] = 1 - v * 2;
+      this.mat[this.pickOff + 11] = 0;
+      this.flush();
+      return await this.tracePick();
+    });
+  }
+  /** Trace an EXPLICIT world ray and return the distance (mm) to the first point where
+   *  front-to-back opacity reaches 50%, or Infinity if it never does. Unlike pick(), the ray
+   *  is independent of the camera, so it can look backwards and sideways — which is what makes
+   *  collision "rails" possible in a first-person flythrough. */
+  async probe(origin, dir) {
+    if (!this.pickPipeline || !this.pickBind || !this.placed.length) return Infinity;
+    const l = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+    return this.serialise(async () => {
+      this.mat[this.pickOff + 4] = origin[0];
+      this.mat[this.pickOff + 5] = origin[1];
+      this.mat[this.pickOff + 6] = origin[2];
+      this.mat[this.pickOff + 8] = dir[0] / l;
+      this.mat[this.pickOff + 9] = dir[1] / l;
+      this.mat[this.pickOff + 10] = dir[2] / l;
+      this.mat[this.pickOff + 11] = 1;
+      this.flush();
+      const hit = await this.tracePick();
+      this.mat[this.pickOff + 11] = 0;
+      this.flush();
+      if (!hit) return Infinity;
+      return Math.hypot(hit[0] - origin[0], hit[1] - origin[1], hit[2] - origin[2]);
+    });
+  }
+  /** Serialises pick/probe. They share ONE uniform buffer and ONE readback buffer, so
+   *  concurrent calls would overwrite each other's ray and double-map the buffer — a
+   *  Promise.all of probes silently returns garbage. Callers may fire as many as they like;
+   *  they queue here. */
+  pickChain = Promise.resolve();
+  serialise(fn) {
+    const next = this.pickChain.then(fn, fn);
+    this.pickChain = next.catch(() => {
+    });
+    return next;
+  }
+  /** The shared 1x1 render + readback behind pick() and probe(). */
+  async tracePick() {
     if (!this.pickTarget) {
       this.pickTarget = this.dev.createTexture({
         size: [
@@ -2694,8 +3064,15 @@ ${pickDispatch}
    *  background) as tightly-packed rgba8 — the bytes streamed to the remote client, which runs the
    *  same reconstruction (upsample + background composite) the local resolve does. The caller sets
    *  the camera to width×height first (like renderUpscaled). Returns width*height*4 bytes. */
-  async traceSamples(width, height) {
+  async traceSamples(width, height, viewH = height) {
     this.flush();
+    this.dev.queue.writeBuffer(this.camBuf, 64, new Float32Array([
+      width,
+      height
+    ]));
+    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([
+      this.focalPx * (viewH / height)
+    ]));
     const target = this.dev.createTexture({
       size: [
         width,
@@ -2764,13 +3141,19 @@ struct U {
   uvec : vec4<f32>,      // RAS vector spanning the view width  (isotropic mm)
   vvec : vec4<f32>,      // RAS vector spanning the view height (isotropic mm)
   params : vec4<f32>,    // win, lev, fillOpacity, outlineOpacity
-  size : vec4<f32>,      // sizeX, sizeY, _, _
+  size : vec4<f32>,      // sizeX, sizeY, labelOverlayMode, _
 };
 @group(0) @binding(0) var<uniform> u : U;
 @group(0) @binding(1) var s_lin : sampler;
 @group(0) @binding(2) var t_scalar : texture_3d<f32>;
 @group(0) @binding(3) var t_overlay : texture_3d<f32>;
 @group(0) @binding(4) var s_nn : sampler;   // NEAREST \u2014 labelmap overlay is per-voxel crisp (matches Slicer)
+// Label-overlay mode (size.z > 0.5): instead of a pre-coloured rgba volume, take the segment
+// number from a u8 label volume and its colour+opacity from the same 256x2 palette the
+// ColorizeField uses. A coloured overlay of a 509x365x299 CT would be 222 MB; label + palette
+// is 55 MB and, because it shares the palette, hiding an organ group in 3D hides it here too.
+@group(0) @binding(5) var t_labels : texture_3d<u32>;
+@group(0) @binding(6) var t_palette : texture_2d<f32>;
 
 struct V { @builtin(position) position : vec4<f32> };
 @vertex
@@ -2783,10 +3166,21 @@ fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92; let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
   return select(lo, hi, c > vec3<f32>(0.04045));
 }
+/** The overlay colour at a texture coordinate, from whichever source is configured. */
+fn ov_tex(t : vec3<f32>) -> vec4<f32> {
+  if (u.size.z > 0.5) {
+    let d = vec3<f32>(textureDimensions(t_labels));
+    let vi = vec3<i32>(clamp(floor(t * d), vec3<f32>(0.0), d - vec3<f32>(1.0)));
+    let lab = i32(textureLoad(t_labels, vi, 0).r);
+    if (lab == 0) { return vec4<f32>(0.0); }
+    return textureLoad(t_palette, vec2<i32>(lab, 1), 0);
+  }
+  return textureSampleLevel(t_overlay, s_nn, t, 0.0);
+}
 fn ov_at(ras : vec3<f32>) -> vec4<f32> {   // overlay at a RAS point (0 outside the volume)
   let t = (u.p2t * vec4<f32>(ras, 1.0)).xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
-  return textureSampleLevel(t_overlay, s_nn, t, 0.0);
+  return ov_tex(t);
 }
 @fragment
 fn fs_main(v : V) -> @location(0) vec4<f32> {
@@ -2799,7 +3193,7 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
   let win = max(u.params.x, 1e-6);
   let g = clamp((val - (u.params.y - win * 0.5)) / win, 0.0, 1.0);
   var col = vec3<f32>(g);
-  let ov = textureSampleLevel(t_overlay, s_nn, tex, 0.0);
+  let ov = ov_tex(tex);
   // Slicer-style 2D segmentation: a semi-transparent per-voxel FILL plus a brighter boundary
   // OUTLINE, with independent opacities (params.z = fill, params.w = outline). The outline is
   // screen-space (constant pixel width under zoom), drawn in the segment's own colour along its
@@ -2877,6 +3271,9 @@ var SliceRenderer = class {
   u = new Float32Array(36);
   bind;
   overlay;
+  labels;
+  palette;
+  scalarTex;
   // actual in-plane extents (mm) spanned by the LAST rendered viewport, aspect-corrected so
   // pixels stay isotropic on a non-square view (0 until first render → fall back to the square span).
   uSpanMm = 0;
@@ -2966,6 +3363,56 @@ var SliceRenderer = class {
     this.setWindowLevel(255, 127);
     this.setOverlayOpacity(0.55);
   }
+  /** 1x1x1 stand-ins so the label-overlay bindings always exist. The pipeline layout is fixed,
+   *  so every caller must bind them even when it only wants a plain MPR. */
+  emptyLabels;
+  emptyPalette;
+  noLabels() {
+    if (!this.emptyLabels) {
+      this.emptyLabels = this.dev.createTexture({
+        size: [
+          1,
+          1,
+          1
+        ],
+        dimension: "3d",
+        format: "r8uint",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dev.queue.writeTexture({
+        texture: this.emptyLabels
+      }, new Uint8Array(1), {
+        bytesPerRow: 1,
+        rowsPerImage: 1
+      }, [
+        1,
+        1,
+        1
+      ]);
+    }
+    return this.emptyLabels;
+  }
+  noPalette() {
+    if (!this.emptyPalette) {
+      this.emptyPalette = this.dev.createTexture({
+        size: [
+          256,
+          2
+        ],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dev.queue.writeTexture({
+        texture: this.emptyPalette
+      }, new Uint8Array(256 * 2 * 4), {
+        bytesPerRow: 256 * 4
+      }, [
+        256,
+        2
+      ]);
+    }
+    return this.emptyPalette;
+  }
   emptyOverlay;
   transparentOverlay() {
     if (!this.emptyOverlay) {
@@ -3005,6 +3452,20 @@ var SliceRenderer = class {
    *  same RAS->tex mapping addresses both. Omit overlay for a plain MPR. */
   setTextures(scalar, overlay) {
     this.overlay = overlay ?? this.transparentOverlay();
+    this.scalarTex = scalar;
+    this.rebind();
+  }
+  /** Colour the overlay from a u8 label volume + the 256x2 palette (row 1 = colour/opacity),
+   *  instead of a pre-coloured rgba volume. Same geometry requirement as setTextures. Pass
+   *  nulls to go back to the rgba overlay. */
+  setLabelOverlay(labels, palette) {
+    this.labels = labels ?? void 0;
+    this.palette = palette ?? void 0;
+    this.u[34] = labels && palette ? 1 : 0;
+    if (this.scalarTex) this.rebind();
+  }
+  rebind() {
+    if (!this.scalarTex) return;
     this.bind = this.dev.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -3020,15 +3481,23 @@ var SliceRenderer = class {
         },
         {
           binding: 2,
-          resource: scalar.createView()
+          resource: this.scalarTex.createView()
         },
         {
           binding: 3,
-          resource: this.overlay.createView()
+          resource: (this.overlay ?? this.transparentOverlay()).createView()
         },
         {
           binding: 4,
           resource: this.nnSampler
+        },
+        {
+          binding: 5,
+          resource: (this.labels ?? this.noLabels()).createView()
+        },
+        {
+          binding: 6,
+          resource: (this.palette ?? this.noPalette()).createView()
         }
       ]
     });
@@ -3075,10 +3544,20 @@ var SliceRenderer = class {
     this.orient = prev;
     return s;
   }
-  /** Fitted (zoom=1) in-plane extent for an orientation. */
-  baseSpan(orient) {
+  /** Letterbox fit at zoom=1 (Slicer's FitSliceToVolume): the in-plane FOV (uS0×vS0) that
+   *  exactly contains the slice's bounding box in a viewport of the given aspect — the whole
+   *  slice is visible and the LIMITING axis touches the window edge (so the largest fitting
+   *  axis fills the window, no needless margin). Replaces the old max(uExt,vExt) span, which
+   *  under-zoomed whenever the larger extent wasn't on the viewport's limiting axis. */
+  fitUV(orient, aspectWH) {
     const b = BASES[orient];
-    return Math.max(this.rasHi[b.uAxis] - this.rasLo[b.uAxis], this.rasHi[b.vAxis] - this.rasLo[b.vAxis]);
+    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
+    const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
+    const uS0 = Math.max(uExt, vExt * aspectWH);
+    return {
+      uS0,
+      vS0: uS0 / aspectWH
+    };
   }
   /** The complete in-plane view frame for an orientation at a given viewport aspect, folding
    *  in pan (mm along uDir/vDir) + zoom. Single source of truth shared by drawInto, rasToView,
@@ -3088,8 +3567,8 @@ var SliceRenderer = class {
   frameFor(orient, offset01, aspectWH) {
     const b = BASES[orient];
     const vs = this.viewState[orient];
-    const span = this.baseSpan(orient) / vs.zoom;
-    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
+    const { uS0, vS0 } = this.fitUV(orient, aspectWH);
+    const uS = uS0 / vs.zoom, vS = vS0 / vs.zoom;
     const c = [
       (this.rasLo[0] + this.rasHi[0]) / 2,
       (this.rasLo[1] + this.rasHi[1]) / 2,
@@ -3112,21 +3591,19 @@ var SliceRenderer = class {
   }
   /** Pan the in-plane view by a pixel delta (drag): the anatomy under the cursor follows it. */
   panByPixels(orient, dxPx, dyPx, w, h) {
-    const span = this.baseSpan(orient) / this.viewState[orient].zoom;
-    const uS = span * Math.max(1, w / h), vS = span * Math.max(1, h / w);
+    const z = this.viewState[orient].zoom;
+    const { uS0, vS0 } = this.fitUV(orient, w / h);
+    const uS = uS0 / z, vS = vS0 / z;
     this.viewState[orient].panU -= dxPx / w * uS;
     this.viewState[orient].panV += dyPx / h * vS;
   }
   /** Zoom by `factor` (>1 zooms in) about a pivot (u,v in [0,1]); the pivot point stays fixed. */
   zoomAbout(orient, factor, pu, pv, w, h) {
     const vs = this.viewState[orient];
-    const base = this.baseSpan(orient);
-    const spanOld = base / vs.zoom;
+    const { uS0, vS0 } = this.fitUV(orient, w / h);
     const z = Math.max(0.2, Math.min(50, vs.zoom * factor));
-    const spanNew = base / z;
-    const au = Math.max(1, w / h), av = Math.max(1, h / w);
-    vs.panU += (pu - 0.5) * (spanOld - spanNew) * au;
-    vs.panV += (0.5 - pv) * (spanOld - spanNew) * av;
+    vs.panU += (pu - 0.5) * (uS0 / vs.zoom - uS0 / z);
+    vs.panV += (0.5 - pv) * (vS0 / vs.zoom - vS0 / z);
     vs.zoom = z;
   }
   /** Reset pan/zoom for an orientation to the fitted view. */
@@ -3351,24 +3828,54 @@ var ImageField = class {
   unit;
   stepMm;
   box;
+  normScale = 1;
   constructor(dev, data, dims, spacing, lut, opts) {
     const center = opts.center ?? [
       0,
       0,
       0
     ];
+    let src = data, fmt = "r32float", bpe = 4;
+    this.normScale = 1;
+    if (data instanceof Uint8Array) {
+      fmt = "r8unorm";
+      bpe = 1;
+      this.normScale = 255;
+    } else if (data instanceof Uint16Array) {
+      src = Float32Array.from(data);
+      fmt = "r32float";
+      bpe = 4;
+    }
     this.volTex = dev.createTexture({
       size: dims,
       dimension: "3d",
-      format: "r32float",
+      format: fmt,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
     });
-    dev.queue.writeTexture({
-      texture: this.volTex
-    }, data, {
-      bytesPerRow: dims[0] * 4,
-      rowsPerImage: dims[1]
-    }, dims);
+    {
+      const bytesPerRow = dims[0] * bpe, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
+      const CHUNK = 256 * 1024 * 1024;
+      const slab = Math.max(1, Math.min(dims[2], Math.floor(CHUNK / Math.max(1, sliceBytes))));
+      for (let z = 0; z < dims[2]; z += slab) {
+        const depth = Math.min(slab, dims[2] - z);
+        dev.queue.writeTexture({
+          texture: this.volTex,
+          origin: {
+            x: 0,
+            y: 0,
+            z
+          }
+        }, src, {
+          offset: z * sliceBytes,
+          bytesPerRow,
+          rowsPerImage
+        }, [
+          dims[0],
+          dims[1],
+          depth
+        ]);
+      }
+    }
     this.lutTex = dev.createTexture({
       size: [
         256,
@@ -3428,6 +3935,16 @@ var ImageField = class {
     return [
       this.clim[0],
       this.clim[1]
+    ];
+  }
+  /** Phong shading tuple [ka, kd, ks, shininess] — re-packed into the material uniform next
+   *  render (VR presets carry their own lighting). [1,0,0,1] = flat emission (no shading). */
+  setShade(shade) {
+    this.shade = [
+      shade[0],
+      shade[1],
+      shade[2],
+      shade[3]
     ];
   }
   origP2t;
@@ -3529,8 +4046,8 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   }
   fillUniforms(out, off) {
     out.set(this.p2t, off);
-    out[off + 16] = this.clim[0];
-    out[off + 17] = this.clim[1];
+    out[off + 16] = this.clim[0] / this.normScale;
+    out[off + 17] = this.clim[1] / this.normScale;
     out[off + 20] = this.shade[0];
     out[off + 21] = this.shade[1];
     out[off + 22] = this.shade[2];
@@ -5883,6 +6400,48 @@ function loadSeg(g, grid, opts) {
     };
   });
 }
+var firstOf = (list, ...tests) => {
+  for (const t of tests) {
+    const hit = list.find(t);
+    if (hit) return hit;
+  }
+  return void 0;
+};
+function pickRole(kase, role, like) {
+  const s = kase.series;
+  const pre = s.filter((e) => e.tp === "preop");
+  const intra = s.filter((e) => e.tp === "intraop");
+  switch (role) {
+    case "preop_t1gd":
+      return firstOf(pre, (e) => e.d.includes("T1_postcontrast"), (e) => e.d.includes("T1"), (e) => e.d.startsWith("3D"), () => true);
+    case "pre_dura_us":
+      return firstOf(s, (e) => e.tp === "pre_dura", (e) => e.tp === "post_dura", (e) => e.m === "US");
+    case "final_us":
+      return firstOf(s, (e) => e.tp === "pre_imri", (e) => e.tp === "post_dura", (e) => e.m === "US");
+    case "intraop":
+      return firstOf(intra, (e) => !!like && e.d === like.d, (e) => e.d.includes("T1_postcontrast"), (e) => e.d.includes("T1"), () => true);
+  }
+}
+function defaultPairs(kase) {
+  const t1 = pickRole(kase, "preop_t1gd");
+  return [
+    {
+      a: t1,
+      b: pickRole(kase, "pre_dura_us"),
+      why: "plan vs first look"
+    },
+    {
+      a: pickRole(kase, "pre_dura_us"),
+      b: pickRole(kase, "final_us"),
+      why: "extent of resection"
+    },
+    {
+      a: t1,
+      b: pickRole(kase, "intraop", t1),
+      why: "pre-op vs intra-op MR"
+    }
+  ];
+}
 
 // examples/remind/remind-compare-scene.ts
 var SEG_MAX_DIM = 192;
@@ -6399,6 +6958,7 @@ var CELLS = [
   "threeD"
 ];
 var PARAMS = new URLSearchParams(location.search);
+var ROCK_MS = 1600;
 var el = (id) => document.getElementById(id);
 var status = (msg, err = false) => {
   const s = el("status");
@@ -6408,18 +6968,6 @@ var status = (msg, err = false) => {
   }
 };
 var mb = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
-function suggestedRows(kase) {
-  const pick = [];
-  const tumorMR = kase.series.find((e) => e.tp === "preop" && e.segs.some((g) => g.s === "tumor")) ?? kase.series.find((e) => e.tp === "preop");
-  const us = kase.series.find((e) => e.tp === "post_dura") ?? kase.series.find((e) => e.m === "US");
-  const intra = kase.series.find((e) => e.tp === "intraop" && e.segs.length) ?? kase.series.find((e) => e.tp === "intraop");
-  for (const e of [
-    tumorMR,
-    us,
-    intra
-  ]) if (e) pick.push(e.u);
-  return pick;
-}
 async function main() {
   if (!navigator.gpu) {
     status("WebGPU not available \u2014 try Chrome/Edge 113+ or Safari 18+.", true);
@@ -6439,8 +6987,8 @@ async function main() {
   const sc = new RemindScene(gpu, srgb, kase, {
     maxDim: Number(PARAMS.get("maxdim")) || void 0,
     maxVoxels: Number(PARAMS.get("maxvox")) || void 0,
-    onRowChange: (row) => {
-      syncRowChrome(row);
+    onRowChange: () => {
+      syncRowLabels();
       requestDraw();
     },
     onRedraw: () => requestDraw()
@@ -6449,140 +6997,11 @@ async function main() {
   const cv = /* @__PURE__ */ new Map();
   const cx = /* @__PURE__ */ new Map();
   const overlays = /* @__PURE__ */ new Map();
-  const rowEls = /* @__PURE__ */ new Map();
-  const cellId = (row, c) => `${row.key}|${c}`;
-  for (const row of sc.rows) {
-    const root = document.createElement("div");
-    root.className = "mrow";
-    root.dataset.key = row.key;
-    const tp = TIMEPOINTS[row.entry.tp];
-    root.style.setProperty("--accent", rgbCss(tp.color));
-    const label = document.createElement("div");
-    label.className = "mlabel";
-    label.title = "click to load / unload this series";
-    label.addEventListener("click", () => toggleRow(row.key));
-    root.appendChild(label);
-    for (const c of CELLS) {
-      const cell = document.createElement("div");
-      cell.className = "cell";
-      cell.dataset.cell = c;
-      const canvas = document.createElement("canvas");
-      const id = cellId(row, c);
-      canvas.id = "c-" + id;
-      cell.appendChild(canvas);
-      const lab = document.createElement("div");
-      lab.className = "lab";
-      lab.textContent = c === "threeD" ? "3D" : c[0].toUpperCase() + c.slice(1);
-      cell.appendChild(lab);
-      const ov = document.createElement("canvas");
-      ov.className = "xh";
-      cell.appendChild(ov);
-      root.appendChild(cell);
-      cv.set(id, canvas);
-      overlays.set(id, {
-        c: ov,
-        g: ov.getContext("2d")
-      });
-    }
-    rowsEl.appendChild(root);
-    rowEls.set(row.key, {
-      root,
-      label
-    });
-  }
-  const configureCanvas = (id) => {
-    if (cx.has(id)) return;
-    const ctx = cv.get(id).getContext("webgpu");
-    ctx.configure({
-      device: gpu.device,
-      format: preferred,
-      viewFormats: [
-        srgb
-      ],
-      alphaMode: "opaque"
-    });
-    cx.set(id, ctx);
-  };
-  const configure = (row) => {
-    for (const c of CELLS) configureCanvas(cellId(row, c));
-  };
-  const CMP = "cmp";
-  const cmpRoot = document.createElement("div");
-  cmpRoot.className = "mrow compare";
-  cmpRoot.hidden = true;
-  const cmpLabel = document.createElement("div");
-  cmpLabel.className = "mlabel";
-  cmpRoot.appendChild(cmpLabel);
-  for (const c of CELLS) {
-    const cell = document.createElement("div");
-    cell.className = "cell";
-    cell.dataset.cell = c;
-    for (const side of [
-      "a",
-      "b"
-    ]) {
-      const canvas = document.createElement("canvas");
-      canvas.id = `c-${CMP}|${c}|${side}`;
-      canvas.className = side === "b" ? "bside" : "aside";
-      cell.appendChild(canvas);
-      cv.set(`${CMP}|${c}|${side}`, canvas);
-    }
-    const lab = document.createElement("div");
-    lab.className = "lab";
-    lab.textContent = c === "threeD" ? "3D" : c[0].toUpperCase() + c.slice(1);
-    cell.appendChild(lab);
-    const ov = document.createElement("canvas");
-    ov.className = "xh";
-    cell.appendChild(ov);
-    overlays.set(`${CMP}|${c}`, {
-      c: ov,
-      g: ov.getContext("2d")
-    });
-    cmpRoot.appendChild(cell);
-  }
-  rowsEl.appendChild(cmpRoot);
-  let cmpA = null, cmpB = null;
-  let cmpMode = "off";
-  let blend = 0.5;
-  const ROCK_MS = 1600;
-  const rowA = () => cmpA ? sc.row(cmpA) : void 0;
-  const rowB = () => cmpB ? sc.row(cmpB) : void 0;
-  const cmpLive = () => cmpMode !== "off" && rowA()?.state === "ready" && rowB()?.state === "ready";
-  const applyBlend = () => {
-    for (const c of CELLS) {
-      const b = cv.get(`${CMP}|${c}|b`);
-      if (b) b.style.opacity = String(blend);
-    }
-    const fade = el("cmp-fade");
-    if (fade && document.activeElement !== fade) fade.value = String(Math.round(blend * 100));
-    const a = rowA(), bb = rowB();
-    if (a && bb) {
-      cmpLabel.innerHTML = `<div class="tp">COMPARE</div><div class="seq">${seriesLabel(a.entry)}</div><div class="det" style="color:${rgbCss(TIMEPOINTS[a.entry.tp].color)}">${TIMEPOINTS[a.entry.tp].short}</div><div class="cmpbar"><i style="width:${Math.round(blend * 100)}%"></i></div><div class="det" style="color:${rgbCss(TIMEPOINTS[bb.entry.tp].color)}">${TIMEPOINTS[bb.entry.tp].short}</div><div class="seq">${seriesLabel(bb.entry)}</div>`;
-    }
-  };
-  let animRaf = 0, animT0 = 0;
-  const animate = (t) => {
-    if (!cmpLive() || cmpMode !== "rock" && cmpMode !== "toggle") {
-      animRaf = 0;
-      return;
-    }
-    if (!animT0) animT0 = t;
-    const phase = (t - animT0) % ROCK_MS / ROCK_MS;
-    blend = cmpMode === "rock" ? (1 - Math.cos(phase * 2 * Math.PI)) / 2 : phase < 0.5 ? 0 : 1;
-    applyBlend();
-    animRaf = requestAnimationFrame(animate);
-  };
-  const syncAnim = () => {
-    const want2 = cmpLive() && (cmpMode === "rock" || cmpMode === "toggle");
-    if (want2 && !animRaf) {
-      animT0 = 0;
-      animRaf = requestAnimationFrame(animate);
-    }
-    if (!want2 && animRaf) {
-      cancelAnimationFrame(animRaf);
-      animRaf = 0;
-    }
-  };
+  const cmpRows = [];
+  const PAIRS = defaultPairs(kase);
+  let cmpMode = "fade";
+  let blend = 0;
+  let rowSeq = 0;
   let focus = [
     0,
     0,
@@ -6594,7 +7013,7 @@ async function main() {
     0
   ];
   let fovMm = 200;
-  let framed = false;
+  let autoFrame = true;
   const camera = framedCamera([
     0,
     0,
@@ -6606,34 +7025,285 @@ async function main() {
     coronal: true,
     threeD: true
   };
+  const canvasKey = (r, c, side) => `${r.id}|${c}|${side}`;
+  const overlayKey = (r, c) => `${r.id}|${c}`;
+  const rowOf = (key) => key ? sc.row(key) : void 0;
+  const rowReady = (key) => rowOf(key)?.state === "ready";
+  const seriesOptions = (cur) => {
+    let out = `<option value="">\u2014 none \u2014</option>`;
+    let group = "";
+    for (const e of [
+      ...kase.series
+    ].sort((x, y) => TIMEPOINTS[x.tp].rank - TIMEPOINTS[y.tp].rank || x.sn - y.sn)) {
+      if (e.tp !== group) {
+        if (group) out += `</optgroup>`;
+        group = e.tp;
+        out += `<optgroup label="${TIMEPOINTS[e.tp].short}">`;
+      }
+      const sel = e.u === cur ? " selected" : "";
+      const segs = e.segs.length ? ` \xB7 ${e.segs.length} seg` : "";
+      const nm = e.m === "US" ? TIMEPOINTS[e.tp].short : `${TIMEPOINTS[e.tp].short} \xB7 ${e.d}`;
+      out += `<option value="${e.u}"${sel} title="${nm} \xB7 ${mb(e.b)}">${nm} \xB7 ${mb(e.b)}${segs}</option>`;
+    }
+    return out + (group ? `</optgroup>` : "");
+  };
+  function addRow(a, b, why = "custom") {
+    const id = `r${++rowSeq}`;
+    const root = document.createElement("div");
+    root.className = "crow";
+    root.dataset.row = id;
+    const label = document.createElement("div");
+    label.className = "clabel";
+    root.appendChild(label);
+    for (const c of CELLS) {
+      const cell = document.createElement("div");
+      cell.className = "cell";
+      cell.dataset.cell = c;
+      for (const side of [
+        "a",
+        "b"
+      ]) {
+        const canvas = document.createElement("canvas");
+        canvas.className = side === "b" ? "bside" : "aside";
+        canvas.id = `c-${id}|${c}|${side}`;
+        cell.appendChild(canvas);
+        cv.set(`${id}|${c}|${side}`, canvas);
+      }
+      const lab = document.createElement("div");
+      lab.className = "lab";
+      lab.textContent = c === "threeD" ? "3D" : c[0].toUpperCase() + c.slice(1);
+      cell.appendChild(lab);
+      const ov = document.createElement("canvas");
+      ov.className = "xh";
+      cell.appendChild(ov);
+      overlays.set(`${id}|${c}`, {
+        c: ov,
+        g: ov.getContext("2d")
+      });
+      root.appendChild(cell);
+    }
+    rowsEl.appendChild(root);
+    const row = {
+      id,
+      a: a?.u ?? null,
+      b: b?.u ?? null,
+      why,
+      root,
+      label
+    };
+    cmpRows.push(row);
+    attachRowInteraction(row);
+    for (const c of CELLS) for (const s of [
+      "a",
+      "b"
+    ]) configureCanvas(canvasKey(row, c, s));
+    syncRowLabels();
+    reconcile();
+    return row;
+  }
+  function removeRow(id) {
+    const i = cmpRows.findIndex((r2) => r2.id === id);
+    if (i < 0) return;
+    const [r] = cmpRows.splice(i, 1);
+    r.root.remove();
+    for (const c of CELLS) {
+      overlays.delete(overlayKey(r, c));
+      for (const s of [
+        "a",
+        "b"
+      ]) {
+        cv.delete(canvasKey(r, c, s));
+        cx.delete(canvasKey(r, c, s));
+      }
+    }
+    syncRowLabels();
+    reconcile();
+  }
+  const configureCanvas = (id) => {
+    if (cx.has(id)) return;
+    const c = cv.get(id);
+    if (!c) return;
+    const ctx = c.getContext("webgpu");
+    ctx.configure({
+      device: gpu.device,
+      format: preferred,
+      viewFormats: [
+        srgb
+      ],
+      alphaMode: "opaque"
+    });
+    cx.set(id, ctx);
+  };
+  async function reconcile() {
+    const needed = /* @__PURE__ */ new Set();
+    for (const r of cmpRows) {
+      if (r.a) needed.add(r.a);
+      if (r.b) needed.add(r.b);
+    }
+    for (const row of sc.rows) {
+      if (row.state === "ready" && !needed.has(row.key)) sc.releaseRow(row.key);
+    }
+    updateBar();
+    resize();
+    const pending = [
+      ...needed
+    ].filter((k) => sc.row(k)?.state === "idle");
+    for (const k of pending) {
+      const loaded = await sc.ensureRow(k);
+      if (autoFrame && loaded.state === "ready") frameToBounds();
+      applyFrames();
+      syncRowLabels();
+      renderTF();
+      updateBar();
+      resize();
+    }
+    status(statusLine());
+  }
+  const statusLine = () => {
+    const res = sc.readyRows();
+    const loading = sc.rows.filter((r) => r.state === "loading").length;
+    const bytes = res.reduce((n, r) => n + r.entry.b, 0);
+    return `${kase.pid} \u2014 ${cmpRows.length} comparison${cmpRows.length === 1 ? "" : "s"}, ${res.length} volume${res.length === 1 ? "" : "s"} resident (${mb(bytes)})` + (loading ? `, ${loading} loading\u2026` : "");
+  };
+  function syncRowLabels() {
+    for (const r of cmpRows) {
+      const ra = rowOf(r.a), rb = rowOf(r.b);
+      const busy = [
+        ra,
+        rb
+      ].filter((x) => x?.state === "loading");
+      const prog = busy.length ? `<div class="prog">${busy[0].progress.msg}<i style="width:${Math.round(busy[0].progress.frac * 100)}%"></i></div>` : "";
+      const err = [
+        ra,
+        rb
+      ].find((x) => x?.state === "error");
+      const accent = (row) => row ? rgbCss(TIMEPOINTS[row.entry.tp].color) : "#7d92b5";
+      r.label.innerHTML = `<div class="why">${r.why}</div><div class="pick" style="--ac:${accent(ra)}"><span class="ab">A</span><select class="sel-a" data-row="${r.id}">${seriesOptions(r.a)}</select></div><div class="pick" style="--ac:${accent(rb)}"><span class="ab">B</span><select class="sel-b" data-row="${r.id}">${seriesOptions(r.b)}</select></div>` + (err ? `<div class="err">failed: ${err.error}</div>` : prog) + `<div class="rowbtns"><button class="mini swap" data-row="${r.id}" title="swap A and B">\u21C4</button><button class="mini rm" data-row="${r.id}" title="remove this comparison">\xD7</button></div>`;
+      r.root.classList.toggle("live", rowReady(r.a) && rowReady(r.b));
+    }
+    el("addrow").toggleAttribute("disabled", cmpRows.length >= 6);
+  }
+  rowsEl.addEventListener("change", (e) => {
+    const t = e.target;
+    if (!t.dataset.row || !t.classList.contains("sel-a") && !t.classList.contains("sel-b")) return;
+    const r = cmpRows.find((x) => x.id === t.dataset.row);
+    if (!r) return;
+    if (t.classList.contains("sel-a")) r.a = t.value || null;
+    else r.b = t.value || null;
+    r.why = "custom";
+    syncRowLabels();
+    reconcile();
+  });
+  rowsEl.addEventListener("click", (e) => {
+    const t = e.target.closest("button.mini");
+    if (!t) return;
+    const r = cmpRows.find((x) => x.id === t.dataset.row);
+    if (!r) return;
+    if (t.classList.contains("rm")) removeRow(r.id);
+    else {
+      const s = r.a;
+      r.a = r.b;
+      r.b = s;
+      syncRowLabels();
+      requestDraw();
+    }
+  });
+  const applyBlend = () => {
+    for (const r of cmpRows) {
+      for (const c of CELLS) {
+        const b = cv.get(canvasKey(r, c, "b"));
+        if (b) b.style.opacity = String(rowReady(r.b) ? blend : 0);
+      }
+    }
+    const f = el("cmp-fade");
+    if (f && document.activeElement !== f) f.value = String(Math.round(blend * 100));
+    el("cmp-note").textContent = `A ${Math.round((1 - blend) * 100)}% \xB7 B ${Math.round(blend * 100)}%`;
+  };
+  let animRaf = 0, animT0 = 0;
+  const animate = (t) => {
+    if (cmpMode === "fade") {
+      animRaf = 0;
+      return;
+    }
+    if (!animT0) animT0 = t;
+    const phase = (t - animT0) % ROCK_MS / ROCK_MS;
+    blend = cmpMode === "rock" ? (1 - Math.cos(phase * 2 * Math.PI)) / 2 : phase < 0.5 ? 0 : 1;
+    applyBlend();
+    animRaf = requestAnimationFrame(animate);
+  };
+  const syncAnim = () => {
+    const want2 = cmpMode !== "fade";
+    if (want2 && !animRaf) {
+      animT0 = 0;
+      animRaf = requestAnimationFrame(animate);
+    }
+    if (!want2 && animRaf) {
+      cancelAnimationFrame(animRaf);
+      animRaf = 0;
+    }
+  };
+  const setMode = (m) => {
+    cmpMode = m;
+    for (const b of el("cmpbar").querySelectorAll("[data-mode]")) {
+      b.classList.toggle("on", b.dataset.mode === m);
+    }
+    syncAnim();
+    applyBlend();
+  };
+  const updateBar = () => {
+    el("cmp-count").textContent = `${cmpRows.length} row${cmpRows.length === 1 ? "" : "s"}`;
+  };
+  for (const b of el("cmpbar").querySelectorAll("[data-mode]")) {
+    b.addEventListener("click", () => setMode(b.dataset.mode));
+  }
+  el("cmp-fade").addEventListener("input", (e) => {
+    blend = Number(e.target.value) / 100;
+    if (cmpMode !== "fade") setMode("fade");
+    applyBlend();
+  });
+  el("addrow").addEventListener("click", () => {
+    const p = PAIRS[cmpRows.length] ?? PAIRS[PAIRS.length - 1];
+    addRow(p?.a, p?.b, p?.why ?? "custom");
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.target?.tagName === "INPUT" || e.target?.tagName === "SELECT") return;
+    if (e.code !== "Space") return;
+    e.preventDefault();
+    if (cmpMode !== "fade") setMode("fade");
+    blend = blend > 0.5 ? 0 : 1;
+    applyBlend();
+  });
+  const extentOf = (r) => Math.max(r.rasHi[0] - r.rasLo[0], r.rasHi[1] - r.rasLo[1], r.rasHi[2] - r.rasLo[2]);
   const frameToBounds = () => {
     const b = sc.bounds();
-    if (!b) return;
     const ready = sc.readyRows();
+    if (!b || !ready.length) return;
     let best = ready[0];
-    for (const r of ready) if ((r.radius ?? Infinity) < (best.radius ?? Infinity)) best = r;
+    for (const r of ready) if (extentOf(r) < extentOf(best)) best = r;
     focus = [
       ...best.center ?? b.center
     ];
     viewCenter = [
       ...focus
     ];
-    fovMm = Math.max(40, (best.radius ?? b.radius) * 2.4);
+    fovMm = Math.max(40, extentOf(best) * 1.15);
     camera.focalPoint = [
-      ...b.center
+      ...viewCenter
     ];
-    const dist = b.radius * 2.6;
+    const dist = fovMm / (2 * Math.tan(camera.viewAngle / 2 * Math.PI / 180));
     camera.position = [
-      b.center[0],
-      b.center[1] - dist,
-      b.center[2]
+      viewCenter[0],
+      viewCenter[1] - dist,
+      viewCenter[2]
     ];
     camera.viewUp = [
       0,
       0,
       1
     ];
-    framed = true;
+  };
+  const userTookOver = () => {
+    autoFrame = false;
   };
   const applyFrames = () => {
     for (const o of ORIENTS) sc.applyFrame(o, viewCenter, fovMm);
@@ -6670,7 +7340,7 @@ async function main() {
   let fast3d = false, settleTimer = 0;
   const drawSliceTo = (row, o, id) => {
     const c = cv.get(id);
-    if (!c.width || row.state !== "ready" || !shown[o]) return;
+    if (!c || !c.width || row.state !== "ready" || !shown[o]) return;
     row.slice.setPlane(o, sc.offset01(row, o, focus));
     row.slice.renderToView(cx.get(id).getCurrentTexture().createView({
       format: srgb
@@ -6678,7 +7348,7 @@ async function main() {
   };
   const draw3dTo = (row, id) => {
     const c = cv.get(id);
-    if (!c.width || row.state !== "ready" || !shown.threeD) return;
+    if (!c || !c.width || row.state !== "ready" || !shown.threeD) return;
     const view = cx.get(id).getCurrentTexture().createView({
       format: srgb
     });
@@ -6692,29 +7362,25 @@ async function main() {
       scene.renderToView(view, c.width, c.height);
     }
   };
-  const drawCompare = () => {
-    if (!cmpLive()) return;
-    for (const [side, row] of [
-      [
-        "a",
-        rowA()
-      ],
-      [
-        "b",
-        rowB()
-      ]
-    ]) {
-      for (const o of ORIENTS) drawSliceTo(row, o, `${CMP}|${o}|${side}`);
-      draw3dTo(row, `${CMP}|threeD|${side}`);
+  const drawAll = () => {
+    for (const r of cmpRows) {
+      for (const [side, key] of [
+        [
+          "a",
+          r.a
+        ],
+        [
+          "b",
+          r.b
+        ]
+      ]) {
+        const row = rowOf(key);
+        if (!row || row.state !== "ready") continue;
+        for (const o of ORIENTS) drawSliceTo(row, o, canvasKey(r, o, side));
+        draw3dTo(row, canvasKey(r, "threeD", side));
+      }
     }
     applyBlend();
-  };
-  const drawAll = () => {
-    for (const row of sc.readyRows()) {
-      for (const o of ORIENTS) drawSliceTo(row, o, cellId(row, o));
-      draw3dTo(row, cellId(row, "threeD"));
-    }
-    drawCompare();
     xhairRedraw();
   };
   const touch3d = () => {
@@ -6734,33 +7400,32 @@ async function main() {
     });
   };
   const xhair = createCrosshair(false);
-  const xhairCell = (overlayKey, canvasKey, row, k) => {
-    const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
-    const o = overlays.get(overlayKey);
-    const host = cv.get(canvasKey);
-    if (!o || !host) return;
-    const w = host.clientWidth, h = host.clientHeight;
-    if (!w || !h) return;
-    if (o.c.width !== Math.floor(w * dpr)) {
-      o.c.width = Math.floor(w * dpr);
-      o.c.height = Math.floor(h * dpr);
-    }
-    o.g.setTransform(o.c.width / w, 0, 0, o.c.height / h, 0, 0);
-    o.g.clearRect(0, 0, w, h);
-    if (!xhair.visible || !xhair.ras || row?.state !== "ready") return;
-    if (k === "threeD") {
-      const s = rasToScreen3D(camera, xhair.ras, w, h);
-      if (s) drawCross(o.g, s.x * w, s.y * h);
-    } else {
-      const pr = row.slice.rasToView(k, sc.offset01(row, k, focus), xhair.ras, w / h);
-      if (pr.u >= 0 && pr.u <= 1 && pr.v >= 0 && pr.v <= 1) drawCross(o.g, pr.u * w, pr.v * h);
-    }
-  };
   const xhairRedraw = () => {
-    for (const row of sc.rows) {
-      for (const k of CELLS) xhairCell(cellId(row, k), cellId(row, k), row, k);
+    const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
+    for (const r of cmpRows) {
+      const row = rowOf(blend > 0.5 && rowReady(r.b) ? r.b : r.a) ?? rowOf(r.b);
+      for (const k of CELLS) {
+        const o = overlays.get(overlayKey(r, k));
+        const host = cv.get(canvasKey(r, k, "b")) ?? cv.get(canvasKey(r, k, "a"));
+        if (!o || !host) continue;
+        const w = host.clientWidth, h = host.clientHeight;
+        if (!w || !h) continue;
+        if (o.c.width !== Math.floor(w * dpr)) {
+          o.c.width = Math.floor(w * dpr);
+          o.c.height = Math.floor(h * dpr);
+        }
+        o.g.setTransform(o.c.width / w, 0, 0, o.c.height / h, 0, 0);
+        o.g.clearRect(0, 0, w, h);
+        if (!xhair.visible || !xhair.ras || row?.state !== "ready") continue;
+        if (k === "threeD") {
+          const s = rasToScreen3D(camera, xhair.ras, w, h);
+          if (s) drawCross(o.g, s.x * w, s.y * h);
+        } else {
+          const pr = row.slice.rasToView(k, sc.offset01(row, k, focus), xhair.ras, w / h);
+          if (pr.u >= 0 && pr.u <= 1 && pr.v >= 0 && pr.v <= 1) drawCross(o.g, pr.u * w, pr.v * h);
+        }
+      }
     }
-    for (const k of CELLS) xhairCell(`${CMP}|${k}`, `${CMP}|${k}|b`, rowA(), k);
   };
   const hideXhair = () => {
     if (xhair.visible) {
@@ -6797,20 +7462,22 @@ async function main() {
   };
   const adoptFrame = (row, o, canvas) => {
     const aspect = aspectOf(canvas);
-    const off = sc.offset01(row, o, focus);
-    viewCenter = row.slice.viewToRas(o, off, 0.5, 0.5, aspect);
+    userTookOver();
+    viewCenter = row.slice.viewToRas(o, sc.offset01(row, o, focus), 0.5, 0.5, aspect);
     fovMm = row.slice.spanMmFor(o) / Math.max(1e-6, row.slice.zoom(o));
     applyFrames();
     syncCameraToFov();
   };
-  for (const row of sc.rows) {
+  function attachRowInteraction(r) {
+    const leader = () => rowOf(blend > 0.5 && rowReady(r.b) ? r.b : r.a) ?? rowOf(r.b);
     for (const o of ORIENTS) {
-      const canvas = cv.get(cellId(row, o));
+      const canvas = cv.get(canvasKey(r, o, "b"));
       attachSliceControls(canvas, {
         orient: o,
-        getSlice: () => row.slice,
+        getSlice: () => leader().slice,
         step: (fwd) => {
-          if (row.state !== "ready") return;
+          const row = leader();
+          if (row?.state !== "ready") return;
           const axis = o === "axial" ? 2 : o === "coronal" ? 1 : 0;
           const f = [
             ...focus
@@ -6819,19 +7486,20 @@ async function main() {
           focus = f;
         },
         redraw: () => {
-          if (row.state !== "ready") return;
-          adoptFrame(row, o, canvas);
+          const row = leader();
+          if (row?.state === "ready") adoptFrame(row, o, canvas);
           requestDraw();
         },
         hooks: {
           onDoubleClick: () => {
-            toggleMax(cellId(row, o));
+            toggleMax(canvasKey(r, o, "b"));
             return true;
           }
         }
       });
       canvas.addEventListener("pointermove", (e) => {
-        if (!isShiftHover(e) || row.state !== "ready") return;
+        const row = leader();
+        if (!isShiftHover(e) || row?.state !== "ready") return;
         if (!xhair.visible) xhair.toggle(true);
         const { u, v, aspect } = uvOf(canvas, e);
         const ras = row.slice.viewToRas(o, sc.offset01(row, o, focus), u, v, aspect);
@@ -6839,17 +7507,20 @@ async function main() {
         jumpTo(ras);
       });
     }
-    const c3 = cv.get(cellId(row, "threeD"));
+    const c3 = cv.get(canvasKey(r, "threeD", "b"));
     attachCameraControls(c3, camera, {
       onChange: () => {
+        userTookOver();
         touch3d();
         syncFovToCamera();
         requestDraw();
       }
     });
-    attachDoubleClick(c3, () => toggleMax(cellId(row, "threeD")));
+    attachDoubleClick(c3, () => toggleMax(canvasKey(r, "threeD", "b")));
     let inFlight = false, queued = null;
     const pick = async (u, v) => {
+      const row = leader();
+      if (row?.state !== "ready") return;
       inFlight = true;
       const ras = await row.scene.pick(u, v);
       inFlight = false;
@@ -6864,7 +7535,7 @@ async function main() {
       }
     };
     c3.addEventListener("pointermove", (e) => {
-      if (!isShiftHover(e) || row.state !== "ready") return;
+      if (!isShiftHover(e)) return;
       if (!xhair.visible) xhair.toggle(true);
       const { u, v } = uvOf(c3, e);
       if (inFlight) queued = {
@@ -6880,203 +7551,15 @@ async function main() {
     rowsEl.classList.toggle("maxmode", !!maxed);
     const target = maxed ? cv.get(maxed)?.parentElement : null;
     for (const cell of rowsEl.querySelectorAll(".cell")) cell.classList.toggle("max", cell === target);
-    for (const r of rowsEl.querySelectorAll(".mrow")) r.classList.toggle("hasmax", !!target && r.contains(target));
+    for (const rr of rowsEl.querySelectorAll(".crow")) rr.classList.toggle("hasmax", !!target && rr.contains(target));
     resize();
-  };
-  function syncRowChrome(row) {
-    const re = rowEls.get(row.key);
-    if (!re) return;
-    const e = row.entry;
-    const tp = TIMEPOINTS[e.tp];
-    re.root.classList.toggle("on", row.state === "ready");
-    re.root.classList.toggle("loading", row.state === "loading");
-    re.root.classList.toggle("failed", row.state === "error");
-    const segNames = e.segs.map((g) => g.s).join(", ");
-    const detail = row.state === "loading" ? `${row.progress.msg}` : row.state === "error" ? `failed: ${row.error}` : row.state === "ready" ? `${row.vol.dims.join("\xD7")} @ ${row.vol.vox.toFixed(2)} mm` : `${mb(e.b)} \xB7 ${e.n} inst`;
-    re.label.innerHTML = `<div class="tp">${tp.short}</div><div class="seq">${seriesLabel(e)}</div><div class="det">${detail}</div>` + (segNames ? `<div class="segs">${segNames}</div>` : "") + `<div class="mbar"><i style="width:${Math.round((row.state === "ready" ? 1 : row.progress.frac) * 100)}%"></i></div>`;
-    const chip = el("strip").querySelector(`[data-key="${row.key}"]`);
-    if (chip) {
-      chip.classList.toggle("on", row.state === "ready");
-      chip.classList.toggle("busy", row.state === "loading");
-      chip.classList.toggle("failed", row.state === "error");
-    }
-  }
-  const suggested = suggestedRows(kase);
-  const strip = el("series");
-  let stripGroup = "";
-  for (const row of sc.rows) {
-    const e = row.entry;
-    if (e.tp !== stripGroup) {
-      stripGroup = e.tp;
-      const g = document.createElement("div");
-      g.className = "tpgroup";
-      g.style.color = rgbCss(TIMEPOINTS[e.tp].color);
-      g.textContent = TIMEPOINTS[e.tp].short;
-      strip.appendChild(g);
-    }
-    const isSugg = suggested.includes(row.key);
-    const b = document.createElement("button");
-    b.className = "chip series" + (isSugg ? " sugg" : "");
-    b.dataset.key = row.key;
-    b.style.setProperty("--accent", rgbCss(TIMEPOINTS[e.tp].color));
-    b.innerHTML = `${seriesLabel(e)}<span>${mb(e.b)}</span>` + (e.segs.length ? `<em>${e.segs.length} seg</em>` : "");
-    b.title = `${e.m} \xB7 ${e.d} \xB7 series ${e.sn} \xB7 ${e.n} instance(s)
-click to download ${mb(e.b)} from IDC` + (isSugg ? " (suggested)" : "") + (e.segs.length ? `
-segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
-    b.addEventListener("click", () => toggleRow(row.key));
-    strip.appendChild(b);
-  }
-  const hint = document.createElement("div");
-  hint.id = "hint";
-  const suggBytes = suggested.reduce((n, k) => n + (sc.row(k)?.entry.b ?? 0), 0);
-  hint.innerHTML = `<div class="h1">Nothing downloaded yet</div><div class="h2">This case is ${mb(kase.bytes)} in IDC. Pick a series from the timeline below and it streams straight from the public bucket \u2014 one row at a time, only what you ask for.</div><button id="hint-sugg" class="chip">Load the suggested three \xB7 ${mb(suggBytes)}</button>`;
-  rowsEl.appendChild(hint);
-  el("hint-sugg").addEventListener("click", () => {
-    for (const k of suggested) toggleRow(k);
-  });
-  const syncHint = () => {
-    hint.style.display = sc.rows.some((r) => r.state !== "idle") ? "none" : "";
-  };
-  const selA = el("cmp-a");
-  const selB = el("cmp-b");
-  const fadeEl = el("cmp-fade");
-  const fillSel = (sel, cur) => {
-    const ready = sc.readyRows();
-    sel.innerHTML = `<option value="">\u2014</option>` + ready.map((r) => `<option value="${r.key}"${r.key === cur ? " selected" : ""}>${TIMEPOINTS[r.entry.tp].short} \xB7 ${seriesLabel(r.entry)}</option>`).join("");
-    sel.disabled = ready.length < 2;
-  };
-  const setMode = (m) => {
-    cmpMode = m;
-    for (const b of el("cmpbar").querySelectorAll("[data-mode]")) {
-      b.classList.toggle("on", b.dataset.mode === m);
-    }
-    syncCompare();
-  };
-  function syncCompare() {
-    const ready = sc.readyRows();
-    if (ready.length >= 2) {
-      if (!rowA() || rowA().state !== "ready") cmpA = ready[0].key;
-      if (!rowB() || rowB().state !== "ready" || cmpB === cmpA) {
-        cmpB = (ready.find((r) => r.key !== cmpA) ?? ready[1]).key;
-      }
-    } else {
-      cmpA = cmpA && sc.row(cmpA)?.state === "ready" ? cmpA : null;
-      cmpB = null;
-    }
-    fillSel(selA, cmpA);
-    fillSel(selB, cmpB);
-    const live = cmpLive();
-    cmpRoot.hidden = !live;
-    el("cmpbar").classList.toggle("dim", ready.length < 2);
-    el("cmp-note").textContent = ready.length < 2 ? "load two series to compare them" : cmpMode === "off" ? "" : `${Math.round((1 - blend) * 100)}% / ${Math.round(blend * 100)}%`;
-    if (live) for (const c of CELLS) for (const s of [
-      "a",
-      "b"
-    ]) configureCanvas(`${CMP}|${c}|${s}`);
-    syncAnim();
-    resize();
-  }
-  selA.addEventListener("change", () => {
-    cmpA = selA.value || null;
-    syncCompare();
-  });
-  selB.addEventListener("change", () => {
-    cmpB = selB.value || null;
-    syncCompare();
-  });
-  fadeEl.addEventListener("input", () => {
-    blend = Number(fadeEl.value) / 100;
-    if (cmpMode === "off") setMode("fade");
-    else if (cmpMode !== "fade") setMode("fade");
-    applyBlend();
-    el("cmp-note").textContent = `${Math.round((1 - blend) * 100)}% / ${Math.round(blend * 100)}%`;
-  });
-  for (const b of el("cmpbar").querySelectorAll("[data-mode]")) {
-    b.addEventListener("click", () => setMode(b.dataset.mode));
-  }
-  el("cmp-swap").addEventListener("click", () => {
-    const t = cmpA;
-    cmpA = cmpB;
-    cmpB = t;
-    blend = 1 - blend;
-    syncCompare();
-    requestDraw();
-  });
-  for (const o of ORIENTS) {
-    const canvas = cv.get(`${CMP}|${o}|b`);
-    attachSliceControls(canvas, {
-      orient: o,
-      getSlice: () => (rowA() ?? sc.readyRows()[0]).slice,
-      step: (fwd) => {
-        const r = rowA();
-        if (!r || r.state !== "ready") return;
-        const axis = o === "axial" ? 2 : o === "coronal" ? 1 : 0;
-        const f = [
-          ...focus
-        ];
-        f[axis] = Math.max(r.rasLo[axis], Math.min(r.rasHi[axis], f[axis] + Math.max(0.2, r.vol.vox) * (fwd ? 1 : -1)));
-        focus = f;
-      },
-      redraw: () => {
-        const r = rowA();
-        if (r?.state === "ready") adoptFrame(r, o, canvas);
-        requestDraw();
-      },
-      hooks: {
-        onDoubleClick: () => {
-          toggleMax(`${CMP}|${o}|b`);
-          return true;
-        }
-      }
-    });
-    canvas.addEventListener("pointermove", (e) => {
-      const r = rowA();
-      if (!isShiftHover(e) || r?.state !== "ready") return;
-      if (!xhair.visible) xhair.toggle(true);
-      const { u, v, aspect } = uvOf(canvas, e);
-      const ras = r.slice.viewToRas(o, sc.offset01(r, o, focus), u, v, aspect);
-      xhair.set(ras);
-      jumpTo(ras);
-    });
-  }
-  attachCameraControls(cv.get(`${CMP}|threeD|b`), camera, {
-    onChange: () => {
-      touch3d();
-      syncFovToCamera();
-      requestDraw();
-    }
-  });
-  attachDoubleClick(cv.get(`${CMP}|threeD|b`), () => toggleMax(`${CMP}|threeD|b`));
-  async function toggleRow(key) {
-    const row = sc.row(key);
-    if (row.state === "ready") {
-      sc.releaseRow(key);
-      syncRowChrome(row);
-      syncCompare();
-      return;
-    }
-    if (row.state === "loading") return;
-    configure(row);
-    syncRowChrome(row);
-    resize();
-    const loaded = await sc.ensureRow(key);
-    if (!framed && loaded.state === "ready") frameToBounds();
-    applyFrames();
-    syncRowChrome(row);
-    syncCompare();
-    renderTF();
-    status(statusLine());
-  }
-  const statusLine = () => {
-    const ready = sc.readyRows().length;
-    const loading = sc.rows.filter((r) => r.state === "loading").length;
-    return `${kase.pid} \u2014 ${ready}/${sc.rows.length} series loaded` + (loading ? `, ${loading} loading\u2026` : "");
   };
   const applyColumns = () => {
-    for (const row of sc.rows) {
-      for (const c of CELLS) cv.get(cellId(row, c)).parentElement.classList.toggle("hidden", !shown[c]);
+    for (const r of cmpRows) {
+      for (const c of CELLS) {
+        cv.get(canvasKey(r, c, "b")).parentElement.classList.toggle("hidden", !shown[c]);
+      }
     }
-    for (const c of CELLS) cv.get(`${CMP}|${c}|b`).parentElement.classList.toggle("hidden", !shown[c]);
     resize();
   };
   for (const c of CELLS) {
@@ -7087,8 +7570,6 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
       applyColumns();
     });
   }
-  const tpCount = /* @__PURE__ */ new Map();
-  for (const e of kase.series) tpCount.set(e.tp, (tpCount.get(e.tp) ?? 0) + 1);
   el("info").innerHTML = `<b>${kase.pid}</b> \xB7 ${kase.series.length} series \xB7 ${kase.series.reduce((n, e) => n + e.segs.length, 0)} segmentations \xB7 ${mb(kase.bytes)} in IDC`;
   const caseBtn = el("case-btn");
   caseBtn.textContent = `${kase.pid} \u25BE`;
@@ -7102,7 +7583,7 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
       const segs = c.series.reduce((n, e) => n + e.segs.length, 0);
       const us = c.series.filter((e) => e.m === "US").length;
       const b = document.createElement("button");
-      b.className = "crow" + (c.pid === kase.pid ? " cur" : "");
+      b.className = "crow-pick" + (c.pid === kase.pid ? " cur" : "");
       b.innerHTML = `<span class="pid">${c.pid}</span><span class="st">${c.series.length} ser \xB7 ${us} US \xB7 ${segs} seg \xB7 ${mb(c.bytes)}</span>`;
       b.addEventListener("click", () => {
         location.search = `?case=${c.pid}`;
@@ -7155,6 +7636,7 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
     }))),
     ohifURL: (st) => ohifViewerURL(st) ?? ""
   });
+  let shellOp = 1;
   const controls = [
     {
       label: "Volume (3D)",
@@ -7197,7 +7679,6 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
       ]
     }
   ];
-  let shellOp = 1;
   installChrome({
     controls
   });
@@ -7267,8 +7748,6 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
     el("tf-panel").classList.toggle("dim", !row);
     if (row?.state === "ready") {
       tfRamp.value = row.tf.ramp;
-      tfWin.value = String(row.win.toFixed(3));
-      tfLev.value = String(row.lev.toFixed(3));
       el("tf-wl").textContent = `W ${row.win.toFixed(0)} \xB7 L ${row.lev.toFixed(0)}`;
     }
     drawTFCurve();
@@ -7339,7 +7818,7 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
   tfCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
   tfCanvas.addEventListener("pointerdown", (e) => {
     const row = tfRow();
-    if (!row || row.state !== "ready") return;
+    if (row?.state !== "ready") return;
     const { t, a, r } = tfAt(e);
     const hit = nearest(t, a, r);
     const pts = row.tf.points;
@@ -7397,14 +7876,19 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
     p.hidden = !p.hidden;
     if (!p.hidden) renderTF();
   });
+  document.addEventListener("click", (e) => {
+    const p = el("tf-panel");
+    if (!p.hidden && !p.contains(e.target) && e.target !== tfBtn) p.hidden = true;
+  });
   const jumps = el("jumps");
   const renderJumps = () => {
     jumps.innerHTML = "";
     const seen = /* @__PURE__ */ new Set();
     for (const row of sc.readyRows()) {
       for (const s of row.segs) {
-        if (!s.centroid || seen.has(s.structure + row.key)) continue;
-        seen.add(s.structure + row.key);
+        const k = s.structure + row.key;
+        if (!s.centroid || seen.has(k)) continue;
+        seen.add(k);
         const b = document.createElement("button");
         b.className = "chip jump";
         b.style.setProperty("--accent", rgbCss(s.color));
@@ -7417,44 +7901,28 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
   };
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
-    const fit = (canvas) => {
+    for (const [, canvas] of cv) {
       const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
       if (w && h && (canvas.width !== w || canvas.height !== h)) {
         canvas.width = w;
         canvas.height = h;
       }
-    };
-    for (const row of sc.rows) {
-      rowEls.get(row.key).root.classList.toggle("empty", row.state === "idle");
-      for (const c of CELLS) fit(cv.get(cellId(row, c)));
     }
-    for (const c of CELLS) for (const s of [
-      "a",
-      "b"
-    ]) fit(cv.get(`${CMP}|${c}|${s}`));
-    syncHint();
     renderJumps();
     requestDraw();
   };
   globalThis.addEventListener("resize", resize);
-  for (const row of sc.rows) syncRowChrome(row);
   applyColumns();
-  syncCompare();
-  renderTF();
+  setMode("fade");
   el("col-link").addEventListener("click", () => {
     link3d = !link3d;
     el("col-link").classList.toggle("on", link3d);
     if (link3d) syncCameraToFov();
     requestDraw();
   });
-  document.addEventListener("click", (e) => {
-    const p = el("tf-panel");
-    if (!p.hidden && !p.contains(e.target) && e.target !== tfBtn) p.hidden = true;
-  });
-  const want = PARAMS.get("rows");
-  const startKeys = want === "all" ? sc.rows.map((r) => r.key) : want === "suggested" ? suggested : want && want !== "none" ? want.split(",").filter((k) => sc.row(k)) : [];
-  status(startKeys.length ? `${kase.pid} \u2014 loading ${startKeys.length} series from IDC\u2026` : `${kase.pid} \u2014 nothing downloaded yet`);
-  for (const k of startKeys) toggleRow(k);
+  const want = Math.max(1, Math.min(PAIRS.length, Number(PARAMS.get("rows")) || 1));
+  for (let i = 0; i < want; i++) addRow(PAIRS[i]?.a, PAIRS[i]?.b, PAIRS[i]?.why ?? "custom");
+  status(`${kase.pid} \u2014 loading the first comparison from IDC\u2026`);
   globalThis.__remindDbg = {
     ready: () => sc.readyRows().length,
     pid: () => kase.pid,
@@ -7465,6 +7933,7 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
       m: r.entry.m,
       state: r.state,
       error: r.error,
+      nSegs: r.entry.segs.length,
       dims: r.vol?.dims,
       vox: r.vol?.vox,
       win: r.vol?.win,
@@ -7472,13 +7941,57 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
       ijkToRAS: r.vol?.ijkToRAS,
       rasLo: r.rasLo,
       rasHi: r.rasHi,
-      nSegs: r.entry.segs.length,
       segs: r.segs.map((s) => ({
         structure: s.structure,
         voxels: s.voxels,
         centroid: s.centroid
       }))
     })),
+    // the compare rows — the unit of display
+    cmpRows: () => cmpRows.map((r) => ({
+      id: r.id,
+      why: r.why,
+      a: r.a,
+      b: r.b,
+      aDesc: rowOf(r.a)?.entry.d,
+      bDesc: rowOf(r.b)?.entry.d,
+      aTp: rowOf(r.a)?.entry.tp,
+      bTp: rowOf(r.b)?.entry.tp,
+      live: rowReady(r.a) && rowReady(r.b)
+    })),
+    addRow: () => {
+      const p = PAIRS[cmpRows.length] ?? PAIRS[PAIRS.length - 1];
+      addRow(p?.a, p?.b, p?.why ?? "custom");
+      return cmpRows.length;
+    },
+    removeRow: (id) => {
+      removeRow(id);
+      return cmpRows.length;
+    },
+    setPair: (id, a, b) => {
+      const r = cmpRows.find((x) => x.id === id);
+      if (!r) return null;
+      r.a = a;
+      r.b = b;
+      r.why = "custom";
+      syncRowLabels();
+      reconcile();
+      return {
+        a: r.a,
+        b: r.b
+      };
+    },
+    mode: () => cmpMode,
+    setMode: (m) => {
+      setMode(m);
+      return cmpMode;
+    },
+    blend: () => blend,
+    setBlend: (v) => {
+      blend = v;
+      applyBlend();
+    },
+    residentKeys: () => sc.readyRows().map((r) => r.key),
     focus: () => [
       ...focus
     ],
@@ -7505,17 +8018,16 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
       fovAtFocus: fovAtDist(camDist())
     }),
     jumpTo: (ras) => jumpTo(ras, true),
-    toggleRow: (k) => toggleRow(k),
     setColumn: (c, on) => {
       shown[c] = on;
       el(`col-${c}`)?.classList.toggle("on", on);
       applyColumns();
     },
-    // linked navigation + compare + TF, for the driver to exercise without synthetic input
     zoomSlice: (o, factor) => {
       const r = sc.readyRows()[0];
       if (!r) return;
-      const c = cv.get(cellId(r, o));
+      const cr = cmpRows.find((x) => rowOf(x.a) === r || rowOf(x.b) === r) ?? cmpRows[0];
+      const c = cv.get(canvasKey(cr, o, "b"));
       r.slice.zoomAbout(o, factor, 0.5, 0.5, c.clientWidth, c.clientHeight);
       adoptFrame(r, o, c);
       requestDraw();
@@ -7524,29 +8036,6 @@ segmentations: ${e.segs.map((g) => g.s).join(", ")}` : "");
     setLink3d: (on) => {
       link3d = on;
       el("col-link")?.classList.toggle("on", on);
-    },
-    compare: () => ({
-      mode: cmpMode,
-      a: cmpA,
-      b: cmpB,
-      blend,
-      live: cmpLive(),
-      hidden: cmpRoot.hidden
-    }),
-    setCompare: (a, b, mode) => {
-      cmpA = a;
-      cmpB = b;
-      setMode(mode);
-      return {
-        a: cmpA,
-        b: cmpB,
-        mode: cmpMode,
-        live: cmpLive()
-      };
-    },
-    setBlend: (v) => {
-      blend = v;
-      applyBlend();
     },
     tf: (k) => {
       const r = k ? sc.row(k) : tfRow();

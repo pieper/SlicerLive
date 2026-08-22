@@ -196,3 +196,57 @@ export function loadSeg(
     return { ...r, lab: new Uint8Array(r.lab) };
   });
 }
+
+// ── semantic roles ───────────────────────────────────────────────────────────
+// The compare viewer opens on clinically meaningful PAIRS, not on whatever series
+// happened to be first. Naming those pairs needs a mapping from role → series, and every
+// role needs a fallback ladder: across the 114 ReMIND cases the ideal pair exists 85–92%
+// of the time, and an exact intra-op sequence match only 52% of the time. A role that
+// cannot be filled returns undefined and the row simply opens empty on that side.
+
+export type RoleKey = "preop_t1gd" | "pre_dura_us" | "final_us" | "intraop";
+
+const firstOf = (list: SeriesEntry[], ...tests: ((e: SeriesEntry) => boolean)[]) => {
+  for (const t of tests) {
+    const hit = list.find(t);
+    if (hit) return hit;
+  }
+  return undefined;
+};
+
+/** Resolve a role against a case, walking the fallback ladder. `like` asks for a sequence
+ *  match (used for "the intra-op scan matching the pre-op one"). */
+export function pickRole(kase: CaseEntry, role: RoleKey, like?: SeriesEntry): SeriesEntry | undefined {
+  const s = kase.series;
+  const pre = s.filter((e) => e.tp === "preop");
+  const intra = s.filter((e) => e.tp === "intraop");
+  switch (role) {
+    case "preop_t1gd":
+      // post-contrast T1 is the pre-op reference scan; degrade to any T1, then any 3D, then any
+      return firstOf(pre, (e) => e.d.includes("T1_postcontrast"), (e) => e.d.includes("T1"),
+        (e) => e.d.startsWith("3D"), () => true);
+    case "pre_dura_us":
+      // the first look, before the dura is opened — 10 cases have none, fall through to the next US
+      return firstOf(s, (e) => e.tp === "pre_dura", (e) => e.tp === "post_dura", (e) => e.m === "US");
+    case "final_us":
+      // the last ultrasound of the operation (acquired before the intra-op MRI)
+      return firstOf(s, (e) => e.tp === "pre_imri", (e) => e.tp === "post_dura", (e) => e.m === "US");
+    case "intraop":
+      // prefer the SAME sequence as `like` so the comparison isn't confounded by contrast
+      return firstOf(intra, (e) => !!like && e.d === like.d, (e) => e.d.includes("T1_postcontrast"),
+        (e) => e.d.includes("T1"), () => true);
+  }
+}
+
+/** The compare rows a case opens with, in order — each added row answers a different
+ *  question: is the tumour where the plan said (pre-op vs first look), how far has the
+ *  resection got (first look vs last look), and what does the post-resection MR show
+ *  against the plan (pre-op vs intra-op MR). */
+export function defaultPairs(kase: CaseEntry): { a?: SeriesEntry; b?: SeriesEntry; why: string }[] {
+  const t1 = pickRole(kase, "preop_t1gd");
+  return [
+    { a: t1, b: pickRole(kase, "pre_dura_us"), why: "plan vs first look" },
+    { a: pickRole(kase, "pre_dura_us"), b: pickRole(kase, "final_us"), why: "extent of resection" },
+    { a: t1, b: pickRole(kase, "intraop", t1), why: "pre-op vs intra-op MR" },
+  ];
+}

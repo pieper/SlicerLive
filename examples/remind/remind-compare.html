@@ -3,20 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- ReMINDer compare — one row per acquisition in a ReMIND case, ordered along the surgical
-     timeline (pre-op MRI -> iUS pre-dura -> iUS post-dura -> iUS pre-iMRI -> intra-op MRI),
-     x selectable {axial, sagittal, coronal, 3D} columns. Every row is a different grid; the
-     linking is in patient space. Pixels stream straight from IDC's public bucket, and NOTHING
-     is fetched until asked for — the timeline strip along the bottom is the switchboard.
-     ?case=<pid>&rows=all|suggested|<uuid,...> -->
-<title>ReMINDer — case timeline</title>
+<!-- ReMINDer compare — COMPARE-CENTRIC. Every row is a PAIR (A ⇄ B) over the same anatomy,
+     x selectable {axial, sagittal, coronal, 3D} columns. One set of compare controls drives
+     every row at once; what is per-row is only the pair itself. Opens on
+     pre-op T1+Gd ⇄ pre-dura US; added rows step through extent-of-resection and
+     pre-op-vs-intra-op. Pixels stream straight from IDC's public bucket, and only the
+     volumes some row references are resident.   ?case=<pid>&rows=1|2|3 -->
+<title>ReMINDer — compare</title>
 <style>
   :root { color-scheme: dark; }
   html, body { height: 100%; margin: 0; background: #05060a; color: #d6e2f2;
-               font: 12px -apple-system, system-ui, sans-serif; }
+               font: 12px -apple-system, system-ui, sans-serif; overflow: hidden; }
   #page { display: flex; flex-direction: column; height: 100vh; }
-  /* the shared demo chrome parks a fixed "?" at top-left and the SlicerLive logo at
-     top-right — leave both their gutters free so the header never sits under them */
+  /* the shared demo chrome parks a fixed "?" top-left and the SlicerLive logo top-right */
   header { display: flex; align-items: center; gap: 12px; padding: 5px 132px 5px 52px; background: #0b0e16;
            border-bottom: 1px solid #1b2740; flex: 0 0 auto; flex-wrap: wrap; min-height: 34px; }
   header h1 { font-size: 13px; margin: 0; color: #9fb3d0; font-weight: 700; letter-spacing: .3px; }
@@ -28,74 +27,80 @@
   .chip { font: 600 11px -apple-system, system-ui, sans-serif; color: #d6e2f2; background: #1b2740;
           border: 1px solid #33507e; border-radius: 4px; padding: 2px 8px; cursor: pointer; }
   .chip.on { background: #2b6cb0; border-color: #3f86d0; color: #fff; }
+  .chip:disabled { opacity: .4; cursor: default; }
 
-  /* ── rows: one acquisition each ─────────────────────────────────────────── */
+  /* ── the global compare bar: ONE set of controls for every row ───────────── */
+  #cmpbar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 5px 12px;
+            background: #0d1119; border-bottom: 1px solid #1b2740; font-size: 11px; color: #7d92b5; }
+  #cmpbar .cmplabel { font: 800 9.5px -apple-system, system-ui, sans-serif; letter-spacing: .08em; color: #f0d24a; }
+  #cmp-fade { width: 220px; accent-color: #f0d24a; }
+  #cmp-note { font-variant-numeric: tabular-nums; min-width: 128px; }
+  #cmp-count { margin-left: auto; color: #4d5c78; }
+  .hintkey { color: #4d5c78; }
+  .hintkey b { color: #9fb3d0; font-weight: 600; }
+
+  /* ── compare rows ────────────────────────────────────────────────────────── */
   #rows { flex: 1; display: flex; flex-direction: column; gap: 2px; min-height: 0; padding: 2px; }
-  .mrow { flex: 1; display: flex; gap: 2px; min-height: 0; border-left: 3px solid var(--accent, #33507e);
-          background: #080b12; border-radius: 3px; }
-  .mrow.empty { flex: 0 0 34px; opacity: .62; }
-  .mrow.loading { opacity: .95; }
-  .mrow.failed { border-left-color: #f05a5a; }
-  .mlabel { flex: 0 0 152px; padding: 4px 8px; cursor: pointer; overflow: hidden; min-width: 0;
-            display: flex; flex-direction: column; gap: 1px; user-select: none; }
-  .mlabel:hover { background: #101725; }
-  .mlabel .tp { font: 800 9.5px -apple-system, system-ui, sans-serif; letter-spacing: .08em;
-                color: var(--accent, #9fb3d0); }
-  .mlabel .seq { font-weight: 700; font-size: 11px; color: #d6e2f2; overflow-wrap: anywhere; line-height: 1.22; }
-  .mlabel .det { font-size: 10px; color: #7d92b5; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-  .mlabel .segs { font-size: 10px; color: #f0a8b0; overflow-wrap: anywhere; }
-  /* an unloaded row collapses to a single clickable line — its name, cost and labels stay
-     legible (the 132px stack is for loaded rows, where the cells need the width) */
-  .mrow.empty .mlabel { flex: 1 1 auto; flex-direction: row; align-items: center; gap: 10px;
-                        white-space: nowrap; padding: 0 10px; }
-  .mrow.empty .mlabel > * { overflow-wrap: normal; white-space: nowrap; }
-  .mrow.empty .mlabel .seq { font-weight: 600; }
-  .mrow.empty .mlabel .segs { color: #8d7080; }
-  .mrow.empty .mlabel::after { content: "click to load"; margin-left: auto; color: #4d5c78; font-size: 10px; }
-  .mbar { margin-top: auto; height: 2px; background: #1b2740; border-radius: 2px; overflow: hidden; }
-  .mbar i { display: block; height: 100%; background: var(--accent, #3f86d0); transition: width .2s; }
-  .mrow:not(.loading) .mbar { visibility: hidden; }
-  .mrow.empty .mbar { display: none; }
+  .crow { flex: 1; display: flex; gap: 2px; min-height: 0; background: #080b12; border-radius: 3px;
+          border-left: 3px solid #33507e; }
+  .crow.live { border-left-color: #f0d24a; }
+  .clabel { flex: 0 0 214px; padding: 5px 8px; overflow: hidden; min-width: 0;
+            display: flex; flex-direction: column; gap: 4px; }
+  .clabel .why { font: 800 9px -apple-system, system-ui, sans-serif; letter-spacing: .07em;
+                 color: #9fb3d0; text-transform: uppercase; }
+  .clabel .pick { display: flex; align-items: center; gap: 5px; min-width: 0; }
+  .clabel .pick .ab { font: 800 9px -apple-system, system-ui, sans-serif; color: var(--ac, #7d92b5);
+                      border: 1px solid var(--ac, #33507e); border-radius: 3px; padding: 1px 4px; flex: 0 0 auto; }
+  .clabel select { flex: 1; min-width: 0; font: 11px -apple-system, system-ui, sans-serif; color: #d6e2f2;
+                   background: #131a2a; border: 1px solid #2a3a5c;
+                   border-radius: 4px; padding: 2px 3px; }
+  .clabel .prog { font-size: 10px; color: #7d92b5; position: relative; padding-bottom: 3px; }
+  .clabel .prog i { position: absolute; left: 0; bottom: 0; height: 2px; background: #3f86d0; border-radius: 2px; }
+  .clabel .err { font-size: 10px; color: #ff9aa2; overflow-wrap: anywhere; }
+  .clabel .rowbtns { margin-top: auto; display: flex; gap: 4px; }
+  .mini { font: 600 11px -apple-system, system-ui, sans-serif; color: #9fb3d0; background: #131a2a;
+          border: 1px solid #2a3a5c; border-radius: 4px; padding: 1px 7px; cursor: pointer; }
+  .mini:hover { color: #fff; background: #1b2740; }
+
   .cell { position: relative; flex: 1; min-width: 0; min-height: 0; }
-  .mrow.empty .cell { display: none; }
   .cell.hidden { display: none; }
-  .cell canvas { width: 100%; height: 100%; display: block; background: #000; touch-action: none; }
-  .cell canvas.xh { position: absolute; inset: 0; background: transparent; pointer-events: none; }
-  .cell .lab { position: absolute; top: 4px; left: 6px; font-weight: 700; font-size: 10px;
+  .cell canvas { width: 100%; height: 100%; display: block; background: #000; touch-action: none;
+                 position: absolute; inset: 0; }
+  .cell canvas.bside { z-index: 1; }        /* B on top — its opacity IS the blend */
+  .cell canvas.xh { z-index: 2; background: transparent; pointer-events: none; }
+  .cell .lab { position: absolute; top: 4px; left: 6px; z-index: 3; font-weight: 700; font-size: 10px;
                opacity: .7; pointer-events: none; color: #9fb3d0; }
   /* double-click a cell to maximize it */
-  #rows.maxmode .mrow { display: none; }
-  #rows.maxmode .mrow.hasmax { display: flex; flex: 1; }
-  #rows.maxmode .mrow.hasmax .cell { display: none; }
-  #rows.maxmode .mrow.hasmax .cell.max { display: block; flex: 1; }
+  #rows.maxmode .crow { display: none; }
+  #rows.maxmode .crow.hasmax { display: flex; flex: 1; }
+  #rows.maxmode .crow.hasmax .cell { display: none; }
+  #rows.maxmode .crow.hasmax .cell.max { display: block; flex: 1; }
 
-  /* ── empty state: nothing is fetched until asked for ────────────────────── */
-  #hint { margin: auto; text-align: center; padding: 24px; max-width: 560px; }
-  #hint .h1 { font-size: 15px; font-weight: 700; color: #9fb3d0; }
-  #hint .h2 { font-size: 12px; color: #7d92b5; margin: 7px 0 14px; line-height: 1.6; }
-  #hint .chip { padding: 6px 14px; font-size: 12px; }
+  /* ── bottom strip: jump chips ────────────────────────────────────────────── */
+  #strip { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 5px 10px;
+           background: #0b0e16; border-top: 1px solid #1b2740; overflow-x: auto; }
+  #strip:empty, #jumps:empty { display: none; }
+  #jumps { display: flex; gap: 4px; }
+  .chip.jump { flex: 0 0 auto; border-color: var(--accent); color: var(--accent); background: #101725; }
 
-  /* ── the COMPARE row: A and B stacked, blended by B's alpha ─────────────── */
-  .mrow.compare { border-left-color: #f0d24a; }
-  .mrow.compare[hidden] { display: none; }
-  .mrow.compare .mlabel .tp { color: #f0d24a; }
-  .cell canvas.aside, .cell canvas.bside { position: absolute; inset: 0; }
-  .cell canvas.bside { z-index: 1; }        /* B is on top; its opacity IS the blend */
-  .cmpbar { height: 3px; background: #1b2740; border-radius: 2px; overflow: hidden; margin: 3px 0; }
-  .cmpbar i { display: block; height: 100%; background: #f0d24a; }
-  #cmpbar { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 5px 10px;
-            background: #0b0e16; border-top: 1px solid #1b2740; font-size: 11px; color: #7d92b5; }
-  #cmpbar.dim { opacity: .55; }
-  #cmpbar .cmplabel { font: 800 9.5px -apple-system, system-ui, sans-serif; letter-spacing: .08em; color: #f0d24a; }
-  #cmpbar select { max-width: 210px; }
-  #cmp-fade { width: 160px; }
-  #cmp-note { font-variant-numeric: tabular-nums; }
-  select, input[type=range] { font: 11px -apple-system, system-ui, sans-serif; color: #d6e2f2;
-            background: #131a2a; border: 1px solid #33507e; border-radius: 4px; padding: 2px 4px; accent-color: #3f86d0; }
+  /* ── case picker ─────────────────────────────────────────────────────────── */
+  #case-panel[hidden] { display: none; }
+  #case-panel { position: fixed; top: 34px; right: 8px; z-index: 20; width: 330px; max-height: 70vh;
+                display: flex; flex-direction: column; background: #0b0e16; border: 1px solid #33507e;
+                border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,.6); overflow: hidden; }
+  #case-search { margin: 8px; padding: 5px 8px; font: 12px -apple-system, system-ui, sans-serif;
+                 color: #d6e2f2; background: #131a2a; border: 1px solid #33507e; border-radius: 5px; outline: none; }
+  #case-list { overflow-y: auto; padding: 0 6px 6px; }
+  #case-list .crow-pick { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+                background: none; border: none; border-radius: 5px; padding: 4px 6px; cursor: pointer;
+                font: 12px -apple-system, system-ui, sans-serif; color: #d6e2f2; }
+  #case-list .crow-pick:hover { background: #1b2740; }
+  #case-list .crow-pick.cur { background: #2b6cb0; }
+  #case-list .crow-pick .pid { font-weight: 700; min-width: 86px; font-variant-numeric: tabular-nums; }
+  #case-list .crow-pick .st { margin-left: auto; color: #7d92b5; font-size: 11px; font-variant-numeric: tabular-nums; }
 
-  /* ── transfer-function panel ────────────────────────────────────────────── */
+  /* ── transfer-function panel ─────────────────────────────────────────────── */
   #tf-panel[hidden] { display: none; }
-  /* clear of the shared chrome's fixed logo (top-right, ~110x92) */
   #tf-panel { position: fixed; top: 108px; right: 8px; z-index: 21; width: 300px; padding: 9px 10px 10px;
               display: flex; flex-direction: column; gap: 6px; background: #0b0e16;
               border: 1px solid #33507e; border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,.6); }
@@ -109,42 +114,8 @@
   #tf-panel .tfrow label { flex: 0 0 46px; }
   #tf-panel .tfrow select, #tf-panel .tfrow input { flex: 1; min-width: 0; }
   #tf-panel .tfwl { flex: 1; font-variant-numeric: tabular-nums; color: #9fb3d0; }
-
-  /* ── the timeline strip = the row switchboard ───────────────────────────── */
-  #strip { flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
-           padding: 6px 10px; background: #0b0e16; border-top: 1px solid #1b2740; }
-  #series { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; }
-  .tpgroup { flex: 0 0 auto; font: 800 9px -apple-system, system-ui, sans-serif; letter-spacing: .08em;
-             padding: 0 4px 0 10px; border-left: 1px solid #1b2740; }
-  .tpgroup:first-child { border-left: none; padding-left: 2px; }
-  .chip.series { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 0;
-                 border-color: color-mix(in srgb, var(--accent) 55%, #1b2740); background: #101725; padding: 3px 8px; }
-  .chip.series span { font-weight: 400; font-size: 9.5px; color: #7d92b5; }
-  .chip.series em { font-style: normal; font-size: 9px; color: #f0a8b0; }
-  .chip.series.on { background: color-mix(in srgb, var(--accent) 32%, #101725); border-color: var(--accent); color: #fff; }
-  .chip.series.busy { border-style: dashed; }
-  /* the three the viewer would have chosen — marked, never auto-fetched */
-  .chip.series.sugg { box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--accent) 70%, transparent); }
-  .chip.series.failed { border-color: #f05a5a; color: #ffb0b8; }
-  .chip.jump { flex: 0 0 auto; border-color: var(--accent); color: var(--accent); background: #101725; }
-  #jumps { flex: 0 0 auto; display: flex; gap: 4px; padding-left: 10px; border-left: 1px solid #1b2740; }
-  #jumps:empty { display: none; }
-
-  /* ── case picker ────────────────────────────────────────────────────────── */
-  #case-panel[hidden] { display: none; }
-  #case-panel { position: fixed; top: 34px; right: 8px; z-index: 20; width: 330px; max-height: 70vh;
-                display: flex; flex-direction: column; background: #0b0e16; border: 1px solid #33507e;
-                border-radius: 8px; box-shadow: 0 10px 34px rgba(0,0,0,.6); overflow: hidden; }
-  #case-search { margin: 8px; padding: 5px 8px; font: 12px -apple-system, system-ui, sans-serif;
-                 color: #d6e2f2; background: #131a2a; border: 1px solid #33507e; border-radius: 5px; outline: none; }
-  #case-list { overflow-y: auto; padding: 0 6px 6px; }
-  #case-list .crow { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-                background: none; border: none; border-radius: 5px; padding: 4px 6px; cursor: pointer;
-                font: 12px -apple-system, system-ui, sans-serif; color: #d6e2f2; }
-  #case-list .crow:hover { background: #1b2740; }
-  #case-list .crow.cur { background: #2b6cb0; }
-  #case-list .crow .pid { font-weight: 700; min-width: 86px; font-variant-numeric: tabular-nums; }
-  #case-list .crow .st { margin-left: auto; color: #7d92b5; font-size: 11px; font-variant-numeric: tabular-nums; }
+  select, input[type=range] { font: 11px -apple-system, system-ui, sans-serif; color: #d6e2f2;
+            background: #131a2a; border: 1px solid #33507e; border-radius: 4px; padding: 2px 4px; accent-color: #3f86d0; }
 </style>
 </head>
 <body>
@@ -165,13 +136,27 @@
         <button id="case-btn" class="chip" title="choose a case">case ▾</button>
       </div>
     </header>
+
+    <div id="cmpbar">
+      <span class="cmplabel">COMPARE</span>
+      <button class="chip" data-mode="fade">fade</button>
+      <button class="chip" data-mode="rock">rock</button>
+      <button class="chip" data-mode="toggle">toggle</button>
+      <input id="cmp-fade" type="range" min="0" max="100" value="0" title="blend A ⇄ B (applies to every row)">
+      <span id="cmp-note"></span>
+      <span class="hintkey"><b>space</b> flips A/B · <b>shift+move</b> crosshair · <b>dbl-click</b> maximize</span>
+      <button id="addrow" class="chip" title="add another comparison">+ row</button>
+      <span id="cmp-count"></span>
+    </div>
+
     <div id="case-panel" hidden>
       <input id="case-search" type="search" placeholder="filter by id…" autocomplete="off">
       <div id="case-list"></div>
     </div>
+
     <div id="tf-panel" hidden>
       <div class="tfhead">Transfer function
-        <select id="tf-row" title="which loaded series to edit"></select>
+        <select id="tf-row" title="which resident volume to edit"></select>
       </div>
       <canvas id="tf-curve" title="drag a handle to reshape the opacity curve · click to add a point · alt/right-click to remove"></canvas>
       <div class="tfrow"><label>ramp</label><select id="tf-ramp"></select></div>
@@ -179,21 +164,10 @@
       <div class="tfrow"><label>level</label><input id="tf-lev" type="range" min="-1" max="1" step="0.01" value="0"></div>
       <div class="tfrow"><span id="tf-wl" class="tfwl"></span><button id="tf-reset" class="chip">reset</button></div>
     </div>
+
     <div id="rows"></div>
-    <div id="cmpbar">
-      <span class="cmplabel">Compare</span>
-      <select id="cmp-a" title="volume A (under)"></select>
-      <button id="cmp-swap" class="chip" title="swap A and B">⇄</button>
-      <select id="cmp-b" title="volume B (over)"></select>
-      <button class="chip" data-mode="off">off</button>
-      <button class="chip" data-mode="fade">fade</button>
-      <button class="chip" data-mode="rock">rock</button>
-      <button class="chip" data-mode="toggle">toggle</button>
-      <input id="cmp-fade" type="range" min="0" max="100" value="50" title="blend A ⇄ B">
-      <span id="cmp-note"></span>
-    </div>
-    <div id="strip"><div id="series"></div><div id="jumps"></div></div>
+    <div id="strip"><div id="jumps"></div></div>
   </div>
-  <script type="module" src="remind-compare.js?v=20260814b"></script>   <!-- bump per deploy: stale cached bundles read as phantom behaviour -->
+  <script type="module" src="remind-compare.js?v=20260822a"></script>   <!-- bump per deploy: stale cached bundles read as phantom behaviour -->
 </body>
 </html>

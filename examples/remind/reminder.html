@@ -134,12 +134,13 @@ td.num{text-align:right;color:var(--ink-2);font-variant-numeric:tabular-nums;pad
 
 /* drilldown */
 #drill[hidden]{display:none}
-#drill{position:fixed;inset:0;z-index:50;background:rgba(4,6,10,.72);backdrop-filter:blur(3px);
-  display:flex;align-items:center;justify-content:center}
-#drill-panel{width:min(97vw,1780px);height:95vh;display:flex;flex-direction:column;
-  background:var(--bg);border:1px solid var(--line);border-radius:12px;overflow:hidden;
-  box-shadow:0 24px 80px rgba(0,0,0,.65)}
-#drill-head{display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--line);flex:0 0 auto}
+#drill{position:fixed;inset:0;z-index:50;background:var(--bg);
+  display:flex;align-items:stretch;justify-content:stretch}
+/* the drilldown takes the WHOLE viewport — every pixel it doesn't use is a row of
+   comparison you can't see. No max-width, no rounding, no gutter. */
+#drill-panel{width:100vw;height:100vh;display:flex;flex-direction:column;
+  background:var(--bg);border:none;border-radius:0;overflow:hidden}
+#drill-head{display:flex;align-items:center;gap:10px;padding:5px 12px;border-bottom:1px solid var(--line);flex:0 0 auto;font-size:12.5px}
 #drill-title{display:flex;align-items:center;gap:9px;font-size:13px;min-width:0;flex-wrap:wrap}
 #drill-title b{font-size:14px}
 #drill-close{margin-left:auto;font-size:15px;line-height:1;padding:5px 10px}
