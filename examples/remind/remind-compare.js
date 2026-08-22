@@ -3226,9 +3226,11 @@ var BASES = {
       1,
       0
     ],
-    uAxis: 0,
-    vAxis: 1,
-    nAxis: 2
+    nDir: [
+      0,
+      0,
+      1
+    ]
   },
   coronal: {
     uDir: [
@@ -3241,9 +3243,11 @@ var BASES = {
       0,
       1
     ],
-    uAxis: 0,
-    vAxis: 2,
-    nAxis: 1
+    nDir: [
+      0,
+      1,
+      0
+    ]
   },
   sagittal: {
     uDir: [
@@ -3256,11 +3260,14 @@ var BASES = {
       0,
       1
     ],
-    uAxis: 1,
-    vAxis: 2,
-    nAxis: 0
+    nDir: [
+      1,
+      0,
+      0
+    ]
   }
 };
+var dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 var SliceRenderer = class {
   dev;
   format;
@@ -3316,6 +3323,9 @@ var SliceRenderer = class {
     0,
     0
   ];
+  // Optional per-orientation basis override (reslice along a volume's own axes). null = the
+  // anatomical preset.
+  basisOverride = {};
   constructor(gpu, format = DEFAULT_FORMAT2) {
     this.dev = gpu.device;
     this.format = format;
@@ -3439,6 +3449,35 @@ var SliceRenderer = class {
     }
     return this.emptyOverlay;
   }
+  /** Reslice this orientation along an arbitrary RAS basis instead of the anatomical preset.
+   *  Pass null to restore. The vectors should be unit length and mutually orthogonal; they are
+   *  used verbatim, so the caller owns the display convention for a non-anatomical frame. */
+  setBasis(orient, basis) {
+    this.basisOverride[orient] = basis;
+  }
+  basisOf(orient) {
+    return this.basisOverride[orient] ?? BASES[orient];
+  }
+  /** Extent of the volume's RAS bounding box projected onto a direction — the generalisation
+   *  of "rasHi[axis] - rasLo[axis]" to an oblique axis. Reduces to exactly that for the
+   *  anatomical bases, since projecting an axis-aligned box on its own axis is the axis span. */
+  extentAlong(d) {
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      const c = [
+        i & 1 ? this.rasHi[0] : this.rasLo[0],
+        i & 2 ? this.rasHi[1] : this.rasLo[1],
+        i & 4 ? this.rasHi[2] : this.rasLo[2]
+      ];
+      const t = dot3(c, d);
+      if (t < lo) lo = t;
+      if (t > hi) hi = t;
+    }
+    return {
+      lo,
+      hi
+    };
+  }
   /** Volume geometry: patientToTexture (RAS->tex[0,1], encodes ijkToRAS) + the RAS
    *  bounding box (for plane extents/scrub range). Get both from the ImageField. */
   setVolume(p2t, rasLo, rasHi) {
@@ -3530,10 +3569,9 @@ var SliceRenderer = class {
    *  Slicer: Red FOV=[891.78,256] at viewport 634x182 -> vertical FOV == the 256mm
    *  A-extent, horizontal follows viewport aspect.) */
   viewSpanMm() {
-    const b = BASES[this.orient];
-    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
-    const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
-    return Math.max(uExt, vExt);
+    const b = this.basisOf(this.orient);
+    const u = this.extentAlong(b.uDir), v = this.extentAlong(b.vDir);
+    return Math.max(u.hi - u.lo, v.hi - v.lo);
   }
   /** The fitted in-plane extent (mm) used for a given orientation — the value directly
    *  comparable to a Slicer slice node's fitted fieldOfView. */
@@ -3550,9 +3588,9 @@ var SliceRenderer = class {
    *  axis fills the window, no needless margin). Replaces the old max(uExt,vExt) span, which
    *  under-zoomed whenever the larger extent wasn't on the viewport's limiting axis. */
   fitUV(orient, aspectWH) {
-    const b = BASES[orient];
-    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
-    const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
+    const b = this.basisOf(orient);
+    const u = this.extentAlong(b.uDir), v = this.extentAlong(b.vDir);
+    const uExt = u.hi - u.lo, vExt = v.hi - v.lo;
     const uS0 = Math.max(uExt, vExt * aspectWH);
     return {
       uS0,
@@ -3565,7 +3603,7 @@ var SliceRenderer = class {
    *  pan/zoom. Returns the plane centre `c` (RAS, incl. scrub offset + pan) and the half-... no:
    *  uS/vS are the FULL in-plane extents mapped across the viewport width/height. */
   frameFor(orient, offset01, aspectWH) {
-    const b = BASES[orient];
+    const b = this.basisOf(orient);
     const vs = this.viewState[orient];
     const { uS0, vS0 } = this.fitUV(orient, aspectWH);
     const uS = uS0 / vs.zoom, vS = vS0 / vs.zoom;
@@ -3574,7 +3612,12 @@ var SliceRenderer = class {
       (this.rasLo[1] + this.rasHi[1]) / 2,
       (this.rasLo[2] + this.rasHi[2]) / 2
     ];
-    c[b.nAxis] = this.rasLo[b.nAxis] + Math.max(0, Math.min(1, offset01)) * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    const nx = this.extentAlong(b.nDir);
+    const want = nx.lo + Math.max(0, Math.min(1, offset01)) * (nx.hi - nx.lo);
+    const have = dot3(c, b.nDir);
+    c[0] += b.nDir[0] * (want - have);
+    c[1] += b.nDir[1] * (want - have);
+    c[2] += b.nDir[2] * (want - have);
     c[0] += b.uDir[0] * vs.panU + b.vDir[0] * vs.panV;
     c[1] += b.uDir[1] * vs.panU + b.vDir[1] * vs.panV;
     c[2] += b.uDir[2] * vs.panU + b.vDir[2] * vs.panV;
@@ -3633,9 +3676,9 @@ var SliceRenderer = class {
    *  zoom proportionally; pan is the centre's offset from the volume centre projected onto the
    *  plane's in-plane axes. The out-of-plane offset is applied separately via setPlane. */
   setMirrorFrame(orient, centerRAS, fovX, fovY) {
-    const b = BASES[orient];
-    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
-    const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
+    const b = this.basisOf(orient);
+    const ux = this.extentAlong(b.uDir), vx = this.extentAlong(b.vDir);
+    const uExt = ux.hi - ux.lo, vExt = vx.hi - vx.lo;
     const zoom = Math.max(uExt / Math.max(fovX, 1e-6), vExt / Math.max(fovY, 1e-6));
     const volC = [
       (this.rasLo[0] + this.rasHi[0]) / 2,
@@ -3659,7 +3702,7 @@ var SliceRenderer = class {
    *  plane — for click picking. Returns the tex coord; the caller converts to IJK via
    *  ijk = tex*dims - 0.5. Anisotropy/rotation are handled by the same p2t the shader uses. */
   viewToTex(u, v) {
-    const b = BASES[this.orient];
+    const b = this.basisOf(this.orient);
     const uS = this.uSpanMm || this.viewSpanMm();
     const vS = this.vSpanMm || this.viewSpanMm();
     const c = this.cX;
@@ -3686,7 +3729,7 @@ var SliceRenderer = class {
     return {
       u,
       v,
-      distMm: d[b.nAxis]
+      distMm: dot3(d, b.nDir)
     };
   }
   /** Map a view (u,v in [0,1], y down) on a plane back to a RAS point ON that plane —
@@ -6578,6 +6621,78 @@ var DEFAULT_TF_POINTS = [
     1
   ]
 ];
+var norm2 = (v) => {
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [
+    v[0] / l,
+    v[1] / l,
+    v[2] / l
+  ];
+};
+var cross3 = (a, b) => [
+  a[1] * b[2] - a[2] * b[1],
+  a[2] * b[0] - a[0] * b[2],
+  a[0] * b[1] - a[1] * b[0]
+];
+var dot32 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+function basisFromNormal(nIn) {
+  const n = norm2(nIn);
+  let up = [
+    0,
+    0,
+    1
+  ];
+  if (Math.abs(dot32(up, n)) > 0.98) up = [
+    0,
+    1,
+    0
+  ];
+  const vRaw = [
+    up[0] - n[0] * dot32(up, n),
+    up[1] - n[1] * dot32(up, n),
+    up[2] - n[2] * dot32(up, n)
+  ];
+  const v = norm2(vRaw);
+  let u = norm2(cross3(v, n));
+  let nn = n;
+  if (dot32(u, [
+    -1,
+    0,
+    0
+  ]) < 0) {
+    u = [
+      -u[0],
+      -u[1],
+      -u[2]
+    ];
+    nn = [
+      -n[0],
+      -n[1],
+      -n[2]
+    ];
+  }
+  return {
+    uDir: u,
+    vDir: v,
+    nDir: nn
+  };
+}
+function nativeBases(ijkToRAS) {
+  const col = (c) => [
+    ijkToRAS[c],
+    ijkToRAS[4 + c],
+    ijkToRAS[8 + c]
+  ];
+  return {
+    axial: basisFromNormal(col(2)),
+    coronal: basisFromNormal(col(1)),
+    sagittal: basisFromNormal(col(0))
+  };
+}
+function obliquityDeg(b) {
+  const best = Math.max(Math.abs(b.nDir[0]), Math.abs(b.nDir[1]), Math.abs(b.nDir[2]));
+  return Math.acos(Math.min(1, best)) * 180 / Math.PI;
+}
 var RemindScene = class {
   kase;
   rows;
@@ -6598,6 +6713,8 @@ var RemindScene = class {
     this.segsOn = false;
     this.shellOp = 1;
     this.mergedLab = /* @__PURE__ */ new Map();
+    this.frameBases = null;
+    this.frameKey = null;
     this.gpu = gpu;
     this.format = format;
     this.opts = opts;
@@ -6832,6 +6949,7 @@ var RemindScene = class {
     ];
     row.radius = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2;
     row.segs = [];
+    this.applyBasis(row);
     this.rebuildScene(row);
   }
   mergedLab;
@@ -6928,6 +7046,31 @@ var RemindScene = class {
   /** Point every loaded row's in-plane view at the same patient-space frame. */
   applyFrame(orient, centerRAS, fovMm) {
     for (const r of this.readyRows()) r.slice.setMirrorFrame(orient, centerRAS, fovMm, fovMm);
+  }
+  frameBases;
+  frameKey;
+  /** Reslice EVERY row along the axes of one volume (null = anatomical patient planes).
+   *  The same RAS basis goes to every row, so the rows stay registered with each other. */
+  setFrameVolume(key) {
+    this.frameKey = key;
+    const src = key ? this.row(key) : void 0;
+    this.frameBases = src?.state === "ready" ? nativeBases(src.vol.ijkToRAS) : null;
+    for (const r of this.readyRows()) this.applyBasis(r);
+  }
+  frameVolume() {
+    return this.frameKey;
+  }
+  frameBasis(o) {
+    return this.frameBases?.[o] ?? null;
+  }
+  applyBasis(r) {
+    for (const o of [
+      "axial",
+      "coronal",
+      "sagittal"
+    ]) {
+      r.slice.setBasis(o, this.frameBases?.[o] ?? null);
+    }
   }
   setVolumeOpacity(o) {
     const was = this.volOpacity > 1e-3;
@@ -7208,6 +7351,7 @@ async function main() {
       applyFrames();
       syncRowLabels();
       renderTF();
+      syncFrameSel();
       updateBar();
       resize();
       requestDraw();
@@ -7231,6 +7375,7 @@ async function main() {
         await sc.ensureRow(next);
         applyFrames();
         syncRowLabels();
+        syncFrameSel();
         renderTF();
         updateBar();
         status(statusLine());
@@ -8010,6 +8155,32 @@ async function main() {
   applyColumns();
   setMode("fade");
   el("col-segs").classList.toggle("on", sc.segVisible());
+  const frameSel = el("frame-sel");
+  const syncFrameSel = () => {
+    const cur = sc.frameVolume();
+    const res = sc.readyRows();
+    frameSel.innerHTML = `<option value="">patient (axial/sag/cor)</option>` + res.map((r) => `<option value="${r.key}"${r.key === cur ? " selected" : ""}>${TIMEPOINTS[r.entry.tp].short} \xB7 ${seriesLabel(r.entry)}</option>`).join("");
+    frameSel.value = cur ?? "";
+    for (const r of cmpRows) {
+      for (const c of ORIENTS) {
+        const b = sc.frameBasis(c);
+        const lab = cv.get(canvasKey(r, c, "b")).parentElement.querySelector(".lab");
+        lab.textContent = b ? `${{
+          axial: "\u27C2K",
+          coronal: "\u27C2J",
+          sagittal: "\u27C2I"
+        }[c]} \xB7 ${obliquityDeg(b).toFixed(0)}\xB0 oblique` : c[0].toUpperCase() + c.slice(1);
+        lab.title = b ? "resliced along the chosen volume's own axes" : "anatomical plane";
+      }
+    }
+  };
+  syncFrameSel();
+  frameSel.addEventListener("change", () => {
+    sc.setFrameVolume(frameSel.value || null);
+    applyFrames();
+    syncFrameSel();
+    requestDraw();
+  });
   el("col-segs").addEventListener("click", () => {
     const on = !sc.segVisible();
     sc.setSegVisible(on);
@@ -8142,6 +8313,15 @@ async function main() {
       adoptFrame(r, o, c);
       requestDraw();
     },
+    frameVolume: () => sc.frameVolume(),
+    setFrameVolume: (k) => {
+      sc.setFrameVolume(k);
+      applyFrames();
+      syncFrameSel();
+      requestDraw();
+      return sc.frameVolume();
+    },
+    frameBasis: (o) => sc.frameBasis(o),
     segsOn: () => sc.segVisible(),
     setSegs: (on) => {
       sc.setSegVisible(on);

@@ -16,7 +16,7 @@
 // switched on, and switching one off frees its GPU objects.
 import type { Gpu } from "../../render/device.ts";
 import { SceneRenderer } from "../../render/scene-renderer.ts";
-import { SliceRenderer, type Orientation } from "../../render/slice-renderer.ts";
+import { type Orientation, type PlaneBasis, SliceRenderer } from "../../render/slice-renderer.ts";
 import { ImageField } from "../../render/fields.ts";
 import { bakeColorizeRGBA } from "../../render/bake.ts";
 import { EditableSegmentation } from "../../algorithms/editable-segmentation.ts";
@@ -123,6 +123,63 @@ export interface RowTF {
   ramp: string;
   /** [t, alpha] control points, t and alpha both 0..1; alpha is scaled by the global VR opacity. */
   points: [number, number][];
+}
+
+// ── reslicing in a volume's own frame ────────────────────────────────────────
+// Brain shift is largely gravity-driven: the brain sags once the dura is open. An
+// intra-operative ultrasound is acquired with the probe on the exposed cortex, so its
+// acquisition axes are tied to the surgical approach rather than to the scanner — which
+// means one of its native planes tends to contain the up/down direction, and the sag reads
+// directly in it. The anatomical axial/sagittal/coronal planes cut that obliquely and smear
+// it. So the viewer can reslice EVERY row along the axes of one chosen volume.
+//
+// The normal comes from the volume; the in-plane orientation does not. Using the volume's own
+// row/column directions would happily display a reformat upside-down or mirrored. Instead:
+// screen-up is whatever in-plane direction is closest to SUPERIOR, and screen-right is then
+// fixed to the radiological sense (patient left on the right). Where the plane contains the
+// S axis — the gravity case above — up on screen really is up in the patient.
+const norm = (v: Vec3): Vec3 => {
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / l, v[1] / l, v[2] / l];
+};
+const cross3 = (a: Vec3, b: Vec3): Vec3 =>
+  [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const dot3 = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+/** A display-correct basis for a plane with the given RAS normal. */
+export function basisFromNormal(nIn: Vec3): PlaneBasis {
+  const n = norm(nIn);
+  // screen-up = the in-plane direction nearest SUPERIOR; if the plane is (near) axial, S has
+  // no in-plane component, so fall back to ANTERIOR, which is how an axial view is read.
+  let up: Vec3 = [0, 0, 1];
+  if (Math.abs(dot3(up, n)) > 0.98) up = [0, 1, 0];
+  const vRaw: Vec3 = [
+    up[0] - n[0] * dot3(up, n), up[1] - n[1] * dot3(up, n), up[2] - n[2] * dot3(up, n),
+  ];
+  const v = norm(vRaw);
+  let u = norm(cross3(v, n));
+  let nn = n;
+  // radiological sense: patient LEFT on the right of screen. Flipping u alone would mirror
+  // the image, so flip u AND the normal — a 180 deg turn about the up vector, which keeps
+  // handedness and keeps up pointing up.
+  if (dot3(u, [-1, 0, 0]) < 0) { u = [-u[0], -u[1], -u[2]]; nn = [-n[0], -n[1], -n[2]]; }
+  return { uDir: u, vDir: v, nDir: nn };
+}
+
+/** The three planes of a volume's own grid: normals along its k, j and i axes. */
+export function nativeBases(ijkToRAS: number[]): Record<Orientation, PlaneBasis> {
+  const col = (c: number): Vec3 => [ijkToRAS[c], ijkToRAS[4 + c], ijkToRAS[8 + c]];
+  return {
+    axial: basisFromNormal(col(2)),     // through the acquisition stack — the stored image plane
+    coronal: basisFromNormal(col(1)),
+    sagittal: basisFromNormal(col(0)),
+  };
+}
+
+/** How far a basis is from the nearest anatomical plane, in degrees — for honest labelling. */
+export function obliquityDeg(b: PlaneBasis): number {
+  const best = Math.max(Math.abs(b.nDir[0]), Math.abs(b.nDir[1]), Math.abs(b.nDir[2]));
+  return Math.acos(Math.min(1, best)) * 180 / Math.PI;
 }
 
 export class RemindScene {
@@ -301,6 +358,7 @@ export class RemindScene {
     row.center = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
     row.radius = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2;
     row.segs = [];
+    this.applyBasis(row);          // a row loaded while a native frame is active adopts it
     this.rebuildScene(row);
   }
 
@@ -387,6 +445,24 @@ export class RemindScene {
   /** Point every loaded row's in-plane view at the same patient-space frame. */
   applyFrame(orient: Orientation, centerRAS: Vec3, fovMm: number) {
     for (const r of this.readyRows()) r.slice!.setMirrorFrame(orient, centerRAS, fovMm, fovMm);
+  }
+
+  private frameBases: Record<Orientation, PlaneBasis> | null = null;
+  private frameKey: string | null = null;
+  /** Reslice EVERY row along the axes of one volume (null = anatomical patient planes).
+   *  The same RAS basis goes to every row, so the rows stay registered with each other. */
+  setFrameVolume(key: string | null) {
+    this.frameKey = key;
+    const src = key ? this.row(key) : undefined;
+    this.frameBases = src?.state === "ready" ? nativeBases(src.vol!.ijkToRAS) : null;
+    for (const r of this.readyRows()) this.applyBasis(r);
+  }
+  frameVolume() { return this.frameKey; }
+  frameBasis(o: Orientation): PlaneBasis | null { return this.frameBases?.[o] ?? null; }
+  private applyBasis(r: Row) {
+    for (const o of ["axial", "coronal", "sagittal"] as Orientation[]) {
+      r.slice!.setBasis(o, this.frameBases?.[o] ?? null);
+    }
   }
 
   setVolumeOpacity(o: number) {

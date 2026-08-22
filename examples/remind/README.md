@@ -116,6 +116,26 @@ checked rather than assumed by `worker/build_index.py`:
 - **Slice ↔ 3D** are two expressions of the same thing — a centre and a span — so zooming a
   slice dollies the 3D camera and dollying the 3D zooms the slices (`Link 3D`, on by default).
   Orbiting is deliberately *not* coupled: it changes direction, not extent.
+- **Reslicing in a volume's own frame.** Brain shift is largely gravity-driven — the brain
+  sags once the dura is open. An intra-operative ultrasound is acquired with the probe on the
+  exposed cortex, so its axes follow the surgical approach rather than the scanner, and one of
+  its native planes tends to contain the up/down direction. The anatomical planes cut that
+  obliquely and smear it: for ReMIND-001's pre-dura US the acquisition plane is **47° off-axis**.
+  The `frame` control reslices **every** row along the axes of one chosen volume, so the US
+  reads square-on and the MR is reformatted to match.
+
+  The normal comes from the volume; the in-plane orientation does not. Using the volume's own
+  row/column directions would cheerfully display a reformat mirrored or upside-down. Instead
+  screen-up is the in-plane direction nearest **superior** (measured `v·S = 0.878` for that
+  case, so gravity really does read vertically), and screen-right is then fixed to the
+  radiological sense — flipping *u and the normal together*, a 180° turn about the up vector,
+  so handedness and "up" both survive. The view captions stop claiming "Axial" and say what
+  they are: `⟂K · 47° oblique`.
+
+  This needed core support: `SliceRenderer` had the three anatomical bases hard-coded. A basis
+  is now a `(uDir, vDir, nDir)` triple in RAS with `setBasis()` to override it per orientation,
+  and span/scrub/projection work off those vectors — so the anatomical cases reduce to exactly
+  the arithmetic they always used, and Slicer's slice-stepping parity fixture still verifies.
 - **A newly selected volume is aligned immediately.** A volume already resident from the
   prefetch never goes through the load path, so the shared frame has to be re-applied on
   selection — without that it kept its default pan/zoom and sat misaligned until some gesture

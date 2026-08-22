@@ -36,6 +36,9 @@
   #cmp-fade { width: 220px; accent-color: #f0d24a; }
   #cmp-speed:disabled { opacity: .4; }
   #cmp-note { font-variant-numeric: tabular-nums; min-width: 128px; }
+  #cmpbar .frame { display: flex; align-items: center; gap: 5px; }
+  #cmpbar .frame label { font: 800 9px -apple-system, system-ui, sans-serif; letter-spacing: .07em; color: #9fb3d0; }
+  #frame-sel { max-width: 220px; }
   #cmp-count { margin-left: auto; color: #4d5c78; }
   .hintkey { color: #4d5c78; }
   .hintkey b { color: #9fb3d0; font-weight: 600; }
@@ -154,6 +157,7 @@
       </select>
       <input id="cmp-fade" type="range" min="0" max="100" value="50" title="blend A ⇄ B (applies to every row)">
       <span id="cmp-note"></span>
+      <span class="frame"><label for="frame-sel">frame</label><select id="frame-sel" title="reslice every view along a volume's own acquisition axes — an intra-op US plane usually contains the up/down direction, which is where brain shift reads"></select></span>
       <span class="hintkey"><b>space</b> flips A/B · <b>shift+move</b> crosshair · <b>dbl-click</b> maximize</span>
       <button id="addrow" class="chip" title="add another comparison">+ row</button>
       <span id="cmp-count"></span>
@@ -178,6 +182,6 @@
     <div id="rows"></div>
     <div id="strip"><div id="jumps"></div></div>
   </div>
-  <script type="module" src="remind-compare.js?v=20260822f"></script>   <!-- bump per deploy: stale cached bundles read as phantom behaviour -->
+  <script type="module" src="remind-compare.js?v=20260822g"></script>   <!-- bump per deploy: stale cached bundles read as phantom behaviour -->
 </body>
 </html>

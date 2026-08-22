@@ -36,7 +36,9 @@ import { createCrosshair, drawCross, rasToScreen3D } from "../../render/demos/cr
 import { installChrome, type VizControl } from "../../render/demos/sl-chrome.ts";
 import { installIdcInfo } from "../../render/demos/idc-info.ts";
 import { ohifViewerURL } from "../../render/vendor/idc_tools/s3.js";
-import { DEFAULT_TF_POINTS, defaultRamp, RAMP_NAMES, RAMPS, RemindScene, type Row } from "./remind-compare-scene.ts";
+import {
+  DEFAULT_TF_POINTS, defaultRamp, obliquityDeg, RAMP_NAMES, RAMPS, RemindScene, type Row,
+} from "./remind-compare-scene.ts";
 import {
   defaultPairs, loadIndex, rgbCss, seriesLabel, TIMEPOINTS,
   type CaseEntry, type ReMINDIndex, type SeriesEntry,
@@ -224,6 +226,7 @@ async function main() {
       applyFrames();
       syncRowLabels();
       renderTF();
+      syncFrameSel();
       updateBar();
       resize();
       requestDraw();
@@ -256,6 +259,7 @@ async function main() {
         await sc.ensureRow(next);
         applyFrames();               // a prefetched volume must be frame-ready the instant it is picked
         syncRowLabels();
+        syncFrameSel();
         renderTF();
         updateBar();
         status(statusLine());
@@ -886,6 +890,34 @@ async function main() {
   applyColumns();
   setMode("fade");
   el("col-segs").classList.toggle("on", sc.segVisible());
+  // ── reslice frame ──────────────────────────────────────────────────────────
+  const frameSel = el("frame-sel") as HTMLSelectElement;
+  const syncFrameSel = () => {
+    const cur = sc.frameVolume();
+    const res = sc.readyRows();
+    frameSel.innerHTML = `<option value="">patient (axial/sag/cor)</option>` + res.map((r) =>
+      `<option value="${r.key}"${r.key === cur ? " selected" : ""}>${TIMEPOINTS[r.entry.tp].short} · ${seriesLabel(r.entry)}</option>`).join("");
+    frameSel.value = cur ?? "";
+    // the cell captions must stop claiming "Axial" once the planes are no longer anatomical
+    for (const r of cmpRows) {
+      for (const c of ORIENTS) {
+        const b = sc.frameBasis(c);
+        const lab = cv.get(canvasKey(r, c, "b"))!.parentElement!.querySelector(".lab") as HTMLElement;
+        lab.textContent = b
+          ? `${{ axial: "⟂K", coronal: "⟂J", sagittal: "⟂I" }[c]} · ${obliquityDeg(b).toFixed(0)}° oblique`
+          : c[0].toUpperCase() + c.slice(1);
+        lab.title = b ? "resliced along the chosen volume's own axes" : "anatomical plane";
+      }
+    }
+  };
+  syncFrameSel();
+  frameSel.addEventListener("change", () => {
+    sc.setFrameVolume(frameSel.value || null);
+    applyFrames();          // pan/zoom are basis-relative, so re-apply the shared frame
+    syncFrameSel();
+    requestDraw();
+  });
+
   el("col-segs").addEventListener("click", () => {
     const on = !sc.segVisible();
     sc.setSegVisible(on);
@@ -963,6 +995,9 @@ async function main() {
       adoptFrame(r, o, c);
       requestDraw();
     },
+    frameVolume: () => sc.frameVolume(),
+    setFrameVolume: (k: string | null) => { sc.setFrameVolume(k); applyFrames(); syncFrameSel(); requestDraw(); return sc.frameVolume(); },
+    frameBasis: (o: Orientation) => sc.frameBasis(o),
     segsOn: () => sc.segVisible(),
     setSegs: (on: boolean) => { sc.setSegVisible(on); el("col-segs")?.classList.toggle("on", on); requestDraw(); },
     prefetching: () => prefetching,
