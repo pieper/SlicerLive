@@ -28,10 +28,21 @@
             color: #8a93a6; background: rgba(10,12,18,.55); padding: 3px 8px; border-radius: 6px; max-width: 70vw;
             pointer-events: none; }
   #credit:empty { display: none; }
-  #refine { position: fixed; right: 12px; bottom: 10px; z-index: 6; font: 600 12px -apple-system, system-ui, sans-serif;
-            color: #cfe6ff; background: rgba(20,40,66,.82); border: 1px solid #2e6ea0; padding: 5px 11px; border-radius: 999px;
-            box-shadow: 0 2px 10px rgba(0,0,0,.35); pointer-events: none; }
+  #refine { position: fixed; right: 16px; bottom: 16px; z-index: 6; font: 700 22px -apple-system, system-ui, sans-serif;
+            color: #dff0ff; background: rgba(20,40,66,.9); border: 1px solid #3f88c5; padding: 10px 20px; border-radius: 999px;
+            box-shadow: 0 3px 16px rgba(0,0,0,.45); pointer-events: none; letter-spacing: .2px; }
+  #refine::before { content: "◐ "; }
   #refine:empty { display: none; }
+  #logo { font: 700 13px -apple-system, system-ui, sans-serif; background: linear-gradient(180deg,#1b3350,#12203a);
+           color: #cfe6ff; border: 1px solid #33628f; border-radius: 8px; padding: 6px 11px; cursor: pointer; margin-right: 4px; }
+  #logo:hover { border-color: #4a90d9; }
+  #lutPopup { display: none; position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.45); align-items: center; justify-content: center; }
+  #lutPopup.show { display: flex; }
+  #lutPopup .row { display: flex; align-items: center; gap: 10px; margin: 12px 0; font: 500 13px -apple-system, system-ui, sans-serif; }
+  #lutPopup .row select, #lutPopup .row input[type=range] { flex: 1; }
+  #lutPopup .about { margin-top: 16px; }
+  #lutPopup .about a { color: #7fb2ff; text-decoration: none; font: 500 13px -apple-system, system-ui, sans-serif; }
+  #lutShiftVal { min-width: 2.5em; text-align: right; font: 600 12px ui-monospace, Menlo, monospace; color: #9fb3d0; }
   #scene { font: 600 12px -apple-system, system-ui, sans-serif; background: #12151f; color: #dfe4f0; border: 1px solid #2a3040; border-radius: 7px; padding: 6px 9px; max-width: 40vw; }
   #scene:disabled { opacity: .5; }
   #mode { font: 600 12px -apple-system, system-ui, sans-serif; color: #04121c; cursor: pointer;
@@ -73,6 +84,7 @@
 </head>
 <body>
 <header>
+  <button id="logo" title="SlicerLive — rendering & display options">◉ SlicerLive</button>
   <h1>Remote Render<span class="badge">Deno · WebGPU · WS</span></h1>
   <select id="scene" title="Choose a specimen (MorphoDepot / SlicerMorph)"></select>
   <button id="mode">Rendering on the REMOTE GPU — click to render locally</button>
@@ -100,6 +112,22 @@
       restart). Shorter saves more; longer keeps it instantly responsive.</p>
     <div id="idleOpts"></div>
     <button class="close" id="idleClose">Done</button>
+  </div>
+</div>
+<div id="lutPopup">
+  <div class="pop">
+    <h3>◉ SlicerLive</h3>
+    <p>Rendering options for the current specimen. The colour/opacity <b>lookup table</b> and the
+      <b>shift</b> (slide the transfer function along the intensity axis) apply live on the remote GPU.</p>
+    <label class="row">Lookup table
+      <select id="lutSel"></select>
+    </label>
+    <label class="row">Shift
+      <input type="range" id="lutShift" min="-0.5" max="0.5" step="0.01" value="0">
+      <span id="lutShiftVal">0</span>
+    </label>
+    <p class="about"><a id="aboutLink" href="https://github.com/pieper/SlicerLive" target="_blank" rel="noopener">About SlicerLive — github.com/pieper/SlicerLive ↗</a></p>
+    <button class="close" id="lutClose">Done</button>
   </div>
 </div>
 <div id="overlay">

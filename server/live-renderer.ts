@@ -14,8 +14,8 @@ import { buildMultiVolume } from "../render/demos/selftest-scenes.ts";
 import { TransformGizmoField } from "../render/transform-gizmo-field.ts";
 import { ImageField } from "../render/fields.ts";
 import { loadNrrd } from "../render/nrrd.ts";
-import { fetchZarrVolume, type ZarrDesc } from "../render/zarr.ts";
-import { fetchVP, lutFromVP } from "../render/vp-preset.ts";
+import { fetchZarrVolumeNative, type ZarrDesc } from "../render/zarr.ts";
+import { fetchVP, lutFromVP, VP_PRESETS } from "../render/vp-preset.ts";
 import type { Field } from "../render/fields.ts";
 import { identity, type Mat4, type Vec3 } from "../render/mat4.ts";
 import { Av1Sidecar, codedSize } from "./av1-sidecar.ts";
@@ -127,6 +127,8 @@ let gizmo: TransformGizmoField | null = null;
 let xformC0: Vec3 = [0, 0, 0];
 let xformM: Mat4 = identity();
 let currentScene = "";
+let curRange: [number, number] = [0, 255];   // current specimen scalar range (for shift)
+let curPreset = "";                          // current specimen VP preset name
 const fieldCache = new Map<string, ImageField>();
 let loadToken = 0;                                             // bumped per scene switch; stale upgrades check it
 let pendingUpgrade: { field: ImageField; token: number } | null = null;   // full-res field awaiting swap-in
@@ -175,17 +177,21 @@ async function loadScene(name: string, onProgress?: (done: number, total: number
       // of after the whole download + upload.
       const base = spec.zarrBase;   // capture (narrowing is lost inside the async upgrade closure)
       const meta = await (await fetch(base + "meta.json")).json() as ZarrMeta;
+      curRange = meta.range; curPreset = meta.preset || spec.preset;
       const vp = await fetchVP(meta.preset || spec.preset).catch(() => null);
-      const mkField = (zv: { data: Float32Array; dims: [number, number, number]; range: [number, number] }, ijk: number[]) => {
+      const mkField = (zv: { data: ArrayLike<number> & ArrayBufferView; dims: [number, number, number]; range: [number, number] }, ijk: number[]) => {
         const { lut, clim, shade } = vp ? lutFromVP(vp, zv.range) : { lut: buildGrayLut(), clim: zv.range, shade: [0.25, 0.75, 0.5, 24] as [number, number, number, number] };
-        return new ImageField(gpu.device, zv.data, zv.dims, [1, 1, 1], lut, { clim, ijkToRAS: ijk, shade });
+        // ImageField stores uint8 as r8unorm (native, 4× cheaper); any other dtype promotes to f32.
+        const d: Float32Array | Uint8Array | Uint16Array = zv.data instanceof Uint8Array || zv.data instanceof Uint16Array || zv.data instanceof Float32Array
+          ? zv.data : Float32Array.from(zv.data as ArrayLike<number>);
+        return new ImageField(gpu.device, d, zv.dims, [1, 1, 1], lut, { clim, ijkToRAS: ijk, shade });
       };
       const levels: ZarrLevel[] = meta.levels ?? [{ ...(meta.zarr as ZarrDesc), ijkToRAS: meta.ijkToRAS, dims: meta.dims, bytes: meta.bytes ?? 0, level: 0 }];
       const descOf = (L: ZarrLevel): ZarrDesc => ({ dir: L.dir, dataset: L.dataset, shape: L.shape, chunks: L.chunks, chunkGrid: L.chunkGrid, dtype: L.dtype });
 
       const coarse = levels[levels.length - 1];
       console.log(`[live-renderer] ${spec.label} proxy L${coarse.level} ${coarse.dims.join("×")} …`);
-      const cz = await fetchZarrVolume(base, descOf(coarse), (n) => { mb += n; });
+      const cz = await fetchZarrVolumeNative(base, descOf(coarse), (n) => { mb += n; });
       const proxy = mkField(cz, coarse.ijkToRAS);
       setupSpecimenScene(proxy, spec);
 
@@ -196,7 +202,7 @@ async function loadScene(name: string, onProgress?: (done: number, total: number
           const total = full0.bytes ?? 0;
           let done = 0, lastSent = 0;
           onProgress?.(0, total);
-          const zv = await fetchZarrVolume(base, descOf(full0), (n) => {
+          const zv = await fetchZarrVolumeNative(base, descOf(full0), (n) => {
             mb += n; done += n; const now = performance.now();
             if (onProgress && (now - lastSent > 100 || done >= total)) { lastSent = now; onProgress(done, total); }
           });
@@ -520,6 +526,7 @@ function handleWs(req: Request): Response {
       type: "hello", proto: PROTO, center, radius, name: sceneName, sceneUrl: SCENE_URL, demo: DEMO,
       rate: GPU_RATE_PER_HR, scaledownS: SCALEDOWN_S,
       scenes: SCENE_MENU, scene: currentScene,
+      lutPresets: Object.keys(VP_PRESETS), preset: curPreset,
       widget: xformTarget ? { center: xformC0, m: [...xformM] } : null,
     }));
   };
@@ -529,7 +536,7 @@ function handleWs(req: Request): Response {
   socket.onmessage = async (e) => {
     try {
       // A UNION, not an intersection: the message shapes have incompatible `type` fields.
-      const m = JSON.parse(e.data as string) as CamMsg | XformMsg | { type: "ack" | "resync" | "cack" | "caps" | "scene"; av1?: boolean; scene?: string };
+      const m = JSON.parse(e.data as string) as CamMsg | XformMsg | { type: "ack" | "resync" | "cack" | "caps" | "scene" | "lut"; av1?: boolean; scene?: string; preset?: string; shift?: number };
       if (m.type === "scene") {
         const name = (m as { scene?: string }).scene;
         if (typeof name !== "string" || name === currentScene || sceneLoading) return;
@@ -564,6 +571,25 @@ function handleWs(req: Request): Response {
         latest = c;
         lastMsg = performance.now();
         if (!same) { gen++; genAt = performance.now(); abortWait(); }
+      }
+      else if (m.type === "lut") {
+        // Live LUT/shift on the current specimen (the SlicerLive popup control). shift is a fraction
+        // of the scalar range that offsets the transfer function along the intensity axis (Slicer VR
+        // "Shift"). Rebuild the LUT from the chosen VP preset and re-window; one fresh frame follows.
+        const lm = m as { preset?: string; shift?: number };
+        if (xformTarget && currentScene !== "multi") {
+          const preset = lm.preset ?? curPreset;
+          const shift = lm.shift ?? 0;
+          const vp = await fetchVP(preset).catch(() => null);
+          if (vp) {
+            const { lut, clim } = lutFromVP(vp, curRange);
+            const span = clim[1] - clim[0];
+            xformTarget.setLUT(lut);
+            xformTarget.setClim(clim[0] + shift * span, clim[1] + shift * span);
+            curPreset = preset;
+            gen++; abortWait();
+          }
+        }
       }
       else if (m.type === "caps") {
         clientAv1 = !!(m as { av1?: boolean }).av1 && sidecar !== null;

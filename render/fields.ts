@@ -87,23 +87,32 @@ export class ImageField implements Field {
   private unit: number;
   private stepMm: number;
   private box: [Vec3, Vec3];
+  private normScale = 1;   // r8unorm samples return raw/255; clim is packed /normScale so shader math is unchanged
 
-  constructor(dev: GPUDevice, data: Float32Array, dims: Vec3, spacing: Vec3, lut: Uint8Array, opts: ImageFieldOpts) {
+  constructor(dev: GPUDevice, data: Float32Array | Uint8Array | Uint16Array, dims: Vec3, spacing: Vec3, lut: Uint8Array, opts: ImageFieldOpts) {
     const center = opts.center ?? [0, 0, 0];
-    this.volTex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    // Store the volume in its NATIVE dtype where possible — 4× less VRAM + upload than expanding to
+    // f32. r8unorm/r32float are both `float` sample types (filterable), so the sampling WGSL and bind
+    // layout are unchanged; only the clim is normalized (below) since r8unorm samples return v/255.
+    // uint16 has no filterable core format (r16uint isn't linearly sampled), so it promotes to f32.
+    let src: ArrayBufferView = data, fmt: GPUTextureFormat = "r32float", bpe = 4;
+    this.normScale = 1;
+    if (data instanceof Uint8Array) { fmt = "r8unorm"; bpe = 1; this.normScale = 255; }
+    else if (data instanceof Uint16Array) { src = Float32Array.from(data); fmt = "r32float"; bpe = 4; }
+    this.volTex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: fmt, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     // Upload the 3D texture in Z-slabs. wgpu's writeTexture stages the whole write through ONE
     // buffer whose size can't exceed the device's maxBufferSize (~4 GB on an L4) — a single write
     // of a multi-GB volume crashes the backend. Chunking the depth keeps each staging buffer small,
     // so volumes are bounded only by total VRAM, not by one upload's size.
     {
-      const bytesPerRow = dims[0] * 4, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
+      const bytesPerRow = dims[0] * bpe, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
       const CHUNK = 256 * 1024 * 1024;   // ~256 MB per write — comfortably under any maxBufferSize
       const slab = Math.max(1, Math.min(dims[2], Math.floor(CHUNK / Math.max(1, sliceBytes))));
       for (let z = 0; z < dims[2]; z += slab) {
         const depth = Math.min(slab, dims[2] - z);
         dev.queue.writeTexture(
           { texture: this.volTex, origin: { x: 0, y: 0, z } },
-          data,
+          src,
           { offset: z * sliceBytes, bytesPerRow, rowsPerImage },
           [dims[0], dims[1], depth],
         );
@@ -226,7 +235,7 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
 
   fillUniforms(out: Float32Array, off: number) {
     out.set(this.p2t, off);
-    out[off + 16] = this.clim[0]; out[off + 17] = this.clim[1];
+    out[off + 16] = this.clim[0] / this.normScale; out[off + 17] = this.clim[1] / this.normScale;
     out[off + 20] = this.shade[0]; out[off + 21] = this.shade[1]; out[off + 22] = this.shade[2]; out[off + 23] = this.shade[3];
     out[off + 24] = this.unit;
   }

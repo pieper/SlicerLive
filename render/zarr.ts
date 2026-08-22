@@ -30,6 +30,15 @@ export interface ZarrVolume {
   range: [number, number];            // observed [min, max] scalar value
 }
 
+/** Like ZarrVolume but keeps the stored NATIVE dtype (e.g. Uint8Array for "<u1") — 4× less host
+ *  RAM and GPU upload than expanding to f32, so a matching-format texture (r8unorm) is cheap. */
+export interface ZarrVolumeNative {
+  data: Uint8Array | Int8Array | Uint16Array | Int16Array | Uint32Array | Int32Array | Float32Array | Float64Array;
+  dtype: string;
+  dims: [number, number, number];
+  range: [number, number];
+}
+
 async function inflateDeflate(buf: ArrayBuffer): Promise<ArrayBuffer> {
   const ds = new DecompressionStream("deflate");
   return await new Response(new Response(buf).body!.pipeThrough(ds)).arrayBuffer();
@@ -44,6 +53,18 @@ export async function fetchZarrVolume(
   onBytes?: (n: number) => void,
   concurrency = 12,
 ): Promise<ZarrVolume> {
+  const zv = await fetchZarrVolumeNative(blobBase, z, onBytes, concurrency);
+  const data = zv.data instanceof Float32Array ? zv.data : Float32Array.from(zv.data);
+  return { data, dims: zv.dims, range: zv.range };
+}
+
+/** As fetchZarrVolume, but the assembled array keeps the stored dtype (no f32 expansion). */
+export async function fetchZarrVolumeNative(
+  blobBase: string,
+  z: ZarrDesc,
+  onBytes?: (n: number) => void,
+  concurrency = 12,
+): Promise<ZarrVolumeNative> {
   const Ctor = ZDT[z.dtype] ?? Int16Array;
   const [nz, ny, nx] = z.shape, [cz, cy, cx] = z.chunks, [ncz, ncy, ncx] = z.chunkGrid;
   // Content-addressed chunks (chunkHashes: "k.j.i" -> hash, fetched flat at blobBase+hash) or
@@ -52,7 +73,7 @@ export async function fetchZarrVolume(
   const posBase = blobBase + z.dir + "/" + z.dataset + "/";
   const chunkUrl = (kk: number, jj: number, ii: number) =>
     hashes ? blobBase + hashes[kk + "." + jj + "." + ii] : posBase + kk + "." + jj + "." + ii;
-  const out = new Float32Array(nz * ny * nx);
+  const out = new Ctor(nz * ny * nx);   // NATIVE dtype (e.g. Uint8Array) — no f32 blow-up
   let lo = Infinity, hi = -Infinity;
 
   const jobs: [number, number, number][] = [];
@@ -105,5 +126,5 @@ export async function fetchZarrVolume(
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, worker));
 
-  return { data: out, dims: [nx, ny, nz], range: [lo, hi] };
+  return { data: out, dtype: z.dtype, dims: [nx, ny, nz], range: [lo, hi] };
 }

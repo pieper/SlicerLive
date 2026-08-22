@@ -1231,18 +1231,31 @@ var ImageField = class {
   unit;
   stepMm;
   box;
+  normScale = 1;
+  // r8unorm samples return raw/255; clim is packed /normScale so shader math is unchanged
   constructor(dev, data, dims, spacing, lut, opts) {
     const center = opts.center ?? [0, 0, 0];
-    this.volTex = dev.createTexture({ size: dims, dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    let src = data, fmt = "r32float", bpe = 4;
+    this.normScale = 1;
+    if (data instanceof Uint8Array) {
+      fmt = "r8unorm";
+      bpe = 1;
+      this.normScale = 255;
+    } else if (data instanceof Uint16Array) {
+      src = Float32Array.from(data);
+      fmt = "r32float";
+      bpe = 4;
+    }
+    this.volTex = dev.createTexture({ size: dims, dimension: "3d", format: fmt, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     {
-      const bytesPerRow = dims[0] * 4, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
+      const bytesPerRow = dims[0] * bpe, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
       const CHUNK = 256 * 1024 * 1024;
       const slab = Math.max(1, Math.min(dims[2], Math.floor(CHUNK / Math.max(1, sliceBytes))));
       for (let z = 0; z < dims[2]; z += slab) {
         const depth = Math.min(slab, dims[2] - z);
         dev.queue.writeTexture(
           { texture: this.volTex, origin: { x: 0, y: 0, z } },
-          data,
+          src,
           { offset: z * sliceBytes, bytesPerRow, rowsPerImage },
           [dims[0], dims[1], depth]
         );
@@ -1276,6 +1289,11 @@ var ImageField = class {
   }
   getClim() {
     return [this.clim[0], this.clim[1]];
+  }
+  /** Phong shading tuple [ka, kd, ks, shininess] — re-packed into the material uniform next
+   *  render (VR presets carry their own lighting). [1,0,0,1] = flat emission (no shading). */
+  setShade(shade) {
+    this.shade = [shade[0], shade[1], shade[2], shade[3]];
   }
   origP2t;
   // sampling matrix + box at identity, for setWorldTransform
@@ -1377,8 +1395,8 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   }
   fillUniforms(out, off) {
     out.set(this.p2t, off);
-    out[off + 16] = this.clim[0];
-    out[off + 17] = this.clim[1];
+    out[off + 16] = this.clim[0] / this.normScale;
+    out[off + 17] = this.clim[1] / this.normScale;
     out[off + 20] = this.shade[0];
     out[off + 21] = this.shade[1];
     out[off + 22] = this.shade[2];
@@ -1411,12 +1429,17 @@ async function inflateDeflate(buf) {
   return await new Response(new Response(buf).body.pipeThrough(ds)).arrayBuffer();
 }
 async function fetchZarrVolume(blobBase, z, onBytes, concurrency = 12) {
+  const zv = await fetchZarrVolumeNative(blobBase, z, onBytes, concurrency);
+  const data = zv.data instanceof Float32Array ? zv.data : Float32Array.from(zv.data);
+  return { data, dims: zv.dims, range: zv.range };
+}
+async function fetchZarrVolumeNative(blobBase, z, onBytes, concurrency = 12) {
   const Ctor = ZDT[z.dtype] ?? Int16Array;
   const [nz, ny, nx] = z.shape, [cz, cy, cx] = z.chunks, [ncz, ncy, ncx] = z.chunkGrid;
   const hashes = z.chunkHashes;
   const posBase = blobBase + z.dir + "/" + z.dataset + "/";
   const chunkUrl = (kk, jj, ii) => hashes ? blobBase + hashes[kk + "." + jj + "." + ii] : posBase + kk + "." + jj + "." + ii;
-  const out = new Float32Array(nz * ny * nx);
+  const out = new Ctor(nz * ny * nx);
   let lo = Infinity, hi = -Infinity;
   const jobs = [];
   for (let kk = 0; kk < ncz; kk++) for (let jj = 0; jj < ncy; jj++) for (let ii = 0; ii < ncx; ii++) jobs.push([kk, jj, ii]);
@@ -1466,7 +1489,7 @@ async function fetchZarrVolume(blobBase, z, onBytes, concurrency = 12) {
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, worker));
-  return { data: out, dims: [nx, ny, nz], range: [lo, hi] };
+  return { data: out, dtype: z.dtype, dims: [nx, ny, nz], range: [lo, hi] };
 }
 
 // render/mrson.ts
@@ -3171,6 +3194,28 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let clientScene = "";
   const sceneSel = document.getElementById("scene");
   const creditEl = document.getElementById("credit");
+  const lutPopup = document.getElementById("lutPopup");
+  const lutSel = document.getElementById("lutSel");
+  const lutShift = document.getElementById("lutShift");
+  const lutShiftVal = document.getElementById("lutShiftVal");
+  const logoBtn = document.getElementById("logo");
+  logoBtn?.addEventListener("click", () => lutPopup?.classList.add("show"));
+  document.getElementById("lutClose")?.addEventListener("click", () => lutPopup?.classList.remove("show"));
+  lutPopup?.addEventListener("click", (e) => {
+    if (e.target === lutPopup) lutPopup.classList.remove("show");
+  });
+  const sendLut = () => {
+    if (mode !== "remote") {
+      status("switch to REMOTE to change the lookup table", true);
+      return;
+    }
+    const preset = lutSel?.value ?? "";
+    const shift = lutShift ? Number(lutShift.value) : 0;
+    if (lutShiftVal) lutShiftVal.textContent = shift.toFixed(2);
+    ws?.send(JSON.stringify({ type: "lut", preset, shift }));
+  };
+  lutSel?.addEventListener("change", sendLut);
+  lutShift?.addEventListener("input", sendLut);
   let sceneMenu = [];
   const showCredit = (name) => {
     if (!creditEl) return;
@@ -3413,6 +3458,13 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         const reconnecting = !!camera;
         demo = m.demo ?? "single";
         if (Array.isArray(m.scenes)) sceneMenu = m.scenes;
+        if (lutSel && Array.isArray(m.lutPresets) && lutSel.options.length === 0) {
+          for (const name of m.lutPresets) lutSel.appendChild(new Option(name, name));
+        }
+        if (lutSel && typeof m.preset === "string" && m.preset) {
+          if (![...lutSel.options].some((o) => o.value === m.preset)) lutSel.appendChild(new Option(m.preset, m.preset));
+          lutSel.value = m.preset;
+        }
         if (sceneSel && Array.isArray(m.scenes) && sceneSel.options.length === 0) {
           for (const sc of m.scenes) {
             const o = document.createElement("option");
@@ -3435,6 +3487,10 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
           showCredit(m.scene);
         }
         widgetSeed = m.widget ?? null;
+        if (sceneChanged && lutShift) {
+          lutShift.value = "0";
+          if (lutShiftVal) lutShiftVal.textContent = "0";
+        }
         if (sceneChanged) {
           widget = null;
           widgetAttached = false;

@@ -377,6 +377,24 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let clientScene = "";            // which scene the server currently has loaded
   const sceneSel = document.getElementById("scene") as HTMLSelectElement | null;
   const creditEl = document.getElementById("credit");
+  // SlicerLive logo popup: live LUT preset + transfer-function shift on the remote specimen.
+  const lutPopup = document.getElementById("lutPopup");
+  const lutSel = document.getElementById("lutSel") as HTMLSelectElement | null;
+  const lutShift = document.getElementById("lutShift") as HTMLInputElement | null;
+  const lutShiftVal = document.getElementById("lutShiftVal");
+  const logoBtn = document.getElementById("logo");
+  logoBtn?.addEventListener("click", () => lutPopup?.classList.add("show"));
+  document.getElementById("lutClose")?.addEventListener("click", () => lutPopup?.classList.remove("show"));
+  lutPopup?.addEventListener("click", (e) => { if (e.target === lutPopup) lutPopup.classList.remove("show"); });
+  const sendLut = () => {
+    if (mode !== "remote") { status("switch to REMOTE to change the lookup table", true); return; }
+    const preset = lutSel?.value ?? "";
+    const shift = lutShift ? Number(lutShift.value) : 0;
+    if (lutShiftVal) lutShiftVal.textContent = shift.toFixed(2);
+    ws?.send(JSON.stringify({ type: "lut", preset, shift }));
+  };
+  lutSel?.addEventListener("change", sendLut);
+  lutShift?.addEventListener("input", sendLut);
   let sceneMenu: Array<{ name: string; credit?: string }> = [];
   const showCredit = (name: string) => {
     if (!creditEl) return;
@@ -573,6 +591,13 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         demo = m.demo ?? "single";
         // Populate the specimen menu (once), and note which scene the server has loaded.
         if (Array.isArray(m.scenes)) sceneMenu = m.scenes;
+        if (lutSel && Array.isArray(m.lutPresets) && lutSel.options.length === 0) {
+          for (const name of m.lutPresets) lutSel.appendChild(new Option(name, name));
+        }
+        if (lutSel && typeof m.preset === "string" && m.preset) {
+          if (![...lutSel.options].some((o) => o.value === m.preset)) lutSel.appendChild(new Option(m.preset, m.preset));
+          lutSel.value = m.preset;
+        }
         if (sceneSel && Array.isArray(m.scenes) && sceneSel.options.length === 0) {
           for (const sc of m.scenes) {
             const o = document.createElement("option");
@@ -588,6 +613,7 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         const sceneChanged = typeof m.scene === "string" && m.scene !== clientScene && clientScene !== "";
         if (typeof m.scene === "string") { clientScene = m.scene; if (sceneSel) { sceneSel.value = m.scene; sceneSel.disabled = false; } showCredit(m.scene); }
         widgetSeed = m.widget ?? null;
+        if (sceneChanged && lutShift) { lutShift.value = "0"; if (lutShiftVal) lutShiftVal.textContent = "0"; }
         if (sceneChanged) {
           // A different specimen: drop the old gizmo, re-frame the camera, remount for the new one.
           widget = null; widgetAttached = false;
