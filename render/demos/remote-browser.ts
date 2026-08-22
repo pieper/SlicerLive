@@ -17,6 +17,7 @@ import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { attachWidgetControls, type Handle, projectToCanvasCss, unprojectToCameraPlane } from "./widget-control.ts";
 import { componentOf, makeXformWidget, type XformTarget, type XformWidget, type XMeta } from "./xform-widget.ts";
 import { buildMultiVolume } from "./selftest-scenes.ts";
+import { installChrome, type Chrome } from "./sl-chrome.ts";
 import { Av1Presenter } from "../av1-presenter.ts";
 import type { ImageField } from "../fields.ts";
 import { identity, type Mat4, type Vec3 } from "../mat4.ts";
@@ -377,39 +378,33 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let clientScene = "";            // which scene the server currently has loaded
   const sceneSel = document.getElementById("scene") as HTMLSelectElement | null;
   const creditEl = document.getElementById("credit");
-  // SlicerLive logo popup: live volume-property (VP) preview + transfer-function shift.
-  const lutPopup = document.getElementById("lutPopup");
-  const lutList = document.getElementById("lutList");
-  const lutShift = document.getElementById("lutShift") as HTMLInputElement | null;
-  const lutShiftVal = document.getElementById("lutShiftVal");
-  const logoBtn = document.getElementById("logo");
-  let activePreset = "";
-  logoBtn?.addEventListener("click", () => lutPopup?.classList.add("show"));
-  document.getElementById("lutClose")?.addEventListener("click", () => lutPopup?.classList.remove("show"));
-  lutPopup?.addEventListener("click", (e) => { if (e.target === lutPopup) lutPopup.classList.remove("show"); });
-  const sendLut = (preset: string) => {
+  // SlicerLive chrome: the SAME hover-badge component the other demos use — a rounded logo pinned to
+  // the top-right of the 3D view; hovering opens the popup, clicking outside dismisses it. Holds a
+  // live volume-property (VP) picker + transfer-function shift slider (from @muratmaga's VPs).
+  let activePreset = "", currentShift = 0;
+  let vpList: Array<{ name: string; description?: string }> = [];
+  let chrome: Chrome | null = null;
+  const sendLut = () => {
     if (mode !== "remote") { status("switch to REMOTE to change the volume property", true); return; }
-    activePreset = preset;
-    if (lutList) for (const b of Array.from(lutList.children)) (b as HTMLElement).classList.toggle("active", (b as HTMLElement).dataset.preset === preset);
-    const shift = lutShift ? Number(lutShift.value) : 0;
-    if (lutShiftVal) lutShiftVal.textContent = shift.toFixed(3);
-    ws?.send(JSON.stringify({ type: "lut", preset, shift }));
+    ws?.send(JSON.stringify({ type: "lut", preset: activePreset, shift: currentShift }));
   };
-  // Rebuild the VP button list from the server's manifest (once). Clicking a VP applies it LIVE and
-  // keeps it as the active one; the shift slider re-applies the active VP as you drag.
-  const buildLutList = (vps: Array<{ name: string; description?: string }>) => {
-    if (!lutList || lutList.childElementCount) return;
-    for (const vp of vps) {
-      const b = document.createElement("button");
-      b.dataset.preset = vp.name;
-      b.innerHTML = `<span class="vpname"></span><span class="vpdesc"></span>`;
-      (b.querySelector(".vpname") as HTMLElement).textContent = vp.name;
-      (b.querySelector(".vpdesc") as HTMLElement).textContent = vp.description ?? "";
-      b.addEventListener("click", () => sendLut(vp.name));
-      lutList.appendChild(b);
-    }
+  const ensureChrome = () => {
+    if (chrome || !vpList.length) return;
+    chrome = installChrome({
+      anchor: canvas,
+      about: { label: "About SlicerLive", url: "https://github.com/pieper/SlicerLive" },
+      selects: [{
+        label: "Volume property",
+        options: vpList.map((v) => ({ value: v.name, label: v.description ? `${v.name} — ${v.description}` : v.name })),
+        get: () => activePreset,
+        set: (v) => { activePreset = v; sendLut(); },
+      }],
+      controls: [{
+        label: "Shift",
+        slider: { min: -1, max: 1, step: 0.005, get: () => currentShift, set: (v) => { currentShift = v; sendLut(); }, format: (v) => v.toFixed(3) },
+      }],
+    });
   };
-  lutShift?.addEventListener("input", () => { if (activePreset) sendLut(activePreset); });
   let sceneMenu: Array<{ name: string; credit?: string }> = [];
   const showCredit = (name: string) => {
     if (!creditEl) return;
@@ -615,11 +610,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         if (Array.isArray(m.scenes)) sceneMenu = m.scenes;
         if (typeof m.proxyDims === "string") proxyDims = m.proxyDims;
         if (typeof m.fullDims === "string") fullDims = m.fullDims;
-        if (Array.isArray(m.lutPresets)) buildLutList(m.lutPresets.map((v: unknown) => typeof v === "string" ? { name: v } : v as { name: string; description?: string }));
-        if (typeof m.preset === "string" && m.preset) {
-          activePreset = m.preset;
-          if (lutList) for (const b of Array.from(lutList.children)) (b as HTMLElement).classList.toggle("active", (b as HTMLElement).dataset.preset === m.preset);
-        }
+        if (Array.isArray(m.lutPresets)) { vpList = m.lutPresets.map((v: unknown) => typeof v === "string" ? { name: v } : v as { name: string; description?: string }); ensureChrome(); }
+        if (typeof m.preset === "string" && m.preset) activePreset = m.preset;
         if (sceneSel && Array.isArray(m.scenes) && sceneSel.options.length === 0) {
           for (const sc of m.scenes) {
             const o = document.createElement("option");
@@ -635,7 +627,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         const sceneChanged = typeof m.scene === "string" && m.scene !== clientScene && clientScene !== "";
         if (typeof m.scene === "string") { clientScene = m.scene; if (sceneSel) { sceneSel.value = m.scene; sceneSel.disabled = false; } showCredit(m.scene); }
         widgetSeed = m.widget ?? null;
-        if (sceneChanged && lutShift) { lutShift.value = "0"; if (lutShiftVal) lutShiftVal.textContent = "0"; }
+        if (sceneChanged) currentShift = 0;
+        chrome?.refresh();
         if (sceneChanged) {
           // A different specimen: drop the old gizmo, re-frame the camera, remount for the new one.
           widget = null; widgetAttached = false;

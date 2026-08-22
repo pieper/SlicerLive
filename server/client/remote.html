@@ -35,25 +35,6 @@
   #refine .rl { font: 600 14px -apple-system, system-ui, sans-serif; color: #a9cdf0; }
   #refine .rb { font: 700 22px -apple-system, system-ui, sans-serif; letter-spacing: .2px; margin-top: 2px; }
   #refine:empty { display: none; }
-  #logo { font: 700 13px -apple-system, system-ui, sans-serif; background: linear-gradient(180deg,#1b3350,#12203a);
-           color: #cfe6ff; border: 1px solid #33628f; border-radius: 8px; padding: 6px 11px; cursor: pointer; margin-right: 4px; }
-  #logo:hover { border-color: #4a90d9; }
-  #lutPopup { display: none; position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.45); align-items: center; justify-content: center; }
-  #lutPopup.show { display: flex; }
-  #lutPopup .row { display: flex; align-items: center; gap: 10px; margin: 12px 0; font: 500 13px -apple-system, system-ui, sans-serif; }
-  #lutPopup .row input[type=range] { flex: 1; }
-  #lutPopup .lbl { font: 600 13px -apple-system, system-ui, sans-serif; margin: 6px 0 8px; }
-  #lutPopup .hint { font-weight: 400; opacity: .6; font-size: 12px; }
-  #lutList { display: flex; flex-direction: column; gap: 6px; }
-  #lutList button { text-align: left; background: #12151f; color: #dfe4f0; border: 1px solid #2a3040; border-radius: 8px;
-                    padding: 8px 11px; cursor: pointer; font: 500 13px -apple-system, system-ui, sans-serif; }
-  #lutList button:hover { border-color: #4a90d9; }
-  #lutList button.active { border-color: #54c6f0; background: #17324a; box-shadow: 0 0 0 1px #54c6f0 inset; }
-  #lutList button .vpname { font-weight: 700; }
-  #lutList button .vpdesc { opacity: .62; font-size: 12px; margin-left: 6px; }
-  #lutPopup .about { margin-top: 16px; }
-  #lutPopup .about a { color: #7fb2ff; text-decoration: none; font: 500 13px -apple-system, system-ui, sans-serif; }
-  #lutShiftVal { min-width: 2.5em; text-align: right; font: 600 12px ui-monospace, Menlo, monospace; color: #9fb3d0; }
   #scene { font: 600 12px -apple-system, system-ui, sans-serif; background: #12151f; color: #dfe4f0; border: 1px solid #2a3040; border-radius: 7px; padding: 6px 9px; max-width: 40vw; }
   #scene:disabled { opacity: .5; }
   #mode { font: 600 12px -apple-system, system-ui, sans-serif; color: #04121c; cursor: pointer;
@@ -95,7 +76,6 @@
 </head>
 <body>
 <header>
-  <button id="logo" title="SlicerLive — rendering & display options">◉ SlicerLive</button>
   <h1>Remote Render<span class="badge">Deno · WebGPU · WS</span></h1>
   <select id="scene" title="Choose a specimen (MorphoDepot / SlicerMorph)"></select>
   <button id="mode">Rendering on the REMOTE GPU — click to render locally</button>
@@ -123,21 +103,6 @@
       restart). Shorter saves more; longer keeps it instantly responsive.</p>
     <div id="idleOpts"></div>
     <button class="close" id="idleClose">Done</button>
-  </div>
-</div>
-<div id="lutPopup">
-  <div class="pop">
-    <h3>◉ SlicerLive</h3>
-    <p>Rendering options for the current specimen. The colour/opacity <b>lookup table</b> and the
-      <b>shift</b> (slide the transfer function along the intensity axis) apply live on the remote GPU.</p>
-    <div class="lbl">Volume property <span class="hint">(from @muratmaga's SlicerMorph/VPs — click to preview live)</span></div>
-    <div id="lutList"></div>
-    <label class="row">Shift
-      <input type="range" id="lutShift" min="-1" max="1" step="0.005" value="0">
-      <span id="lutShiftVal">0</span>
-    </label>
-    <p class="about"><a id="aboutLink" href="https://github.com/pieper/SlicerLive" target="_blank" rel="noopener">About SlicerLive — github.com/pieper/SlicerLive ↗</a></p>
-    <button class="close" id="lutClose">Done</button>
   </div>
 </div>
 <div id="overlay">

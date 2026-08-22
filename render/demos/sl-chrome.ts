@@ -420,8 +420,17 @@ export function installChrome(opts: ChromeOpts): Chrome {
   logo.onclick = () => { pinned = !pinned; pinned ? show() : hide(); };
   logo.onmouseleave = () => { logo.style.transform = "scale(1)"; if (!pinned) setTimeout(() => { if (!pop.matches(":hover") && !pinned) hide(); }, 120); };
   pop.onmouseleave = () => { if (!pinned) hide(); };
+  // A click ANYWHERE outside the badge/popup dismisses it (and unpins). Capture phase + contains()
+  // so a control click inside the popup never counts as "outside".
+  const onDocDown = (e: Event) => {
+    const t = e.target as Node;
+    if (logo.contains(t) || pop.contains(t)) return;
+    pinned = false; hide();
+  };
+  document.addEventListener("pointerdown", onDocDown, true);
 
   const destroy = () => {
+    document.removeEventListener("pointerdown", onDocDown, true);
     globalThis.removeEventListener("resize", place);
     anchorRO?.disconnect();
     document.removeEventListener("keydown", escClose, true);

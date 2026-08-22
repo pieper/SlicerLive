@@ -2704,6 +2704,453 @@ async function buildMultiVolume(dev, onBytes) {
   return { cta, pano, fields: [cta.field, pano.field] };
 }
 
+// render/demos/sl-logo.ts
+var SL_LOGO = "data:image/png;base64,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";
+
+// render/demos/sl-chrome.ts
+var DEFAULT_HELP = [
+  { title: "3D view", rows: [
+    ["Left-drag", "Rotate"],
+    ["Right-drag", "Zoom"],
+    ["Middle / Shift+Left-drag", "Pan"],
+    ["Wheel / two-finger", "Zoom (dolly)"],
+    ["Double-click", "Maximize / restore"],
+    ["Shift + move", "Pick \u2192 jump slices to the point"]
+  ] },
+  { title: "Endovascular flight (fly-inside / endo demo)", rows: [
+    ["Up / Down", "Move in / out along the view axis"],
+    ["Left / Right", "Yaw"],
+    ["Shift + Left/Right", "Pitch"],
+    ["Ctrl + Left/Right", "Roll"],
+    ["Space", "Toggle forward cruise"],
+    ["Shift + Space", "Toggle reverse cruise"],
+    ["Escape", "Stop"],
+    ["Left-drag", "Look around"],
+    ["Shift + click", "Autopilot target"],
+    ["Speed slider", "Travel speed in mm/s (live, applies mid-flight)"]
+  ] },
+  { title: "Slice views", rows: [
+    ["Wheel / Left-drag", "Scroll through slices"],
+    ["Right-drag / \u2318-wheel", "Zoom this slice"],
+    ["Middle / Shift+Left-drag", "Pan"],
+    ["Double-click", "Maximize / restore"],
+    ["R", "Reset pan/zoom"],
+    ["Shift + move", "Jump the other views to the point under the cursor"]
+  ] }
+];
+function glass(el, extra = "") {
+  el.style.cssText += ";background:linear-gradient(135deg,rgba(58,64,88,.55),rgba(20,24,38,.66));backdrop-filter:blur(20px) saturate(1.6);-webkit-backdrop-filter:blur(20px) saturate(1.6);border:1px solid rgba(255,255,255,.2);box-shadow:0 18px 50px rgba(0,0,0,.55);" + extra;
+}
+function installChrome(opts) {
+  const controls = opts.controls ?? [];
+  const host = opts.container ?? document.body;
+  const help = (opts.help === false ? [] : opts.help) ?? DEFAULT_HELP;
+  let helpBtn = null;
+  if (opts.help !== false) {
+    helpBtn = document.createElement("button");
+    helpBtn.textContent = "?";
+    helpBtn.title = "Controls & key bindings";
+    helpBtn.style.cssText = "position:fixed;top:12px;left:12px;z-index:74;width:32px;height:32px;padding:0;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:#cfe6ff;font:700 15px -apple-system,system-ui,sans-serif;";
+    glass(helpBtn);
+    helpBtn.onclick = openHelp;
+    host.appendChild(helpBtn);
+  }
+  let helpEl = null;
+  function openHelp() {
+    if (helpEl) return;
+    helpEl = document.createElement("div");
+    helpEl.style.cssText = "position:fixed;inset:0;z-index:96;display:flex;align-items:center;justify-content:center;background:rgba(6,8,14,.55);font:13px/1.5 -apple-system,system-ui,sans-serif;color:#e8eeff;";
+    helpEl.addEventListener("mousedown", (e) => {
+      if (e.target === helpEl) closeHelp();
+    });
+    const panel = document.createElement("div");
+    panel.style.cssText = "max-width:min(640px,92vw);max-height:86vh;overflow-y:auto;padding:22px 26px;border-radius:16px;color:#eaf0ff;";
+    glass(panel);
+    panel.innerHTML = `<div style="font:800 20px -apple-system,system-ui,sans-serif;margin-bottom:4px">SlicerLive \u2014 controls</div>`;
+    for (const sec of help) {
+      const rows2 = sec.rows.map(([k, d]) => `<div style="font:600 12px ui-monospace,Menlo,monospace;color:#fff5d6;white-space:nowrap">${k}</div><div style="color:rgba(232,238,255,.85)">${d}</div>`).join("");
+      panel.innerHTML += `<div style="margin-top:14px;padding:12px 14px;border-radius:10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)"><div style="font:700 11px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#9fe9ff;margin-bottom:9px">${sec.title}</div><div style="display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;align-items:baseline">${rows2}</div></div>`;
+    }
+    panel.innerHTML += `<div style="margin-top:16px;font-size:12px;color:rgba(232,238,255,.55)">Press <b style="color:#fff5d6">esc</b> or click outside to dismiss.</div>`;
+    helpEl.appendChild(panel);
+    host.appendChild(helpEl);
+    document.addEventListener("keydown", escClose, true);
+  }
+  function escClose(e) {
+    if (e.key === "Escape") closeHelp();
+  }
+  function closeHelp() {
+    if (helpEl) {
+      helpEl.remove();
+      helpEl = null;
+      document.removeEventListener("keydown", escClose, true);
+    }
+  }
+  const logo = document.createElement("div");
+  logo.id = "sl-badge";
+  logo.title = "SlicerLive \u2014 visualization";
+  logo.style.cssText = "position:fixed;z-index:74;cursor:pointer;user-select:none;display:flex;flex-direction:column;align-items:center;gap:4px;padding:7px 12px 6px;border-radius:14px;background:#121826;border:1px solid rgba(255,255,255,.12);box-shadow:0 10px 30px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06);transition:transform 120ms ease-out;";
+  const mark = document.createElement("img");
+  mark.src = SL_LOGO;
+  mark.alt = "SlicerLive";
+  mark.style.cssText = "height:40px;width:auto;display:block;filter:drop-shadow(0 0 5px rgba(255,200,80,.5));";
+  const word = document.createElement("div");
+  word.innerHTML = 'Slicer<b style="color:#ffd34d">Live</b>';
+  word.style.cssText = "font:800 12px/1 -apple-system,system-ui,sans-serif;letter-spacing:.5px;color:#eef7ff;text-shadow:0 0 14px rgba(255,210,90,.4);";
+  logo.appendChild(mark);
+  logo.appendChild(word);
+  host.appendChild(logo);
+  const place = () => {
+    const a = opts.anchor;
+    const r = a && a.getClientRects().length ? a.getBoundingClientRect() : null;
+    if (r && r.width > 2 && r.height > 2) {
+      logo.style.top = Math.round(r.top + 8) + "px";
+      logo.style.right = Math.round(globalThis.innerWidth - r.right + 8) + "px";
+    } else {
+      logo.style.top = "10px";
+      logo.style.right = "12px";
+    }
+  };
+  place();
+  requestAnimationFrame(place);
+  globalThis.addEventListener("resize", place);
+  const anchorRO = opts.anchor && "ResizeObserver" in globalThis ? new ResizeObserver(place) : null;
+  anchorRO?.observe(opts.anchor);
+  const pop = document.createElement("div");
+  pop.id = "sl-popup";
+  pop.style.cssText = "position:fixed;z-index:73;min-width:210px;max-width:300px;max-height:84vh;overflow-y:auto;padding:10px 12px;border-radius:12px;color:#eaf0ff;font:13px -apple-system,system-ui,sans-serif;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 120ms ease-out,transform 120ms ease-out;";
+  glass(pop);
+  host.appendChild(pop);
+  const paintSw = (sw, on) => {
+    sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
+    sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
+  };
+  const afterPaint = (fn) => requestAnimationFrame(() => requestAnimationFrame(fn));
+  const paintTri = (box, level, color) => {
+    const pct = Math.round(level * 100);
+    const c = `rgb(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)})`;
+    box.style.opacity = level < 0.02 ? "0.75" : "1";
+    box.innerHTML = `<span style="position:absolute;left:0;top:0;bottom:0;width:${pct}%;background:${c};opacity:.9"></span><span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:700 10px -apple-system,system-ui,sans-serif;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.75)">${pct}%</span>`;
+  };
+  const triNext = (v) => v > 0.66 ? 0.5 : v > 0.04 ? 0 : 1;
+  const attachOpacity = (box, get, set, color, onChange) => {
+    box.style.cursor = "ew-resize";
+    box.title = "Click: 100% \u2192 50% \u2192 off \xB7 Drag sideways for a live opacity slider";
+    const paint = () => paintTri(box, get(), color);
+    paint();
+    let startX = 0, startV = 0, dragged = false, id = -1;
+    box.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      startX = e.clientX;
+      startV = get();
+      dragged = false;
+      id = e.pointerId;
+      try {
+        box.setPointerCapture(id);
+      } catch {
+      }
+    });
+    box.addEventListener("pointermove", (e) => {
+      if (id < 0) return;
+      const dx = e.clientX - startX;
+      if (Math.abs(dx) > 3) dragged = true;
+      if (dragged) {
+        set(Math.max(0, Math.min(1, startV + dx / 130)));
+        paint();
+        onChange();
+      }
+    });
+    const end = () => {
+      if (id < 0) return;
+      if (!dragged) {
+        set(triNext(get()));
+        paint();
+        onChange();
+      }
+      try {
+        box.releasePointerCapture(id);
+      } catch {
+      }
+      id = -1;
+    };
+    box.addEventListener("pointerup", end);
+    box.addEventListener("pointercancel", end);
+    return paint;
+  };
+  const OPBOX_CSS = "width:44px;height:18px;border-radius:6px;position:relative;overflow:hidden;flex:0 0 auto;background:rgba(255,255,255,.14);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);touch-action:none;";
+  const heading = (text, first) => {
+    const h = document.createElement("div");
+    h.textContent = text;
+    h.style.cssText = "font:700 10px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#9fe9ff;margin:" + (first ? "0 0 8px" : "12px 0 6px") + ";" + (first ? "" : "border-top:1px solid rgba(255,255,255,.12);padding-top:10px;");
+    pop.appendChild(h);
+  };
+  const selects = opts.selects ?? [];
+  const selEls = [];
+  let sectionSeen = null;
+  let firstHead = true;
+  for (const c of selects) {
+    const sec = c.section ?? "Visualization";
+    if (sec !== sectionSeen) {
+      heading(sec, firstHead);
+      sectionSeen = sec;
+      firstHead = false;
+    }
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:5px 0;";
+    const lab = document.createElement("span");
+    lab.textContent = c.label;
+    const sel = document.createElement("select");
+    sel.style.cssText = "flex:1 1 auto;max-width:60%;border-radius:7px;padding:4px 6px;cursor:pointer;font:500 12px -apple-system,system-ui,sans-serif;color:#e8eeff;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.20);";
+    for (const o of c.options) {
+      const op = document.createElement("option");
+      op.value = o.value;
+      op.textContent = o.label;
+      op.style.cssText = "background:#1b2030;color:#e8eeff;";
+      sel.appendChild(op);
+    }
+    sel.value = c.get();
+    sel.onclick = (e) => e.stopPropagation();
+    sel.onchange = () => {
+      c.set(sel.value);
+      opts.onChange?.();
+      refresh();
+    };
+    row.appendChild(lab);
+    row.appendChild(sel);
+    pop.appendChild(row);
+    selEls.push({ c, el: sel });
+  }
+  const rows = [];
+  if (controls.length) {
+    for (const c of controls) {
+      const sec = c.section ?? "Visualization";
+      if (sec !== sectionSeen) {
+        heading(sec, firstHead);
+        sectionSeen = sec;
+        firstHead = false;
+      }
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:14px;padding:5px 0;";
+      if (c.slider) {
+        row.style.cssText = "display:flex;flex-direction:column;gap:4px;padding:6px 0;";
+        const top = document.createElement("div");
+        top.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;";
+        const lab2 = document.createElement("span");
+        lab2.textContent = c.label;
+        const val = document.createElement("span");
+        val.style.cssText = "font:600 11px ui-monospace,Menlo,monospace;color:#9fe9ff;font-variant-numeric:tabular-nums;";
+        top.appendChild(lab2);
+        top.appendChild(val);
+        const inp = document.createElement("input");
+        inp.type = "range";
+        inp.min = String(c.slider.min);
+        inp.max = String(c.slider.max);
+        inp.step = String(c.slider.step ?? 1);
+        inp.value = String(c.slider.get());
+        inp.style.cssText = "width:100%;accent-color:#54c6f0;cursor:pointer;";
+        const fmt = c.slider.format ?? ((v) => String(Math.round(v)));
+        const paint = () => {
+          val.textContent = fmt(c.slider.get());
+        };
+        inp.oninput = () => {
+          c.slider.set(parseFloat(inp.value));
+          paint();
+          opts.onChange?.();
+        };
+        inp.onpointerdown = (e) => e.stopPropagation();
+        paint();
+        row.appendChild(top);
+        row.appendChild(inp);
+        pop.appendChild(row);
+        rows.push({ c, row, repaint: () => {
+          inp.value = String(c.slider.get());
+          paint();
+        } });
+        continue;
+      }
+      const lab = document.createElement("span");
+      lab.textContent = c.label;
+      row.appendChild(lab);
+      if (c.button) {
+        const pill = document.createElement("span");
+        pill.style.cssText = "max-width:60%;border-radius:7px;padding:4px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:600 12px -apple-system,system-ui,sans-serif;color:#eaf0ff;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.20);";
+        pill.textContent = c.button.text();
+        pill.onclick = (e) => {
+          e.stopPropagation();
+          c.button.run();
+        };
+        pill.onpointerdown = (e) => e.stopPropagation();
+        row.appendChild(pill);
+        pop.appendChild(row);
+        rows.push({ c, row, repaint: () => {
+          pill.textContent = c.button.text();
+        } });
+        continue;
+      }
+      if (c.getOpacity && c.setOpacity) {
+        const box = document.createElement("span");
+        box.style.cssText = OPBOX_CSS;
+        row.appendChild(box);
+        const paint = attachOpacity(box, c.getOpacity, (o) => c.setOpacity(o), c.color ?? [0.62, 0.9, 1], () => opts.onChange?.());
+        rows.push({ c, row, repaint: paint });
+      } else {
+        row.style.cursor = "pointer";
+        const sw = document.createElement("span");
+        sw.style.cssText = "width:34px;height:19px;border-radius:999px;position:relative;transition:background 120ms;flex:0 0 auto;";
+        row.appendChild(sw);
+        row.onclick = () => {
+          if (c.disabled?.()) return;
+          const next = !c.get();
+          paintSw(sw, next);
+          afterPaint(() => {
+            c.set(next);
+            opts.onChange?.();
+            refresh();
+          });
+        };
+        rows.push({ c, row, sw });
+      }
+      pop.appendChild(row);
+    }
+  } else if (opts.about === false && !opts.segments && !selects.length) {
+    pop.textContent = "SlicerLive \u2014 WebGPU renderer";
+  }
+  const segHost = document.createElement("div");
+  pop.appendChild(segHost);
+  const segRows = [];
+  function buildSegments() {
+    const S = opts.segments;
+    segRows.length = 0;
+    segHost.innerHTML = "";
+    if (!S) return;
+    const list = S.list();
+    if (!list.length) return;
+    const wrap = document.createElement("div");
+    wrap.style.cssText = "margin-top:6px;border-top:1px solid rgba(255,255,255,.12);padding-top:6px;" + (list.length > 6 ? "max-height:210px;overflow-y:auto;" : "");
+    for (const s of list) {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 2px;";
+      const left = document.createElement("span");
+      left.style.cssText = "display:flex;align-items:center;gap:8px;min-width:0;";
+      const swatch = document.createElement("span");
+      swatch.style.cssText = `flex:0 0 auto;width:11px;height:11px;border-radius:3px;box-shadow:0 0 0 1px rgba(255,255,255,.25);background:rgb(${Math.round(s.color[0] * 255)},${Math.round(s.color[1] * 255)},${Math.round(s.color[2] * 255)})`;
+      const lab = document.createElement("span");
+      lab.textContent = s.name;
+      lab.style.cssText = "font:500 12.5px -apple-system,system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+      left.appendChild(swatch);
+      left.appendChild(lab);
+      const box = document.createElement("span");
+      box.style.cssText = OPBOX_CSS;
+      row.appendChild(left);
+      row.appendChild(box);
+      const paint = attachOpacity(box, () => S.get(s.num), (o) => {
+        if (!(S.enabled && !S.enabled())) S.set(s.num, o);
+      }, s.color, () => opts.onChange?.());
+      wrap.appendChild(row);
+      segRows.push({ num: s.num, box, color: s.color, paint });
+    }
+    segHost.appendChild(wrap);
+    paintSegments();
+  }
+  function paintSegments() {
+    const S = opts.segments;
+    if (!S) return;
+    const dis = S.enabled ? !S.enabled() : false;
+    segHost.style.opacity = dis ? "0.4" : "1";
+    for (const r of segRows) r.paint();
+  }
+  if (opts.about !== false) {
+    const about = document.createElement("div");
+    const aLabel = opts.about?.label ?? "About SlicerLive";
+    const aURL = opts.about?.url ?? "https://github.com/pieper/SlicerLive";
+    about.textContent = aLabel;
+    about.style.cssText = "cursor:pointer;border-radius:9px;padding:9px 8px 3px;margin-top:4px;" + (controls.length || opts.segments ? "border-top:1px solid rgba(255,255,255,.12);" : "") + "font:600 13px -apple-system,system-ui,sans-serif;color:#9fe9ff;";
+    about.onmouseenter = () => {
+      about.style.background = "rgba(255,255,255,.07)";
+    };
+    about.onmouseleave = () => {
+      about.style.background = "transparent";
+    };
+    about.onclick = (e) => {
+      e.stopPropagation();
+      globalThis.open(aURL, "_blank", "noopener");
+    };
+    pop.appendChild(about);
+  }
+  function refresh() {
+    for (const { c, el } of selEls) {
+      const v = c.get();
+      if (el.value !== v) el.value = v;
+    }
+    for (const { c, row, sw, repaint } of rows) {
+      const dis = c.disabled?.() ?? false;
+      row.style.opacity = dis ? "0.4" : "1";
+      if (repaint) {
+        repaint();
+        continue;
+      }
+      const on = c.get();
+      row.style.cursor = dis ? "default" : "pointer";
+      sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
+      sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
+    }
+    paintSegments();
+  }
+  refresh();
+  const show = () => {
+    buildSegments();
+    refresh();
+    const b = logo.getBoundingClientRect();
+    pop.style.top = Math.round(b.bottom + 6) + "px";
+    pop.style.right = Math.round(globalThis.innerWidth - b.right) + "px";
+    pop.style.opacity = "1";
+    pop.style.pointerEvents = "auto";
+    pop.style.transform = "translateY(0)";
+  };
+  const hide = () => {
+    pop.style.opacity = "0";
+    pop.style.pointerEvents = "none";
+    pop.style.transform = "translateY(-6px)";
+  };
+  let pinned = false;
+  logo.onmouseenter = () => {
+    logo.style.transform = "scale(1.08)";
+    show();
+  };
+  logo.onclick = () => {
+    pinned = !pinned;
+    pinned ? show() : hide();
+  };
+  logo.onmouseleave = () => {
+    logo.style.transform = "scale(1)";
+    if (!pinned) setTimeout(() => {
+      if (!pop.matches(":hover") && !pinned) hide();
+    }, 120);
+  };
+  pop.onmouseleave = () => {
+    if (!pinned) hide();
+  };
+  const onDocDown = (e) => {
+    const t = e.target;
+    if (logo.contains(t) || pop.contains(t)) return;
+    pinned = false;
+    hide();
+  };
+  document.addEventListener("pointerdown", onDocDown, true);
+  const destroy = () => {
+    document.removeEventListener("pointerdown", onDocDown, true);
+    globalThis.removeEventListener("resize", place);
+    anchorRO?.disconnect();
+    document.removeEventListener("keydown", escClose, true);
+    helpBtn?.remove();
+    helpEl?.remove();
+    logo.remove();
+    pop.remove();
+  };
+  return { refresh, destroy };
+}
+
 // render/codec.ts
 var AV1_GRID = 64;
 
@@ -3203,43 +3650,39 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
   let clientScene = "";
   const sceneSel = document.getElementById("scene");
   const creditEl = document.getElementById("credit");
-  const lutPopup = document.getElementById("lutPopup");
-  const lutList = document.getElementById("lutList");
-  const lutShift = document.getElementById("lutShift");
-  const lutShiftVal = document.getElementById("lutShiftVal");
-  const logoBtn = document.getElementById("logo");
-  let activePreset = "";
-  logoBtn?.addEventListener("click", () => lutPopup?.classList.add("show"));
-  document.getElementById("lutClose")?.addEventListener("click", () => lutPopup?.classList.remove("show"));
-  lutPopup?.addEventListener("click", (e) => {
-    if (e.target === lutPopup) lutPopup.classList.remove("show");
-  });
-  const sendLut = (preset) => {
+  let activePreset = "", currentShift = 0;
+  let vpList = [];
+  let chrome = null;
+  const sendLut = () => {
     if (mode !== "remote") {
       status("switch to REMOTE to change the volume property", true);
       return;
     }
-    activePreset = preset;
-    if (lutList) for (const b of Array.from(lutList.children)) b.classList.toggle("active", b.dataset.preset === preset);
-    const shift = lutShift ? Number(lutShift.value) : 0;
-    if (lutShiftVal) lutShiftVal.textContent = shift.toFixed(3);
-    ws?.send(JSON.stringify({ type: "lut", preset, shift }));
+    ws?.send(JSON.stringify({ type: "lut", preset: activePreset, shift: currentShift }));
   };
-  const buildLutList = (vps) => {
-    if (!lutList || lutList.childElementCount) return;
-    for (const vp of vps) {
-      const b = document.createElement("button");
-      b.dataset.preset = vp.name;
-      b.innerHTML = `<span class="vpname"></span><span class="vpdesc"></span>`;
-      b.querySelector(".vpname").textContent = vp.name;
-      b.querySelector(".vpdesc").textContent = vp.description ?? "";
-      b.addEventListener("click", () => sendLut(vp.name));
-      lutList.appendChild(b);
-    }
+  const ensureChrome = () => {
+    if (chrome || !vpList.length) return;
+    chrome = installChrome({
+      anchor: canvas,
+      about: { label: "About SlicerLive", url: "https://github.com/pieper/SlicerLive" },
+      selects: [{
+        label: "Volume property",
+        options: vpList.map((v) => ({ value: v.name, label: v.description ? `${v.name} \u2014 ${v.description}` : v.name })),
+        get: () => activePreset,
+        set: (v) => {
+          activePreset = v;
+          sendLut();
+        }
+      }],
+      controls: [{
+        label: "Shift",
+        slider: { min: -1, max: 1, step: 5e-3, get: () => currentShift, set: (v) => {
+          currentShift = v;
+          sendLut();
+        }, format: (v) => v.toFixed(3) }
+      }]
+    });
   };
-  lutShift?.addEventListener("input", () => {
-    if (activePreset) sendLut(activePreset);
-  });
   let sceneMenu = [];
   const showCredit = (name) => {
     if (!creditEl) return;
@@ -3492,11 +3935,11 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
         if (Array.isArray(m.scenes)) sceneMenu = m.scenes;
         if (typeof m.proxyDims === "string") proxyDims = m.proxyDims;
         if (typeof m.fullDims === "string") fullDims = m.fullDims;
-        if (Array.isArray(m.lutPresets)) buildLutList(m.lutPresets.map((v) => typeof v === "string" ? { name: v } : v));
-        if (typeof m.preset === "string" && m.preset) {
-          activePreset = m.preset;
-          if (lutList) for (const b of Array.from(lutList.children)) b.classList.toggle("active", b.dataset.preset === m.preset);
+        if (Array.isArray(m.lutPresets)) {
+          vpList = m.lutPresets.map((v) => typeof v === "string" ? { name: v } : v);
+          ensureChrome();
         }
+        if (typeof m.preset === "string" && m.preset) activePreset = m.preset;
         if (sceneSel && Array.isArray(m.scenes) && sceneSel.options.length === 0) {
           for (const sc of m.scenes) {
             const o = document.createElement("option");
@@ -3519,10 +3962,8 @@ struct V { @builtin(position) p : vec4<f32>, @location(0) uv : vec2<f32> };
           showCredit(m.scene);
         }
         widgetSeed = m.widget ?? null;
-        if (sceneChanged && lutShift) {
-          lutShift.value = "0";
-          if (lutShiftVal) lutShiftVal.textContent = "0";
-        }
+        if (sceneChanged) currentShift = 0;
+        chrome?.refresh();
         if (sceneChanged) {
           widget = null;
           widgetAttached = false;
