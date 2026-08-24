@@ -173,16 +173,42 @@ Apache 2.0 — same as 3D Slicer.
 - Educational use and teaching materials
 - **Code reviews with attention to numerical correctness and medical imaging semantics**
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed contribution guidelines.
+**Please open issues, not pull requests.** This is an AI-generated codebase that changes fast, and
+incoming patches are difficult to review fairly against it. A detailed issue — especially one showing
+a wrong number — is the contribution that helps most; accepted ones get implemented by a coding agent
+under review. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## Acknowledgments
 
-This work continues a line of GPU-accelerated medical imaging experiments:
+SlicerLive continues a line of experiments in GPU-accelerated medical imaging:
 
-- **[SlicerCL](https://github.com/pieper/SlicerCL)** — GPU-accelerated segmentation effects (OpenCL)
-- **[step](https://github.com/pieper/step)** — Browser-based GPU medical image computing (WebGL 2.0)
+- <a href="https://github.com/pieper/SlicerCL" target="_blank" rel="noopener"><b>SlicerCL</b></a> —
+  3D Slicer extensions written in OpenCL through pyopencl, including a GPU-accelerated GrowCut effect for
+  Slicer's segmentation editor. It contributed the core idea behind `algorithms/`: interactive segmentation
+  editing expressed as GPU compute kernels, driven live from an editor UI. It also introduced the
+  compositing renderer that `render/` follows — multiple pieces of content composited in a single
+  ray-cast pass — along with analytic signed-distance-field compositing and ray marching through
+  nonlinear transforms, the direct ancestors of today's Fields, SDF shells, and `TransformField`.  This led to a proposal for [CommonGL](https://docs.google.com/document/d/1-4Up_Shq6oFTGhwXIF5DuiXUYsdIMlAC1oK7eNHWP_o/edit?usp=sharing) and experiments adding functionality to VTK's GLSL.
 
-Deep gratitude to the [3D Slicer](https://www.slicer.org/) developers and community for decades of inspiration and reference implementation.
+  <a href="https://www.youtube.com/watch?v=hFxTyLPjQd0" target="_blank" rel="noopener"><img src="https://img.youtube.com/vi/hFxTyLPjQd0/mqdefault.jpg" alt="Nonlinear Transforms and Volume Rendering" width="200"></a>
+  <br><sub><a href="https://www.youtube.com/watch?v=hFxTyLPjQd0" target="_blank" rel="noopener">Nonlinear Transforms and Volume Rendering</a></sub>
+
+- <a href="https://github.com/pieper/step" target="_blank" rel="noopener"><b>step</b></a> — GPU medical
+  image computing in the browser with JavaScript and WebGL 2.0, working directly from DICOM-native data
+  structures. It contributed the everything-in-the-browser premise, the patient/pixel/texture coordinate
+  discipline and `aToB` naming conventions the renderer still uses, and the transform-composition pattern
+  that `TransformField` follows today.
+
+  <a href="https://youtu.be/ML9_JWAz1kY" target="_blank" rel="noopener"><img src="https://img.youtube.com/vi/ML9_JWAz1kY/mqdefault.jpg" alt="STEP nonlinear transform volumes" width="200"></a>
+  <a href="https://youtu.be/8dputUoKBTA" target="_blank" rel="noopener"><img src="https://img.youtube.com/vi/8dputUoKBTA/mqdefault.jpg" alt="MR/US registration in step" width="200"></a>
+  <br><sub><a href="https://youtu.be/ML9_JWAz1kY" target="_blank" rel="noopener">STEP nonlinear transform volumes</a> &nbsp;·&nbsp; <a href="https://youtu.be/8dputUoKBTA" target="_blank" rel="noopener">MR/US, step p3</a></sub>
+
+Beyond these direct ancestors, SlicerLive owes its deepest debt to the
+<a href="https://www.slicer.org/" target="_blank" rel="noopener">3D Slicer</a> developers and users —
+decades of their designs, code, and clinical-research workflows are the inspiration for, and the reference
+implementation behind, essentially everything here — and to the many software developers and researchers
+who published the algorithms and open implementations this project draws on, from ray-marched volume
+rendering and jump-flooding distance transforms to the ecosystem of open DICOM tooling.
 
 ---
 
