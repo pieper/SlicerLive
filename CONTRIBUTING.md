@@ -61,16 +61,18 @@ agent under review, the same way the rest of the codebase is written.
 Prerequisites: [Deno](https://deno.com/) and a WebGPU-capable browser; Node 20+ for the legacy VTK.js
 bundling; 3D Slicer only if you want the LiveStory integration.
 
-```bash
-# Lint and type-check the renderer
-cd render && deno lint && deno check
+There is no build system and no task runner — no `deno.json`, no Makefile, no npm scripts. Everything
+is plain [Deno](https://docs.deno.com/runtime/) subcommands run directly against the sources:
+[`deno lint`](https://docs.deno.com/runtime/reference/cli/lint/) and
+[`deno check`](https://docs.deno.com/runtime/reference/cli/check/) in `render/`,
+[`deno test`](https://docs.deno.com/runtime/reference/cli/test/) for the test directories (some tests
+write comparison images, so they need `--allow-write`), and
+[`deno run`](https://docs.deno.com/runtime/reference/cli/run/) for the demo servers and the parity
+harness. The [permission flags](https://docs.deno.com/runtime/fundamentals/security/) are the only
+thing to know: most entry points here want `-A`.
 
-# Run the renderer tests (they write comparison images)
-deno test --allow-write test/
-
-# Serve a demo, then open http://localhost:8777
-deno run -A examples/cardiac/serve.ts
-```
+The README's [Development Setup](README.md#development-setup) has the exact invocations, and
+[docs/HARNESS.md](docs/HARNESS.md) covers the Slicer ↔ browser parity harness.
 
 Start with [docs/ARCHITECTURE-2026-08-02.md](docs/ARCHITECTURE-2026-08-02.md) for the system design;
 the other design notes are listed in the [README](README.md#key-documentation).

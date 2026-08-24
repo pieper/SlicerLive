@@ -168,7 +168,7 @@ Apache 2.0 — same as 3D Slicer.
 
 - Bug reports and feature requests
 - Performance profiling and optimization
-- New field types and rendering modes
+- Suggestions for new field types and rendering modes — these are especially appreciated
 - Integration with other medical imaging workflows
 - Educational use and teaching materials
 - **Code reviews with attention to numerical correctness and medical imaging semantics**
