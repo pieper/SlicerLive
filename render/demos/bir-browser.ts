@@ -275,6 +275,13 @@ async function main() {
     onThumb: (n: number, w: number, h: number, rgba: ArrayBuffer) => mosaic.thumb(n, w, h, rgba),
   });
   const sc: SegrouletteScene = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
+  // Sampled scalar range of the loaded volume: drives the W/L drag gain (Slicer's
+  // vtkMRMLWindowLevelWidget scales by the scalar range) and the VR shift-slider span.
+  const vd = res.ct.vol;
+  let vmin = Infinity, vmax = -Infinity;
+  const vstride = Math.max(1, Math.floor(vd.length / 2_000_000));
+  for (let i = 0; i < vd.length; i += vstride) { const v = vd[i]; if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
+  const dataRange = (): [number, number] => [vmin, vmax];
   sc.setVolumeOpacity(0.5); // 3D volume rendering starts semi-transparent (composites with SEG)
 
   // SlicerLive display state (toggled from the badge popup, below).
@@ -499,7 +506,7 @@ async function main() {
         enabled: () => bir!.tool() === "wl",
         get: () => [wl.win, wl.lev],
         set: setWL,
-        range: () => res.ct.range,
+        range: dataRange,
         reset: () => setWL(sc.win, sc.lev),
       },
       leftMode: () => bir!.leftMode(),
@@ -558,10 +565,6 @@ async function main() {
   // range (sampled), like Slicer's shift slider spanning the scalar range.
   let vrPreset: string | null = null;
   let vrShift = 0;
-  const vd = res.ct.vol;
-  let vmin = Infinity, vmax = -Infinity;
-  const vstride = Math.max(1, Math.floor(vd.length / 2_000_000));
-  for (let i = 0; i < vd.length; i += vstride) { const v = vd[i]; if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
   const shiftRange = Math.max(200, (vmax - vmin) / 2);
   const bakeOf = (name: string | null) => name ? presetLUT(CT_VR_PRESETS.find((p) => p.name === name)!) : null;
   const presetLabel = () => vrPreset ? (CT_VR_PRESETS.find((p) => p.name === vrPreset)?.label ?? vrPreset) : "Default (W/L)";
