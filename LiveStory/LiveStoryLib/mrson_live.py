@@ -104,6 +104,9 @@ _CLASS_TYPE = {
     "vtkMRMLViewNode": "view",
     "vtkMRMLSliceNode": "view",
     "vtkMRMLLayoutNode": "layout",
+    "vtkMRMLCrosshairNode": "crosshair",
+    "vtkMRMLInteractionNode": "interaction",
+    "vtkMRMLSelectionNode": "selection",
 }
 
 
@@ -154,6 +157,12 @@ def _node_event(node):
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._markup_node(node, nid)}
     if t == "layout":
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._layout_node(node, nid)}
+    if t == "crosshair":
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._crosshair_node(node, nid)}
+    if t == "interaction":
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._interaction_node(node, nid)}
+    if t == "selection":
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._selection_node(node, nid)}
     if t == "view":                              # slice scroll / 3d view changes
         vn = M._slice_view_node(node, nid) if cls == "vtkMRMLSliceNode" else M._3d_view_node(node, nid)
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": vn}
@@ -467,6 +476,10 @@ class _WSClient:
 
     def _observeInstance(self, node):
         self._tags_add(node, node.AddObserver(vtk.vtkCommand.ModifiedEvent, self._onNodeModified))
+        if node.GetClassName() == "vtkMRMLInteractionNode":
+            for evname in ("InteractionModeChangedEvent", "InteractionModePersistenceChangedEvent"):
+                if hasattr(node, evname):
+                    self._tags_add(node, node.AddObserver(getattr(node, evname), self._onNodeModified))
         # markups fire a dedicated PointModifiedEvent on control-point drags
         if _mrson_type(node) == "markup" and hasattr(node, "PointModifiedEvent"):
             self._tags_add(node, node.AddObserver(node.PointModifiedEvent, self._onNodeModified))

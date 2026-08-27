@@ -440,6 +440,25 @@ export class SliceRenderer {
     this.viewState[orient] = { panU, panV, zoom: Math.max(1e-3, zoom) };
   }
 
+  /** The current pan/zoom of a plane expressed the way Slicer's slice node stores it: in-plane centre
+   *  (RAS, without the out-of-plane offset which the caller owns) + field of view (mm) — the inverse
+   *  of setMirrorFrame, so a local pan/zoom can be written back to the app as a slice frame. */
+  mirrorFrame(orient: Orientation, aspectWH: number): { centerRAS: Vec3; fovX: number; fovY: number } {
+    const b = this.basisOf(orient);
+    const st = this.viewState[orient];
+    const ux = this.extentAlong(b.uDir), vx = this.extentAlong(b.vDir);
+    const uExt = ux.hi - ux.lo, vExt = vx.hi - vx.lo;
+    const fit = Math.min(uExt, vExt) / st.zoom;                 // the smaller extent fills the smaller viewport side
+    const fovY = aspectWH >= 1 ? fit : fit / aspectWH, fovX = aspectWH >= 1 ? fit * aspectWH : fit;
+    const volC: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    const centerRAS: Vec3 = [
+      volC[0] + b.uDir[0] * st.panU + b.vDir[0] * st.panV,
+      volC[1] + b.uDir[1] * st.panU + b.vDir[1] * st.panV,
+      volC[2] + b.uDir[2] * st.panU + b.vDir[2] * st.panV,
+    ];
+    return { centerRAS, fovX, fovY };
+  }
+
   /** Map a view (u,v) in [0,1] (y down) to normalized texture coords for the current
    *  plane — for click picking. Returns the tex coord; the caller converts to IJK via
    *  ijk = tex*dims - 0.5. Anisotropy/rotation are handled by the same p2t the shader uses. */

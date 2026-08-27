@@ -116,6 +116,22 @@ def _apply_patch(node, path, value):
             node.SetFieldOfView(float(value[0]), float(value[1]), float(value[2])); node.UpdateMatrices(); return True
         return False
 
+    if cls == "vtkMRMLCrosshairNode":
+        # SlicerLive cursor -> Slicer's crosshair node: DataProbe observes CursorPositionModifiedEvent, so the
+        # streamed Data Probe panel shows the values under the SlicerLive cursor (lossless, no re-implementation)
+        if k0 == "cursorRAS" and isinstance(value, (list, tuple)) and len(value) >= 3:
+            node.SetCursorPositionRAS([float(value[0]), float(value[1]), float(value[2])]); return True
+        if k0 == "crosshairRAS" and isinstance(value, (list, tuple)) and len(value) >= 3:
+            node.SetCrosshairRAS([float(value[0]), float(value[1]), float(value[2])]); return True
+        if k0 == "mode": node.SetCrosshairMode(int(value)); return True
+        return False
+
+    if cls == "vtkMRMLInteractionNode":
+        modes = {"place": 1, "viewTransform": 2, "select": 3, "user": 4, "adjustWindowLevel": 5}
+        if k0 == "mode" and value in modes: node.SetCurrentInteractionMode(modes[value]); return True
+        if k0 == "placeModePersistence": node.SetPlaceModePersistence(1 if value else 0); return True
+        return False
+
     if cls == "vtkMRMLLayoutNode":
         if k0 == "arrangement": node.SetViewArrangement(int(value)); return True
         return False
@@ -147,8 +163,10 @@ def _apply_patch(node, path, value):
         return False
 
     if cls == "vtkMRMLScalarVolumeDisplayNode":
-        if k0 == "window": node.SetWindow(float(value)); return True
-        if k0 == "level": node.SetLevel(float(value)); return True
+        # a manual W/L set must switch AutoWindowLevel off first (as the Slicer GUI does on a W/L drag),
+        # otherwise the auto computation immediately overrides the value
+        if k0 == "window": node.SetAutoWindowLevel(0); node.SetWindow(float(value)); return True
+        if k0 == "level": node.SetAutoWindowLevel(0); node.SetLevel(float(value)); return True
         if k0 == "interpolate": node.SetInterpolate(bool(value)); return True
         # visible falls through to the generic display-visibility fallback
 
@@ -203,6 +221,58 @@ def _apply_patch(node, path, value):
 
 
 def _apply_cmd(node, cmd, args):
+    if cmd == "setCursor" and node is not None and node.GetClassName() == "vtkMRMLCrosshairNode":
+        # SlicerLive pointer over a slice view -> Slicer's crosshair cursor, in the XYZ+sliceNode form so
+        # DataProbe (which needs the slice node + its layers) shows the values under the cursor.
+        import vtk
+        ras = args.get("ras"); view = args.get("view")
+        sn = None
+        for n in slicer.util.getNodesByClass("vtkMRMLSliceNode"):
+            if n.GetLayoutName() == view: sn = n
+        if ras is None:
+            node.SetCursorPositionInvalid(); return True
+        if sn is None:
+            node.SetCursorPositionRAS([float(ras[0]), float(ras[1]), float(ras[2])]); return True
+        inv = vtk.vtkMatrix4x4(); vtk.vtkMatrix4x4.Invert(sn.GetXYToRAS(), inv)
+        xyz = inv.MultiplyPoint([float(ras[0]), float(ras[1]), float(ras[2]), 1.0])
+        node.SetCursorPositionXYZ([xyz[0], xyz[1], xyz[2]], sn)
+        return True
+    if cmd == "setSliceFrame" and node is not None and node.GetClassName() == "vtkMRMLSliceNode":
+        # SlicerLive pan/zoom -> Slicer: in-plane centre (translation column of sliceToRAS) + field of view
+        c = args.get("center"); fov = args.get("fov")
+        m = node.GetSliceToRAS()
+        if c is not None:
+            for i in range(3): m.SetElement(i, 3, float(c[i]))
+        if fov is not None and len(fov) >= 2:
+            node.SetFieldOfView(float(fov[0]), float(fov[1]), float(fov[2]) if len(fov) > 2 else node.GetFieldOfView()[2])
+        node.UpdateMatrices(); node.Modified()
+        return True
+    if cmd == "viewContextMenu" and node is not None and node.GetClassName() in ("vtkMRMLSliceNode", "vtkMRMLViewNode"):
+        # right-click in a SlicerLive view -> the app's own view context menu, via the same event the
+        # interactor styles use (vtkMRMLInteractionNode::ShowViewContextMenu -> app logic -> subject
+        # hierarchy plugin logic builds the QMenu). The QMenu is a top-level -> it streams as a popup
+        # region and the click that picks an item routes back through the GUI stream. The menu's
+        # exec() runs a nested loop; sockets keep being serviced, so nothing else stalls.
+        ras = args.get("ras") or [0.0, 0.0, 0.0]
+        inode = node.GetInteractionNode() if hasattr(node, "GetInteractionNode") else slicer.app.applicationLogic().GetInteractionNode()
+        ed = slicer.vtkMRMLInteractionEventData()
+        ed.SetViewNode(node)
+        ed.SetWorldPosition([float(ras[0]), float(ras[1]), float(ras[2])])
+        ed.SetDisplayPosition([int(args.get("x", 0)), int(args.get("y", 0))])
+        import qt
+        # Slicer positions the menu at QCursor::pos(): move the (virtual, offscreen) cursor to the click
+        # first so the popup region lands where the user clicked
+        lm = slicer.app.layoutManager(); view = None
+        if node.GetClassName() == "vtkMRMLSliceNode":
+            w = lm.sliceWidget(node.GetLayoutName()); view = w.sliceView() if w else None
+        else:
+            for i in range(lm.threeDViewCount):
+                tw = lm.threeDWidget(i)
+                if tw.mrmlViewNode().GetID() == node.GetID(): view = tw.threeDView()
+        if view is not None:
+            qt.QCursor.setPos(view.mapToGlobal(qt.QPoint(int(args.get("x", 0)), int(args.get("y", 0)))))
+        qt.QTimer.singleShot(0, lambda: inode.ShowViewContextMenu(ed))   # defer: don't nest the loop inside the op handler
+        return True
     if cmd == "setCameraPose" and node is not None:
         if "position" in args: node.SetPosition(*args["position"])
         if "focalPoint" in args: node.SetFocalPoint(*args["focalPoint"])

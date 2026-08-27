@@ -178,6 +178,27 @@ Remaining in S2: keyed multi-volume / multi-segmentation fields, a second 3D vie
 `SceneRenderer`), per-cell basis slots (cells beyond Red/Green/Yellow share the renderer's three
 orientation slots round-robin), and migrating `mirror-browser.ts` onto `mountLiveViews`.
 
+## S3 status (2026-08-27): interaction completeness (first cut)
+New mrson node types `crosshair`, `interaction`, `selection` (serialize + observe; the interaction node
+fires `InteractionModeChangedEvent`, observed explicitly). Server ops: `crosshair #/cursorRAS`,
+`#/crosshairRAS`, `#/mode`; `interaction #/mode`, `#/placeModePersistence`; cmds `setCursor {ras, view}`
+(uses `SetCursorPositionXYZ(xyz, sliceNode)` — the RAS-only form leaves DataProbe blank), `setSliceFrame
+{center, fov}`, `viewContextMenu {ras, x, y}` (→ `vtkMRMLInteractionNode.ShowViewContextMenu(eventData)`
+after `QCursor.setPos` to the click; the QMenu streams as a popup region and its `exec()` nested loop is
+harmless because sockets keep being serviced — but never call it synchronously from an MCP handler).
+W/L patches now switch `AutoWindowLevel` off first (otherwise Slicer silently overrides the value).
+Client (`live-views.ts` + `view-cmds.ts`): `ViewStateDisplayableManager`; hover → `setCursor` →
+**Slicer's real Data Probe follows the SlicerLive cursor**; shift-move → crosshair RAS + overlay lines;
+W/L left-drag gated by the streamed interaction mode; ctrl/⌘-wheel zoom, right-drag zoom and pan write
+back a `setSliceFrame` (local "branched" frame until written, 200 ms debounce); markup control-point
+drag in slice cells (pick within 12 px of an in-plane glyph, optimistic move + `setControlPoint`,
+echo-suppression by `touch`); right-click → Slicer's own view context menu (verified: picking "Adjust
+window/level" flipped the interaction node to 5 and the menu closed).
+Verified numerically over MCP: cursor RAS (39.5, −19.2, 5.1) → DataProbe value 82; W/L 151/75.5 →
+263.2/19.4; FOV 449×256 → 261.6×149.2.
+Open in S3: keys into views, drag-and-drop upload (needs the S4 blob endpoint), slice-intersection
+lines, second 3D view.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

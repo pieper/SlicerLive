@@ -17,10 +17,11 @@ import { LiveSync } from "../livesync.ts";
 import { WsTransport } from "../transport.ts";
 import { CameraInteractor } from "../vtk-interactor.ts";
 import { attachSliceControls, type SliceControls } from "../demos/slice-control.ts";
+import "./view-cmds.ts";   // registers setCursor / setSliceFrame / viewContextMenu client handlers
 import {
   CameraDisplayableManager, type CameraState, LayoutDisplayableManager, LiveScene, MarkupsDisplayableManager,
   type MirrorView, type OverlayItem, RoiCropDisplayableManager, SegmentationDisplayableManager, SliceDisplayableManager,
-  type SlicePlane, type Vec3, VolumeRenderingDisplayableManager,
+  type SlicePlane, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeRenderingDisplayableManager,
 } from "../livescene.ts";
 
 export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
@@ -32,6 +33,7 @@ const CELL_COLORS: Record<string, string> = { Red: "#f05a5a", Yellow: "#f0d24a",
 interface SliceCell {
   name: string; el: HTMLElement; canvas: HTMLCanvasElement; ctx: GPUCanvasContext; overlay: HTMLCanvasElement;
   plane?: SlicePlane; controls?: SliceControls; orientKey: Orientation;
+  branched?: boolean;   // a local pan/zoom is in progress: keep the local frame until it is written back
 }
 
 export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; onStatus?: (s: string) => void }): LiveViews {
@@ -89,6 +91,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const cells = new Map<string, SliceCell>();
   let segOverlay: GPUTexture | null = null, segFill = 0.5, segOutline = 1.0;
   const overlays = new Map<string, OverlayItem[]>();   // layer -> items (cell "*")
+  let viewState: ViewState = {};                          // interaction / selection / crosshair nodes
+  const interactionMode = () => (viewState.interaction?.mode as string | undefined) ?? "viewTransform";
   let nextOrient = 0;
   const ORIENTS: Orientation[] = ["axial", "coronal", "sagittal"];
 
@@ -116,7 +120,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const applyPlane = (c: SliceCell) => {
     const pl = c.plane!;
     slice.setBasis(c.orientKey, pl.basis ? { uDir: pl.basis.uDir, vDir: pl.basis.vDir, nDir: pl.basis.nDir } : null);
-    if (pl.centerRAS && pl.fovX && pl.fovY) slice.setMirrorFrame(c.orientKey, pl.centerRAS as Vec3, pl.fovX, pl.fovY); else slice.resetView(c.orientKey);
+    if (!c.branched) {   // while a local pan/zoom is in flight the renderer's own viewState is the truth
+      if (pl.centerRAS && pl.fovX && pl.fovY) slice.setMirrorFrame(c.orientKey, pl.centerRAS as Vec3, pl.fovX, pl.fovY); else slice.resetView(c.orientKey);
+    }
     slice.setPlane(c.orientKey, planeOffset01(c));
   };
   const drawOverlay = (c: SliceCell) => {
@@ -146,6 +152,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         }
       }
     }
+    const ch = viewState.crosshair;
+    if (ch && (ch.mode as number) && ch.crosshairRAS) {           // full-view cross lines (Slicer's crosshair modes)
+      const p = proj(ch.crosshairRAS as Vec3);
+      g.strokeStyle = "rgba(255,255,80,0.8)"; g.lineWidth = ((ch.thickness as number) || 1) * dpr; g.beginPath();
+      g.moveTo(0, p.y); g.lineTo(ov.width, p.y); g.moveTo(p.x, 0); g.lineTo(p.x, ov.height); g.stroke();
+    }
   };
   const renderSlice = (c: SliceCell) => {
     if (c.el.style.display === "none") return;
@@ -158,7 +170,17 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const resizeAll = () => { sizeCanvas(three.canvas); for (const c of cells.values()) sizeCanvas(c.canvas); };
 
   // ── MirrorView ──
-  const view: MirrorView = {
+  const crosshairOverlay = () => {
+    const ch = viewState.crosshair;
+    const mode = (ch?.mode as number) ?? 0, ras = ch?.crosshairRAS as Vec3 | undefined;
+    if (!mode || !ras) { overlays.delete("crosshair"); return; }
+    // Slicer draws the crosshair through crosshairRAS as lines spanning the view; two long polylines per
+    // cell in the plane's own axes are what the projection produces. Represent as an in-plane cross of
+    // 1e4 mm arms along the cell basis — drawn per cell in drawOverlay via the "cross" hint.
+    overlays.set("crosshair", [{ kind: "point", ras, color: [1, 1, 0.3, 1], radiusPx: 3, label: "" }]);
+  };
+  const view: MirrorView & { setViewState?: (st: ViewState) => void } = {
+    setViewState(st) { viewState = st; crosshairOverlay(); for (const c of cells.values()) drawOverlay(c); },
     setOverlay(_cell, layer, items) { if (items.length) overlays.set(layer, items); else overlays.delete(layer); for (const c of cells.values()) drawOverlay(c); },
     setField(k, f) { fields3d.set(k, f); rebuild3d(); },
     removeField(k) { if (fields3d.delete(k)) rebuild3d(); },
@@ -192,9 +214,11 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     },
   };
 
+  const markupsDM = new MarkupsDisplayableManager();
   const live = new LiveScene(cfg.httpBase, [
     new LayoutDisplayableManager(), new CameraDisplayableManager(), new VolumeRenderingDisplayableManager(gpu.device),
-    new SliceDisplayableManager(), new SegmentationDisplayableManager(gpu.device, 1.5), new MarkupsDisplayableManager(), new RoiCropDisplayableManager(),
+    new SliceDisplayableManager(), new SegmentationDisplayableManager(gpu.device, 1.5), markupsDM, new RoiCropDisplayableManager(),
+    new ViewStateDisplayableManager(),
   ]);
   live.view = view;
   const sync = new LiveSync(live, new WsTransport(cfg.wsUrl));
@@ -218,6 +242,38 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   three.canvas.addEventListener("pointerup", end3d); three.canvas.addEventListener("pointercancel", end3d);
   three.canvas.addEventListener("wheel", (e) => { e.preventDefault(); cam3d.wheel(e.deltaY < 0); pushCamera(); }, { passive: false });
 
+  const sliceNodeId = (name: string) => nodeIdFor((nd) => nd.type === "view" && nd.kind === "slice" && nd.layoutName === name);
+  const scalarDisplayId = () => nodeIdFor((nd) => nd.type === "scalarVolumeDisplay");
+  const crosshairId = () => viewState.crosshair?.id ?? null;
+  /** RAS of a cell pixel (u,v in [0,1]) on the cell's current plane. */
+  const cellRas = (c: SliceCell, u: number, v: number): Vec3 => { applyPlane(c); return slice.viewToRas(c.orientKey, planeOffset01(c), u, v, c.canvas.width / c.canvas.height); };
+  /** Nearest markup control point to a cell pixel within `px`, among in-plane points. */
+  const pickMarkup = (c: SliceCell, u: number, v: number, w: number, h: number, px = 12) => {
+    applyPlane(c);
+    const off = planeOffset01(c), aspect = w / h;
+    let best: { id: string; index: number; ras: Vec3 } | null = null, bestD = px * dpr;
+    for (const hd of markupsDM.handles()) {
+      const r = slice.rasToView(c.orientKey, off, hd.ras, aspect);
+      if (Math.abs(r.distMm) > SLAB_MM) continue;
+      const d = Math.hypot((r.u - u) * w, (r.v - v) * h);
+      if (d < bestD) { bestD = d; best = { id: hd.id, index: hd.index, ras: hd.ras }; }
+    }
+    return best;
+  };
+  let sliceDrag: { id: string; index: number } | null = null;
+  const pushSliceFrame = (c: SliceCell) => {
+    const id = sliceNodeId(c.name); const pl = c.plane; if (!id || !pl) return;
+    const f = slice.mirrorFrame(c.orientKey, c.canvas.width / c.canvas.height);
+    const n: Vec3 = pl.basis ? pl.basis.nDir : pl.orient === "axial" ? [0, 0, 1] : pl.orient === "coronal" ? [0, 1, 0] : [1, 0, 0];
+    // keep the out-of-plane position: replace the centre's component along the normal with posMm
+    const along = f.centerRAS[0] * n[0] + f.centerRAS[1] * n[1] + f.centerRAS[2] * n[2];
+    const center: Vec3 = [f.centerRAS[0] + (pl.posMm - along) * n[0], f.centerRAS[1] + (pl.posMm - along) * n[1], f.centerRAS[2] + (pl.posMm - along) * n[2]];
+    live.write({ op: "cmd", id, cmd: "setSliceFrame", args: { center, fov: [f.fovX, f.fovY] } });   // the app keeps its slab thickness
+    pl.centerRAS = center; pl.fovX = f.fovX; pl.fovY = f.fovY;
+    c.branched = false;
+  };
+  let frameTimer: number | undefined;
+  const branch = (c: SliceCell) => { c.branched = true; clearTimeout(frameTimer); frameTimer = setTimeout(() => pushSliceFrame(c), 200) as unknown as number; };
   function attachInteraction(c: SliceCell) {
     c.controls = attachSliceControls(c.canvas, {
       orient: c.orientKey, getSlice: () => slice,
@@ -227,12 +283,59 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         const [lo, hi] = volumeField.aabb();
         const ext = Math.abs(n[0]) * (hi[0] - lo[0]) + Math.abs(n[1]) * (hi[1] - lo[1]) + Math.abs(n[2]) * (hi[2] - lo[2]);
         pl.posMm += ext * 0.02 * (fwd ? -1 : 1);
-        const id = nodeIdFor((nd) => nd.type === "view" && nd.kind === "slice" && nd.layoutName === c.name);
+        const id = sliceNodeId(c.name);
         if (id) live.write({ op: "patch", id, path: "#/offset", value: pl.posMm });   // the app's slice follows (parity-proven)
       },
       redraw: () => renderSlice(c),
+      // Slicer's AdjustWindowLevel mouse mode: gated by the interaction node streamed from the app
+      wl: {
+        enabled: () => interactionMode() === "adjustWindowLevel",
+        get: () => { const d = viewState ? live.nodes.get(scalarDisplayId() ?? "") : undefined; return [(d?.window as number) ?? 100, (d?.level as number) ?? 50]; },
+        set: (win, lev) => { const id = scalarDisplayId(); if (!id) return; live.write({ op: "patch", id, path: "#/window", value: win }); live.write({ op: "patch", id, path: "#/level", value: lev }); slice.setWindowLevel(win, lev); renderSlice(c); },
+        range: () => volumeField ? volumeField.getClim() : [0, 1],
+      },
+      hooks: {
+        onZoom: () => branch(c),
+        onLeftGrab: (u, v, w, h) => {
+          const hit = pickMarkup(c, u, v, w, h);
+          if (!hit) return false;
+          sliceDrag = { id: hit.id, index: hit.index }; markupsDM.touch(hit.id, hit.index); return true;
+        },
+        onLeftDrag: (u, v) => {
+          if (!sliceDrag) return;
+          const ras = cellRas(c, u, v);
+          markupsDM.moveLocal(sliceDrag.id, sliceDrag.index, ras, live);   // optimistic
+          markupsDM.touch(sliceDrag.id, sliceDrag.index);
+          live.write({ op: "cmd", id: sliceDrag.id, cmd: "setControlPoint", args: { index: sliceDrag.index, position: ras } });
+        },
+        onLeftDrop: () => { if (sliceDrag) { sync.flush(); sliceDrag = null; } },
+        onHover: (u, v, w, h) => {
+          // cursor -> the app's crosshair cursor (DataProbe follows); shift-move -> crosshair position too
+          const id = crosshairId(); if (!id) return;
+          const ras = cellRas(c, u, v);
+          live.write({ op: "cmd", id, cmd: "setCursor", args: { ras, view: c.name } });
+          if (shiftHeld) live.write({ op: "patch", id, path: "#/crosshairRAS", value: ras });
+          c.canvas.style.cursor = pickMarkup(c, u, v, w, h) ? "grab" : "default";
+        },
+      },
+    });
+    // pan (middle / shift+left drag) and right-drag zoom have no hooks: branch on the press that starts
+    // them (capture phase, before the control handles it) and write the frame back on release
+    c.canvas.addEventListener("pointerdown", (e) => { if (e.button === 1 || e.button === 2 || (e.button === 0 && e.shiftKey)) c.branched = true; }, true);
+    c.canvas.addEventListener("pointerup", () => { if (c.branched && !sliceDrag) pushSliceFrame(c); });
+    c.canvas.addEventListener("pointerleave", () => { const id = crosshairId(); if (id) live.write({ op: "cmd", id, cmd: "setCursor", args: { ras: null, view: c.name } }); });
+    c.canvas.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      const id = sliceNodeId(c.name); if (!id) return;
+      const r = c.canvas.getBoundingClientRect();
+      const ras = cellRas(c, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+      live.write({ op: "cmd", id, cmd: "viewContextMenu", args: { ras, x: Math.round(e.clientX - r.left), y: Math.round(e.clientY - r.top) } });
+      sync.flush();
     });
   }
+  let shiftHeld = false;
+  addEventListener("keydown", (e) => { if (e.key === "Shift") shiftHeld = true; }, true);
+  addEventListener("keyup", (e) => { if (e.key === "Shift") shiftHeld = false; }, true);
 
   const setCells = (rects: ViewCellRect[]) => {
     const origin = root.getBoundingClientRect();

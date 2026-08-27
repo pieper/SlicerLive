@@ -316,6 +316,34 @@ def _layout_node(n, node_id):
     }
 
 
+_INTERACTION_MODES = {1: "place", 2: "viewTransform", 3: "select", 4: "user", 5: "adjustWindowLevel"}
+
+
+def _crosshair_node(n, node_id):
+    ras = [0.0, 0.0, 0.0]; n.GetCursorPositionRAS(ras)
+    xras = list(n.GetCrosshairRAS())          # VTK python: returns a tuple
+    return {"type": "crosshair", "id": node_id, "name": n.GetName(),
+            "mode": int(n.GetCrosshairMode()), "thickness": int(n.GetCrosshairThickness()),
+            "behavior": int(n.GetCrosshairBehavior()), "cursorRAS": ras, "crosshairRAS": xras,
+            "source": {"mrmlClass": n.GetClassName()}}
+
+
+def _interaction_node(n, node_id):
+    return {"type": "interaction", "id": node_id, "name": n.GetName(),
+            "mode": _INTERACTION_MODES.get(int(n.GetCurrentInteractionMode()), "viewTransform"),
+            "placeModePersistence": bool(n.GetPlaceModePersistence()),
+            "source": {"mrmlClass": n.GetClassName()}}
+
+
+def _selection_node(n, node_id):
+    return {"type": "selection", "id": node_id, "name": n.GetName(),
+            "activePlaceNodeClassName": n.GetActivePlaceNodeClassName() or "",
+            "activePlaceNodeID": n.GetActivePlaceNodeID() or "",
+            "activeVolumeID": n.GetActiveVolumeID() or "", "secondaryVolumeID": n.GetSecondaryVolumeID() or "",
+            "activeLabelVolumeID": n.GetActiveLabelVolumeID() or "",
+            "source": {"mrmlClass": n.GetClassName()}}
+
+
 def _3d_view_node(n, node_id):
     node = {"type": "view", "id": node_id, "name": n.GetName(), "kind": "3d",
             "layoutName": n.GetLayoutName(), "refs": {}, "source": {"mrmlClass": n.GetClassName()}}
@@ -383,7 +411,9 @@ def serialize_mrson(outdir, name):
             print(f"mrson: skipped segmentation {seg.GetID()}: {e}")
 
     simple = [("vtkMRMLLayoutNode", _layout_node), ("vtkMRMLCameraNode", _camera_node),
-              ("vtkMRMLSliceNode", _slice_view_node), ("vtkMRMLViewNode", _3d_view_node)]
+              ("vtkMRMLSliceNode", _slice_view_node), ("vtkMRMLViewNode", _3d_view_node),
+              ("vtkMRMLCrosshairNode", _crosshair_node), ("vtkMRMLInteractionNode", _interaction_node),
+              ("vtkMRMLSelectionNode", _selection_node)]
     for cls, build in simple:
         for n in slicer.util.getNodesByClass(cls):
             if n.GetID() in nodes:
