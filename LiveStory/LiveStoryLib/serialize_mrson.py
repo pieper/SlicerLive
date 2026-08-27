@@ -28,10 +28,42 @@ def _rgba(c):
     return [c[0], c[1], c[2], 1.0]
 
 
+_ZARR_CACHE = {}   # node id -> (imageData MTime, blobdir, desc): a transform drag re-serializes ONLY metadata
+
+
 def _zarr_desc(vol, node_id, blobdir):
+    img = vol.GetImageData()
+    key = (img.GetMTime() if img is not None else 0, blobdir)
+    hit = _ZARR_CACHE.get(node_id)
+    if hit is not None and hit[0] == key:
+        return dict(hit[1])
     desc = S._write_zarr(vol, node_id, blobdir)
     desc["bytes"] = str(desc["bytes"])          # mrson int64-safe rule
-    return desc
+    _ZARR_CACHE[node_id] = (key, desc)
+    return dict(desc)
+
+
+def _transform_ref(node):
+    """refs.transform for a transformable node (world coordinates are ALSO baked into ijkToRAS /
+    control points, so a client that ignores transforms still sees the right geometry)."""
+    tn = node.GetParentTransformNode() if hasattr(node, "GetParentTransformNode") else None
+    return {"transform": [tn.GetID()]} if tn is not None else {}
+
+
+def _transform_node(n, node_id):
+    import vtk
+    toParent = vtk.vtkMatrix4x4(); toWorld = vtk.vtkMatrix4x4()
+    linear = bool(n.IsTransformToWorldLinear())
+    if hasattr(n, "GetMatrixTransformToParent"):
+        n.GetMatrixTransformToParent(toParent)
+    if linear:
+        n.GetMatrixTransformToWorld(toWorld)
+    parent = n.GetParentTransformNode()
+    return {"type": "transform", "id": node_id, "name": n.GetName(), "frame": "RAS",
+            "transformType": "linear" if linear else "nonlinear",
+            "toParent": S._mat4(toParent), "toWorld": S._mat4(toWorld) if linear else None,
+            "refs": {"parent": [parent.GetID()]} if parent is not None else {},
+            "source": {"mrmlClass": n.GetClassName()}}
 
 
 def _view_refs(dn):
@@ -131,7 +163,7 @@ def _image_node(vol, node_id, blobdir):
         "ijkToRAS": S._volume_ijk_to_ras(vol),
         "zarr": _zarr_desc(vol, node_id, blobdir),
         "labelmap": vol.GetClassName() == "vtkMRMLLabelMapVolumeNode",
-        "refs": {}, "source": {"mrmlClass": vol.GetClassName()},
+        "refs": _transform_ref(vol), "source": {"mrmlClass": vol.GetClassName()},
     }
 
 
@@ -397,7 +429,7 @@ def _color_table_node(n, node_id, max_entries=4096):
 
 def _3d_view_node(n, node_id):
     node = {"type": "view", "id": node_id, "name": n.GetName(), "kind": "3d",
-            "layoutName": n.GetLayoutName(), "refs": {}, "source": {"mrmlClass": n.GetClassName()}}
+            "layoutName": n.GetLayoutName(), "refs": _transform_ref(n), "source": {"mrmlClass": n.GetClassName()}}
     for cam in slicer.util.getNodesByClass("vtkMRMLCameraNode"):
         # match camera->view by layout name (GetActiveTag() is deprecated and, being a
         # vtkDeprecation warning, prints to the Python console on EVERY call → main-thread repaint)
@@ -437,7 +469,7 @@ def serialize_mrson(outdir, name):
                 continue
             try:
                 _add_displayable(nodes, m, lambda n, nid: {"type": "mesh", "id": nid, "name": n.GetName(),
-                                 "frame": "RAS", "refs": {}, "source": {"mrmlClass": n.GetClassName()}}, m.GetID())
+                                 "frame": "RAS", "refs": _transform_ref(n), "source": {"mrmlClass": n.GetClassName()}}, m.GetID())
             except Exception as e:  # noqa: BLE001
                 print(f"mrson: skipped mesh {m.GetID()}: {e}")
 
@@ -464,7 +496,8 @@ def serialize_mrson(outdir, name):
     simple = [("vtkMRMLLayoutNode", _layout_node), ("vtkMRMLCameraNode", _camera_node),
               ("vtkMRMLSliceNode", _slice_view_node), ("vtkMRMLViewNode", _3d_view_node),
               ("vtkMRMLCrosshairNode", _crosshair_node), ("vtkMRMLInteractionNode", _interaction_node),
-              ("vtkMRMLSelectionNode", _selection_node), ("vtkMRMLSliceCompositeNode", _slice_composite_node)]
+              ("vtkMRMLSelectionNode", _selection_node), ("vtkMRMLSliceCompositeNode", _slice_composite_node),
+              ("vtkMRMLTransformNode", _transform_node)]
     for cls, build in simple:
         for n in slicer.util.getNodesByClass(cls):
             if n.GetID() in nodes:

@@ -21,7 +21,7 @@ import "./view-cmds.ts";   // registers setCursor / setSliceFrame / viewContextM
 import {
   CameraDisplayableManager, type CameraState, LayoutDisplayableManager, LiveScene, MarkupsDisplayableManager,
   type MirrorView, type OverlayItem, RoiCropDisplayableManager, SegmentationDisplayableManager, SliceDisplayableManager,
-  type SlicePlane, type SliceLayers, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeLayersDisplayableManager, VolumeRenderingDisplayableManager,
+  type SlicePlane, type SliceLayers, TransformDisplayableManager, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeLayersDisplayableManager, VolumeRenderingDisplayableManager,
 } from "../livescene.ts";
 
 export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
@@ -233,7 +233,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const live = new LiveScene(cfg.httpBase, [
     new LayoutDisplayableManager(), new CameraDisplayableManager(), new VolumeRenderingDisplayableManager(gpu.device), new VolumeLayersDisplayableManager(gpu.device),
     new SliceDisplayableManager(), new SegmentationDisplayableManager(gpu.device, 1.5), markupsDM, new RoiCropDisplayableManager(),
-    new ViewStateDisplayableManager(),
+    new ViewStateDisplayableManager(), new TransformDisplayableManager(),
   ]);
   live.view = view;
   const sync = new LiveSync(live, new WsTransport(cfg.wsUrl));

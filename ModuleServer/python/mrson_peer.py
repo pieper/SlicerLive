@@ -183,6 +183,9 @@ class _Peer:
         self._tag(node, node.AddObserver(vtk.vtkCommand.ModifiedEvent, self._on_node_modified))
         cls = node.GetClassName()
         t = ML._mrson_type(node)
+        # a parent transform changed: the node's WORLD geometry changed although the node itself did not
+        if hasattr(node, "GetParentTransformNode"):
+            self._tag(node, node.AddObserver(slicer.vtkMRMLTransformableNode.TransformModifiedEvent, self._on_node_modified))
         if cls == "vtkMRMLInteractionNode":
             for evname in ("InteractionModeChangedEvent", "InteractionModePersistenceChangedEvent"):
                 if hasattr(node, evname):

@@ -89,7 +89,9 @@ export class ImageField implements Field {
   private box: [Vec3, Vec3];
   private normScale = 1;   // r8unorm samples return raw/255; clim is packed /normScale so shader math is unchanged
 
+  private dims: Vec3;
   constructor(dev: GPUDevice, data: Float32Array | Uint8Array | Uint16Array, dims: Vec3, spacing: Vec3, lut: Uint8Array, opts: ImageFieldOpts) {
+    this.dims = dims;
     const center = opts.center ?? [0, 0, 0];
     // Store the volume in its NATIVE dtype where possible — 4× less VRAM + upload than expanding to
     // f32. r8unorm/r32float are both `float` sample types (filterable), so the sampling WGSL and bind
@@ -174,6 +176,12 @@ export class ImageField implements Field {
   }
   /** RAS(patient) -> texture[0,1] matrix (encodes the real ijkToRAS geometry). */
   patientToTexture(): Mat4 { return this.p2t; }
+  /** Re-place the volume in RAS without re-uploading voxels (a parent transform moved it). */
+  setIjkToRAS(ijkToRAS: ArrayLike<number>) {
+    this.p2t = patientToTextureFromIjkToRAS(ijkToRAS, this.dims);
+    this.box = volumeAABBFromIjkToRAS(ijkToRAS, this.dims);
+    this.stepMm = Math.min(...spacingFromIjkToRAS(ijkToRAS));
+  }
 
   structMembers(s: number): string {
     return [

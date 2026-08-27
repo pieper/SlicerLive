@@ -248,6 +248,19 @@ reports all three layers under the SlicerLive cursor.
 Not yet: threshold/invert in the shader, blend-by-drag, slice linking semantics on the client, multiple
 segmentations (still one overlay).
 
+## S7a status (2026-08-27): transforms
+mrson `transform` nodes (`transformType`, `toParent`, `toWorld` for linear, `refs.parent`), `refs.transform`
+on images/markups/segmentations, `#/toParent` patch. World geometry stays **baked** on the wire
+(`ijkToRAS` folds the linear parent chain; markup control points are world) so clients need no
+composition; the peer now observes `vtkMRMLTransformableNode::TransformModifiedEvent` on every
+transformable and re-serializes the image *metadata only* (zarr descriptor cached by image `MTime`),
+and `ImageField.setIjkToRAS` re-places a loaded volume without re-uploading voxels. Verified: a 25/−10 mm
+translation of a transform applied to MRHead moved the page's `ijkToRAS` by exactly that.
+Not yet (S7b): mesh geometry blobs + `MeshField` raster/depth composite in `SceneRenderer`, model slice
+intersections, nonlinear transforms as `TransformField` modifiers, the transform gizmo.
+Caution: Slicer's slice widgets own hidden `Red/Green/Yellow Transform` linear transform nodes — never
+attach data to them (I did, briefly; reset).
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

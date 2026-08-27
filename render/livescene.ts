@@ -548,6 +548,18 @@ export class ViewStateDisplayableManager implements DisplayableManager {
   onSceneClosed(scene: LiveScene) { this.state = {}; this.push(scene); }
 }
 
+/** Keeps the transform nodes (linear matrices, parent refs). World geometry is baked into every
+ *  displayable on the wire (ijkToRAS, world control points), so nothing needs composing here; this
+ *  manager exists so transforms are subscribed and available for interaction (gizmo, Transforms
+ *  module parity) and, later, nonlinear TransformField modifiers. */
+export class TransformDisplayableManager implements DisplayableManager {
+  interestedTypes = ["transform"];
+  nodes = new Map<string, MrsonNode>();
+  onNodeAdded(node: MrsonNode) { this.nodes.set(node.id, node); }
+  onNodeRemoved(id: string) { this.nodes.delete(id); }
+  onSceneClosed() { this.nodes.clear(); }
+}
+
 /** Mirrors the application layout (which views are shown, and how). */
 export class LayoutDisplayableManager implements DisplayableManager {
   interestedTypes = ["layout"];
@@ -711,7 +723,14 @@ export class VolumeLayersDisplayableManager implements DisplayableManager {
 
   async onNodeAdded(node: MrsonNode, scene: LiveScene): Promise<void> {
     this.blobBaseHref = scene.blobBase();
-    if (node.type === "image") { const e = this.images.get(node.id); if (e) e.node = node; else this.images.set(node.id, { node }); }
+    if (node.type === "image") {
+      const e = this.images.get(node.id);
+      if (e) {
+        const moved = e.field && JSON.stringify(e.node.ijkToRAS) !== JSON.stringify(node.ijkToRAS);
+        e.node = node;
+        if (moved) e.field!.setIjkToRAS(node.ijkToRAS as number[]);   // a transform moved it: re-place, don't re-fetch
+      } else this.images.set(node.id, { node });
+    }
     else if (node.type === "scalarVolumeDisplay" || node.type === "labelMapDisplay") this.displays.set(node.id, node);
     else if (node.type === "colorTable") this.tables.set(node.id, node);
     else if (node.type === "sliceComposite") this.composites.set(node.layoutName as string, node);
@@ -823,7 +842,14 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
   async onNodeAdded(node: MrsonNode, scene: LiveScene): Promise<void> {
     this.blobBaseHref = scene.blobBase();
     this.view = scene.view;
-    if (node.type === "image") { if (!this.image) this.image = node; }
+    if (node.type === "image") {
+      if (!this.image) this.image = node;
+      else if (node.id === this.image.id) {
+        const moved = this.field && JSON.stringify(this.image.ijkToRAS) !== JSON.stringify(node.ijkToRAS);
+        this.image = node;
+        if (moved) { this.field!.setIjkToRAS(node.ijkToRAS as number[]); this.view?.setVolumeField(this.field!, this.wl()); this.view?.redraw(); }
+      }
+    }
     else if (node.type === "volumeRenderingDisplay") { this.vrDisplayId = node.id; this.vrVisible = !!node.visible; }
     else if (node.type === "transferFunction") { this.tf = node; this.reLUT(); }
     else if (node.type === "scalarVolumeDisplay") { this.scalarDisp = node; this.pushVolume(); }

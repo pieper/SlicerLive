@@ -190,6 +190,15 @@ def _apply_patch(node, path, value):
             return True
         return False
 
+    if "TransformNode" in cls and k0 == "toParent" and isinstance(value, (list, tuple)) and len(value) == 16:
+        import vtk
+        m = vtk.vtkMatrix4x4()
+        for r in range(4):
+            for c in range(4):
+                m.SetElement(r, c, float(value[r * 4 + c]))
+        node.SetMatrixTransformToParent(m)
+        return True
+
     if cls == "vtkMRMLLayoutNode":
         if k0 == "arrangement": node.SetViewArrangement(int(value)); return True
         return False

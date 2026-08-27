@@ -108,6 +108,8 @@ _CLASS_TYPE = {
     "vtkMRMLInteractionNode": "interaction",
     "vtkMRMLSelectionNode": "selection",
     "vtkMRMLSliceCompositeNode": "sliceComposite",
+    "vtkMRMLLinearTransformNode": "transform", "vtkMRMLTransformNode": "transform",
+    "vtkMRMLGridTransformNode": "transform", "vtkMRMLBSplineTransformNode": "transform",
     "vtkMRMLLabelMapVolumeNode": "image",
     "vtkMRMLLabelMapVolumeDisplayNode": "labelMapDisplay",
     "vtkMRMLColorTableNode": "colorTable",
@@ -162,6 +164,14 @@ def _node_event(node):
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._markup_node(node, nid)}
     if t == "layout":
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._layout_node(node, nid)}
+    if t == "transform":
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._transform_node(node, nid)}
+    if t == "image":
+        # geometry/metadata only (zarr descriptor is cached by image MTime) -- this is what a transform
+        # drag or a spacing/origin edit needs; voxel edits bump the MTime and re-write chunks
+        import os
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls,
+                "node": M._image_node(node, nid, os.path.join(HS._live_dir(), "blobs"))}
     if t == "sliceComposite":
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._slice_composite_node(node, nid)}
     if t == "labelMapDisplay":
