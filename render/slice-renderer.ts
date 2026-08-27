@@ -242,6 +242,14 @@ export class SliceRenderer {
    *  Pass null to restore. The vectors should be unit length and mutually orthogonal; they are
    *  used verbatim, so the caller owns the display convention for a non-anatomical frame. */
   setBasis(orient: Orientation, basis: PlaneBasis | null) { this.basisOverride[orient] = basis; }
+  /** offset01 (the setPlane scrub coordinate) for a RAS point, along the plane's current normal — the
+   *  inverse of what setPlane does internally, so a caller holding a position in mm (a slice node's
+   *  centre, a crosshair) can address the same slice for anatomical AND oblique bases. */
+  offset01Along(orient: Orientation, ras: Vec3): number {
+    const n = this.basisOf(orient).nDir;
+    const { lo, hi } = this.extentAlong(n);
+    return Math.max(0, Math.min(1, (dot3(ras, n) - lo) / Math.max(hi - lo, 1e-6)));
+  }
   basisOf(orient: Orientation): PlaneBasis { return this.basisOverride[orient] ?? BASES[orient]; }
 
   /** Extent of the volume's RAS bounding box projected onto a direction — the generalisation

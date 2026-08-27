@@ -22,8 +22,11 @@ export type Vec3 = [number, number, number];
  *  a Slicer displayable manager renders into. Managers ADD/REMOVE fields (coarse -> rebuild)
  *  and REDRAW when a field changed in place (fine), per the event-granularity rule. */
 export interface SlicePlane {
-  orient: "axial" | "coronal" | "sagittal";
-  posMm: number;
+  orient: "axial" | "coronal" | "sagittal";   // nearest anatomical preset (display convention + fallback)
+  posMm: number;                               // out-of-plane position: RAS coordinate along `orient`'s axis, or along basis.nDir
+  /** Oblique / Reformat: the slice node's actual (u, v, n) RAS basis from sliceToRAS. Absent for the
+   *  anatomical presets. When present, posMm is the signed distance along nDir. */
+  basis?: { uDir: Vec3; vDir: Vec3; nDir: Vec3 };
   // Slicer's in-plane navigation, mirrored: the slice centre (RAS) + field of view (mm).
   // Present when the slice node carries them → the view matches Slicer's pan + zoom; absent →
   // the fitted (FitSliceToBackground) view.
@@ -32,7 +35,18 @@ export interface SlicePlane {
   fovY?: number;
 }
 
+/** A 2D overlay primitive in RAS — the DOM/canvas analogue of Slicer's slice-view displayable
+ *  managers' actors (markup glyphs and lines, crosshair, slice intersections, annotations).
+ *  Each slice cell projects these onto its plane (rasToView) and draws what lies within `slabMm`. */
+export type OverlayItem =
+  | { kind: "point"; ras: Vec3; color: number[]; radiusPx?: number; label?: string; projected?: boolean }
+  | { kind: "polyline"; points: Vec3[]; color: number[]; widthPx?: number; closed?: boolean }
+  | { kind: "text"; ras: Vec3; text: string; color: number[] };
+
 export interface MirrorView {
+  /** Per-view 2D overlays (optional): `cell` = a slice cell name or "*" for every slice cell;
+   *  `layer` namespaces one producer (e.g. "markups"); [] clears the layer. */
+  setOverlay?(cell: string, layer: string, items: OverlayItem[]): void;
   setField(key: string, field: Field): void;   // add or replace a 3D field -> rebuild
   removeField(key: string): void;               // -> rebuild
   redraw(): void;                                // an existing field changed in place
@@ -327,7 +341,24 @@ export class MarkupsDisplayableManager implements DisplayableManager {
     for (const n of this.nodes.values()) out.push(...this.segmentsFor(n));
     return out;
   }
+  /** 2D overlay items for the slice views: every control point (drawn in-plane or as a projection)
+   *  and the connector polylines. Mirrors vtkMRMLMarkupsDisplayableManager's slice-view actors. */
+  private overlayItems(): OverlayItem[] {
+    const out: OverlayItem[] = [];
+    for (const n of this.nodes.values()) {
+      const col = (n.color as number[]) ?? [1, 0.85, 0.2, 1];
+      const cps = (n.controlPoints as { position: number[]; label?: string }[] | undefined) ?? [];
+      for (const cp of cps) out.push({ kind: "point", ras: cp.position as Vec3, color: col, radiusPx: 5, label: cp.label });
+      const segs = this.segmentsFor(n);
+      if (segs.length) {
+        const pts: Vec3[] = [segs[0].a, ...segs.map((sg) => sg.b)];
+        out.push({ kind: "polyline", points: pts, color: col, widthPx: 2 });
+      }
+    }
+    return out;
+  }
   private refresh(scene: LiveScene, first = false) {
+    scene.view?.setOverlay?.("*", "markups", this.overlayItems());
     if (!this.field) this.field = new FiducialField(this.allSpheres(), { screenSpace: true, ghost: true, shininess: 60 });
     else this.field.setSpheres(this.allSpheres());          // in place
     if (!this.lines) this.lines = new CapsuleField(this.allSegments(), { screenSpace: true, ghost: true });
@@ -388,12 +419,14 @@ export class MarkupsDisplayableManager implements DisplayableManager {
     if (!this.nodes.delete(id) || !this.field) return;
     this.field.setSpheres(this.allSpheres());
     this.lines?.setSegments(this.allSegments());
+    scene.view?.setOverlay?.("*", "markups", this.overlayItems());
     scene.view?.redraw();
   }
   onSceneClosed(scene: LiveScene) {
     this.nodes.clear();
     this.field = undefined;
     this.lines = undefined;
+    scene.view?.setOverlay?.("*", "markups", []);
     scene.view?.removeField("markupLines");
     scene.view?.removeField("markups");
   }
@@ -441,26 +474,33 @@ export class RoiCropDisplayableManager implements DisplayableManager {
   }
 }
 
-/** Mirrors the slice (MPR) views: each SliceNode's orientation + position becomes a reslice
- *  plane in the matching cell (Red->red / Green->green / Yellow->yellow). Slice scrolls arrive
- *  as NodeAdded upserts and just re-set the plane. */
+/** Mirrors the slice (MPR) views: each SliceNode becomes a reslice plane in the cell that carries its
+ *  layoutName (Red/Green/Yellow, Compare's Slice4.., Red+ ...): the cell set is whatever the app's layout
+ *  engine reports, not a fixed trio. Anatomical orientations use SlicerLive's radiological presets; any
+ *  other sliceToRAS (Reformat, oblique) is passed through as a basis so the view reslices along it.
+ *  Slice scrolls arrive as NodeAdded upserts and just re-set the plane. */
 export class SliceDisplayableManager implements DisplayableManager {
   interestedTypes = ["view"];
   private static ORIENT: Record<string, "axial" | "coronal" | "sagittal"> = { Axial: "axial", Coronal: "coronal", Sagittal: "sagittal" };
-  private static CELL: Record<string, string> = { Red: "red", Green: "green", Yellow: "yellow" };
   onNodeAdded(node: MrsonNode, scene: LiveScene) {
     if (node.type !== "view" || node.kind !== "slice") return;
-    const orient = SliceDisplayableManager.ORIENT[node.orientation as string];
-    const cell = SliceDisplayableManager.CELL[node.layoutName as string];
-    const m = node.sliceToRAS as number[] | undefined;
-    if (!orient || !cell || !m) return;
-    const trans: Vec3 = [m[3], m[7], m[11]];   // slice centre in RAS (in-plane pan + out-of-plane offset)
-    const axis = orient === "axial" ? 2 : orient === "coronal" ? 1 : 0;
-    const plane: SlicePlane = { orient, posMm: trans[axis] };
+    const cell = node.layoutName as string | undefined;
+    const m = node.sliceToRAS as number[] | undefined;    // row-major 4x4: columns = u, v, n; last column = centre
+    if (!cell || !m || m.length < 16) return;
+    const col = (c: number): Vec3 => [m[c], m[4 + c], m[8 + c]];
+    const norm = (v: Vec3): Vec3 => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+    const nDir = norm(col(2)), uDir = norm(col(0)), vDir = norm(col(1));
+    const trans: Vec3 = [m[3], m[7], m[11]];
+    // nearest anatomical axis of the normal → display preset; exact match → anatomical plane
+    const ax = [Math.abs(nDir[0]), Math.abs(nDir[1]), Math.abs(nDir[2])];
+    const axis = ax[2] >= ax[0] && ax[2] >= ax[1] ? 2 : ax[1] >= ax[0] ? 1 : 0;
+    const orient = SliceDisplayableManager.ORIENT[node.orientation as string] ?? (["sagittal", "coronal", "axial"] as const)[axis];
+    const anatomical = ax[axis] > 0.9999 && SliceDisplayableManager.ORIENT[node.orientation as string] !== undefined;
+    const plane: SlicePlane = anatomical
+      ? { orient, posMm: trans[axis] }
+      : { orient, posMm: trans[0] * nDir[0] + trans[1] * nDir[1] + trans[2] * nDir[2], basis: { uDir, vDir, nDir } };
     const fov = node.fieldOfView as number[] | undefined;   // [fovX, fovY, slabThickness] mm — Slicer's zoom
-    if (fov && fov.length >= 2 && fov[0] > 0 && fov[1] > 0) {
-      plane.centerRAS = trans; plane.fovX = fov[0]; plane.fovY = fov[1];
-    }
+    if (fov && fov.length >= 2 && fov[0] > 0 && fov[1] > 0) { plane.centerRAS = trans; plane.fovX = fov[0]; plane.fovY = fov[1]; }
     scene.view?.setSlicePlane(cell, plane);
   }
 }

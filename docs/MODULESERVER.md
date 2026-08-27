@@ -167,6 +167,17 @@ Open in S1: measured bytes are contaminated when a human is driving the same ser
 photo-like regions; the Python console's caret blink is a legitimate 2 Hz repaint (exclude or accept).
 PythonQt traps collected so far: `width`/`height`/`cursor`/`platformName`/`primaryScreen` are properties.
 
+## S2 status (2026-08-27): MirrorView v2, first cut
+Done: `SlicePlane.basis` (oblique/Reformat from the slice node's `sliceToRAS` columns → `SliceRenderer.setBasis`;
+verified with a 30° X-rotation of Red), `SliceDisplayableManager` keyed by Slicer `layoutName` (any cell
+set), `MirrorView.setOverlay` 2D channel (`OverlayItem`: point/polyline/text in RAS) with
+`MarkupsDisplayableManager` emitting markups — **markups now appear in slice views** (in-plane filled,
+off-plane hollow projections, labels), per-cell overlay canvases in `live-views.ts` (dynamic slice cells
+from the app's view-cell rects; `SliceRenderer.offset01Along` for oblique scrub positions).
+Remaining in S2: keyed multi-volume / multi-segmentation fields, a second 3D view (per-view
+`SceneRenderer`), per-cell basis slots (cells beyond Red/Green/Yellow share the renderer's three
+orientation slots round-robin), and migrating `mirror-browser.ts` onto `mountLiveViews`.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

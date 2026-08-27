@@ -191,7 +191,7 @@ async function main() {
       rebuild3d();
     },
     showVolume3D(show) { volumeShown3D = show; rebuild3d(); },
-    setSlicePlane(cell, pl) { planes[cell] = pl; renderSlice(cell); },
+    setSlicePlane(cell, pl) { cell = cell.toLowerCase(); if (!(cell in CELL_ORIENT)) return; planes[cell] = pl; renderSlice(cell); },   // SliceDM keys by Slicer layoutName (Red/Green/Yellow); this demo has the fixed trio
     setLayout(name) { applyLayout(name); },
     setSegmentationOverlay(tex, fillOpacity, outlineOpacity) {
       segOverlay = tex;
