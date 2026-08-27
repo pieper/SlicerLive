@@ -218,11 +218,25 @@ export class LiveScene {
    *  upsert / NodeRemoved / CameraModified / SceneClosed); each mutates the model, notifies displayers
    *  (unless replay froze the view), and emits on the `_changes` feed with a remote origin so Controls
    *  and the SceneRecorder reflect it. */
+  /** A node this place created with a provisional id (put) now has the peer's real id: move it. */
+  aliasNode(clientId: string, realId: string): void {
+    if (clientId === realId) return;
+    const node = this.nodes.get(clientId);
+    if (!node) return;
+    this.nodes.delete(clientId);
+    node.id = realId;
+    this.nodes.set(realId, node);
+    if (this.applyView) for (const m of this.interested(node.type)) { m.onNodeRemoved?.(clientId, this); m.onNodeAdded?.(node, this); }
+    this.feed({ id: clientId, type: node.type, kind: "remove", origin: "remote", v: ++this.seq });
+    this.feed({ id: realId, type: node.type, kind: "upsert", origin: "remote", v: ++this.seq, node });
+  }
+
   async receiveEvent(ev: Record<string, unknown>): Promise<void> {
     const e = ev.event as string;
     const live = this.applyView;   // drive managers only when the view is attached to the live model
     if (e === "NodeAdded" && ev.node) {
       const node = ev.node as MrsonNode;
+      if (typeof ev.clientId === "string") this.aliasNode(ev.clientId, node.id);   // our own put, now with its real id
       this.nodes.set(node.id, node);                       // upsert
       if (live) for (const m of this.interested(node.type)) await m.onNodeAdded?.(node, this);
       this.feed({ id: node.id, type: node.type, kind: "upsert", origin: "remote", v: ++this.seq, node });

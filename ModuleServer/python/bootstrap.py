@@ -132,9 +132,13 @@ def _start_mrson():
     livestory = os.path.join(ROOT, "LiveStory")
     if livestory not in sys.path:
         sys.path.insert(0, livestory)
-    from LiveStoryLib import mrson_server, mrson_live  # noqa: E402
+    from LiveStoryLib import mrson_server  # noqa: E402
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import mrson_peer  # noqa: E402  (ModuleServer-native WS A peer: seq/OpAck, put, reconcile, metadataOnly)
     slicer.moduleServerHttp = mrson_server.startMrsonServer(HTTP_PORT)
-    slicer.moduleServerLive = mrson_live.startMrsonLive(WS_PORT)
+    slicer.moduleServerLive = mrson_peer.startMrsonPeer(WS_PORT)
     return {"http": slicer.moduleServerHttp.port, "ws": WS_PORT}
 
 

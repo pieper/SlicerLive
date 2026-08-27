@@ -85,7 +85,53 @@ def _apply_op(op):
         return _apply_patch(node, op.get("path", ""), op.get("value"))
     if kind == "cmd":
         return _apply_cmd(node, op.get("cmd"), op.get("args") or {})
-    return False   # 'put' (create/replace whole node) not yet implemented
+    if kind == "put":
+        return _apply_put(op) is not None
+
+
+_MARKUP_CLASSES = {"fiducial": "vtkMRMLMarkupsFiducialNode", "line": "vtkMRMLMarkupsLineNode",
+                   "angle": "vtkMRMLMarkupsAngleNode", "curve": "vtkMRMLMarkupsCurveNode",
+                   "closedCurve": "vtkMRMLMarkupsClosedCurveNode", "plane": "vtkMRMLMarkupsPlaneNode",
+                   "roi": "vtkMRMLMarkupsROINode"}
+
+
+def _apply_put(op):
+    """Create a node from an mrson `put` (client-created node, e.g. place mode). Returns the REAL MRML
+    id (MRML assigns ids; the client's provisional id is aliased by the caller) or None. Markups are
+    first-class; anything else is created by its declared mrmlClass and then patched property by
+    property (unknown properties are ignored by _apply_patch). Bulk types (image) are not creatable
+    over the wire yet."""
+    import vtk
+    node_m = op.get("node") or {}
+    t = node_m.get("type")
+    name = node_m.get("name") or ""
+    if t == "markup":
+        cls = _MARKUP_CLASSES.get(node_m.get("markupType") or "fiducial")
+        node = slicer.mrmlScene.AddNewNodeByClass(cls, name)
+        node.CreateDefaultDisplayNodes()
+        for cp in node_m.get("controlPoints") or []:
+            pos = cp.get("position") if isinstance(cp, dict) else cp
+            if pos and len(pos) >= 3:
+                idx = node.AddControlPoint(vtk.vtkVector3d(float(pos[0]), float(pos[1]), float(pos[2])))
+                if isinstance(cp, dict) and cp.get("label"):
+                    node.SetNthControlPointLabel(idx, cp["label"])
+    elif t == "image":
+        return None
+    else:
+        cls = (node_m.get("source") or {}).get("mrmlClass")
+        if not cls:
+            return None
+        node = slicer.mrmlScene.AddNewNodeByClass(cls, name)
+        if hasattr(node, "CreateDefaultDisplayNodes"):
+            node.CreateDefaultDisplayNodes()
+    for k, v in node_m.items():
+        if k in ("id", "type", "name", "source", "refs", "controlPoints", "markupType", "zarr"):
+            continue
+        try:
+            _apply_patch(node, "#/" + k, v)
+        except Exception:  # noqa: BLE001
+            pass
+    return node.GetID()
 
 
 def _apply_patch(node, path, value):

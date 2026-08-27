@@ -41,6 +41,12 @@ export class LiveSync {
 
   private out: Coalescer<Op>;
   private tag = 0;
+  /** Sent batches not yet acknowledged by the peer (tag -> ops). Re-sent after a reconnect so a burst
+   *  that raced the drop is not lost; cleared by OpAck. */
+  pending = new Map<number, Op[]>();
+  /** Highest peer seq seen (a checkpoint for resumable reconnects). */
+  lastSeq = 0;
+  private everConnected = false;
   private unsub?: () => void;
   private inq: Promise<void> = Promise.resolve();   // serialize inbound handling in arrival order
 
@@ -56,7 +62,7 @@ export class LiveSync {
     this.now = opts.now ?? (() => Date.now());
     this.out = new Coalescer<Op>(
       opts.intervalMs ?? 33,
-      (batch) => this.transport.send({ op: "applyOps", ops: [...batch.values()], tag: ++this.tag }),
+      (batch) => { const ops = [...batch.values()]; const tag = ++this.tag; this.pending.set(tag, ops); this.transport.send({ op: "applyOps", ops, tag }); },
       opts.now ?? (() => (typeof performance !== "undefined" ? performance.now() : Date.now())),
     );
     transport.onMessage = (m) => this.onMessage(m);
@@ -75,12 +81,28 @@ export class LiveSync {
 
   private onOpen(): void {
     this.attempt = 0;
+    const reconnect = this.everConnected;
+    this.everConnected = true;
     // localBulk: types this scene reproduces locally → peer skips re-streaming their bulk updates.
-    this.transport.send({ op: "subscribe", types: this.scene.subscribedTypes(), localBulk: this.scene.localBulk() });   // peer re-sends state
+    this.transport.send({ op: "subscribe", types: this.scene.subscribedTypes(), localBulk: this.scene.localBulk(), lastSeq: this.lastSeq });   // peer re-sends state
     this.unsub?.();
     this.unsub = this.scene.subscribe((c) => this.onLocalChange(c));                  // start replicating out
+    // LiveScene is the authority: capture OUR state now (before the peer's re-snapshot upserts the local
+    // model with its possibly stale values) and push it back once SnapshotComplete lands; the peer's echo
+    // then converges the local model onto the same values.
+    if (reconnect) { this.reconcileAfter = true; this.reconcileSnapshot = JSON.parse(JSON.stringify(Object.fromEntries(this.scene.nodes))); }
     this.emit({ state: "connected" });
     this.firstOpen?.(); this.firstOpen = undefined;
+  }
+  private reconcileAfter = false;
+  private reconcileSnapshot: Record<string, unknown> = {};
+  /** After a reconnect the peer (a restarted app, or one that diverged while we were away) re-snapshots;
+   *  authority inversion means OUR node map wins: send it as a reconcile, then re-send unacked batches. */
+  private reconcile(): void {
+    this.reconcileAfter = false;
+    this.transport.send({ op: "reconcile", nodes: this.reconcileSnapshot });
+    this.reconcileSnapshot = {};
+    for (const [tag, ops] of this.pending) this.transport.send({ op: "applyOps", ops, tag });
   }
 
   private onLocalChange(c: Change): void {
@@ -90,11 +112,17 @@ export class LiveSync {
   }
 
   private onMessage(m: unknown): void {
-    const msg = m as { event?: string };
-    if (msg && typeof msg === "object" && "event" in msg) {
-      this.inq = this.inq.then(() => this.scene.receiveEvent(msg as Record<string, unknown>));
+    const msg = m as { event?: string; seq?: number; tag?: number; created?: Record<string, string> };
+    if (!msg || typeof msg !== "object" || !("event" in msg)) return;
+    if (typeof msg.seq === "number" && msg.seq > this.lastSeq) this.lastSeq = msg.seq;
+    if (msg.event === "OpAck") {
+      if (typeof msg.tag === "number") this.pending.delete(msg.tag);
+      if (msg.created) for (const [clientId, realId] of Object.entries(msg.created)) this.scene.aliasNode(clientId, realId);
+      return;
     }
-    // OpAck and other control frames are ignored for now (seq/checkpoint acks land in a later pass).
+    if (msg.event === "Reconciled") return;
+    this.inq = this.inq.then(() => this.scene.receiveEvent(msg as Record<string, unknown>));
+    if (msg.event === "SnapshotComplete" && this.reconcileAfter) this.inq = this.inq.then(() => this.reconcile());
   }
 
   private onClose(): void {

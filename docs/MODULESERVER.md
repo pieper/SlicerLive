@@ -199,6 +199,27 @@ Verified numerically over MCP: cursor RAS (39.5, −19.2, 5.1) → DataProbe val
 Open in S3: keys into views, drag-and-drop upload (needs the S4 blob endpoint), slice-intersection
 lines, second 3D view.
 
+## S4 status (2026-08-27): authority inversion + acks
+`ModuleServer/python/mrson_peer.py` is now the WS A peer for ModuleServers (LiveStory keeps its own
+`mrson_live.py`; the peer imports the serializer/applier/observers from LiveStoryLib rather than copying).
+Wire additions (superset of the old channel): every event carries `seq`; `applyOps` → `OpAck {tag, seq,
+applied, errors, created}`; **`put`** creates nodes (markups first-class, anything else by `mrmlClass`,
+bulk types not yet) — MRML assigns the real id, `OpAck.created` + a `NodeAdded{clientId}` let clients
+collapse their provisional id; **`reconcile {nodes}`** applies every differing patchable property of the
+client's node map (LiveScene wins); `subscribe {metadataOnly}` strips `zarr` references (`getNode` fetches
+the full node); `lastSeq` on subscribe. Blob `Range` is not possible through Slicer's WebServer (handlers
+never see request headers) and not needed: zarr chunks are the pull unit.
+Client: `LiveSync` tracks `pending` batches until acked and `lastSeq`; on reconnect it captures its node
+map *before* the peer's re-snapshot (the snapshot would otherwise overwrite local state), sends it as a
+reconcile after `SnapshotComplete`, then re-sends unacked batches; `LiveScene.aliasNode` rewrites a put's
+provisional id. Conformance scenarios cover ack/pending/reconcile-on-reconnect and put aliasing (29 tests
+green in Deno with `--no-check`; the 8 remaining type errors are the pre-existing `BufferSource` lib
+strictness in the GPU files).
+Verified live: page put → real MRML fiducial; peer stopped, Slicer W/L diverged to 999/500, peer
+restarted → page's 180/90 reconciled back, pending 0.
+Not done in S4: blob_cache.py / server-side lazy pull (only meaningful with a second server — S11),
+seq-based resume (the peer re-snapshots; reconcile makes that correct, resume makes it cheaper).
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

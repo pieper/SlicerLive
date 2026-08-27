@@ -310,7 +310,11 @@ class GuiStream:
             self.blockedSince = now
         elif not self.blockedSent and now - self.blockedSince > BLOCKED_AFTER_S:
             self.blockedSent = True
-            self._broadcast_text({"ev": "blocked", "title": m.windowTitle, "className": m.className()})
+            try:
+                title, cls = m.windowTitle, m.className()
+            except Exception:  # noqa: BLE001  (the modal can be deleted between the check and the read)
+                title, cls = "", ""
+            self._broadcast_text({"ev": "blocked", "title": title, "className": cls})
 
     def _broadcast_text(self, obj):
         for c in self.subscribers:

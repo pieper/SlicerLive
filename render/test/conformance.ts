@@ -127,5 +127,47 @@ export async function runConformance(): Promise<ConfResult[]> {
     assert(changes.at(-1)!.type === "segmentation", "seg display change not emitted on the feed");
   });
 
+  await check("LiveSync: OpAck clears pending; unacked batches are re-sent after a reconnect with a reconcile", async () => {
+    const s = new LiveScene("http://x/", [new FakeMgr(["image"])]);
+    s.nodes.set("v", { type: "image", id: "v", window: 0 });
+    const t = new MockTransport();
+    const sync = new LiveSync(s, t);
+    await sync.connect();
+    s.write({ op: "patch", id: "v", path: "#/window", value: 1 }); sync.flush();
+    const tag1 = t.applied()[0].tag as number;
+    const pendingCount = () => sync.pending.size as number;   // (a helper: TS would otherwise narrow the literal)
+    assert(pendingCount() === 1, "batch not pending");
+    t.deliver({ event: "OpAck", tag: tag1, seq: 7, applied: 1 });
+    assert(pendingCount() === 0 && sync.lastSeq === 7, "OpAck did not clear pending / record seq");
+    s.write({ op: "patch", id: "v", path: "#/window", value: 2 }); sync.flush();
+    assert(pendingCount() === 1, "second batch not pending");
+    t.sent.length = 0;
+    t.close(); t.connect();                                     // drop + reconnect
+    assert((t.sent[0] as { op: string }).op === "subscribe" && (t.sent[0] as { lastSeq: number }).lastSeq === 7, "re-subscribe must carry lastSeq");
+    t.deliver({ event: "NodeAdded", node: { type: "image", id: "v", window: 99 }, seq: 8 });   // the peer's (stale) snapshot
+    t.deliver({ event: "SnapshotComplete", seq: 9 });
+    await new Promise((r) => setTimeout(r, 0));
+    const rec = t.sent.find((m) => m.op === "reconcile") as { nodes: Record<string, { window: number }> } | undefined;
+    assert(rec && rec.nodes.v.window === 2, "reconcile must carry OUR node map (LiveScene wins)");
+    assert(t.sent.some((m) => m.op === "applyOps"), "unacked batch was not re-sent after reconnect");
+  });
+
+  await check("put: provisional id is aliased to the peer's real id (OpAck.created / NodeAdded.clientId)", async () => {
+    const mgr = new FakeMgr(["markup"]);
+    const s = new LiveScene("http://x/", [mgr]);
+    const t = new MockTransport();
+    const sync = new LiveSync(s, t);
+    await sync.connect();
+    s.write({ op: "put", id: "tmp1", node: { type: "markup", id: "tmp1", markupType: "fiducial", controlPoints: [] } }); sync.flush();
+    assert(s.nodes.has("tmp1"), "local put not applied");
+    const tag = t.applied()[0].tag as number;
+    t.deliver({ event: "OpAck", tag, seq: 1, applied: 1, created: { tmp1: "vtkMRMLMarkupsFiducialNode7" } });
+    assert(!s.nodes.has("tmp1") && s.nodes.has("vtkMRMLMarkupsFiducialNode7"), "alias not applied");
+    assert(s.nodes.get("vtkMRMLMarkupsFiducialNode7")!.id === "vtkMRMLMarkupsFiducialNode7", "node.id not rewritten");
+    t.deliver({ event: "NodeAdded", clientId: "tmp1", node: { type: "markup", id: "vtkMRMLMarkupsFiducialNode7", markupType: "fiducial", controlPoints: [] }, seq: 2 });
+    await new Promise((r) => setTimeout(r, 0));
+    assert(s.nodes.size === 1, "duplicate node after NodeAdded with clientId");
+  });
+
   return results;
 }
