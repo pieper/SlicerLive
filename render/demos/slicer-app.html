@@ -11,7 +11,8 @@
   #gui { position: absolute; inset: 0; }
   #gui canvas.legacy-region { image-rendering: auto; }
   #gui canvas.popup { box-shadow: 0 6px 24px rgba(0,0,0,.35); }
-  #views { position: absolute; left: 0; top: 0; width: 0; height: 0; background: #0a0b10; z-index: 5; }
+  #views { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 20; pointer-events: none; }
+  #views .lv-cell { background: #0a0b10; pointer-events: auto; }
   #status { position: fixed; right: 8px; bottom: 8px; z-index: 1000; font: 11px system-ui; color: #445; background: rgba(255,255,255,.7); padding: 2px 8px; border-radius: 6px; pointer-events: none; }
 </style>
 </head>

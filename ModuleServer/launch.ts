@@ -14,6 +14,7 @@
 //   --show            keep Slicer's main window visible (debug)
 //   --platform <qpa>  Qt platform plugin: offscreen (Qt6 builds; true headless), cocoa/xcb/windows,
 //                     or "" to leave Qt's default. Default: offscreen if the build ships it, else default.
+//   --dpr <n>         device pixel ratio for GUI grabs (QT_SCALE_FACTOR; 2 = retina)  default 1
 //   --roles <list>    capabilities this server advertises, comma separated (default module; POC: app,module)
 //   --extra <args>    extra Slicer args, comma separated (e.g. --extra=--disable-cli-modules)
 //
@@ -25,9 +26,9 @@
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 
 const args = parseArgs(Deno.args, {
-  string: ["slicer", "http", "ws", "mcp", "mcp-server", "state", "log", "extra", "platform", "roles", "gui"],
+  string: ["slicer", "http", "ws", "mcp", "mcp-server", "state", "log", "extra", "platform", "roles", "gui", "dpr"],
   boolean: ["show", "help"],
-  default: { http: "2131", ws: "2132", mcp: "2126", gui: "2133", roles: "module" },
+  default: { http: "2131", ws: "2132", mcp: "2126", gui: "2133", roles: "module", dpr: "1" },
 });
 if (args.help) { console.log(new TextDecoder().decode(await Deno.readFile(new URL(import.meta.url))).split("\n").filter((l) => l.startsWith("//")).join("\n")); Deno.exit(0); }
 
@@ -70,6 +71,7 @@ try { await Deno.remove(statePath); } catch { /* none */ }
 const platform = args.platform ?? (hasOffscreen(slicer) ? "offscreen" : "");
 const env: Record<string, string> = {
   ...(platform ? { QT_QPA_PLATFORM: platform } : {}),
+  ...(args.dpr && args.dpr !== "1" ? { QT_SCALE_FACTOR: args.dpr } : {}),
   MODULESERVER_PLATFORM: platform,
   MODULESERVER_ROLES: args.roles!,
   MODULESERVER_ROOT: ROOT,

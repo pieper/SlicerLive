@@ -29,13 +29,15 @@ const LAYOUTS: Record<string, Cell[]> = {
   oneUp3D: ["threeD"], dual3D: ["threeD"], oneUpRed: ["red"], oneUpYellow: ["yellow"], oneUpGreen: ["green"],
 };
 
-export interface LiveViews { live: LiveScene; sync: LiveSync; resize(): void }
+export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
+export interface LiveViews { live: LiveScene; sync: LiveSync; resize(): void; setCells(cells: ViewCellRect[]): void }
 
 export function mountLiveViews(gpu: Gpu, grid: HTMLElement, cfg: { httpBase: string; wsUrl: string; onStatus?: (s: string) => void }): LiveViews {
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
   const cv: Record<string, HTMLCanvasElement> = {}, cx: Record<string, GPUCanvasContext> = {}, cellEl: Record<string, HTMLElement> = {};
   grid.style.display = "grid"; grid.style.gap = "2px";
+  let placedByCells = false;   // once the app reports view-cell rects, cells are positioned absolutely (the app is the layout engine)
   for (const c of CELLS) {
     const cell = document.createElement("div"); cell.className = "lv-cell"; cell.style.cssText = "position:relative;min-width:0;min-height:0";
     const lab = document.createElement("div"); lab.textContent = c === "threeD" ? "3D" : c[0].toUpperCase() + c.slice(1);
@@ -93,6 +95,7 @@ export function mountLiveViews(gpu: Gpu, grid: HTMLElement, cfg: { httpBase: str
     a3d.draw();
   };
   const applyLayout = (name: string) => {
+    if (placedByCells) return;                    // cell placement comes from the app's layout engine
     const cells = LAYOUTS[name] ?? LAYOUTS.fourUp;
     visible.clear(); for (const c of cells) visible.add(c);
     grid.style.gridTemplateColumns = cells.length === 1 ? "1fr" : "1fr 1fr";
@@ -177,5 +180,25 @@ export function mountLiveViews(gpu: Gpu, grid: HTMLElement, cfg: { httpBase: str
   addEventListener("resize", () => { resizeAll(); renderSlices(); a3d.draw(); });
   Object.assign(globalThis, { __live: live, __sync: sync });
   sync.connect();
-  return { live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); } };
+  // Place the four cells at the rects the app laid out (window coords, relative to `grid`'s origin).
+  // Names: Red/Yellow/Green slice views and 3D view "1"; other cells (Compare slices, 3D #2/#3) wait for
+  // MirrorView v2 and are reported as unsupported.
+  const NAME_TO_CELL: Record<string, Cell> = { Red: "red", Yellow: "yellow", Green: "green", "1": "threeD" };
+  const setCells = (cells: ViewCellRect[]) => {
+    placedByCells = true;
+    grid.style.display = "block";
+    const origin = grid.getBoundingClientRect();
+    const shown = new Set<Cell>();
+    for (const c of cells) {
+      const cell = c.kind === "3d" || c.kind === "slice" ? NAME_TO_CELL[c.name] : undefined;
+      if (!cell) { if (c.kind === "slice" || c.kind === "3d") console.warn("live-views: unsupported view cell", c.kind, c.name); continue; }
+      const el = cellEl[cell];
+      el.style.cssText = `position:absolute;left:${c.view.x - origin.left}px;top:${c.view.y - origin.top}px;width:${c.view.w}px;height:${c.view.h}px`;
+      shown.add(cell);
+    }
+    visible.clear();
+    for (const c of CELLS) { if (shown.has(c)) visible.add(c); else cellEl[c].style.display = "none"; }
+    resizeAll(); renderSlices(); a3d.draw();
+  };
+  return { live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells };
 }

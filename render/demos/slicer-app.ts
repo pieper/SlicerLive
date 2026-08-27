@@ -26,10 +26,13 @@ async function main() {
   const gui = new LegacyGui(document.getElementById("gui")!, guiUrl, {
     hideKinds: nativeMenus ? ["menubar"] : [],
     onViewport: (v) => {
-      viewsEl.style.left = v.x + "px"; viewsEl.style.top = v.y + "px";
-      viewsEl.style.width = v.w + "px"; viewsEl.style.height = v.h + "px";
-      views.resize();
+      // the views container spans the whole window so cells can be placed in window coordinates
+      viewsEl.style.left = "0px"; viewsEl.style.top = "0px"; viewsEl.style.width = "100%"; viewsEl.style.height = "100%";
+      viewsEl.style.pointerEvents = "none";
+      void v;
     },
+    onCells: (cells) => { views.setCells(cells); for (const el of viewsEl.querySelectorAll<HTMLElement>(".lv-cell")) el.style.pointerEvents = "auto"; },
+    onBlocked: (info) => { let b = document.getElementById("blocked"); if (!b) { b = document.createElement("div"); b.id = "blocked"; b.style.cssText = "position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:2000;background:#ffd27a;color:#432;padding:6px 14px;border-radius:8px;font:13px system-ui;box-shadow:0 4px 16px rgba(0,0,0,.25)"; document.body.appendChild(b); } b.hidden = !info; if (info) b.textContent = `Slicer is waiting on a dialog: ${info.title || info.className}`; },
     onMenus: (m) => { menus = m; (globalThis as unknown as { __menus?: unknown }).__menus = m; (globalThis as unknown as { slicerliveMenus?: (m: Menu[]) => void }).slicerliveMenus?.(m); },
     onTitle: (t) => { document.title = t; },
     onStatus: status,

@@ -150,6 +150,23 @@ conformance scenarios for authority-on-reconnect, ack, put, metadata-only, bulk-
 | 19 | **"Licensing"** | Slicer BSD; Qt LGPL dynamically linked as today; no Qt-wasm. | Nothing new to license. |
 | 20 | **"Offline / static hosting"** | Native features work statically today; legacy modules need a server somewhere. | Tiers (#2); the local helper is a one-click install; desktop app bundles it. |
 
+## S1 status (2026-08-27): GUI stream hardening
+Done and verified on the Qt6 `/opt/sr` server: **view cells from the app's own layout engine**
+(`ev:"regions"` now carries `cells[{id,kind,name,rect,view}]`; slice/3D controller bars, plot views,
+table views and splitter handles stream as regions — `FourUpPlot` verified: 3D cell hidden, plot region
+streamed, slice cells moved to Slicer's rects); **paint-driven dirty-rect capture** (app-level
+`QEvent.Paint` hook → per-region dirty rect → partial frames with `x,y` offsets; full re-grab every 2 s
+as a safety net; hot path is integer math only — a repaint storm of ~3k paints/s was observed while the
+QVTK views fail their GL contexts); **cursor** (`ev:"cursor"`), **tooltips** (client hover dwell →
+`op:"hover"` → `QHelpEvent(ToolTip)` → the tip is a top-level and streams as a popup region),
+**dialog watchdog** (`ev:"blocked"/"unblocked"` from `activeModalWidget()` after 1 s), multi-client,
+`--dpr` on the launcher (`QT_SCALE_FACTOR`; needs a relaunch to verify).
+Client: partial frames, DPR-aware canvases, cells placement (`live-views.setCells` — the `LAYOUTS` name
+table is bypassed once cells arrive), cursor, hover, blocked banner.
+Open in S1: measured bytes are contaminated when a human is driving the same server; WebP/JPEG for
+photo-like regions; the Python console's caret blink is a legitimate 2 Hz repaint (exclude or accept).
+PythonQt traps collected so far: `width`/`height`/`cursor`/`platformName`/`primaryScreen` are properties.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,
