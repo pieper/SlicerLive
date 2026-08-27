@@ -267,6 +267,28 @@ def _apply_patch(node, path, value):
 
 
 def _apply_cmd(node, cmd, args):
+    if cmd == "placeAt" and node is not None and node.GetClassName() == "vtkMRMLInteractionNode":
+        # Place mode, server-authoritative: exactly what vtkMRMLMarkupsDisplayableManager does on a click
+        # in a view -- use the selection node's active place class / node (creating the node if needed),
+        # add the control point, and leave place mode unless persistence is on.
+        import vtk
+        ras = args.get("ras")
+        if ras is None or node.GetCurrentInteractionMode() != 1:
+            return False
+        sel = slicer.app.applicationLogic().GetSelectionNode()
+        cls = sel.GetActivePlaceNodeClassName() or "vtkMRMLMarkupsFiducialNode"
+        target = slicer.mrmlScene.GetNodeByID(sel.GetActivePlaceNodeID() or "")
+        if target is None or target.GetClassName() != cls:
+            target = slicer.mrmlScene.AddNewNodeByClass(cls)
+            target.CreateDefaultDisplayNodes()
+            sel.SetActivePlaceNodeID(target.GetID())
+        idx = target.AddControlPoint(vtk.vtkVector3d(float(ras[0]), float(ras[1]), float(ras[2])))
+        if args.get("label"):
+            target.SetNthControlPointLabel(idx, args["label"])
+        done = target.GetMaximumNumberOfControlPoints() > 0 and target.GetNumberOfControlPoints() >= target.GetMaximumNumberOfControlPoints()
+        if (not node.GetPlaceModePersistence()) and (target.GetMaximumNumberOfControlPoints() <= 0 or done):
+            node.SwitchToViewTransformMode()
+        return True
     if cmd == "setCursor" and node is not None and node.GetClassName() == "vtkMRMLCrosshairNode":
         # SlicerLive pointer over a slice view -> Slicer's crosshair cursor, in the XYZ+sliceNode form so
         # DataProbe (which needs the slice node + its layers) shows the values under the cursor.

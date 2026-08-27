@@ -220,6 +220,17 @@ restarted → page's 180/90 reconciled back, pending 0.
 Not done in S4: blob_cache.py / server-side lazy pull (only meaningful with a second server — S11),
 seq-based resume (the peer re-snapshots; reconcile makes that correct, resume makes it cheaper).
 
+## S5 status (2026-08-27): place mode
+One server-authoritative cmd on the interaction node, `placeAt {ras, view, label?}`, mirrors what
+`vtkMRMLMarkupsDisplayableManager` does on a click: resolve the selection node's active place class /
+node (creating the node and setting it active if needed), add the control point, and
+`SwitchToViewTransformMode()` unless place-mode persistence is on (or the node's maximum point count
+isn't reached). The client (`live-views.ts`) sends it on a left click in a slice cell whenever the
+streamed interaction mode is `place` (cursor: crosshair). Verified: Place via the interaction node →
+click in Red → F gained a point at the clicked RAS and the mode returned to ViewTransform on both sides.
+Slicer's own toolbar buttons (streamed) drive the same nodes, so "click the fiducial toolbar button, click
+in a SlicerLive view" is the normal path.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

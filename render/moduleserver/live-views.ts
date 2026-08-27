@@ -297,6 +297,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       hooks: {
         onZoom: () => branch(c),
         onLeftGrab: (u, v, w, h) => {
+          if (interactionMode() === "place") {                          // Slicer's Place mode: a click places
+            const id = viewState.interaction?.id; if (!id) return true;
+            live.write({ op: "cmd", id, cmd: "placeAt", args: { ras: cellRas(c, u, v), view: c.name } });
+            sync.flush();
+            return true;                                                  // consume: no scroll-drag starts
+          }
           const hit = pickMarkup(c, u, v, w, h);
           if (!hit) return false;
           sliceDrag = { id: hit.id, index: hit.index }; markupsDM.touch(hit.id, hit.index); return true;
@@ -315,7 +321,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           const ras = cellRas(c, u, v);
           live.write({ op: "cmd", id, cmd: "setCursor", args: { ras, view: c.name } });
           if (shiftHeld) live.write({ op: "patch", id, path: "#/crosshairRAS", value: ras });
-          c.canvas.style.cursor = pickMarkup(c, u, v, w, h) ? "grab" : "default";
+          c.canvas.style.cursor = interactionMode() === "place" ? "crosshair" : pickMarkup(c, u, v, w, h) ? "grab" : "default";
         },
       },
     });

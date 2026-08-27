@@ -24,3 +24,9 @@ registerCmd("viewContextMenu", (node, args) => {
   (node as Record<string, unknown>).contextMenuRequest = { ras: args.ras, x: args.x, y: args.y, at: Date.now() };
   return true;
 });
+
+registerCmd("placeAt", (node, args) => {
+  // place mode: the app owns the outcome (which node, persistence); record the request so it replicates
+  (node as Record<string, unknown>).placeRequest = { ras: args.ras, at: Date.now() };
+  return true;
+});
