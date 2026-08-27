@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D Slicer — SlicerLive host</title>
+<style>
+  :root { color-scheme: light; }
+  html, body { height: 100%; margin: 0; background: #e8e8e8; overflow: hidden; font: 12px -apple-system, system-ui, sans-serif; }
+  #app { position: relative; width: 100vw; height: 100vh; }
+  #gui { position: absolute; inset: 0; }
+  #gui canvas.legacy-region { image-rendering: auto; }
+  #gui canvas.popup { box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+  #views { position: absolute; left: 0; top: 0; width: 0; height: 0; background: #0a0b10; z-index: 5; }
+  #status { position: fixed; right: 8px; bottom: 8px; z-index: 1000; font: 11px system-ui; color: #445; background: rgba(255,255,255,.7); padding: 2px 8px; border-radius: 6px; pointer-events: none; }
+</style>
+</head>
+<body>
+  <div id="app">
+    <div id="gui"></div>
+    <div id="views"></div>
+  </div>
+  <div id="status">starting…</div>
+  <script type="module" src="slicer-app.js"></script>
+</body>
+</html>

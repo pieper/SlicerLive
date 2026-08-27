@@ -1,0 +1,191 @@
+# ModuleServer — legacy Slicer modules as sidecars of SlicerLive
+
+Status: **M0 + GUI-stream POC done (2026-08-27)** — a stock 3D Slicer runs headless (Qt 6, `offscreen`
+QPA, fully invisible) as an AppServer+ModuleServer; the 21-property parity harness passes; the stock
+Slicer interface is hosted in the browser / in the Deno desktop app (see "Desktop POC"). M1 (authority
+inversion, lazy bulk) pending.
+Plan of record (v3, 2026-08-27, approved): the ordered steps S0-S15 and the view-area gap matrix live in
+Steve's plan file; this document carries the architecture, the "whatabout" register, and the POC record,
+and will become the third-party protocol reference.
+
+## Why
+
+SlicerLive is the application: `LiveScene` (mrson nodes + content-addressed blobs) is the source of
+truth, stored in user-owned Sessions, rendered by the WebGPU renderers. Existing Slicer extensions
+(258 repos; 71% pure Python, 740 files importing `vtk`, 317 pumping `processEvents()`) are **not
+ported**. A 2026-08-26 evaluation of Qt-wasm / Pyodide / itk-wasm / vtk-wasm concluded that
+cross-compiling or emulating Qt+PythonQt+VTK+MRML is a large diversion (three incompatible
+Emscripten pins, no `QOpenGLWidget`, no nested event loops, no PythonQt-wasm, GPL-only Qt-wasm).
+Instead, legacy code keeps running in a whole, unmodified Slicer — a **ModuleServer** — and the
+*boundary* moves: the server is a replica that proposes ops, and its module GUIs are streamed as
+pixels. This is lossless from day one and lets the server run anywhere (local process, Modal,
+firewall-internal VM) inside whatever sandbox the platform offers.
+
+## Shape
+
+```
+ Browser / desktop shell                        ModuleServer (headless stock Slicer)
+ LiveScene (authoritative)   <-- WS A mrson --> MRML scene = partial replica (metadata-only
+ WebGPU views, native Controls                  subscription; bulk pulled by hash when invoked)
+ LegacyPanel <canvas>        <-- WS B gui  -->  gui_stream.py: widget grab -> frames,
+   pointer/key -> synthetic events              synthetic QMouse/QKey events in
+ ModuleRegistry: N servers, local or remote, each hosting some modules
+```
+
+Design requirements (from the plan):
+- **Slicer-independent protocol.** Either end is replaceable (OHIF/MITK clients, non-Slicer module
+  runtimes). Nothing Qt- or MRML-specific on the wire; `source.mrmlClass` is provenance only.
+  Capabilities are declarative: `{modules, gpu, pip, phi-ok, bulk: lazy|eager, gui: stream|none}`.
+- **Many servers, partial replicas.** Subscribe by node type, `metadataOnly`; bulk by content hash,
+  cacheable and prefetchable.
+- **Sessions on disk** (`SlicerLiveSessions/<id>/`: checkpoint + append-only op log + commits +
+  `blobs/<hash>`) give autosave, undo/redo/branch/bookmarks; "save" = export the reachable set.
+- **Conformance is the contract**: `render/test/conformance.ts` (Deno == browser) plus a
+  protocol suite runnable against any server x client pair (M3).
+
+## M0 — headless launch (done)
+
+```
+deno run --allow-run --allow-read --allow-write --allow-env ModuleServer/launch.ts [--slicer <app>] \
+    [--http 2131] [--ws 2132] [--mcp 2126] [--show]
+```
+`launch.ts` spawns `Slicer --no-splash --ignore-slicerrc --python-script ModuleServer/python/bootstrap.py`,
+tees the log to `~/.slicerlive/moduleserver/<ws>.log`, prints one `{"READY": {...}}` JSON line
+(pid, ports, Slicer version, 173 module names on a 5.12 install with SlicerHeart), and writes the
+same to `~/.slicerlive/moduleserver/moduleserver-<ws>.json`. `bootstrap.py` hides the main window,
+starts the mrson HTTP (:2131) and live WebSocket (:2132) servers from `LiveStory/LiveStoryLib`
+(imported, not copied — they migrate here in M1), and the MCP server (:2126, `autoAllow`) for
+automation.
+
+Verified: `render/test/parity-run.ts` → **21/21 properties round-trip both directions** with the
+mirror page (`render/demos/mirror.html`) in a CDP Chrome. The harness gained `PARITY_TF_ID` because
+`CreateDefaultVolumeRenderingNodes` numbers the transfer-function node after the VR presets.
+
+### Invisible on macOS (measured; now in `bootstrap.py`)
+Positional tricks fail: a window moved to (-20000,-20000) is **clamped** by macOS to x=-1224 (a 40 px
+strip stays on screen), and a QComboBox popup from that parent is re-clamped **onto** the primary
+screen. Spaces have no public create/assign API. Minimizing keeps a Dock tile. What works:
+- `Qt::WA_DontShowOnScreen` on the main window before `show()` -> `isVisible()` true, QWindow never
+  visible/exposed, `grab()` paints normally.
+- A global `QApplication` event filter that sets the same attribute on every top-level widget at
+  `QEvent::Show` (just before `show_sys`) -> popups (`QComboBoxPrivateContainer`), `QMessageBox`,
+  non-native `QFileDialog` all "visible", never on screen, `grab()`-able for the GUI stream.
+- Dock icon: `NSApp.setActivationPolicy(Accessory)` via `ctypes`/`objc_msgSend` at runtime ->
+  `lsappinfo` type `Foreground` -> `UIElement`. `QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM`
+  does nothing for a bundled app.
+`--show` / `MODULESERVER_SHOW=1` disables all of it for debugging. Windows/Linux: see the platform
+notes below (research in progress).
+
+### Windows and Linux (researched 2026-08-27; mechanism verified in Qt 5.15 source, not yet run)
+The recipe is portable because `WA_DontShowOnScreen` is implemented in QtWidgets, not the QPA
+plugin: `show_sys()` returns before `QWindow::setVisible(true)` (no HWND shown, no X window mapped,
+no wl_surface created), the repaint manager never flushes to the platform surface, and `grab()` /
+`render()` paint the backing store regardless. `QEvent::Show` is sent before `show_sys()` on every
+platform, so the show-time filter is in time everywhere. The attribute also forces `QFileDialog` /
+`QMessageBox` to the in-process Qt widgets (native dialogs would ignore it), `QMenu` handles it
+explicitly, `QOpenGLWidget` renders to its own `QOffscreenSurface` and only warns on context failure.
+- **Official packages ship exactly one QPA plugin per OS** (`CMake/SlicerCPack.cmake:33-63`):
+  `cocoa` / `xcb` / `windows`. No `offscreen` or `minimal` anywhere, so the attribute route is the
+  only one that works against unmodified Slicer on all three platforms.
+- **Windows**: no Dock-icon equivalent to drop; a never-shown HWND has no taskbar button or Alt-Tab
+  entry. Open risk: a non-interactive session (service / session 0 / SSH without desktop) — Qt 5.15's
+  `windows` QPA has no placeholder screen, so if `EnumDisplayMonitors` yields nothing
+  `primaryScreen()` is null and Slicer crashes. Test; prefer a logged-in (locked/RDP-disconnected)
+  session. RDP-disconnected only hurts GL views, which the ModuleServer does not use.
+- **Linux server/container**: `xvfb-run -a Slicer ...` (the established Slicer pattern; `xcb` needs
+  an X server) plus the same filter. Xvfb even gives Mesa GL. Desktop X11 session: unmapped window =
+  no taskbar/pager entry. Wayland desktops run stock Slicer under XWayland, so the same applies;
+  the attribute also sidesteps Wayland's no-positioning / popup-needs-parent rules.
+- **Both**: `setQuitOnLastWindowClosed(False)` (invisible windows don't keep the app alive);
+  `--no-splash` (the splash shows before the filter exists); a modal `exec()` still blocks the
+  nested loop normally, so a module that pops a dialog will *hang waiting for a click* rather than
+  crash — the GUI stream must surface it (or auto-dismiss it), never ignore it.
+
+### Hard-won details
+- **macOS bundles ship only the `cocoa` QPA plugin** — `QT_QPA_PLATFORM=offscreen` fails
+  ("Available platform plugins are: cocoa"), and Homebrew's `libqoffscreen` can't be mixed in (two
+  Qt copies). Headless on macOS = cocoa with a **hidden real main window**. Linux containers can use
+  `offscreen`/xvfb.
+- **Do not use `--no-main-window`**: `slicer.app.layoutManager()` becomes `None` and installed
+  extensions crash in `onStartupCompleted` (SlicerHeart registers custom layouts). Legacy modules
+  assume a main window; hiding it is free and lossless.
+- `--python-script` needs an **absolute path**; `--python-code "exec(open(...).read())"` also works.
+- PythonQt: `qt.QGuiApplication.platformName` is a **property**, not a method (calling it raises
+  `'NoneType' object is not callable` — easy to misread as a broken exec namespace).
+- `QWidget.grab()` works on a never-shown module widget (`slicer.modules.X.widgetRepresentation()`),
+  800x1410 at DPR 2 for SampleData; activate the layout first or the header row is unlaid-out.
+- Slicer stdout is block-buffered under a pipe — `print(..., flush=True)` for the READY line.
+- The `slicer-mcp-server.py` bootstrap pattern (`exec` into a namespace, `startMcpServer(port,
+  autoAllow=True)`) is from `~/slicer/slicer-skill/references/mcp.md`; keep the logic on the
+  `slicer` module or it is garbage-collected.
+
+## Next (M1)
+Authority inversion + lazy bulk on WS A: `put` on the server side, `OpAck`/seq + reconnect
+reconciliation (browser snapshot wins), `subscribe {types, metadataOnly}`, `GET blobs/<hash>` with
+ranges + `blob_cache.py`; `mrson_peer.py` lifted from `LiveStoryLib/mrson_live.py`/`mrson_server.py`;
+conformance scenarios for authority-on-reconnect, ack, put, metadata-only, bulk-on-first-access.
+
+## The "whatabout" register — holes and exact mitigations
+
+| # | Whatabout… | Reality | Mitigation (concrete) |
+|---|---|---|---|
+| 1 | **"It's just VNC/remote desktop"** | Only *panels* are pixels. The views — where twitch matters — are native WebGPU on the client, driven by state, not pixels. | Publish numbers: panel event→frame RTT (target ≤ 50 ms local, ≤ 150 ms remote), view interaction at 60 fps regardless of server distance. Dirty-rect + paint-event-driven capture (not polling), WebP/JPEG for photo-like regions, PNG for text; H.264/AV1 sidecar for remote (`native/`, `server/av1-sidecar.ts`). |
+| 2 | **"You still need a Slicer install"** | Yes — that is the point of lossless compat. It just doesn't need to be on *your* machine. | Three tiers, one page: (a) bundled with SlicerLive.app (unprivileged child process); (b) browser + local helper (launcher app / browser-extension-like); (c) cloud/firewall ModuleServer (Modal, JS2, internal VM) with wss+token. Registry entries are the only difference. Static gallery keeps working without any server for native features. |
+| 3 | **"Extensions can still own your machine"** | Extension code runs *in the ModuleServer process*, never in the browser. | Sandbox ladder per platform (OS guard → container → microVM), **hostile-mode default** for untrusted extensions: deny-run/deny-ffi, network egress limited to the data host + the client, per-session scratch wiped, warm pool. Malicious test module must fail at each rung (`docs/MODULESERVER-SANDBOXING.md`). The ModuleServer is disposable: it holds no truth (LiveScene does). |
+| 4 | **"Bulk data over the wire / PHI leaves the building"** | Servers subscribe **metadata-only**; bulk moves by content hash only when a module is invoked; a PHI ModuleServer runs inside the firewall and the browser only ever receives what it renders. | `subscribe {types, metadataOnly}` + `GET blobs/<hash>` (ranges, LRU, prefetch hints); session `blobs/` as cache; per-server `phi-ok` capability gates which blobs a server may pull; audit = the op log. Measure: 512³ volume, no voxels cross until Apply. |
+| 5 | **"Modal dialogs / `processEvents()` loops hang it"** | Already handled better than native: dialogs are invisible-but-grabbable and stream like any region; a blocking `exec()` blocks *that server*, nothing else. | Stream every top-level (done); **dialog watchdog**: server reports `{ev:"blocked", dialog}` when a modal is up > 1 s, client surfaces it front-and-center; known nuisance dialogs (pip-install consent, "restart Slicer?") get policy answers in hostile mode; MCP `execute_python` remains a back door for automation. |
+| 6 | **"Popups, tooltips, cursors, DnD, clipboard, file dialogs"** | Each is a specific seam, none unsolvable. | Popups: done (z-ordered regions). Tooltips: forward hover dwell → Qt `QEvent::ToolTip` → stream as popup region. Cursor: `{ev:"cursor", shape}` from `QApplication::overrideCursor`/`widget.cursor` at pointer move. File dialogs: Qt non-native dialog streams and browses the *server's* sandboxed session dir; add a browser-side picker that uploads into `SlicerLiveSessions/<id>/blobs` by hash (File System Access → blob channel). DnD of files onto the page → same upload → `loadFile` cmd. Clipboard: text only via `{op:"clipboard"}` both ways. |
+| 7 | **"Two servers disagree / who is the master?"** | LiveScene is authoritative by construction; servers propose ops tagged by role. | Op envelope `{origin, v, role}`; `human > agent > module > automated`; `OpAck`+seq with reconnect reconciliation (browser snapshot wins, server converges); per-entity coalesce policy; conformance scenarios for every rule (`render/test/conformance.ts`, runs in Deno *and* browser). |
+| 8 | **"Modules that draw into the VTK renderers directly"** | ~30 files of 2952 bypass MRML (register in `docs/MODULESERVER.md`). | Explicit "unsupported in ModuleServer" notice, not a blank view; per-module port to a native SlicerLive DM when it matters; **compat-view fallback**: run that server with the *native* QPA (cocoa/xcb/windows, still `WA_DontShowOnScreen`) so QVTK views render to their own offscreen GL surface and the cell is streamed as pixels via `grabFramebuffer()`. |
+| 9 | **"Extensions register custom layouts"** | `AddLayoutDescription` XML is the contract; we interpret the same XML. | Generic layout-XML → CSS-grid interpreter (§2.1) covering all built-ins and custom layouts, incl. plot/table view cells streamed as regions. Oracle: every built-in layout id compared numerically (cell rects) against Slicer. |
+| 10 | **"The views won't be exactly Slicer's"** | The views are SlicerLive's own — by design; fidelity is measured, not asserted. | Parity harness (`render/test/parity-run.ts`) + numeric A/B harness (`harness/`) grow with every feature; the compat-view fallback (#8) gives an escape hatch for any cell while a feature is missing. |
+| 11 | **"Screen readers can't read pixels" (a11y)** | True for streamed panels; the honest weakness. | AppServer exports the **accessibility tree** (`QAccessible` names/roles/values/bounds per region) as a semantic overlay (ARIA) positioned over the pixels; keyboard focus ring mirrored; new UI is native web. Same channel gives automation (click-by-name) and testing. |
+| 12 | **"Retina / fonts / DPR"** | Offscreen screen is DPR 1 today. | Server-side `QT_SCALE_FACTOR` / offscreen config → DPR-2 grabs; region header carries `dpr`; client draws at CSS size. |
+| 13 | **"Keyboard shortcuts, IME, international text"** | Forwarded as DOM key events; ⌘ shortcuts go to native menus. | Complete DOM→Qt key map + `text` for composed characters; `compositionend` forwarded as text; menu accelerators handled by the host (native on mac, in-page menubar region elsewhere). |
+| 14 | **"Version skew between SlicerLive and Slicer versions"** | The protocol is versioned and Slicer-independent. | `moduleserver.struct.json` / `guistream.struct.json` in the mrson schema repo; capability negotiation; several Slicer versions side by side (differential debugging is a feature). |
+| 15 | **"pip installs / extension manager inside a sandbox"** | They run inside the ModuleServer (streamed GUI works unchanged). | Per-session Python prefix + extension install path; egress allow-list includes PyPI/extension server only in trusted mode; image snapshots for cloud servers. |
+| 16 | **"Why not just run Slicer?"** | Because the truth moves to LiveScene: sessions with autosave/undo/branch/bookmarks, collaboration, phone/browser clients, hosted compute, recorder. Slicer becomes a service. | Sessions (§3), recorder/commits already built, collab = LiveSync peers. |
+| 17 | **"Crash isolation"** | A crashing extension kills only its ModuleServer. | Authority inversion + reconnect reconciliation: restart the server, it converges to LiveScene; GUI stream reconnects (already retries). |
+| 18 | **"Testing"** | Slicer self-tests run unchanged *inside* the ModuleServer; SlicerLive features have oracles. | MCP-driven tests against the headless server; CDP-driven page tests (as in the POC); numeric harnesses; conformance in Deno+browser. |
+| 19 | **"Licensing"** | Slicer BSD; Qt LGPL dynamically linked as today; no Qt-wasm. | Nothing new to license. |
+| 20 | **"Offline / static hosting"** | Native features work statically today; legacy modules need a server somewhere. | Tiers (#2); the local helper is a one-click install; desktop app bundles it. |
+
+## Direct-renderer register (unsupported for now; revisit per module)
+Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
+SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,
+CurveMaker, SlicerSandbox/Lights, SlicerNeuroSegmentation intersection DM, SlicerAstmPhantomTest,
+SlicerAdaptiveBrush (2D feedback actor), SlicerCIP/VolumeProbe, Film/GelDosimetryAnalysis, CLIC,
+HeadCTDeid, OpenAnatomyExport, TimelapsedHRpQCT. A ModuleServer should report "unsupported" for
+these rather than show a blank view.
+
+## Desktop POC (2026-08-27): the stock Slicer interface hosted by SlicerLive
+
+```
+deno run -A --unstable-ffi desktop/slicer-demo.ts            # launches /opt/sr (Qt 6.10) headless, opens the window
+deno run -A --unstable-ffi desktop/slicer-demo.ts --no-launch # reuse a running ModuleServer
+```
+- **Server**: `ModuleServer/launch.ts --slicer /opt/sr --roles app,module` (Qt 6 build → `-platform offscreen`
+  automatically; `WA_DontShowOnScreen` filter + Dock-icon drop still applied). Ports: mrson 2131/2132,
+  MCP 2126, **GUI stream 2133** (`ModuleServer/python/gui_stream.py`, RFC6455 server in `mrson_ws.py`).
+- **GUI stream protocol** (Slicer-independent): server → `regions` (main-window parts in window
+  coordinates: menubar, toolbars, docks, statusbar, popups/dialogs with z) + `menus` (tree with
+  action ids, shortcuts, enabled/checkable) + `title`; binary frames `<u32 hdrlen><json{region,seq,w,h}><png>`
+  with per-region change detection (idle = 0 bytes). Client → `resize`, `pointer`, `wheel`, `key`,
+  `triggerAction`, `selectModule`. Routing on the server: `region.childAt(p)` (QApplication.widgetAt
+  is useless without native windows) + implicit grab to the pressed widget + popup-outside-click close.
+- **Page** `render/demos/slicer-app.{html,ts}` (bundle: `deno run -A npm:esbuild render/demos/slicer-app.ts
+  --bundle --format=esm --outfile=render/demos/slicer-app.js`): `render/moduleserver/legacy-gui.ts`
+  positions one `<canvas>` per region at the reported geometry and forwards events;
+  `render/moduleserver/live-views.ts` mounts the SlicerLive 4-up in the reported layout viewport,
+  driven by the LiveScene displayable managers; local slice scroll / 3D orbit are written back as
+  mrson ops (`#/offset` patch, `setCameraPose` cmd) so Slicer follows.
+- **Desktop**: `desktop/slicer-demo.ts` (new entry point; `main.ts`/`macmenu.ts` untouched) + `desktop/qtmenu.ts`
+  builds real `NSMenu`s from the AppServer menu tree (Qt `Ctrl+X` → ⌘X key equivalents), forwarding picks
+  as `triggerAction`. Windows/Linux would draw the menubar region instead (`?nativeMenus=1` hides it).
+- **Verified**: clicking "Download Sample Data" in the streamed Welcome panel switched the module;
+  clicking the MRHead thumbnail loaded the volume in Slicer and it appeared in the WebGPU MPR views via
+  mrson (screenshots in the session scratchpad); the same page runs in WKWebView with native menus.
+- **Known POC limits**: DPR 1 grabs (offscreen screen is 1x; use `QT_SCALE_FACTOR=2` or a config file for
+  retina); PNG at ≤15 Hz, no dirty rects (M4); no cursor/tooltip metadata; keyboard shortcuts with ⌘ go
+  to native menus only; module panels that pop modal `exec()` dialogs stream fine but block Slicer until
+  answered through the stream; PythonQt property-vs-method traps (`width`, `height`, `platformName`).

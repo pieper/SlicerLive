@@ -15,7 +15,7 @@ const IDS = {
   markup: "vtkMRMLMarkupsFiducialNode1",
   camera: "vtkMRMLCameraNode1",
   sliceRed: "vtkMRMLSliceNodeRed",
-  tf: "vtkMRMLVolumePropertyNode1",
+  tf: Deno.env.get("PARITY_TF_ID") ?? "vtkMRMLVolumePropertyNode1",   // VR preset nodes shift the id; override per scene
   layout: "vtkMRMLLayoutNodevtkMRMLLayoutNode",
 };
 
