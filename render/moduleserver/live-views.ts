@@ -21,7 +21,7 @@ import "./view-cmds.ts";   // registers setCursor / setSliceFrame / viewContextM
 import {
   CameraDisplayableManager, type CameraState, LayoutDisplayableManager, LiveScene, MarkupsDisplayableManager,
   type MirrorView, type OverlayItem, RoiCropDisplayableManager, SegmentationDisplayableManager, SliceDisplayableManager,
-  type SlicePlane, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeRenderingDisplayableManager,
+  type SlicePlane, type SliceLayers, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeLayersDisplayableManager, VolumeRenderingDisplayableManager,
 } from "../livescene.ts";
 
 export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
@@ -32,6 +32,8 @@ const CELL_COLORS: Record<string, string> = { Red: "#f05a5a", Yellow: "#f0d24a",
 
 interface SliceCell {
   name: string; el: HTMLElement; canvas: HTMLCanvasElement; ctx: GPUCanvasContext; overlay: HTMLCanvasElement;
+  slice: SliceRenderer;          // per-cell reslicer: its own layer stack, basis, pan/zoom
+  layers?: SliceLayers;          // from the app's slice composite node (absent → legacy shared volume)
   plane?: SlicePlane; controls?: SliceControls; orientKey: Orientation;
   branched?: boolean;   // a local pan/zoom is in progress: keep the local frame until it is written back
 }
@@ -86,8 +88,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     a3d.draw();
   };
 
-  // ── slice cells (dynamic, keyed by the app's layout names) ──
-  const slice = new SliceRenderer(gpu, srgb);
+  // ── slice cells (dynamic, keyed by the app's layout names), one SliceRenderer each ──
   const cells = new Map<string, SliceCell>();
   let segOverlay: GPUTexture | null = null, segFill = 0.5, segOutline = 1.0;
   const overlays = new Map<string, OverlayItem[]>();   // layer -> items (cell "*")
@@ -104,21 +105,41 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // Each SliceRenderer orientation slot holds ONE basis/plane; cells beyond the anatomical trio share
     // slots round-robin until the renderer gets per-cell state (S6). Red/Green/Yellow map to their presets.
     const orientKey: Orientation = name === "Red" ? "axial" : name === "Green" ? "coronal" : name === "Yellow" ? "sagittal" : ORIENTS[nextOrient++ % 3];
-    c = { name, ...made, overlay, orientKey };
+    const sr = new SliceRenderer(gpu, srgb);
+    if (volumeField) { const [lo, hi] = volumeField.aabb(); sr.setVolume(volumeField.patientToTexture(), lo, hi); sr.setTextures(volumeField.volumeTexture(), segOverlay ?? undefined); }
+    c = { name, ...made, overlay, orientKey, slice: sr };
     cells.set(name, c);
     attachInteraction(c);
     return c;
   };
+  /** The background volume a cell reslices: its composite's background layer, else the legacy shared volume. */
+  const bgField = (c: SliceCell): ImageField | null => c.layers?.background?.field ?? volumeField;
+  /** Push a cell's layer stack (or the legacy shared volume) into its renderer. */
+  const applyLayers = (c: SliceCell) => {
+    const L = c.layers, sr = c.slice, bg = bgField(c);
+    if (!bg) return;
+    const [lo, hi] = bg.aabb();
+    sr.setVolume(bg.patientToTexture(), lo, hi);
+    sr.setTextures(bg.volumeTexture(), segOverlay ?? undefined);
+    if (L?.background) sr.setWindowLevel(L.background.win, L.background.lev); else if (legacyWL) sr.setWindowLevel(legacyWL.win, legacyWL.lev);
+    sr.setLayerLUTs(L?.background?.lut ?? null, L?.foreground?.lut ?? null);
+    if (L?.foreground) sr.setForeground(L.foreground.field.volumeTexture(), L.foreground.field.patientToTexture(), L.foreground.win, L.foreground.lev, L.foreground.opacity, L.foreground.compositing);
+    else sr.setForeground(null, null, 0, 0, 0);
+    if (L?.label) sr.setLabelLayer(L.label.field.volumeTexture(), L.label.field.patientToTexture(), L.label.table, L.label.opacity);
+    else sr.setLabelLayer(null, null, null, 0);
+    sr.setOverlayOpacity(segOverlay ? segFill : 0); sr.setOutlineOpacity(segOverlay ? segOutline : 0);
+  };
+  let legacyWL: { win: number; lev: number } | undefined;
 
   const planeOffset01 = (c: SliceCell): number => {
     const pl = c.plane!;
-    if (pl.basis) return slice.offset01Along(c.orientKey, [pl.basis.nDir[0] * pl.posMm, pl.basis.nDir[1] * pl.posMm, pl.basis.nDir[2] * pl.posMm]);
-    const [lo, hi] = volumeField!.aabb();
+    if (pl.basis) return c.slice.offset01Along(c.orientKey, [pl.basis.nDir[0] * pl.posMm, pl.basis.nDir[1] * pl.posMm, pl.basis.nDir[2] * pl.posMm]);
+    const [lo, hi] = bgField(c)!.aabb();
     const axis = pl.orient === "axial" ? 2 : pl.orient === "coronal" ? 1 : 0;
     return Math.max(0, Math.min(1, (pl.posMm - lo[axis]) / Math.max(hi[axis] - lo[axis], 1e-6)));
   };
   const applyPlane = (c: SliceCell) => {
-    const pl = c.plane!;
+    const pl = c.plane!, slice = c.slice;
     slice.setBasis(c.orientKey, pl.basis ? { uDir: pl.basis.uDir, vDir: pl.basis.vDir, nDir: pl.basis.nDir } : null);
     if (!c.branched) {   // while a local pan/zoom is in flight the renderer's own viewState is the truth
       if (pl.centerRAS && pl.fovX && pl.fovY) slice.setMirrorFrame(c.orientKey, pl.centerRAS as Vec3, pl.fovX, pl.fovY); else slice.resetView(c.orientKey);
@@ -129,9 +150,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const ov = c.overlay, g = ov.getContext("2d")!;
     if (ov.width !== c.canvas.width || ov.height !== c.canvas.height) { ov.width = c.canvas.width; ov.height = c.canvas.height; }
     g.clearRect(0, 0, ov.width, ov.height);
-    if (!volumeReady || !c.plane) return;
+    if (!bgField(c) || !c.plane) return;
     const off = planeOffset01(c), aspect = ov.width / ov.height;
-    const proj = (ras: Vec3) => { const r = slice.rasToView(c.orientKey, off, ras, aspect); return { x: r.u * ov.width, y: r.v * ov.height, d: r.distMm }; };
+    const proj = (ras: Vec3) => { const r = c.slice.rasToView(c.orientKey, off, ras, aspect); return { x: r.u * ov.width, y: r.v * ov.height, d: r.distMm }; };
     const rgba = (col: number[], a = 1) => `rgba(${Math.round(col[0] * 255)},${Math.round(col[1] * 255)},${Math.round(col[2] * 255)},${a})`;
     g.lineWidth = 2 * dpr; g.font = `${11 * dpr}px system-ui`;
     for (const items of overlays.values()) {
@@ -161,9 +182,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   };
   const renderSlice = (c: SliceCell) => {
     if (c.el.style.display === "none") return;
-    if (!volumeReady || !c.plane) { clearCanvas(c.ctx); drawOverlay(c); return; }
+    if (!bgField(c) || !c.plane) { clearCanvas(c.ctx); drawOverlay(c); return; }
+    applyLayers(c);
     applyPlane(c);
-    slice.renderToView(c.ctx.getCurrentTexture().createView({ format: srgb }), c.canvas.width, c.canvas.height);
+    c.slice.renderToView(c.ctx.getCurrentTexture().createView({ format: srgb }), c.canvas.width, c.canvas.height);
     drawOverlay(c);
   };
   const renderSlices = () => { for (const c of cells.values()) renderSlice(c); };
@@ -192,16 +214,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       a3d.draw();
     },
     setClipBox(lo, hi) { clip = lo ? { lo, hi: hi! } : null; if (scene) { if (clip) scene.setClipBox(clip.lo, clip.hi); else scene.setClipPlanes([]); } a3d.draw(); },
+    setSliceLayers(cell, layers) { const c = sliceCell(cell); c.layers = layers; renderSlice(c); },
     setVolumeField(f, wl) {
-      volumeField = f;
-      if (f) {
-        const [lo, hi] = f.aabb();
-        slice.setVolume(f.patientToTexture(), lo, hi);
-        slice.setTextures(f.volumeTexture(), segOverlay ?? undefined);
-        if (wl) slice.setWindowLevel(wl.win, wl.lev);
-        slice.setOverlayOpacity(segOverlay ? segFill : 0); slice.setOutlineOpacity(segOverlay ? segOutline : 0);
-        volumeReady = true;
-      } else volumeReady = false;
+      volumeField = f; legacyWL = wl;
+      volumeReady = !!f;
       renderSlices(); rebuild3d();
     },
     showVolume3D(show) { volumeShown3D = show; rebuild3d(); },
@@ -209,14 +225,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     setLayout(_name) { /* the app's layout engine places cells (setCells) */ },
     setSegmentationOverlay(tex, fillOpacity, outlineOpacity) {
       segOverlay = tex; segFill = fillOpacity; segOutline = outlineOpacity;
-      if (volumeField) { slice.setTextures(volumeField.volumeTexture(), tex ?? undefined); slice.setOverlayOpacity(tex ? fillOpacity : 0); slice.setOutlineOpacity(tex ? outlineOpacity : 0); }
       renderSlices();
     },
   };
 
   const markupsDM = new MarkupsDisplayableManager();
   const live = new LiveScene(cfg.httpBase, [
-    new LayoutDisplayableManager(), new CameraDisplayableManager(), new VolumeRenderingDisplayableManager(gpu.device),
+    new LayoutDisplayableManager(), new CameraDisplayableManager(), new VolumeRenderingDisplayableManager(gpu.device), new VolumeLayersDisplayableManager(gpu.device),
     new SliceDisplayableManager(), new SegmentationDisplayableManager(gpu.device, 1.5), markupsDM, new RoiCropDisplayableManager(),
     new ViewStateDisplayableManager(),
   ]);
@@ -246,14 +261,14 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const scalarDisplayId = () => nodeIdFor((nd) => nd.type === "scalarVolumeDisplay");
   const crosshairId = () => viewState.crosshair?.id ?? null;
   /** RAS of a cell pixel (u,v in [0,1]) on the cell's current plane. */
-  const cellRas = (c: SliceCell, u: number, v: number): Vec3 => { applyPlane(c); return slice.viewToRas(c.orientKey, planeOffset01(c), u, v, c.canvas.width / c.canvas.height); };
+  const cellRas = (c: SliceCell, u: number, v: number): Vec3 => { applyPlane(c); return c.slice.viewToRas(c.orientKey, planeOffset01(c), u, v, c.canvas.width / c.canvas.height); };
   /** Nearest markup control point to a cell pixel within `px`, among in-plane points. */
   const pickMarkup = (c: SliceCell, u: number, v: number, w: number, h: number, px = 12) => {
     applyPlane(c);
     const off = planeOffset01(c), aspect = w / h;
     let best: { id: string; index: number; ras: Vec3 } | null = null, bestD = px * dpr;
     for (const hd of markupsDM.handles()) {
-      const r = slice.rasToView(c.orientKey, off, hd.ras, aspect);
+      const r = c.slice.rasToView(c.orientKey, off, hd.ras, aspect);
       if (Math.abs(r.distMm) > SLAB_MM) continue;
       const d = Math.hypot((r.u - u) * w, (r.v - v) * h);
       if (d < bestD) { bestD = d; best = { id: hd.id, index: hd.index, ras: hd.ras }; }
@@ -263,7 +278,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   let sliceDrag: { id: string; index: number } | null = null;
   const pushSliceFrame = (c: SliceCell) => {
     const id = sliceNodeId(c.name); const pl = c.plane; if (!id || !pl) return;
-    const f = slice.mirrorFrame(c.orientKey, c.canvas.width / c.canvas.height);
+    const f = c.slice.mirrorFrame(c.orientKey, c.canvas.width / c.canvas.height);
     const n: Vec3 = pl.basis ? pl.basis.nDir : pl.orient === "axial" ? [0, 0, 1] : pl.orient === "coronal" ? [0, 1, 0] : [1, 0, 0];
     // keep the out-of-plane position: replace the centre's component along the normal with posMm
     const along = f.centerRAS[0] * n[0] + f.centerRAS[1] * n[1] + f.centerRAS[2] * n[2];
@@ -276,11 +291,11 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const branch = (c: SliceCell) => { c.branched = true; clearTimeout(frameTimer); frameTimer = setTimeout(() => pushSliceFrame(c), 200) as unknown as number; };
   function attachInteraction(c: SliceCell) {
     c.controls = attachSliceControls(c.canvas, {
-      orient: c.orientKey, getSlice: () => slice,
+      orient: c.orientKey, getSlice: () => c.slice,
       step: (fwd) => {
-        const pl = c.plane; if (!pl || !volumeField) return;
+        const pl = c.plane; const bg = bgField(c); if (!pl || !bg) return;
         const n: Vec3 = pl.basis ? pl.basis.nDir : pl.orient === "axial" ? [0, 0, 1] : pl.orient === "coronal" ? [0, 1, 0] : [1, 0, 0];
-        const [lo, hi] = volumeField.aabb();
+        const [lo, hi] = bg.aabb();
         const ext = Math.abs(n[0]) * (hi[0] - lo[0]) + Math.abs(n[1]) * (hi[1] - lo[1]) + Math.abs(n[2]) * (hi[2] - lo[2]);
         pl.posMm += ext * 0.02 * (fwd ? -1 : 1);
         const id = sliceNodeId(c.name);
@@ -291,8 +306,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       wl: {
         enabled: () => interactionMode() === "adjustWindowLevel",
         get: () => { const d = viewState ? live.nodes.get(scalarDisplayId() ?? "") : undefined; return [(d?.window as number) ?? 100, (d?.level as number) ?? 50]; },
-        set: (win, lev) => { const id = scalarDisplayId(); if (!id) return; live.write({ op: "patch", id, path: "#/window", value: win }); live.write({ op: "patch", id, path: "#/level", value: lev }); slice.setWindowLevel(win, lev); renderSlice(c); },
-        range: () => volumeField ? volumeField.getClim() : [0, 1],
+        set: (win, lev) => { const id = scalarDisplayId(); if (!id) return; live.write({ op: "patch", id, path: "#/window", value: win }); live.write({ op: "patch", id, path: "#/level", value: lev }); c.slice.setWindowLevel(win, lev); renderSlice(c); },
+        range: () => bgField(c) ? bgField(c)!.getClim() : [0, 1],
       },
       hooks: {
         onZoom: () => branch(c),
@@ -357,7 +372,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     resizeAll(); renderSlices(); if (threeVisible) a3d.draw();
   };
   addEventListener("resize", () => { resizeAll(); renderSlices(); a3d.draw(); });
-  Object.assign(globalThis, { __live: live, __sync: sync, __cells: () => [...cells.keys()], __overlays: () => Object.fromEntries(overlays) });
+  Object.assign(globalThis, { __live: live, __sync: sync, __cells: () => [...cells.keys()], __overlays: () => Object.fromEntries(overlays),
+    __layers: () => Object.fromEntries([...cells].map(([k, c]) => [k, { bg: !!c.layers?.background, fg: c.layers?.foreground ? [c.layers.foreground.opacity, c.layers.foreground.compositing] : null, label: c.layers?.label ? c.layers.label.opacity : null, bgLut: !!c.layers?.background?.lut }])) });
   sync.connect();
   return { live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells };
 }

@@ -43,10 +43,21 @@ export type OverlayItem =
   | { kind: "polyline"; points: Vec3[]; color: number[]; widthPx?: number; closed?: boolean }
   | { kind: "text"; ras: Vec3; text: string; color: number[] };
 
+export interface ScalarLayer { field: ImageField; win: number; lev: number; lut?: Uint8Array; interpolate?: boolean }
+export interface SliceLayers {
+  background?: ScalarLayer;
+  foreground?: ScalarLayer & { opacity: number; compositing: number };
+  label?: { field: ImageField; table: Uint8Array; opacity: number };
+  linked?: boolean;
+}
+
 export interface MirrorView {
   /** Per-view 2D overlays (optional): `cell` = a slice cell name or "*" for every slice cell;
    *  `layer` namespaces one producer (e.g. "markups"); [] clears the layer. */
   setOverlay?(cell: string, layer: string, items: OverlayItem[]): void;
+  /** Per-slice-view layer stack (optional): Slicer's slice composite — background / foreground / label
+   *  volumes with their own geometry, W/L, colour LUTs, opacities and compositing. Absent layers = none. */
+  setSliceLayers?(cell: string, layers: SliceLayers): void;
   setField(key: string, field: Field): void;   // add or replace a 3D field -> rebuild
   removeField(key: string): void;               // -> rebuild
   redraw(): void;                                // an existing field changed in place
@@ -679,6 +690,112 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     this.added = false;
     this.palKey = "";
     this.zarrSig = "";
+  }
+}
+
+// ── Slice composite layers ───────────────────────────────────────────────────
+
+/** Mirrors vtkMRMLSliceCompositeNode per slice view: resolves the background / foreground / label
+ *  volume refs to keyed ImageFields (fetched by content hash on demand), their display nodes (W/L,
+ *  colour table) and colour tables, and hands each cell its layer stack. Multiple volumes, different
+ *  volumes per view, label maps — the things the singleton VolumeRenderingDM could not express. */
+export class VolumeLayersDisplayableManager implements DisplayableManager {
+  interestedTypes = ["image", "scalarVolumeDisplay", "labelMapDisplay", "colorTable", "sliceComposite"];
+  private images = new Map<string, { node: MrsonNode; field?: ImageField; zv?: ZarrVolume; loading?: boolean }>();
+  private displays = new Map<string, MrsonNode>();
+  private tables = new Map<string, MrsonNode>();
+  private composites = new Map<string, MrsonNode>();   // layoutName -> node
+  private blobBaseHref = "";
+
+  constructor(private dev: GPUDevice, private onBytes?: (n: number) => void) {}
+
+  async onNodeAdded(node: MrsonNode, scene: LiveScene): Promise<void> {
+    this.blobBaseHref = scene.blobBase();
+    if (node.type === "image") { const e = this.images.get(node.id); if (e) e.node = node; else this.images.set(node.id, { node }); }
+    else if (node.type === "scalarVolumeDisplay" || node.type === "labelMapDisplay") this.displays.set(node.id, node);
+    else if (node.type === "colorTable") this.tables.set(node.id, node);
+    else if (node.type === "sliceComposite") this.composites.set(node.layoutName as string, node);
+    await this.refresh(scene);
+  }
+  onNodeRemoved(id: string, scene: LiveScene) {
+    this.images.delete(id); this.displays.delete(id); this.tables.delete(id);
+    for (const [k, c] of this.composites) if (c.id === id) this.composites.delete(k);
+    void this.refresh(scene);
+  }
+  onSceneClosed(scene: LiveScene) {
+    this.images.clear(); this.displays.clear(); this.tables.clear();
+    for (const k of this.composites.keys()) scene.view?.setSliceLayers?.(k, {});
+    this.composites.clear();
+  }
+
+  private displayFor(image: MrsonNode): MrsonNode | undefined {
+    const ids = ((image.refs as Record<string, string[]> | undefined)?.display) ?? [];
+    for (const id of ids) { const d = this.displays.get(id); if (d) return d; }
+    return undefined;
+  }
+  private lutFor(display: MrsonNode | undefined): Uint8Array | undefined {
+    const cid = ((display?.refs as Record<string, string[]> | undefined)?.color ?? [])[0];
+    const t = cid ? this.tables.get(cid) : undefined;
+    const entries = t?.entries as number[][] | undefined;
+    if (!entries || entries.length !== 256) return undefined;          // a 256-entry table maps the W/L ramp
+    const lut = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) { lut[i * 4] = entries[i][0] * 255; lut[i * 4 + 1] = entries[i][1] * 255; lut[i * 4 + 2] = entries[i][2] * 255; lut[i * 4 + 3] = 255; }
+    // Grey is the identity ramp: skip the LUT so the plain grayscale path (and interpolation) is used
+    if (entries.every((e, i) => Math.abs(e[0] * 255 - i) < 1 && Math.abs(e[1] * 255 - i) < 1 && Math.abs(e[2] * 255 - i) < 1)) return undefined;
+    return lut;
+  }
+  private labelTableFor(display: MrsonNode | undefined): Uint8Array | undefined {
+    const cid = ((display?.refs as Record<string, string[]> | undefined)?.color ?? [])[0];
+    const t = cid ? this.tables.get(cid) : undefined;
+    const entries = t?.entries as number[][] | undefined;
+    if (!entries?.length) return undefined;
+    const table = new Uint8Array(entries.length * 4);
+    entries.forEach((e, i) => { table[i * 4] = e[0] * 255; table[i * 4 + 1] = e[1] * 255; table[i * 4 + 2] = e[2] * 255; table[i * 4 + 3] = (e[3] ?? 1) * 255; });
+    return table;
+  }
+  private async ensureField(id: string, scene: LiveScene): Promise<ImageField | undefined> {
+    const e = this.images.get(id);
+    if (!e || !e.node.zarr) return undefined;
+    if (e.field) return e.field;
+    if (e.loading) return undefined;
+    e.loading = true;
+    try {
+      e.zv = await fetchZarrVolume(this.blobBaseHref, e.node.zarr as ZarrDesc, this.onBytes);
+      const lut = new Uint8Array(256 * 4); for (let i = 0; i < 256; i++) { lut[i * 4] = lut[i * 4 + 1] = lut[i * 4 + 2] = i; lut[i * 4 + 3] = 255; }
+      e.field = new ImageField(this.dev, e.zv.data, e.zv.dims, [1, 1, 1], lut, { clim: e.zv.range, ijkToRAS: e.node.ijkToRAS as number[] });
+    } finally { e.loading = false; }
+    void this.refresh(scene);      // a layer became available: re-hand the stacks
+    return e.field;
+  }
+  private scalarLayer(id: string | undefined, scene: LiveScene): ScalarLayer | undefined {
+    if (!id) return undefined;
+    const e = this.images.get(id);
+    if (!e) return undefined;
+    if (!e.field) { void this.ensureField(id, scene); return undefined; }
+    const d = this.displayFor(e.node);
+    const range = e.zv?.range ?? [0, 1];
+    const win = (d?.window as number) ?? (range[1] - range[0]);
+    const lev = (d?.level as number) ?? (range[0] + range[1]) / 2;
+    return { field: e.field, win, lev, lut: this.lutFor(d), interpolate: (d?.interpolate as boolean) ?? true };
+  }
+  private async refresh(scene: LiveScene): Promise<void> {
+    const view = scene.view;
+    if (!view?.setSliceLayers) return;
+    for (const [layoutName, comp] of this.composites) {
+      const refs = (comp.refs as Record<string, string[]> | undefined) ?? {};
+      const layers: SliceLayers = { linked: !!comp.linkedControl };
+      const bg = this.scalarLayer(refs.background?.[0], scene); if (bg) layers.background = bg;
+      const fg = this.scalarLayer(refs.foreground?.[0], scene);
+      if (fg) layers.foreground = { ...fg, opacity: (comp.foregroundOpacity as number) ?? 0, compositing: (comp.compositing as number) ?? 0 };
+      const lid = refs.label?.[0];
+      if (lid) {
+        const e = this.images.get(lid);
+        if (e && !e.field) void this.ensureField(lid, scene);
+        const table = this.labelTableFor(e ? this.displayFor(e.node) : undefined);
+        if (e?.field && table) layers.label = { field: e.field, table, opacity: (comp.labelOpacity as number) ?? 1 };
+      }
+      view.setSliceLayers(layoutName, layers);
+    }
   }
 }
 

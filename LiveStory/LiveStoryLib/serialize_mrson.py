@@ -63,7 +63,16 @@ def _display_node(dn):
     tf = None
     if cls == "vtkMRMLScalarVolumeDisplayNode":
         node.update({"type": "scalarVolumeDisplay", "window": dn.GetWindow(), "level": dn.GetLevel(),
-                     "color": _rgba(dn.GetColor()), "interpolate": bool(dn.GetInterpolate())})
+                     "color": _rgba(dn.GetColor()), "interpolate": bool(dn.GetInterpolate()),
+                     "autoWindowLevel": bool(dn.GetAutoWindowLevel()),
+                     "applyThreshold": bool(dn.GetApplyThreshold()),
+                     "threshold": [dn.GetLowerThreshold(), dn.GetUpperThreshold()]})
+        if dn.GetColorNodeID():
+            node["refs"]["color"] = [dn.GetColorNodeID()]
+    elif cls == "vtkMRMLLabelMapVolumeDisplayNode":
+        node.update({"type": "labelMapDisplay", "interpolate": False})
+        if dn.GetColorNodeID():
+            node["refs"]["color"] = [dn.GetColorNodeID()]
     elif "VolumeRenderingDisplayNode" in cls:
         node["type"] = "volumeRenderingDisplay"
         vpn = dn.GetVolumePropertyNode()
@@ -121,6 +130,7 @@ def _image_node(vol, node_id, blobdir):
         "comps": 1,
         "ijkToRAS": S._volume_ijk_to_ras(vol),
         "zarr": _zarr_desc(vol, node_id, blobdir),
+        "labelmap": vol.GetClassName() == "vtkMRMLLabelMapVolumeNode",
         "refs": {}, "source": {"mrmlClass": vol.GetClassName()},
     }
 
@@ -344,6 +354,47 @@ def _selection_node(n, node_id):
             "source": {"mrmlClass": n.GetClassName()}}
 
 
+def _slice_composite_node(n, node_id):
+    refs = {}
+    for key, getter in (("background", n.GetBackgroundVolumeID), ("foreground", n.GetForegroundVolumeID), ("label", n.GetLabelVolumeID)):
+        v = getter()
+        if v:
+            refs[key] = [v]
+    return {"type": "sliceComposite", "id": node_id, "name": n.GetName(), "layoutName": n.GetLayoutName(),
+            "refs": refs, "foregroundOpacity": float(n.GetForegroundOpacity()), "labelOpacity": float(n.GetLabelOpacity()),
+            "compositing": int(n.GetCompositing()),          # 0 alpha, 1 reverse alpha, 2 add, 3 subtract
+            "linkedControl": bool(n.GetLinkedControl()), "hotLinkedControl": bool(n.GetHotLinkedControl()),
+            "source": {"mrmlClass": n.GetClassName()}}
+
+
+def _color_table_node(n, node_id, max_entries=4096):
+    """A colour node as an RGBA table. Discrete tables keep their integer index (label value -> colour);
+    procedural (continuous) nodes are sampled to 256 entries across their range and marked `continuous`."""
+    entries = []
+    continuous = False
+    try:
+        ncol = int(n.GetNumberOfColors())
+    except Exception:  # noqa: BLE001
+        ncol = 0
+    ctf = n.GetColorTransferFunction() if hasattr(n, "GetColorTransferFunction") else None
+    if ctf is not None and (ncol <= 0 or ncol > max_entries):
+        lo, hi = ctf.GetRange()
+        for i in range(256):
+            x = lo + (hi - lo) * i / 255.0
+            c = [0.0, 0.0, 0.0]; ctf.GetColor(x, c)
+            entries.append([c[0], c[1], c[2], 1.0])
+        continuous = True
+        rng = [lo, hi]
+    else:
+        rng = None
+        rgba = [0.0, 0.0, 0.0, 0.0]
+        for i in range(min(ncol, max_entries)):
+            n.GetColor(i, rgba)
+            entries.append([rgba[0], rgba[1], rgba[2], rgba[3]])
+    return {"type": "colorTable", "id": node_id, "name": n.GetName(), "entries": entries,
+            "continuous": continuous, "range": rng, "source": {"mrmlClass": n.GetClassName()}}
+
+
 def _3d_view_node(n, node_id):
     node = {"type": "view", "id": node_id, "name": n.GetName(), "kind": "3d",
             "layoutName": n.GetLayoutName(), "refs": {}, "source": {"mrmlClass": n.GetClassName()}}
@@ -413,7 +464,7 @@ def serialize_mrson(outdir, name):
     simple = [("vtkMRMLLayoutNode", _layout_node), ("vtkMRMLCameraNode", _camera_node),
               ("vtkMRMLSliceNode", _slice_view_node), ("vtkMRMLViewNode", _3d_view_node),
               ("vtkMRMLCrosshairNode", _crosshair_node), ("vtkMRMLInteractionNode", _interaction_node),
-              ("vtkMRMLSelectionNode", _selection_node)]
+              ("vtkMRMLSelectionNode", _selection_node), ("vtkMRMLSliceCompositeNode", _slice_composite_node)]
     for cls, build in simple:
         for n in slicer.util.getNodesByClass(cls):
             if n.GetID() in nodes:
@@ -422,6 +473,18 @@ def serialize_mrson(outdir, name):
                 nodes[n.GetID()] = build(n, n.GetID())
             except Exception as e:  # noqa: BLE001
                 print(f"mrson: skipped {n.GetID()} ({cls}): {e}")
+
+    # colour tables: only the ones some display node references (Slicer has ~100 colour nodes)
+    for nd in list(nodes.values()):
+        for cid in (nd.get("refs") or {}).get("color", []):
+            if cid in nodes:
+                continue
+            cn = slicer.mrmlScene.GetNodeByID(cid)
+            if cn is not None:
+                try:
+                    nodes[cid] = _color_table_node(cn, cid)
+                except Exception as e:  # noqa: BLE001
+                    print(f"mrson: skipped color table {cid}: {e}")
 
     wrapper = {"mrson": 0, "blobBase": "blobs/", "nodes": nodes}
     scene_path = os.path.join(outdir, f"{name}.mrson.json")

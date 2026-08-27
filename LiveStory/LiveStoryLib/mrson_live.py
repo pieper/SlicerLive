@@ -107,6 +107,11 @@ _CLASS_TYPE = {
     "vtkMRMLCrosshairNode": "crosshair",
     "vtkMRMLInteractionNode": "interaction",
     "vtkMRMLSelectionNode": "selection",
+    "vtkMRMLSliceCompositeNode": "sliceComposite",
+    "vtkMRMLLabelMapVolumeNode": "image",
+    "vtkMRMLLabelMapVolumeDisplayNode": "labelMapDisplay",
+    "vtkMRMLColorTableNode": "colorTable",
+    "vtkMRMLProceduralColorNode": "colorTable",
 }
 
 
@@ -157,6 +162,13 @@ def _node_event(node):
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._markup_node(node, nid)}
     if t == "layout":
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._layout_node(node, nid)}
+    if t == "sliceComposite":
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._slice_composite_node(node, nid)}
+    if t == "labelMapDisplay":
+        mrn, _tf = M._display_node(node)
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": mrn}
+    if t == "colorTable":
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._color_table_node(node, nid)}
     if t == "crosshair":
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._crosshair_node(node, nid)}
     if t == "interaction":

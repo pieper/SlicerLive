@@ -178,6 +178,18 @@ def _apply_patch(node, path, value):
         if k0 == "placeModePersistence": node.SetPlaceModePersistence(1 if value else 0); return True
         return False
 
+    if cls == "vtkMRMLSliceCompositeNode":
+        if k0 == "foregroundOpacity": node.SetForegroundOpacity(float(value)); return True
+        if k0 == "labelOpacity": node.SetLabelOpacity(float(value)); return True
+        if k0 == "compositing": node.SetCompositing(int(value)); return True
+        if k0 == "linkedControl": node.SetLinkedControl(1 if value else 0); return True
+        if k0 == "hotLinkedControl": node.SetHotLinkedControl(1 if value else 0); return True
+        if k0 == "refs" and k1 in ("background", "foreground", "label"):
+            vid = value[0] if isinstance(value, (list, tuple)) and value else (value if isinstance(value, str) else None)
+            {"background": node.SetBackgroundVolumeID, "foreground": node.SetForegroundVolumeID, "label": node.SetLabelVolumeID}[k1](vid or None)
+            return True
+        return False
+
     if cls == "vtkMRMLLayoutNode":
         if k0 == "arrangement": node.SetViewArrangement(int(value)); return True
         return False
@@ -214,6 +226,12 @@ def _apply_patch(node, path, value):
         if k0 == "window": node.SetAutoWindowLevel(0); node.SetWindow(float(value)); return True
         if k0 == "level": node.SetAutoWindowLevel(0); node.SetLevel(float(value)); return True
         if k0 == "interpolate": node.SetInterpolate(bool(value)); return True
+        if k0 == "autoWindowLevel": node.SetAutoWindowLevel(1 if value else 0); return True
+        if k0 == "applyThreshold": node.SetApplyThreshold(1 if value else 0); return True
+        if k0 == "threshold" and isinstance(value, (list, tuple)) and len(value) >= 2:
+            node.SetThreshold(float(value[0]), float(value[1])); return True
+        if k0 == "refs" and k1 == "color":
+            node.SetAndObserveColorNodeID(value[0] if isinstance(value, (list, tuple)) and value else value); return True
         # visible falls through to the generic display-visibility fallback
 
     if "VolumeRenderingDisplayNode" in cls:

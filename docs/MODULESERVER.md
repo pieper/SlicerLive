@@ -231,6 +231,23 @@ click in Red → F gained a point at the clicked RAS and the mode returned to Vi
 Slicer's own toolbar buttons (streamed) drive the same nodes, so "click the fiducial toolbar button, click
 in a SlicerLive view" is the normal path.
 
+## S6 status (2026-08-27): slice composite layers + colour tables
+mrson: `sliceComposite` (per-view background/foreground/label refs, opacities, compositing 0-3, linked/
+hot-linked; patchable incl. layer refs), `labelmap` flag on images, `labelMapDisplay`, `colorTable`
+(only tables referenced by a display node; discrete tables keep integer indices, procedural nodes are
+sampled to 256 and marked `continuous`), scalar display gains `refs.color`, `autoWindowLevel`,
+`applyThreshold`, `threshold`.
+Renderer: `SliceRenderer` gained a foreground layer (own RAS→texture matrix, W/L, opacity, Slicer's four
+`vtkImageBlend` compositing modes), a label layer (integer labels through a colour table, nearest
+sampling, label 0 transparent) and 256-entry colour LUTs over the W/L ramp for bg/fg (bindings 7-10).
+Client: `VolumeLayersDisplayableManager` keys ImageFields by image id (fetched by hash on demand),
+resolves display nodes + colour tables, and hands each slice cell its `SliceLayers`; `live-views` now
+runs **one SliceRenderer per cell**, so views show different volumes (the singleton limit is gone).
+Verified: Red = Tumor1 + Tumor2 @0.5 alpha + TumorLabel; Green/Yellow = Tumor2; Slicer's Data Probe
+reports all three layers under the SlicerLive cursor.
+Not yet: threshold/invert in the shader, blend-by-drag, slice linking semantics on the client, multiple
+segmentations (still one overlay).
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

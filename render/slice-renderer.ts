@@ -24,7 +24,13 @@ struct U {
   uvec : vec4<f32>,      // RAS vector spanning the view width  (isotropic mm)
   vvec : vec4<f32>,      // RAS vector spanning the view height (isotropic mm)
   params : vec4<f32>,    // win, lev, fillOpacity, outlineOpacity
-  size : vec4<f32>,      // sizeX, sizeY, labelOverlayMode, _
+  size : vec4<f32>,      // sizeX, sizeY, labelOverlayMode, bgLutMode (0 gray, 1 LUT row 0)
+  // ── Slicer slice-composite layers (vtkMRMLSliceCompositeNode): a FOREGROUND volume blended over the
+  //    background with its own geometry, W/L and LUT, and a LABEL volume coloured through a colour table.
+  p2tFg : mat4x4<f32>,   // RAS -> foreground texture[0,1]
+  fgParams : vec4<f32>,  // win, lev, opacity (0 = no foreground), compositing (0 alpha,1 reverse alpha,2 add,3 subtract)
+  p2tLabel : mat4x4<f32>,// RAS -> label texture[0,1]
+  labelParams : vec4<f32>, // opacity (0 = no label layer), lutEntries, fgLutMode (0 gray, 1 LUT row 1), _
 };
 @group(0) @binding(0) var<uniform> u : U;
 @group(0) @binding(1) var s_lin : sampler;
@@ -37,6 +43,10 @@ struct U {
 // is 55 MB and, because it shares the palette, hiding an organ group in 3D hides it here too.
 @group(0) @binding(5) var t_labels : texture_3d<u32>;
 @group(0) @binding(6) var t_palette : texture_2d<f32>;
+@group(0) @binding(7) var t_fg : texture_3d<f32>;       // foreground scalar volume
+@group(0) @binding(8) var t_lut : texture_2d<f32>;      // 256x2 colour LUTs: row 0 background, row 1 foreground (sampled over the W/L ramp)
+@group(0) @binding(9) var t_labelVol : texture_3d<f32>; // label volume (integer values stored as float)
+@group(0) @binding(10) var t_labelLut : texture_2d<f32>;// Nx1 colour table indexed by label value
 
 struct V { @builtin(position) position : vec4<f32> };
 @vertex
@@ -76,6 +86,36 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
   let win = max(u.params.x, 1e-6);
   let g = clamp((val - (u.params.y - win * 0.5)) / win, 0.0, 1.0);
   var col = vec3<f32>(g);
+  if (u.size.w > 0.5) { col = textureLoad(t_lut, vec2<i32>(i32(g * 255.0), 0), 0).rgb; }
+  // ── foreground layer (Slicer's vtkImageBlend semantics per compositing mode) ──
+  if (u.fgParams.z > 0.0) {
+    let tf = (u.p2tFg * vec4<f32>(ras, 1.0)).xyz;
+    if (all(tf >= vec3<f32>(0.0)) && all(tf <= vec3<f32>(1.0))) {
+      let fv = textureSampleLevel(t_fg, s_lin, tf, 0.0).r;
+      let fwin = max(u.fgParams.x, 1e-6);
+      let fg = clamp((fv - (u.fgParams.y - fwin * 0.5)) / fwin, 0.0, 1.0);
+      var fcol = vec3<f32>(fg);
+      if (u.labelParams.z > 0.5) { fcol = textureLoad(t_lut, vec2<i32>(i32(fg * 255.0), 1), 0).rgb; }
+      let a = u.fgParams.z;
+      let mode = i32(u.fgParams.w + 0.5);
+      if (mode == 0) { col = mix(col, fcol, a); }                       // alpha: fg over bg
+      else if (mode == 1) { col = mix(fcol, col, a); }                  // reverse alpha: bg over fg
+      else if (mode == 2) { col = clamp(col + fcol * a, vec3<f32>(0.0), vec3<f32>(1.0)); }   // add
+      else { col = clamp(col - fcol * a, vec3<f32>(0.0), vec3<f32>(1.0)); }                   // subtract
+    }
+  }
+  // ── label layer: integer label -> colour table entry, blended at labelOpacity (label 0 = transparent) ──
+  if (u.labelParams.x > 0.0) {
+    let tl = (u.p2tLabel * vec4<f32>(ras, 1.0)).xyz;
+    if (all(tl >= vec3<f32>(0.0)) && all(tl <= vec3<f32>(1.0))) {
+      let lv = i32(textureSampleLevel(t_labelVol, s_nn, tl, 0.0).r + 0.5);
+      let nEntries = i32(u.labelParams.y);
+      if (lv > 0 && lv < nEntries) {
+        let lc = textureLoad(t_labelLut, vec2<i32>(lv, 0), 0);
+        col = mix(col, lc.rgb, clamp(lc.a * u.labelParams.x, 0.0, 1.0));
+      }
+    }
+  }
   let ov = ov_tex(tex);
   // Slicer-style 2D segmentation: a semi-transparent per-voxel FILL plus a brighter boundary
   // OUTLINE, with independent opacities (params.z = fill, params.w = outline). The outline is
@@ -164,12 +204,16 @@ export class SliceRenderer {
   private sampler: GPUSampler;
   private nnSampler: GPUSampler;
   private ubuf: GPUBuffer;
-  private u = new Float32Array(36);  // p2t(16) + origin(4) + uvec(4) + vvec(4) + params(4) + size(4)
+  private u = new Float32Array(80);  // p2t(16) origin(4) uvec(4) vvec(4) params(4) size(4) | p2tFg(16) fgParams(4) p2tLabel(16) labelParams(4)
   private bind?: GPUBindGroup;
   private overlay?: GPUTexture;
   private labels?: GPUTexture;
   private palette?: GPUTexture;
   private scalarTex?: GPUTexture;
+  private fgTex?: GPUTexture;
+  private lutTex?: GPUTexture;       // 256x2 rgba8: row 0 bg LUT, row 1 fg LUT
+  private labelVolTex?: GPUTexture;
+  private labelLutTex?: GPUTexture;
   // actual in-plane extents (mm) spanned by the LAST rendered viewport, aspect-corrected so
   // pixels stay isotropic on a non-square view (0 until first render → fall back to the square span).
   private uSpanMm = 0;
@@ -227,6 +271,55 @@ export class SliceRenderer {
       this.dev.queue.writeTexture({ texture: this.emptyPalette }, new Uint8Array(256 * 2 * 4), { bytesPerRow: 256 * 4 }, [256, 2]);
     }
     return this.emptyPalette;
+  }
+
+  private emptyScalar?: GPUTexture;
+  private noScalar(): GPUTexture {
+    if (!this.emptyScalar) {
+      this.emptyScalar = this.dev.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      this.dev.queue.writeTexture({ texture: this.emptyScalar }, new Float32Array(1), { bytesPerRow: 4, rowsPerImage: 1 }, [1, 1, 1]);
+    }
+    return this.emptyScalar;
+  }
+  private emptyLut?: GPUTexture;
+  private noLut(): GPUTexture {
+    if (!this.emptyLut) {
+      this.emptyLut = this.dev.createTexture({ size: [256, 2], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      this.dev.queue.writeTexture({ texture: this.emptyLut }, new Uint8Array(256 * 2 * 4), { bytesPerRow: 256 * 4 }, [256, 2]);
+    }
+    return this.emptyLut;
+  }
+  /** Foreground layer: a second scalar volume with its own RAS->texture mapping, W/L, opacity and
+   *  compositing mode (Slicer's slice composite node). Pass null to remove. */
+  setForeground(tex: GPUTexture | null, p2t: Mat4 | null, win: number, lev: number, opacity: number, compositing = 0) {
+    this.fgTex = tex ?? undefined;
+    if (p2t) this.u.set(p2t, 36);
+    this.u[52] = win; this.u[53] = lev; this.u[54] = tex ? opacity : 0; this.u[55] = compositing;
+    if (this.scalarTex) this.rebind();
+  }
+  /** Colour LUTs over the W/L ramp for the background (row 0) and foreground (row 1): 256 rgba8 entries
+   *  each, or null for the grayscale ramp. */
+  setLayerLUTs(bg: Uint8Array | null, fg: Uint8Array | null) {
+    if (!bg && !fg) { this.lutTex = undefined; this.u[35] = 0; this.u[58] = 0; if (this.scalarTex) this.rebind(); return; }
+    if (!this.lutTex) this.lutTex = this.dev.createTexture({ size: [256, 2], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    const gray = new Uint8Array(256 * 4); for (let i = 0; i < 256; i++) { gray[i * 4] = gray[i * 4 + 1] = gray[i * 4 + 2] = i; gray[i * 4 + 3] = 255; }
+    this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 0] }, bg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
+    this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 1] }, fg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
+    this.u[35] = bg ? 1 : 0; this.u[58] = fg ? 1 : 0;
+    if (this.scalarTex) this.rebind();
+  }
+  /** Label layer: a label volume (integer values in a float texture) coloured through a colour table
+   *  (rgba8 entries, index = label value), blended at `opacity`. Pass null to remove. */
+  setLabelLayer(tex: GPUTexture | null, p2t: Mat4 | null, table: Uint8Array | null, opacity: number) {
+    this.labelVolTex = tex ?? undefined;
+    if (p2t) this.u.set(p2t, 60);
+    const n = table ? table.length / 4 : 0;
+    if (table && n > 0) {
+      if (!this.labelLutTex || this.labelLutTex.width !== n) { this.labelLutTex?.destroy(); this.labelLutTex = this.dev.createTexture({ size: [n, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST }); }
+      this.dev.queue.writeTexture({ texture: this.labelLutTex }, table, { bytesPerRow: n * 4 }, [n, 1]);
+    }
+    this.u[76] = tex && table ? opacity : 0; this.u[77] = n;
+    if (this.scalarTex) this.rebind();
   }
 
   private emptyOverlay?: GPUTexture;
@@ -308,6 +401,10 @@ export class SliceRenderer {
         { binding: 4, resource: this.nnSampler },
         { binding: 5, resource: (this.labels ?? this.noLabels()).createView() },
         { binding: 6, resource: (this.palette ?? this.noPalette()).createView() },
+        { binding: 7, resource: (this.fgTex ?? this.noScalar()).createView() },
+        { binding: 8, resource: (this.lutTex ?? this.noLut()).createView() },
+        { binding: 9, resource: (this.labelVolTex ?? this.noScalar()).createView() },
+        { binding: 10, resource: (this.labelLutTex ?? this.noPalette()).createView() },
       ],
     });
   }
