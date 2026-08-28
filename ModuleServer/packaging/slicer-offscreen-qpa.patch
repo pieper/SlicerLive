@@ -1,0 +1,32 @@
+Ship the "offscreen" (and "minimal") Qt platform plugins in Slicer packages
+
+Rationale: a headless Slicer (ModuleServer: no visible windows, streams its module GUIs) needs a QPA that
+does not touch the display server. Every Qt build has `qoffscreen` and `qminimal`, but the packages only
+install the native platform plugin (cocoa / xcb / windows). With the plugins shipped, `-platform offscreen`
+works on all three platforms with the stock package (Qt 6 offscreen on macOS also provides an OpenGL
+context; on Linux/Windows it does not -- fine for a ModuleServer, which renders nothing itself).
+Cost: ~1 MB per package. No behavior change for normal launches.
+
+--- a/CMake/SlicerCPack.cmake
++++ b/CMake/SlicerCPack.cmake
+@@
+     if(APPLE)
+       list(APPEND SlicerBlockInstallQtPlugins_subdirectories
+         platforms:cocoa
++        platforms:offscreen
++        platforms:minimal
+         )
+     elseif(UNIX)
+       list(APPEND SlicerBlockInstallQtPlugins_subdirectories
+         platforms:xcb
++        platforms:offscreen
++        platforms:minimal
+         xcbglintegrations:xcb-glx-integration
+         )
+     elseif(WIN32)
+       list(APPEND SlicerBlockInstallQtPlugins_subdirectories
+         platforms:windows
++        platforms:offscreen
++        platforms:minimal
+         )
+     endif()

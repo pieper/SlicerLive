@@ -462,6 +462,25 @@ that does an HTTP request to the server's own port from the Qt thread waits for 
 Not done: Linux (bubblewrap/systemd-run) and Windows (AppContainer) rungs, rung 2 (read-only image,
 no exec) — the launcher seam and the probe contract are in place for them.
 
+## S15 status (2026-08-28): packaging
+
+- **Slicer packaging change** (Steve submits): `ModuleServer/packaging/slicer-offscreen-qpa.patch` adds
+  `platforms:offscreen` + `platforms:minimal` to `SlicerCPack.cmake` on all three platforms — one line per
+  platform, ~1 MB — so `-platform offscreen` works with the stock package (today only custom builds like
+  /opt/sr, or Debian's matching Qt5 plugin on Linux, have it).
+- **Linux container image**: `ModuleServer/packaging/Dockerfile` + `entrypoint.sh` — Debian slim, Slicer
+  nightly (or a pinned URL via `--build-arg SLICER_URL`), Xvfb + Mesa GLX, non-root user, read-only-friendly
+  (`/session`, `/state`, `/tmp` are the only writable paths), health check on the READY state file, token
+  via `MODULESERVER_TOKEN`. This is rung 2 of the sandbox ladder when run `--read-only --network` with a
+  proxy. Needs a real runtime (runc); see S13 for the gVisor deadlock.
+- **Desktop bundle**: `desktop/slicer-demo.ts` already hosts the stock UI; bundling a ModuleServer into
+  `SlicerLive.app` = ship `ModuleServer/` + `LiveStory/LiveStoryLib` under `Contents/Resources`, launch with
+  `launch.ts --sandbox seatbelt --session <SlicerLiveSessions/id>` as an unprivileged child, and point it at
+  a user-installed Slicer.app (or a bundled one, +1 GB). `desktop/make-app.ts` is being edited by another
+  session, so this is left as the recipe, not applied.
+- **Windows**: not verified in this pass (a Vultr VM is available for it); the launcher's `--sandbox`
+  seam is where an AppContainer/restricted-token rung goes.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,
