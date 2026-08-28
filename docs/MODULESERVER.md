@@ -291,13 +291,27 @@ Not yet: colour legend, slice planes in 3D, the reformat widget, per-view visibi
 (`fiducialsVisible`), human/cube marker styles (all types draw the axes glyph).
 
 ## Known issues (to clean up after the steps)
-- **Event staging** in the streamed GUI (reported by Steve while testing): pointer/key ordering and
-  latency need a pass — candidates: paint-driven capture vs event coalescing on the client, the
-  200 ms frame debounce, and hover→tooltip timing.
-- **Quit must be intercepted by the host**: a Quit reaching the headless Slicer opens the modal
-  "save scene before exit?" dialog and blocks the server (seen 2026-08-27; cancelled over MCP). The
-  host should own Quit (close the page/window, stop the server) and the AppServer should answer that
-  dialog by policy.
+
+Fixed 2026-08-28:
+- **Event staging** (Steve's report): the root cause was that the server delivered synthetic input with
+  `QApplication.sendEvent()` straight to the child widget, skipping everything a window system stages
+  first — no focus-on-click (typing went to the previously focused widget), no Enter/Leave/hover, and an
+  offscreen/hidden window never becomes *active* (so `focusWidget()` was `None` and keys fell to the main
+  window). `gui_stream._stage_focus/_stage_hover` + `setActiveWindow` + key routing to the window's
+  focus widget fix it; verified numerically: slider handle drag, popup item selection, click-then-type in
+  the Python console. Also fixed the same day: the `grab()->paint->dirty->grab` self-feeding loop that kept
+  the Qt loop ~100 % busy since S1 (RTT 1000 ms -> 1 ms), and a stale "waiting on a dialog" banner after
+  a stream restart.
+- **Quit interception**: a `QEvent.Close` on the headless main window is swallowed by the app-wide event
+  filter (clients get `quitIntercepted`); `{"op":"shutdown"}` lets one through. The "save before exit?"
+  dialog can no longer kill the server.
+
+Still open:
+- keys into the SlicerLive views (`v`, arrows, `f`/`b`), drag-and-drop file upload, slice intersection
+  lines + drag, second 3D view, multiple segmentations per view, zoom re-centering, model slice
+  intersections, colour legend, slice planes in 3D, desktop shell passing the sessions path, and
+  hover->tooltip timing (700 ms dwell is a guess).
+- Remote ModuleServer on Modal (gVisor) — see S13.
 
 ## S9 status (2026-08-27): segment-editor in-view feedback
 Users paint in SlicerLive's cells, so the direction is the reverse of the old capture: mrson
