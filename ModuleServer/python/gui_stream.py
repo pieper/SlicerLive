@@ -147,6 +147,7 @@ class GuiStream:
         self.blockedSent = False
         self.subscribers = []
         self.grabbing = False
+        self.hoverTarget = None                          # widget last entered (Enter/Leave staging)
         self.mwKey = str(self.mw)                        # PythonQt wrappers are not identity-stable; str() is
         self.allowQuit = False                           # set True (e.g. by the launcher's shutdown op) to let a Close through
         self.codec, self.quality = "png", 100          # S13: negotiated by the client (webp/jpeg + quality on slow links)
@@ -389,6 +390,10 @@ class GuiStream:
                          "enabled": bool(w.enabled), "focused": bool(w.hasFocus())}
                     if value is not None:
                         n["value"] = value
+                    if role in ("slider", "spinbutton"):
+                        lo, hi = self._text(w, "minimum"), self._text(w, "maximum")
+                        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+                            n["min"], n["max"] = lo, hi
                     if role == "checkbox":
                         n["checked"] = bool(value)
                     nodes.append(n)
@@ -639,13 +644,65 @@ class GuiStream:
             return
         button = _BUTTON.get(int(msg.get("button", 0)), qt.Qt.LeftButton) if kind != "move" else qt.Qt.NoButton
         ev = qt.QMouseEvent(etype, qt.QPointF(local), qt.QPointF(gp), button, _buttons(int(msg.get("buttons", 0))), _mods(msg.get("mods")))
+        # The window-system staging a real click gets before the widget sees it (QWidgetWindow does this
+        # for native input; sendEvent() straight to the child skips it -- typing after a click went to the
+        # previously focused widget, hover styling never changed, sliders only page-stepped):
+        if kind == "move" and self.pressTarget is None:
+            self._stage_hover(t, local, gp)
         if kind == "down":
             self.pressTarget = t
+            self._stage_focus(t, gp)
         qt.QApplication.sendEvent(t, ev)
         if kind == "up":
             self.pressTarget = None
         if kind == "move":
             self._report_cursor(t)
+
+    def _stage_focus(self, t, gp):
+        """Focus-on-click by Qt's focus policy (walk up to the first widget accepting ClickFocus), and make the
+        target's window the active window (popups, focus frames and shortcuts depend on it)."""
+        try:
+            win = t.window()
+            if win is not None and str(qt.QApplication.activeWindow()) != str(win):
+                win.activateWindow()
+                try:
+                    qt.QApplication.setActiveWindow(win)      # offscreen/hidden windows never get activated by a window system
+                except Exception:  # noqa: BLE001
+                    pass
+            w = t
+            while w is not None:
+                if int(w.focusPolicy) & int(qt.Qt.ClickFocus) and w.isEnabled():
+                    if str(qt.QApplication.focusWidget()) != str(w):
+                        w.setFocus(qt.Qt.MouseFocusReason)
+                    break
+                w = w.parentWidget()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _stage_hover(self, t, local, gp):
+        """Enter/Leave (+ HoverEnter/HoverMove for WA_Hover widgets) when the widget under the pointer changes."""
+        try:
+            prev = self.hoverTarget
+            same = prev is not None and str(prev) == str(t)
+            if not same:
+                if prev is not None:
+                    try:
+                        qt.QApplication.sendEvent(prev, qt.QEvent(qt.QEvent.Leave))
+                        if prev.testAttribute(qt.Qt.WA_Hover):
+                            qt.QApplication.sendEvent(prev, qt.QHoverEvent(qt.QEvent.HoverLeave, qt.QPointF(-1, -1), qt.QPointF(gp), qt.QPointF(local)))
+                    except Exception:  # noqa: BLE001
+                        pass
+                self.hoverTarget = t
+                try:
+                    qt.QApplication.sendEvent(t, qt.QEnterEvent(qt.QPointF(local), qt.QPointF(t.mapTo(t.window(), local)), qt.QPointF(gp)))
+                except Exception:  # noqa: BLE001
+                    qt.QApplication.sendEvent(t, qt.QEvent(qt.QEvent.Enter))
+                if t.testAttribute(qt.Qt.WA_Hover):
+                    qt.QApplication.sendEvent(t, qt.QHoverEvent(qt.QEvent.HoverEnter, qt.QPointF(local), qt.QPointF(gp), qt.QPointF(-1, -1)))
+            elif t.testAttribute(qt.Qt.WA_Hover):
+                qt.QApplication.sendEvent(t, qt.QHoverEvent(qt.QEvent.HoverMove, qt.QPointF(local), qt.QPointF(gp), qt.QPointF(local)))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _report_cursor(self, t):
         try:
@@ -682,7 +739,16 @@ class GuiStream:
             if len(key) == 1 and not text:
                 text = key
         etype = qt.QEvent.KeyPress if msg.get("type") == "down" else qt.QEvent.KeyRelease
-        target = qt.QApplication.activePopupWidget() or qt.QApplication.focusWidget() or self.mw
+        target = qt.QApplication.activePopupWidget() or qt.QApplication.focusWidget()
+        if target is None:                       # no active window (offscreen): the window remembers its focus widget
+            for win in ([self.hoverTarget.window()] if self.hoverTarget is not None else []) + [self.mw]:
+                try:
+                    fw = win.focusWidget()
+                except Exception:  # noqa: BLE001
+                    fw = None
+                if fw is not None:
+                    target = fw; break
+        target = target or self.mw
         qt.QApplication.sendEvent(target, qt.QKeyEvent(etype, qk, _mods(msg.get("mods")), text))
 
     def stop(self):
