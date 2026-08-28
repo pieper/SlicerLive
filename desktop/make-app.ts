@@ -1,16 +1,25 @@
-// Build a double-clickable macOS app for the gallery:
-//   deno run -A desktop/make-app.ts [--gallery <dir>]
-// Produces desktop/build/SlicerLive.app — a `deno compile`d binary in a bundle
-// whose Resources/gallery-path.txt pins the gallery checkout to serve (the
-// ~385MB of gallery content stays in the checkout; the app is a thin shell).
-// Icon: docs/slicerlive-logo.png padded square → .icns via sips + iconutil.
+// Build a double-clickable macOS app for the gallery, and a shareable DMG:
+//   deno run -A desktop/make-app.ts [--gallery <dir>] [--thin]
+// Default = self-contained: the gallery checkout (minus .git) and the webview
+// dylib are copied into Contents/Resources, LSMinimumSystemVersion is set to
+// 26.0 (WebGPU in WKWebView), and desktop/build/SlicerLive-<ver>-arm64.dmg is
+// produced with a drag-to-Applications layout. --thin instead pins the gallery
+// path in Resources/gallery-path.txt (70MB app that serves the checkout in
+// place; this machine only) and skips the DMG.
+// Icon: docs/slicerlive-logo.png, bbox-trimmed to a tight square → .icns.
 import { dirname, join, fromFileUrl, resolve } from "jsr:@std/path@1";
+import { makeSquareLogo } from "./icon.ts";
+
+const VERSION = "0.1.0";
+const WEBVIEW_RELEASE = "https://github.com/webview/webview_deno/releases/download/0.9.0";
 
 const here = dirname(fromFileUrl(import.meta.url));
 const repo = dirname(here);
 const buildDir = join(here, "build");
 const galleryArg = Deno.args.find((_, i, a) => a[i - 1] === "--gallery");
 const gallery = resolve(galleryArg ?? join(dirname(repo), "live"));
+const thin = Deno.args.includes("--thin");
+const arch = Deno.build.arch === "aarch64" ? "arm64" : Deno.build.arch;
 
 try {
   Deno.statSync(join(gallery, "index.html"));
@@ -19,8 +28,12 @@ try {
   Deno.exit(1);
 }
 
-async function run(cmd: string, args: string[], opts: { allowFail?: boolean } = {}) {
-  const out = await new Deno.Command(cmd, { args, stdout: "inherit", stderr: "inherit" }).output();
+async function run(cmd: string, args: string[], opts: { allowFail?: boolean; quiet?: boolean } = {}) {
+  const out = await new Deno.Command(cmd, {
+    args,
+    stdout: opts.quiet ? "null" : "inherit",
+    stderr: "inherit",
+  }).output();
   if (!out.success && !opts.allowFail) {
     console.error(`FAILED: ${cmd} ${args.join(" ")}`);
     Deno.exit(1);
@@ -47,7 +60,6 @@ const res = join(app, "Contents", "Resources");
 await Deno.mkdir(macos, { recursive: true });
 await Deno.mkdir(res, { recursive: true });
 await Deno.copyFile(bin, join(macos, "SlicerLive"));
-await Deno.writeTextFile(join(res, "gallery-path.txt"), gallery + "\n");
 await Deno.writeTextFile(
   join(app, "Contents", "Info.plist"),
   `<?xml version="1.0" encoding="UTF-8"?>
@@ -58,13 +70,36 @@ await Deno.writeTextFile(
   <key>CFBundleName</key><string>SlicerLive</string>
   <key>CFBundleDisplayName</key><string>SlicerLive</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+  <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundleIconFile</key><string>SlicerLive</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.medical</string>
 </dict></plist>
 `,
 );
+
+if (thin) {
+  await Deno.writeTextFile(join(res, "gallery-path.txt"), gallery + "\n");
+} else {
+  console.log("bundling gallery (this is the ~400MB part)…");
+  await Deno.mkdir(join(res, "gallery"), { recursive: true });
+  await run("rsync", ["-a", "--exclude", ".git", "--exclude", "publish.py", gallery + "/", join(res, "gallery") + "/"]);
+
+  console.log("bundling libwebview…");
+  const dylibName = `libwebview.${Deno.build.arch}.dylib`;
+  const cached = join(buildDir, dylibName);
+  try {
+    Deno.statSync(cached);
+  } catch {
+    const r = await fetch(`${WEBVIEW_RELEASE}/${dylibName}`);
+    if (!r.ok) { console.error(`dylib download failed: ${r.status}`); Deno.exit(1); }
+    await Deno.writeFile(cached, new Uint8Array(await r.arrayBuffer()));
+  }
+  await Deno.mkdir(join(res, "lib"), { recursive: true });
+  await Deno.copyFile(cached, join(res, "lib", dylibName));
+}
 
 console.log("building icon…");
 const logo = join(repo, "docs", "slicerlive-logo.png");
@@ -72,39 +107,9 @@ const iconset = join(buildDir, "SlicerLive.iconset");
 await Deno.remove(iconset, { recursive: true }).catch(() => {});
 await Deno.mkdir(iconset, { recursive: true });
 const square = join(buildDir, "logo-square.png");
-// The logo is a vertical composition on a wide dark field; padding it square
-// left big empty bars. Instead find the artwork's bounding box (pixels that
-// differ from the corner background color), then cut the largest square that
-// tightly frames it — the mark fills the icon and macOS 26 rounds the corners.
 let iconOk = true;
 try {
-  const { PNG } = await import("npm:pngjs@7");
-  const { Buffer } = await import("node:buffer");
-  const png = PNG.sync.read(Buffer.from(Deno.readFileSync(logo)));
-  const { width: w, height: h, data } = png;
-  const bg = [data[0], data[1], data[2]];
-  let minX = w, minY = h, maxX = -1, maxY = -1;
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = (y * w + x) * 4;
-      if (Math.abs(data[i] - bg[0]) + Math.abs(data[i + 1] - bg[1]) + Math.abs(data[i + 2] - bg[2]) > 24) {
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
-    }
-  }
-  if (maxX < 0) throw new Error("logo appears to be a solid color");
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  // 3% breathing room, clamped to the image; never exceed the smaller dimension.
-  const side = Math.min(Math.round(Math.max(maxX - minX, maxY - minY) * 1.03), Math.min(w, h));
-  const x0 = Math.max(0, Math.min(w - side, Math.round(cx - side / 2)));
-  const y0 = Math.max(0, Math.min(h - side, Math.round(cy - side / 2)));
-  const out = new PNG({ width: side, height: side });
-  PNG.bitblt(png, out, x0, y0, side, side, 0, 0);
-  Deno.writeFileSync(square, PNG.sync.write(out));
-  console.log(`icon crop: bbox ${maxX - minX + 1}x${maxY - minY + 1} → square ${side}px at (${x0},${y0})`);
+  await makeSquareLogo(logo, square);
 } catch (e) {
   console.warn(`bbox crop failed (${e}) — falling back to padded logo`);
   iconOk = await run("sips", ["-p", "1200", "1200", "--padColor", "14141C", logo, "--out", square], { allowFail: true });
@@ -116,7 +121,7 @@ if (iconOk) {
     [256, "icon_256x256.png"], [512, "icon_256x256@2x.png"], [512, "icon_512x512.png"],
     [1024, "icon_512x512@2x.png"],
   ] as [number, string][]) {
-    iconOk = iconOk && await run("sips", ["-z", String(size), String(size), square, "--out", join(iconset, name)], { allowFail: true });
+    iconOk = iconOk && await run("sips", ["-z", String(size), String(size), square, "--out", join(iconset, name)], { allowFail: true, quiet: true });
   }
   iconOk = iconOk && await run("iconutil", ["-c", "icns", iconset, "-o", join(res, "SlicerLive.icns")], { allowFail: true });
 }
@@ -124,4 +129,33 @@ if (!iconOk) console.warn("icon build failed — app will use the generic icon")
 
 await run("codesign", ["--force", "--deep", "-s", "-", app], { allowFail: true });
 
-console.log(`\ndone: ${app}\nserves: ${gallery}\n(open it, or: open '${app}')`);
+if (thin) {
+  console.log(`\ndone: ${app}\nserves: ${gallery} (thin — this machine only)`);
+  Deno.exit(0);
+}
+
+console.log("building DMG…");
+const dmg = join(buildDir, `SlicerLive-${VERSION}-${arch}.dmg`);
+const staging = join(buildDir, "dmg-staging");
+await Deno.remove(staging, { recursive: true }).catch(() => {});
+await Deno.mkdir(staging, { recursive: true });
+await run("cp", ["-R", app, staging]);
+await Deno.symlink("/Applications", join(staging, "Applications"));
+await Deno.writeTextFile(
+  join(staging, "README.txt"),
+  `SlicerLive ${VERSION} (Apple Silicon, macOS 26 or newer)
+
+Drag SlicerLive to Applications, then open it.
+
+This build is not notarized. If macOS says it "could not verify" the app, open
+System Settings > Privacy & Security, scroll down, and click "Open Anyway"
+(once). Demos stream imaging data from public cloud storage the first time they
+are opened and are cached after that.
+`,
+);
+await Deno.remove(dmg).catch(() => {});
+await run("hdiutil", ["create", "-volname", "SlicerLive", "-srcfolder", staging, "-ov", "-format", "UDZO", dmg], { quiet: true });
+await Deno.remove(staging, { recursive: true });
+
+const size = (await Deno.stat(dmg)).size / 1e6;
+console.log(`\ndone: ${app}\ndmg:  ${dmg} (${size.toFixed(0)} MB)`);

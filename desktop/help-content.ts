@@ -7,6 +7,9 @@ window.__sllShowHelp = async function () {
   const existing = document.getElementById("sll-help-backdrop");
   if (existing) { existing.remove(); return; }
 
+  const isMac = navigator.platform.indexOf("Mac") === 0;
+  const M = isMac ? "⌘" : "Ctrl+";
+
   const bd = document.createElement("div");
   bd.id = "sll-help-backdrop";
   bd.style.cssText = "position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.45);" +
@@ -41,9 +44,9 @@ window.__sllShowHelp = async function () {
     '  Each demo also has its own on-page controls (presets, phase players, comparison sliders …) — explained in its footer.</p>' +
     '  <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.4px;color:#9fb3d0;margin:16px 0 6px">Keyboard</h3>' +
     '  <table style="border-collapse:collapse">' + [
-        ["⌘[ or ⌘←", "back to the gallery (or use the ← button, top left of every demo)"],
-        ["⇧⌘?", "this help"],
-        ["⌘M / ⌘W / ⌘Q", "minimize / close window / quit"],
+        [M + "[ or " + M + "←", "back to the gallery (or use the ← button, top left of every demo)"],
+        [isMac ? "⇧⌘?" : "F1", "this help" + (isMac ? "" : " (or the ? button, top left)")],
+        [isMac ? "⌘M / ⌘W / ⌘Q" : "Alt+F4", isMac ? "minimize / close window / quit" : "quit"],
       ].map(function (r) {
         return '<tr><td style="padding:3px 14px 3px 0;white-space:nowrap;color:#b8c4d8">' + r[0] +
                '</td><td style="padding:3px 0;opacity:.8">' + r[1] + '</td></tr>';
