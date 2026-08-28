@@ -339,6 +339,39 @@ Not yet: desktop shell passing the absolute sessions path to a local ModuleServe
 open (blobs are cached as fetched), a session picker UI (sessions are auto-named), reset-on-reopen
 semantics when the app's scene differs from the session (today the app's snapshot is what loads).
 
+## S11 status (2026-08-27): multi-server registry, protocol conformance, mock non-Slicer server
+
+- **Several servers on one scene.** `?peers=ws://host:port/,…` opens extra `LiveSync`s onto the same
+  `LiveScene` (`peers` option of `mountLiveViews`). Each `LiveSync` has a `peerId`; with `relay: true` a
+  change that arrives from one peer is forwarded to the others as a put/patch/del — the browser is the hub,
+  LiveScene the single truth, no server ever talks to another server.
+- **Loop breaker.** Every relayed node is remembered by content (`relayed` map); an echo of what we just
+  applied is dropped, only a *changed* node is forwarded again; `relayCount` cap (5000) as a fuse. The
+  first live run had none of this and produced ~1000 duplicate fiducials and ~6000 orphan display/model
+  nodes in Slicer within seconds (cleaned up by hand; see the `put` note below). Conformance scenario:
+  "hub relay: … loop breaker".
+- **Ids are global.** A node keeps the id it was created under everywhere; only provisional ids
+  (`tmp-…`/`conf-…`) get renamed by the receiving server (`OpAck.created`), and the alias is relayed to
+  the other peers as del+put. Verified: the mock's `mock1` → Slicer's `vtkMRMLMarkupsFiducialNode1327`
+  on the page, in Slicer *and* in the mock.
+- **Module registry.** `module` nodes (`{type:"module", name, server, gui:"stream"|"none"}`) are what a
+  server offers; `ModuleRegistryDisplayableManager` collects the union across peers (`__modules()` on the
+  page). Without a manager interested in `module` the type is never subscribed — that was the first
+  live failure.
+- **`put` creation is whitelisted** server-side (markups, transforms). Bulk types and display nodes are
+  never created from the wire — a display node without its displayable is an orphan (the generic
+  `AddNewNodeByClass` fallback is gone).
+- **Mock server** `ModuleServer/mock/server.ts` (Deno, ~80 lines, no Slicer): Hello/subscribe/snapshot/
+  applyOps/OpAck/reconcile/getNode + one module, `MarkCenter` (puts a fiducial at the centre of the
+  referenced image). It is both the Slicer-independence proof and the conformance fixture.
+- **Protocol conformance** `ModuleServer/conformance/protocol.ts` + `.test.ts`: the same scenarios run
+  against the mock and against a live Slicer peer (`deno test -A`).
+- Verified live: page + Slicer(2132) + mock(2142); Slicer node count steady over 12 s with both connected;
+  `cmd markCenter` on the mock's module node → exactly one fiducial on all three ends at (-2.8, 6.4, -10.7).
+
+Not done: `moduleserver.struct.json`/`guistream.struct.json` in the mrson schema repo; a torch module on
+Modal (S13 first); capability negotiation beyond the `Hello` event.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

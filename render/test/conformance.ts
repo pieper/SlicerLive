@@ -169,5 +169,25 @@ export async function runConformance(): Promise<ConfResult[]> {
     assert(s.nodes.size === 1, "duplicate node after NodeAdded with clientId");
   });
 
+  await check("hub relay: a node from peer A reaches peer B once; B's echo is not relayed again (loop breaker)", async () => {
+    const s = new LiveScene("http://x/", [new FakeMgr(["markup"])]);
+    const ta = new MockTransport(), tb = new MockTransport();
+    const a = new LiveSync(s, ta, { peerId: "A", relay: true }), b = new LiveSync(s, tb, { peerId: "B", relay: true });
+    await a.connect(); await b.connect();
+    ta.sent.length = 0; tb.sent.length = 0;
+    const node = { type: "markup", id: "m1", name: "fromA", controlPoints: [] };
+    ta.deliver({ event: "NodeAdded", sourceId: "m1", node, seq: 1 });
+    await new Promise((r) => setTimeout(r, 0)); a.flush(); b.flush();
+    assert(ta.applied().length === 0, "relayed back to its origin");
+    assert(tb.applied().length === 1 && (tb.applied()[0].ops as { op: string; id: string }[])[0].op === "put", "not relayed to B once");
+    tb.sent.length = 0; ta.sent.length = 0;
+    tb.deliver({ event: "NodeAdded", sourceId: "m1", node: { ...node }, seq: 2 });   // B's echo of what it applied
+    await new Promise((r) => setTimeout(r, 0)); a.flush(); b.flush();
+    assert(ta.applied().length === 0 && tb.applied().length === 0, "an echo was re-relayed (feedback loop)");
+    tb.deliver({ event: "NodeAdded", sourceId: "m1", node: { ...node, name: "editedOnB" }, seq: 3 });   // a REAL change on B
+    await new Promise((r) => setTimeout(r, 0)); a.flush(); b.flush();
+    assert(ta.applied().length === 1 && tb.applied().length === 0, "a real change on B must reach A only");
+  });
+
   return results;
 }

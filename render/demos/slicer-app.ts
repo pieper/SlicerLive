@@ -21,7 +21,8 @@ async function main() {
 
   const gpu = await initDevice();
   const viewsEl = document.getElementById("views")!;
-  const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, onStatus: status });
+  const peers = (p.get("peers") ?? "").split(",").map((x) => x.trim()).filter(Boolean);   // extra ModuleServers (ws urls)
+  const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, peers, onStatus: status });
   // Sessions: ⌘Z/⌘⇧Z undo/redo, ⌘S export, ⌘B bookmark; ?session=opfs auto-opens browser storage
   const session = mountSessionUI(views.live, { onStatus: status, blobBase: () => views.live.blobBase() });
   if (p.get("session") === "opfs") void session.openOPFS();

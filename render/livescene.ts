@@ -256,7 +256,7 @@ export class LiveScene {
     this.feed({ id: realId, type: node.type, kind: "upsert", origin: "remote", v: ++this.seq, node });
   }
 
-  async receiveEvent(ev: Record<string, unknown>): Promise<void> {
+  async receiveEvent(ev: Record<string, unknown>, origin = "remote"): Promise<void> {
     const e = ev.event as string;
     const live = this.applyView;   // drive managers only when the view is attached to the live model
     if (e === "NodeAdded" && ev.node) {
@@ -264,19 +264,19 @@ export class LiveScene {
       if (typeof ev.clientId === "string") this.aliasNode(ev.clientId, node.id);   // our own put, now with its real id
       this.nodes.set(node.id, node);                       // upsert
       if (live) for (const m of this.interested(node.type)) await m.onNodeAdded?.(node, this);
-      this.feed({ id: node.id, type: node.type, kind: "upsert", origin: "remote", v: ++this.seq, node });
+      this.feed({ id: node.id, type: node.type, kind: "upsert", origin, v: ++this.seq, node });
     } else if (e === "NodeRemoved") {
       const id = ev.sourceId as string;
       const node = this.nodes.get(id);
       this.nodes.delete(id);
       if (live) for (const m of this.interested(node?.type)) m.onNodeRemoved?.(id, this);
-      this.feed({ id, type: node?.type, kind: "remove", origin: "remote", v: ++this.seq });
+      this.feed({ id, type: node?.type, kind: "remove", origin, v: ++this.seq });
     } else if (e === "SnapshotComplete") {
       /* managers already received their snapshot nodes */
     } else if (e === "SceneClosed") {
       this.nodes.clear();                                 // wholesale reset (Slicer closed the scene)
       if (live) for (const m of this.managers) m.onSceneClosed?.(this);
-      this.feed({ id: "", kind: "reset", origin: "remote", v: ++this.seq });
+      this.feed({ id: "", kind: "reset", origin, v: ++this.seq });
     } else if (e === "SegmentationDisplayModified") {
       // A display-only change from Slicer (visibility / opacity / colour). Keep the MODEL authoritative:
       // merge the display fields into the segmentation node, let the seg manager update the render, then
@@ -291,7 +291,7 @@ export class LiveScene {
         }
       }
       if (live) for (const m of this.interested("segmentation")) await m.onEvent?.(ev, this);
-      if (node) this.feed({ id, type: "segmentation", kind: "upsert", origin: "remote", v: ++this.seq, node });
+      if (node) this.feed({ id, type: "segmentation", kind: "upsert", origin, v: ++this.seq, node });
     } else if (e === "CameraModified") {
       // Live camera pose from Slicer. Keep the MODEL authoritative — merge the pose fields into the
       // camera node (like SegmentationDisplayModified) so Controls/recorders read current state from
@@ -304,7 +304,7 @@ export class LiveScene {
         }
       }
       if (live) for (const m of this.interested("camera")) await m.onEvent?.(ev, this);
-      if (node) this.feed({ id, type: "camera", kind: "upsert", origin: "remote", v: ++this.seq, node });
+      if (node) this.feed({ id, type: "camera", kind: "upsert", origin, v: ++this.seq, node });
     } else {
       const t = this.nodes.get(ev.sourceId as string)?.type;
       if (live) for (const m of this.interested(t)) await m.onEvent?.(ev, this);
@@ -1012,5 +1012,20 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
       lut[i * 4 + 3] = Math.round(Math.max(0, Math.min(1, (g - 0.15) / 0.85)) * 200);
     }
     return lut;
+  }
+}
+
+/** Module registry (S11): `module` nodes describe what each connected ModuleServer offers (name, server,
+ *  gui: "stream" | "none"). Every peer contributes its own; LiveScene ends up with the union, which is
+ *  what a client menu / launcher enumerates. Slicer's AppServer role publishes its modules the same way. */
+export class ModuleRegistryDisplayableManager implements DisplayableManager {
+  interestedTypes = ["module"];
+  modules = new Map<string, MrsonNode>();
+  onNodeAdded(node: MrsonNode) { this.modules.set(node.id, node); }
+  onNodeRemoved(id: string) { this.modules.delete(id); }
+  onSceneClosed() { this.modules.clear(); }
+  /** Modules offered by one server (from `node.server`, or `source.server`). */
+  byServer(server: string): MrsonNode[] {
+    return [...this.modules.values()].filter((m) => (m.server ?? (m.source as { server?: string } | undefined)?.server) === server);
   }
 }

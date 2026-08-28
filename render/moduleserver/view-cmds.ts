@@ -36,3 +36,8 @@ registerCmd("segPaint", (node, args) => {
   (node as Record<string, unknown>).lastStroke = { n: (args.points as unknown[] | undefined)?.length ?? 0, at: Date.now(), seq: args.seq };
   return true;
 });
+
+registerCmd("markCenter", (node, args) => {          // the mock server's demo module (any server-side cmd needs a local handler to replicate)
+  (node as Record<string, unknown>).lastRequest = { args, at: Date.now() };
+  return true;
+});

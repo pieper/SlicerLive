@@ -21,8 +21,7 @@ import "./view-cmds.ts";   // registers setCursor / setSliceFrame / viewContextM
 import {
   CameraDisplayableManager, type CameraState, LayoutDisplayableManager, LiveScene, MarkupsDisplayableManager,
   type MirrorView, type OverlayItem, RoiCropDisplayableManager, SegmentationDisplayableManager, SliceDisplayableManager,
-  type SceneMeshData, type SlicePlane, type SliceLayers, type ThreeDChrome, ModelDisplayableManager, ThreeDViewDisplayableManager, TransformDisplayableManager, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeLayersDisplayableManager, VolumeRenderingDisplayableManager,
-} from "../livescene.ts";
+  type SceneMeshData, type SlicePlane, type SliceLayers, type ThreeDChrome, ModelDisplayableManager, ThreeDViewDisplayableManager, TransformDisplayableManager, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeLayersDisplayableManager, VolumeRenderingDisplayableManager, ModuleRegistryDisplayableManager } from "../livescene.ts";
 
 export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
 export interface LiveViews { live: LiveScene; sync: LiveSync; resize(): void; setCells(cells: ViewCellRect[]): void }
@@ -38,7 +37,7 @@ interface SliceCell {
   branched?: boolean;   // a local pan/zoom is in progress: keep the local frame until it is written back
 }
 
-export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; onStatus?: (s: string) => void }): LiveViews {
+export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; peers?: string[]; onStatus?: (s: string) => void }): LiveViews {
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
   const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -328,13 +327,18 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   };
 
   const markupsDM = new MarkupsDisplayableManager();
+  const moduleRegistry = new ModuleRegistryDisplayableManager();   // S11: union of every peer's `module` nodes
   const live = new LiveScene(cfg.httpBase, [
     new LayoutDisplayableManager(), new CameraDisplayableManager(), new VolumeRenderingDisplayableManager(gpu.device), new VolumeLayersDisplayableManager(gpu.device),
     new SliceDisplayableManager(), new SegmentationDisplayableManager(gpu.device, 1.5), markupsDM, new RoiCropDisplayableManager(),
-    viewStateDM, new TransformDisplayableManager(), new ModelDisplayableManager(), new ThreeDViewDisplayableManager(),
+    viewStateDM, new TransformDisplayableManager(), new ModelDisplayableManager(), new ThreeDViewDisplayableManager(), moduleRegistry,
   ]);
   live.view = view;
-  const sync = new LiveSync(live, new WsTransport(cfg.wsUrl));
+  const hub = (cfg.peers?.length ?? 0) > 0;
+  const sync = new LiveSync(live, new WsTransport(cfg.wsUrl), { peerId: "app", relay: hub });
+  // Additional ModuleServers (registry entries): the page is the hub — each peer gets everything that
+  // did not originate from it, as put/del. Other servers' outputs arrive as ordinary nodes.
+  const peers: LiveSync[] = (cfg.peers ?? []).map((url, i) => new LiveSync(live, new WsTransport(url), { peerId: "peer" + (i + 1), relay: true }));
   sync.onStatus = (s) => cfg.onStatus?.(s.state === "connected" ? "mirroring Slicer" : s.state === "connecting" ? "connecting…" : "connection lost — retrying");
 
   // ── local interaction → ops (the app follows) ──
@@ -511,5 +515,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   Object.assign(globalThis, { __live: live, __sync: sync, __cells: () => [...cells.keys()], __overlays: () => Object.fromEntries(overlays), __viewState: () => viewState, __brush: () => ({ effect: brushEffect(), diam: brushDiameterMm() }),
     __layers: () => Object.fromEntries([...cells].map(([k, c]) => [k, { bg: !!c.layers?.background, fg: c.layers?.foreground ? [c.layers.foreground.opacity, c.layers.foreground.compositing] : null, label: c.layers?.label ? c.layers.label.opacity : null, bgLut: !!c.layers?.background?.lut }])) });
   sync.connect();
+  for (const p of peers) p.connect();
+  Object.assign(globalThis, { __peers: peers, __modules: () => [...moduleRegistry.modules.values()] });
   return { live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells };
 }

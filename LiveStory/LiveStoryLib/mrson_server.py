@@ -136,15 +136,13 @@ def _apply_put(op):
                 idx = node.AddControlPoint(vtk.vtkVector3d(float(pos[0]), float(pos[1]), float(pos[2])))
                 if isinstance(cp, dict) and cp.get("label"):
                     node.SetNthControlPointLabel(idx, cp["label"])
-    elif t == "image":
-        return None
+    elif t == "transform":
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", name)
     else:
-        cls = (node_m.get("source") or {}).get("mrmlClass")
-        if not cls:
-            return None
-        node = slicer.mrmlScene.AddNewNodeByClass(cls, name)
-        if hasattr(node, "CreateDefaultDisplayNodes"):
-            node.CreateDefaultDisplayNodes()
+        # Bulk types (image, segmentation, mesh) and DISPLAY/other nodes are not creatable over the wire:
+        # a display node without its displayable, or a mesh without geometry, would be an orphan. (A relay
+        # flood once created ~5k orphans through a generic AddNewNodeByClass fallback -- never again.)
+        return None
     for k, v in node_m.items():
         if k in ("id", "type", "name", "source", "refs", "controlPoints", "markupType", "zarr"):
             continue

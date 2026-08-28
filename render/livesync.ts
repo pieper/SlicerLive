@@ -34,6 +34,14 @@ function opKey(op: Op): string {
 export interface LiveSyncOpts {
   intervalMs?: number;   // outbound coalesce interval (default 33 = ~30Hz)
   now?: () => number;    // clock (tests)
+  /** This peer's id (default "remote"). With several LiveSyncs on one LiveScene the scene is the HUB:
+   *  a change that arrived from peer A is forwarded to every other peer as a put/del (never back to A). */
+  peerId?: string;
+  /** Node types this peer should receive at all (default: everything the scene subscribes to). */
+  relayTypes?: string[];
+  /** Hub relay (default OFF): forward changes that came from OTHER peers to this one. A single-peer
+   *  LiveSync must never send anything that did not originate locally (echo suppression). */
+  relay?: boolean;
 }
 
 export class LiveSync {
@@ -58,7 +66,16 @@ export class LiveSync {
   private firstOpen?: () => void;
   private now: () => number;
 
+  peerId: string;
+  private relayTypes?: Set<string>;
+  private relay: boolean;
+  private relayed = new Map<string, string>();   // node id -> last content relayed to this peer
+  private relayedDel = new Set<string>();
+  private relayCount = 0;
   constructor(public scene: LiveScene, public transport: Transport, opts: LiveSyncOpts = {}) {
+    this.peerId = opts.peerId ?? "remote";
+    this.relay = !!opts.relay;
+    this.relayTypes = opts.relayTypes ? new Set(opts.relayTypes) : undefined;
     this.now = opts.now ?? (() => Date.now());
     this.out = new Coalescer<Op>(
       opts.intervalMs ?? 33,
@@ -106,9 +123,25 @@ export class LiveSync {
   }
 
   private onLocalChange(c: Change): void {
-    // Only LOCAL-origin ops go out (echo suppression by construction — a remote change carries no op).
-    if (!c.op || c.origin !== this.scene.origin) return;
-    this.out.update(opKey(c.op), c.op);
+    if (c.origin === this.peerId) return;                                   // echo suppression: never back to its source
+    if (this.relayTypes && c.type && !this.relayTypes.has(c.type)) return;
+    if (c.op && c.origin === this.scene.origin) { this.out.update(opKey(c.op), c.op); return; }   // local write
+    // HUB RELAY (opt-in): a change from another peer (no op on the feed) is forwarded as a whole-node put / del.
+    // LOOP BREAKER: the receiving peer echoes what it applied, the hub would relay that echo back to the
+    // origin's other peers, and so on forever. Relay a node only when its CONTENT differs from what this peer
+    // last received from us — an echo of our own relay is identical and stops here.
+    if (!this.relay || c.origin === this.scene.origin) return;
+    if (c.kind === "upsert" && c.node) {
+      const body = JSON.stringify(c.node);
+      if (this.relayed.get(c.id) === body) return;
+      this.relayed.set(c.id, body);
+      if (++this.relayCount > 5000) { console.warn("LiveSync: relay cap reached — possible loop; relay disabled for", this.peerId); this.relay = false; return; }
+      this.out.update(`${c.id}:put`, { op: "put", id: c.id, node: c.node, origin: c.origin, role: "module" } as Op);
+    } else if (c.kind === "remove") {
+      if (!this.relayed.has(c.id) && this.relayedDel.has(c.id)) return;
+      this.relayed.delete(c.id); this.relayedDel.add(c.id);
+      this.out.update(`${c.id}:del`, { op: "del", id: c.id, origin: c.origin } as Op);
+    }
   }
 
   private onMessage(m: unknown): void {
@@ -121,7 +154,8 @@ export class LiveSync {
       return;
     }
     if (msg.event === "Reconciled") return;
-    this.inq = this.inq.then(() => this.scene.receiveEvent(msg as Record<string, unknown>));
+    if (this.relay && msg.event === "NodeAdded" && (msg as { node?: { id?: string } }).node?.id) { const n = (msg as { node: { id: string } }).node; this.relayed.set(n.id, JSON.stringify(n)); }   // what this peer holds now
+    this.inq = this.inq.then(() => this.scene.receiveEvent(msg as Record<string, unknown>, this.peerId));
     if (msg.event === "SnapshotComplete" && this.reconcileAfter) this.inq = this.inq.then(() => this.reconcile());
   }
 
