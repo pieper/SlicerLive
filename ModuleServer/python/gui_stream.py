@@ -19,6 +19,8 @@ Slicer-independent wire format (no Qt types; a non-Slicer server can implement t
     {"op":"ping", "t"} -> {"ev":"pong","t"}  round-trip measurement
     {"op":"quality", "codec":"png|webp|jpeg", "quality":10..100}   frame codec for slow links (frame header carries "fmt")
     <- {"ev":"stats", "bytesPerS", "framesPerS", "codec", "quality"}  every 2 s while frames flow
+    <- {"ev":"quitIntercepted"}             a Quit reached the server and was swallowed (host owns the lifecycle)
+    {"op":"shutdown"}                       really close the server's main window (lets the next Close through)
     <- {"ev":"a11y", "nodes":[{id,region,role,name,value,x,y,w,h,enabled,focused,checked?}]}   (region-local coords; sent on change)
     {"op":"selectModule", "name":"SampleData"}
   server -> client (JSON text):
@@ -114,6 +116,13 @@ class _PaintFilter(qt.QObject):
                 self.stream.note_paint(obj, ev.rect())
             elif t in (qt.QEvent.Show, qt.QEvent.Hide, qt.QEvent.Resize, qt.QEvent.Move) and obj.isWidgetType() and obj.isWindow():
                 self.stream.structureDirty = True
+            elif t == qt.QEvent.Close and obj.isWidgetType() and str(obj) == self.stream.mwKey and not self.stream.allowQuit:
+                # A Quit reaching the headless server (streamed File > Exit, Ctrl+Q forwarded, a module calling
+                # slicer.util.exit) would pop "save before exit?" and then kill the ModuleServer. The host owns
+                # the lifecycle: swallow it here (before closeEvent runs) and tell clients.
+                ev.ignore()
+                self.stream._broadcast_text({"ev": "quitIntercepted"})
+                return True
         except Exception:  # noqa: BLE001
             pass
         return False
@@ -138,6 +147,8 @@ class GuiStream:
         self.blockedSent = False
         self.subscribers = []
         self.grabbing = False
+        self.mwKey = str(self.mw)                        # PythonQt wrappers are not identity-stable; str() is
+        self.allowQuit = False                           # set True (e.g. by the launcher's shutdown op) to let a Close through
         self.codec, self.quality = "png", 100          # S13: negotiated by the client (webp/jpeg + quality on slow links)
         self.statBytes = 0; self.statFrames = 0; self.statSince = time.perf_counter(); self.statSentIdle = 0
         self.server = WsServer(port, on_message=self._on_message, on_close=self._on_close)
@@ -584,6 +595,9 @@ class GuiStream:
                     self.codec = codec
                 self.quality = max(10, min(100, int(msg.get("quality", 100))))
                 self.lastHash = {}                    # re-send everything at the new quality
+            elif op == "shutdown":                    # the host really wants the server gone
+                self.allowQuit = True
+                qt.QTimer.singleShot(0, lambda: slicer.util.mainWindow().close())
             elif op == "a11yQuery":
                 self.lastA11ySig = None; self.lastA11y = 0
             elif op == "a11yClick":
