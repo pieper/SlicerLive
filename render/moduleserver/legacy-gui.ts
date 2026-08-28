@@ -8,6 +8,8 @@ export interface Region { id: string; kind: string; title: string; x: number; y:
 export interface Rect { x: number; y: number; w: number; h: number }
 export interface MenuItem { id?: string; text?: string; shortcut?: string; enabled?: boolean; checkable?: boolean; checked?: boolean; sep?: boolean; items?: MenuItem[] }
 export interface Menu { title: string; items: MenuItem[] }
+/** One node of the streamed GUI's accessibility tree (region-local CSS px). */
+export interface A11yNode { id: string; region: string; role: string; name: string; value?: unknown; x: number; y: number; w: number; h: number; enabled: boolean; focused: boolean; checked?: boolean }
 export interface ViewCell { id: string; kind: "slice" | "3d" | "plot" | "table"; name: string; x: number; y: number; w: number; h: number; view: Rect }
 
 export interface LegacyGuiOptions {
@@ -17,6 +19,7 @@ export interface LegacyGuiOptions {
   onMenus?: (menus: Menu[]) => void;
   onTitle?: (title: string) => void;
   onStatus?: (s: string) => void;
+  onA11y?: (nodes: A11yNode[]) => void;
   hideKinds?: string[];           // e.g. ["menubar"] when the host provides native menus
 }
 
@@ -31,6 +34,9 @@ export class LegacyGui {
   private ro: ResizeObserver;
   private dpr = 1;
   private hoverTimer: number | undefined;
+  private a11yLayers = new Map<string, HTMLElement>();
+  /** Latest accessibility tree from the server (see a11y ops below). */
+  a11y: A11yNode[] = [];
   connected = false;
 
   constructor(private root: HTMLElement, private url: string, private opts: LegacyGuiOptions = {}) {
@@ -63,6 +69,7 @@ export class LegacyGui {
     else if (j.ev === "cursor") this.root.style.cursor = j.shape as string;
     else if (j.ev === "blocked") this.opts.onBlocked?.({ title: j.title as string, className: j.className as string });
     else if (j.ev === "unblocked") this.opts.onBlocked?.(null);
+    else if (j.ev === "a11y") this.applyA11y(j.nodes as A11yNode[]);
     else if (j.ev === "error") console.warn("gui stream:", j);
   }
 
@@ -93,9 +100,77 @@ export class LegacyGui {
       const pw = Math.round(reg.w * this.dpr), ph = Math.round(reg.h * this.dpr);
       if (c.width !== pw || c.height !== ph) { c.width = pw; c.height = ph; }
     }
-    for (const [id, l] of this.layers) if (!seen.has(id)) { l.canvas.remove(); this.layers.delete(id); }
+    for (const [id, l] of this.layers) if (!seen.has(id)) { l.canvas.remove(); this.layers.delete(id); this.a11yLayers.get(id)?.remove(); this.a11yLayers.delete(id); }
     this.opts.onViewport?.(r.viewport, { w: r.w, h: r.h });
     if (r.cells) this.opts.onCells?.(r.cells);
+  }
+
+  // ---- accessibility overlay + automation (S12) --------------------------------------------
+  // The pixels are opaque to assistive tech; the server publishes the widgets under every region as a
+  // semantic tree and we mirror it as ARIA elements positioned over the canvas. They take no pointer
+  // events (the pixels do) but are focusable/readable, and Enter/Space on one activates the real widget.
+  private applyA11y(nodes: A11yNode[]) {
+    this.a11y = nodes;
+    const byRegion = new Map<string, A11yNode[]>();
+    for (const n of nodes) { if (!byRegion.has(n.region)) byRegion.set(n.region, []); byRegion.get(n.region)!.push(n); }
+    for (const [rid, l] of this.layers) {
+      let layer = this.a11yLayers.get(rid);
+      if (!layer) {
+        layer = document.createElement("div");
+        layer.className = "legacy-a11y";
+        layer.style.cssText = "position:absolute;pointer-events:none;overflow:hidden";
+        layer.setAttribute("role", "group");
+        this.root.appendChild(layer);
+        this.a11yLayers.set(rid, layer);
+      }
+      const c = l.canvas;
+      layer.style.left = c.style.left; layer.style.top = c.style.top; layer.style.width = c.style.width; layer.style.height = c.style.height;
+      layer.style.zIndex = String(Number(c.style.zIndex) + 1);
+      layer.setAttribute("aria-label", l.region.title || l.region.kind);
+      const want = byRegion.get(rid) ?? [];
+      const seen = new Set<string>();
+      for (const n of want) {
+        seen.add(n.id);
+        let el = layer.querySelector<HTMLElement>(`[data-a11y="${n.id}"]`);
+        if (!el) {
+          el = document.createElement("div");
+          el.dataset.a11y = n.id;
+          el.style.cssText = "position:absolute;pointer-events:none;outline:none";
+          el.addEventListener("focus", () => this.send({ op: "a11yFocus", id: n.id }));
+          el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.send({ op: "a11yClick", id: n.id }); } });
+          layer.appendChild(el);
+        }
+        el.setAttribute("role", n.role === "label" ? "text" : n.role);
+        el.setAttribute("aria-label", n.name || n.role);
+        if (n.value !== undefined && n.role !== "checkbox") el.setAttribute("aria-valuetext", String(n.value)); else el.removeAttribute("aria-valuetext");
+        if (n.checked !== undefined) el.setAttribute("aria-checked", String(n.checked)); else el.removeAttribute("aria-checked");
+        el.setAttribute("aria-disabled", String(!n.enabled));
+        el.tabIndex = n.enabled && n.role !== "label" && n.role !== "group" ? 0 : -1;
+        el.style.left = n.x + "px"; el.style.top = n.y + "px"; el.style.width = n.w + "px"; el.style.height = n.h + "px";
+        if (n.focused && document.activeElement !== el && !(document.activeElement && ["INPUT", "TEXTAREA"].includes(document.activeElement.tagName))) el.focus({ preventScroll: true });
+      }
+      for (const el of [...layer.children]) if (!seen.has((el as HTMLElement).dataset.a11y!)) el.remove();
+    }
+    this.opts.onA11y?.(nodes);
+  }
+  /** Find tree nodes by name (string = case-insensitive substring, or a RegExp) and optional role. */
+  find(name: string | RegExp, role?: string): A11yNode[] {
+    const test = typeof name === "string" ? (s: string) => s.toLowerCase().includes(name.toLowerCase()) : (s: string) => name.test(s);
+    return this.a11y.filter((n) => (!role || n.role === role) && test(n.name));
+  }
+  private one(name: string | RegExp, role?: string): A11yNode {
+    const hits = this.find(name, role);
+    if (!hits.length) throw new Error(`no ${role ?? "widget"} named ${name}`);
+    return hits.find((n) => n.enabled) ?? hits[0];
+  }
+  /** Activate a widget by name (buttons click; anything else gets a press+release at its centre). */
+  click(name: string | RegExp, role?: string) { const n = this.one(name, role); this.send({ op: "a11yClick", id: n.id }); return n; }
+  /** Set a widget's value by name (text, number, checked, or combobox item text). */
+  set(name: string | RegExp, value: unknown, role?: string) { const n = this.one(name, role); this.send({ op: "a11ySet", id: n.id, value }); return n; }
+  focus(name: string | RegExp, role?: string) { const n = this.one(name, role); this.send({ op: "a11yFocus", id: n.id }); return n; }
+  /** Ask the server for the tree now; resolves with the next tree that arrives. */
+  refreshA11y(): Promise<A11yNode[]> {
+    return new Promise((resolve) => { const prev = this.opts.onA11y; this.opts.onA11y = (n) => { this.opts.onA11y = prev; prev?.(n); resolve(n); }; this.send({ op: "a11yQuery" }); });
   }
 
   private async onFrame(buf: Uint8Array) {

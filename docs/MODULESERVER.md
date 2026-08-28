@@ -372,6 +372,37 @@ semantics when the app's scene differs from the session (today the app's snapsho
 Not done: `moduleserver.struct.json`/`guistream.struct.json` in the mrson schema repo; a torch module on
 Modal (S13 first); capability negotiation beyond the `Hello` event.
 
+## S12 status (2026-08-27): accessibility tree + click-by-name automation
+
+The pixels are opaque to screen readers and to test automation, so the streamed GUI now carries a semantic
+layer on the same WebSocket:
+
+- **Server** (`gui_stream.py`): for every streamed region, the visible widgets underneath are walked
+  (plain `QWidget` properties — `QAccessible` is not exposed to PythonQt; class checks must use
+  `QObject.inherits()`, `isinstance` misses PythonQt subclass wrappers) and published as
+  `{"ev":"a11y","nodes":[{id, region, role, name, value, x,y,w,h, enabled, focused, checked?}]}`
+  (region-local px, ids from the C++ pointer so they are stable across rebuilds). Roles: button,
+  checkbox, textbox, spinbutton, combobox, slider, tablist, group, label, grid; composite widgets
+  (qMRML*/ctk* comboboxes, sliders, tables) hide their inner children. Refreshed every 0.5 s, sent only
+  when it changed. Ops: `a11yClick` (buttons `click()`, anything else press+release at the centre),
+  `a11yFocus`, `a11ySet` (text / number / checked / combobox item text / **node combobox by node id or
+  name**), `a11yQuery`.
+- **Client** (`legacy-gui.ts`): an ARIA overlay per region — positioned elements with role/aria-label/
+  aria-valuetext/aria-checked/aria-disabled over the canvas, `pointer-events:none` so the pixels keep the
+  mouse, tab-focusable; Enter/Space activates the real widget, focus is mirrored both ways. API:
+  `gui.a11y`, `gui.find(name|RegExp, role?)`, `gui.click(...)`, `gui.set(name, value)`, `gui.focus(...)`,
+  `gui.refreshA11y()`.
+- **CLI** `ModuleServer/tools/a11y.ts` — `list [role] | click <name> | set <name> <value> | focus <name>`
+  straight over the gui-stream socket (no browser, no CDP, no MCP).
+- Verified (Segment Editor, page over CDP): tree = 118 nodes / 17 regions after composite de-dup;
+  `set("SourceVolumeNodeComboBox","MRHead_1")` enabled the disabled Add button, `click("Add")` created
+  `Segment_2` in Slicer (MCP oracle). An automation click on a *disabled* button is correctly a no-op.
+
+Not done: VoiceOver/NVDA walkthrough by a person (I cannot drive a screen reader here); tree for
+popups' inner widgets is included but menus (QMenu items) are still pixels — the `menus` event already
+carries them as data for the native-menu host; `QAccessible` roles (tree items, table cells) beyond the
+widget level.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

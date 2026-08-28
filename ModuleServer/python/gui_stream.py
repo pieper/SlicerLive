@@ -12,6 +12,11 @@ Slicer-independent wire format (no Qt types; a non-Slicer server can implement t
     {"op":"key", "type":"down|up", "key":DOMkey, "text":"", "mods":{...}}
     {"op":"hover", "region":id, "x":..,"y":..}   pointer dwelled: ask the app for a tooltip
     {"op":"triggerAction", "id":"a12"}      fire a menu action (native menus on the client)
+    {"op":"a11yClick", "id":"w7f..."}       activate a widget from the accessibility tree (button click / mouse press+release at centre)
+    {"op":"a11yFocus", "id"}                give it keyboard focus
+    {"op":"a11ySet", "id", "value"}         set its value (text / number / checked / combobox text)
+    {"op":"a11yQuery"}                      re-send the tree now
+    <- {"ev":"a11y", "nodes":[{id,region,role,name,value,x,y,w,h,enabled,focused,checked?}]}   (region-local coords; sent on change)
     {"op":"selectModule", "name":"SampleData"}
   server -> client (JSON text):
     {"ev":"regions", "w","h", "dpr", "viewport":{x,y,w,h}, "regions":[{id,kind,title,x,y,w,h,z}],
@@ -33,6 +38,7 @@ is unchanged. A slow full re-grab (every 2 s) guards against missed paints. ASCI
 """
 import hashlib
 import json
+import re
 import struct
 import time
 
@@ -43,6 +49,7 @@ from mrson_ws import WsServer
 
 FRAME_MS = 33
 FULL_REFRESH_S = 2.0
+A11Y_PERIOD_S = 0.5          # semantic-tree refresh cadence (only broadcast when it changed)
 BLOCKED_AFTER_S = 1.0
 
 
@@ -251,6 +258,184 @@ class GuiStream:
 
         return {"ev": "menus", "menus": [{"title": m.title, "items": items(m)} for m in children_of(mb)]}
 
+
+    # ---- accessibility tree (S12) ---------------------------------------------------------
+    # Pixels are opaque to screen readers and to automation. Every streamed region also publishes the
+    # visible widgets underneath it as a semantic tree (role/name/value/rect), built from plain QWidget
+    # properties PythonQt exposes (QAccessible is not wrapped). The client lays ARIA elements over the
+    # pixels and gets click/set/focus-by-name from the same ids.
+    _ROLE_CLASSES = None
+
+    def _role(self, w):
+        if w.inherits("QAbstractButton"):
+            if w.inherits("QCheckBox") or (w.checkable and not w.inherits("QToolButton")):
+                return "checkbox"
+            return "button"
+        if w.inherits("QLineEdit"):
+            return "textbox"
+        if w.inherits("QAbstractSpinBox"):
+            return "spinbutton"
+        if w.inherits("QComboBox"):
+            return "combobox"
+        if w.inherits("QAbstractSlider"):
+            return "slider"
+        if w.inherits("QTabBar"):
+            return "tablist"
+        if w.inherits("QGroupBox"):
+            return "group"
+        if w.inherits("QLabel"):
+            return "label" if w.text else None
+        cls = w.className()
+        if cls in ("ctkCollapsibleButton", "ctkCollapsibleGroupBox"):
+            return "group"
+        if cls.startswith("qMRML") and cls.endswith("ComboBox"):
+            return "combobox"
+        if cls in ("ctkSliderWidget", "ctkDoubleSlider", "ctkRangeWidget", "ctkDoubleRangeSlider"):
+            return "slider"
+        if cls in ("ctkDoubleSpinBox",):
+            return "spinbutton"
+        if cls in ("QTreeView", "QListView", "QTableView", "QTreeWidget", "QListWidget", "QTableWidget", "qMRMLSubjectHierarchyTreeView", "qMRMLSegmentsTableView"):
+            return "grid"
+        if cls in ("QPlainTextEdit", "QTextEdit", "ctkPythonConsole"):
+            return "textbox"
+        return None
+
+    def _text(self, w, prop):
+        try:
+            v = getattr(w, prop)
+            return v() if callable(v) else v
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _name_value(self, w, role):
+        name = self._text(w, "accessibleName") or ""
+        value = None
+        if role in ("button", "checkbox", "label", "group"):
+            name = name or (self._text(w, "text") or self._text(w, "title") or "")
+        if role == "textbox":
+            value = self._text(w, "text")
+            if value is None:
+                value = self._text(w, "toPlainText")
+        elif role == "spinbutton":
+            value = self._text(w, "value")
+            if value is None:
+                value = self._text(w, "text")
+        elif role == "combobox":
+            value = self._text(w, "currentText") or self._text(w, "currentNodeID")
+        elif role == "slider":
+            value = self._text(w, "value")
+        elif role == "tablist":
+            try:
+                value = w.tabText(w.currentIndex)
+            except Exception:  # noqa: BLE001
+                value = None
+        elif role == "checkbox":
+            value = bool(self._text(w, "checked"))
+        if not name:
+            name = self._text(w, "toolTip") or self._text(w, "placeholderText") or self._text(w, "objectName") or ""
+        name = str(name).replace("&", "")
+        if isinstance(value, float):
+            value = round(value, 4)
+        return name[:120], value
+
+    def a11y(self):
+        nodes, widgets = [], {}
+        for rid, root in self.regionWidgets.items():
+            rw, rh = root.width, root.height
+            composites = set()                                  # widgets whose children are implementation detail
+            for w in root.findChildren(qt.QWidget):
+                try:
+                    if not w.visible:
+                        continue
+                    role = self._role(w)
+                    if role is None:
+                        continue
+                    p, inner = w.parent(), False
+                    while p is not None and str(p) != str(root):
+                        if str(p) in composites:
+                            inner = True; break
+                        p = p.parent()
+                    if inner:
+                        continue
+                    if role in ("combobox", "slider", "spinbutton", "grid", "tablist") or w.className().startswith(("ctk", "qMRML")):
+                        composites.add(str(w))
+                    tl = w.mapTo(root, w.rect.topLeft())
+                    x, y, ww, wh = tl.x(), tl.y(), w.width, w.height
+                    if x + ww <= 0 or y + wh <= 0 or x >= rw or y >= rh:
+                        continue                                    # scrolled out of the region
+                    m = re.search(r"0x[0-9a-fA-F]+", str(w))
+                    wid = "w" + (m.group(0)[2:] if m else str(len(widgets)))
+                    widgets[wid] = w
+                    name, value = self._name_value(w, role)
+                    n = {"id": wid, "region": rid, "role": role, "name": name, "x": x, "y": y, "w": ww, "h": wh,
+                         "enabled": bool(w.enabled), "focused": bool(w.hasFocus())}
+                    if value is not None:
+                        n["value"] = value
+                    if role == "checkbox":
+                        n["checked"] = bool(value)
+                    nodes.append(n)
+                except Exception:  # noqa: BLE001
+                    continue
+        self.a11yWidgets = widgets
+        return {"ev": "a11y", "nodes": nodes}
+
+    def _tick_a11y(self, now):
+        if now - getattr(self, "lastA11y", 0) < A11Y_PERIOD_S:
+            return
+        self.lastA11y = now
+        tree = self.a11y()
+        sig = json.dumps(tree, sort_keys=True)
+        if sig != getattr(self, "lastA11ySig", None):
+            self.lastA11ySig = sig
+            self._broadcast_text(tree)
+
+    def _a11y_widget(self, msg):
+        w = getattr(self, "a11yWidgets", {}).get(msg.get("id"))
+        if w is None:
+            self.a11y()
+            w = self.a11yWidgets.get(msg.get("id"))
+        return w
+
+    def _a11y_click(self, msg):
+        w = self._a11y_widget(msg)
+        if w is None:
+            return
+        if w.inherits("QAbstractButton"):
+            w.click()
+        else:
+            c = qt.QPoint(w.width // 2, w.height // 2)
+            gp = w.mapToGlobal(c)
+            for et in (qt.QEvent.MouseButtonPress, qt.QEvent.MouseButtonRelease):
+                qt.QApplication.sendEvent(w, qt.QMouseEvent(et, qt.QPointF(c), qt.QPointF(gp), qt.Qt.LeftButton,
+                                                             qt.Qt.LeftButton if et == qt.QEvent.MouseButtonPress else qt.Qt.NoButton, qt.Qt.NoModifier))
+        self.lastA11y = 0
+
+    def _a11y_set(self, msg):
+        w = self._a11y_widget(msg)
+        if w is None:
+            return
+        v = msg.get("value")
+        if hasattr(w, "setCurrentNodeID"):                      # qMRMLNodeComboBox & friends: node id, or node name
+            node = slicer.mrmlScene.GetNodeByID(str(v)) or slicer.mrmlScene.GetFirstNodeByName(str(v))
+            w.setCurrentNodeID(node.GetID() if node is not None else "")
+        elif w.inherits("QAbstractButton"):
+            w.setChecked(bool(v))
+        elif w.inherits("QLineEdit"):
+            w.setText(str(v)); w.editingFinished()
+        elif w.inherits("QComboBox"):
+            i = w.findText(str(v))
+            if i >= 0:
+                w.setCurrentIndex(i)
+            elif hasattr(w, "setCurrentNodeID"):
+                w.setCurrentNodeID(str(v))
+        elif hasattr(w, "setValue"):
+            w.setValue(float(v) if w.inherits("QDoubleSpinBox") or w.className() in ("ctkSliderWidget", "ctkDoubleSpinBox", "ctkDoubleSlider") else int(v))
+        elif hasattr(w, "setPlainText"):
+            w.setPlainText(str(v))
+        elif hasattr(w, "setText"):
+            w.setText(str(v))
+        self.lastA11y = 0
+
     # ---- frames -----------------------------------------------------------------------------
     def _png(self, w, rect=None):
         img = w.grab(rect) if rect is not None else w.grab()
@@ -297,6 +482,7 @@ class GuiStream:
             hdr = json.dumps({"region": rid, "seq": self.seq, "x": rect.x() if rect else 0, "y": rect.y() if rect else 0, "w": pw, "h": ph}).encode()
             self._broadcast_bin(struct.pack(">I", len(hdr)) + hdr + png)
         self._watch_modal(now)
+        self._tick_a11y(now)
 
     def _watch_modal(self, now):
         m = qt.QApplication.activeModalWidget()
@@ -344,6 +530,8 @@ class GuiStream:
                 self.lastHash = {}; self.lastRegionsSig = None; self.structureDirty = True
                 client.send_text(json.dumps({"ev": "title", "text": self.mw.windowTitle}))
                 client.send_text(json.dumps(self.menus()))
+                if qt.QApplication.activeModalWidget() is None:
+                    client.send_text(json.dumps({"ev": "unblocked"}))   # a reconnect must clear a stale "blocked" banner
                 self.timer.start()
             elif op == "resize":
                 self.mw.resize(int(msg["w"]), int(msg["h"])); self.structureDirty = True
@@ -361,6 +549,17 @@ class GuiStream:
                     a.trigger()
             elif op == "selectModule":
                 slicer.util.selectModule(msg.get("name"))
+            elif op == "a11yQuery":
+                self.lastA11ySig = None; self.lastA11y = 0
+            elif op == "a11yClick":
+                self._a11y_click(msg)
+            elif op == "a11yFocus":
+                w = self._a11y_widget(msg)
+                if w is not None:
+                    w.setFocus()
+                self.lastA11y = 0
+            elif op == "a11ySet":
+                self._a11y_set(msg)
         except Exception as e:  # noqa: BLE001
             client.send_text(json.dumps({"ev": "error", "op": op, "error": repr(e)}))
 
