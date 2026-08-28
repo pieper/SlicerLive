@@ -166,6 +166,12 @@ def _node_event(node):
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._layout_node(node, nid)}
     if t == "transform":
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._transform_node(node, nid)}
+    if t == "mesh":
+        import os
+        dn0 = node.GetDisplayNode()
+        if dn0 is not None and dn0.GetClassName() == "vtkMRMLSliceDisplayNode":
+            return {"event": "Modified", "sourceId": nid}          # internal slice-plane model: not on the wire
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._mesh_node(node, nid, os.path.join(HS._live_dir(), "blobs"))}
     if t == "image":
         # geometry/metadata only (zarr descriptor is cached by image MTime) -- this is what a transform
         # drag or a spacing/origin edit needs; voxel edits bump the MTime and re-write chunks

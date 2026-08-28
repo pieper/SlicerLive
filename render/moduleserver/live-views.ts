@@ -21,7 +21,7 @@ import "./view-cmds.ts";   // registers setCursor / setSliceFrame / viewContextM
 import {
   CameraDisplayableManager, type CameraState, LayoutDisplayableManager, LiveScene, MarkupsDisplayableManager,
   type MirrorView, type OverlayItem, RoiCropDisplayableManager, SegmentationDisplayableManager, SliceDisplayableManager,
-  type SlicePlane, type SliceLayers, TransformDisplayableManager, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeLayersDisplayableManager, VolumeRenderingDisplayableManager,
+  type SceneMeshData, type SlicePlane, type SliceLayers, ModelDisplayableManager, TransformDisplayableManager, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeLayersDisplayableManager, VolumeRenderingDisplayableManager,
 } from "../livescene.ts";
 
 export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
@@ -78,12 +78,14 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
     gpu, movingScaleCap: 0.4, target: 8,
   });
+  let meshes: SceneMeshData[] = [];
   const rebuild3d = () => {
     const fs = [...fields3d.values()];
     if (volumeShown3D && volumeField) fs.unshift(volumeField);
-    if (fs.length === 0) { scene = null; if (threeVisible) clearCanvas(three.ctx); return; }
+    if (fs.length === 0 && meshes.length === 0) { scene = null; if (threeVisible) clearCanvas(three.ctx); return; }
     if (!scene) scene = new SceneRenderer(gpu, srgb);
     scene.build(fs);
+    scene.setMeshes(meshes);
     if (clip) scene.setClipBox(clip.lo, clip.hi);
     a3d.draw();
   };
@@ -215,6 +217,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     },
     setClipBox(lo, hi) { clip = lo ? { lo, hi: hi! } : null; if (scene) { if (clip) scene.setClipBox(clip.lo, clip.hi); else scene.setClipPlanes([]); } a3d.draw(); },
     setSliceLayers(cell, layers) { const c = sliceCell(cell); c.layers = layers; renderSlice(c); },
+    setMeshes(list) { meshes = list; if (scene) { scene.setMeshes(meshes); a3d.draw(); } else rebuild3d(); },
     setVolumeField(f, wl) {
       volumeField = f; legacyWL = wl;
       volumeReady = !!f;
@@ -233,7 +236,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const live = new LiveScene(cfg.httpBase, [
     new LayoutDisplayableManager(), new CameraDisplayableManager(), new VolumeRenderingDisplayableManager(gpu.device), new VolumeLayersDisplayableManager(gpu.device),
     new SliceDisplayableManager(), new SegmentationDisplayableManager(gpu.device, 1.5), markupsDM, new RoiCropDisplayableManager(),
-    new ViewStateDisplayableManager(), new TransformDisplayableManager(),
+    new ViewStateDisplayableManager(), new TransformDisplayableManager(), new ModelDisplayableManager(),
   ]);
   live.view = view;
   const sync = new LiveSync(live, new WsTransport(cfg.wsUrl));

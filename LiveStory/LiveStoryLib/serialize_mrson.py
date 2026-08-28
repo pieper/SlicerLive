@@ -167,6 +167,55 @@ def _image_node(vol, node_id, blobdir):
     }
 
 
+def _mesh_blob(data_bytes, blobdir):
+    import hashlib
+    h = "sha256-" + hashlib.sha256(data_bytes).hexdigest()
+    dest = os.path.join(blobdir, h)
+    if not os.path.exists(dest):
+        with open(dest, "wb") as f:
+            f.write(data_bytes)
+    return h
+
+
+_MESH_CACHE = {}   # node id -> (polydata MTime, transform MTime, geometry dict)
+
+
+def _mesh_node(m, node_id, blobdir):
+    """A model node: triangulated geometry in WORLD (RAS) coordinates as two content-addressed blobs
+    (float32 xyz points, uint32 triangle indices) plus counts and bounds. Cached by polydata / transform
+    MTime so display-only changes never re-write geometry."""
+    import vtk
+    from vtk.util import numpy_support as ns
+    node = {"type": "mesh", "id": node_id, "name": m.GetName(), "frame": "RAS",
+            "refs": _transform_ref(m), "source": {"mrmlClass": m.GetClassName()}}
+    pd = m.GetPolyData()
+    if pd is None or pd.GetNumberOfPoints() == 0:
+        return node
+    tn = m.GetParentTransformNode()
+    key = (pd.GetMTime(), tn.GetMTime() if tn is not None else 0, blobdir)
+    hit = _MESH_CACHE.get(node_id)
+    if hit is not None and hit[0] == key:
+        node.update(hit[1]); return node
+    tri = vtk.vtkTriangleFilter(); tri.SetInputData(pd); tri.PassLinesOff(); tri.PassVertsOff(); tri.Update()
+    out = tri.GetOutput()
+    if tn is not None:                                   # bake to world like everything else on the wire
+        tf = vtk.vtkTransformPolyDataFilter(); t = vtk.vtkGeneralTransform(); tn.GetTransformToWorld(t)
+        tf.SetTransform(t); tf.SetInputData(out); tf.Update(); out = tf.GetOutput()
+    pts = ns.vtk_to_numpy(out.GetPoints().GetData()).astype("<f4")
+    polys = out.GetPolys()
+    ntri = polys.GetNumberOfCells()
+    conn = ns.vtk_to_numpy(polys.GetConnectivityArray()).astype("<u4") if hasattr(polys, "GetConnectivityArray") else None
+    if conn is None or len(conn) != ntri * 3:            # legacy layout [3,a,b,c,3,...]
+        raw = ns.vtk_to_numpy(polys.GetData()).reshape(-1, 4)
+        conn = raw[:, 1:4].astype("<u4").ravel()
+    geom = {"points": _mesh_blob(pts.tobytes(), blobdir), "triangles": _mesh_blob(conn.tobytes(), blobdir),
+            "pointCount": int(len(pts)), "triangleCount": int(len(conn) // 3),
+            "bounds": [float(v) for v in out.GetBounds()]}
+    _MESH_CACHE[node_id] = (key, geom)
+    node.update(geom)
+    return node
+
+
 def _markup_node(n, node_id):
     pts = []
     for i in range(n.GetNumberOfControlPoints()):
@@ -465,11 +514,11 @@ def serialize_mrson(outdir, name):
 
     for cls in ("vtkMRMLModelNode",):
         for m in slicer.util.getNodesByClass(cls):
-            if m.GetID() in nodes:
-                continue
+            dn0 = m.GetDisplayNode()
+            if m.GetID() in nodes or m.GetHideFromEditors() or (dn0 is not None and dn0.GetClassName() == "vtkMRMLSliceDisplayNode"):
+                continue                                          # skip Slicer's internal slice-plane models
             try:
-                _add_displayable(nodes, m, lambda n, nid: {"type": "mesh", "id": nid, "name": n.GetName(),
-                                 "frame": "RAS", "refs": _transform_ref(n), "source": {"mrmlClass": n.GetClassName()}}, m.GetID())
+                _add_displayable(nodes, m, _mesh_node, m.GetID(), blobdir)
             except Exception as e:  # noqa: BLE001
                 print(f"mrson: skipped mesh {m.GetID()}: {e}")
 

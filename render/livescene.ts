@@ -51,6 +51,8 @@ export interface SliceLayers {
   linked?: boolean;
 }
 
+export interface SceneMeshData { id: string; positions: Float32Array; indices: Uint32Array; color: [number, number, number]; opacity: number }
+
 export interface MirrorView {
   /** Per-view 2D overlays (optional): `cell` = a slice cell name or "*" for every slice cell;
    *  `layer` namespaces one producer (e.g. "markups"); [] clears the layer. */
@@ -58,6 +60,8 @@ export interface MirrorView {
   /** Per-slice-view layer stack (optional): Slicer's slice composite — background / foreground / label
    *  volumes with their own geometry, W/L, colour LUTs, opacities and compositing. Absent layers = none. */
   setSliceLayers?(cell: string, layers: SliceLayers): void;
+  /** Surface meshes (models) for the 3D view (optional): world-space triangles + display colour/opacity. */
+  setMeshes?(meshes: SceneMeshData[]): void;
   setField(key: string, field: Field): void;   // add or replace a 3D field -> rebuild
   removeField(key: string): void;               // -> rebuild
   redraw(): void;                                // an existing field changed in place
@@ -702,6 +706,63 @@ export class SegmentationDisplayableManager implements DisplayableManager {
     this.added = false;
     this.palKey = "";
     this.zarrSig = "";
+  }
+}
+
+// ── Models (surface meshes) ─────────────────────────────────────────────────
+
+/** Mirrors vtkMRMLModelDisplayableManager: fetches each model's world-space geometry blobs by hash
+ *  (once per geometry hash) and hands the visible meshes with their display colour/opacity to the
+ *  view. Display-only changes (colour, opacity, visibility) never re-fetch geometry. */
+export class ModelDisplayableManager implements DisplayableManager {
+  interestedTypes = ["mesh", "modelDisplay"];
+  private meshes = new Map<string, MrsonNode>();
+  private displays = new Map<string, MrsonNode>();
+  private geom = new Map<string, { key: string; positions: Float32Array; indices: Uint32Array }>();
+  private loading = new Set<string>();
+  private blobBaseHref = "";
+
+  async onNodeAdded(node: MrsonNode, scene: LiveScene): Promise<void> {
+    this.blobBaseHref = scene.blobBase();
+    if (node.type === "mesh") this.meshes.set(node.id, node);
+    else if (node.type === "modelDisplay") this.displays.set(node.id, node);
+    await this.refresh(scene);
+  }
+  onNodeRemoved(id: string, scene: LiveScene) { this.meshes.delete(id); this.displays.delete(id); this.geom.delete(id); void this.refresh(scene); }
+  onSceneClosed(scene: LiveScene) { this.meshes.clear(); this.displays.clear(); this.geom.clear(); scene.view?.setMeshes?.([]); }
+
+  private displayFor(mesh: MrsonNode): MrsonNode | undefined {
+    for (const id of ((mesh.refs as Record<string, string[]> | undefined)?.display) ?? []) { const d = this.displays.get(id); if (d) return d; }
+    return undefined;
+  }
+  private async ensureGeom(mesh: MrsonNode, scene: LiveScene): Promise<void> {
+    const key = `${mesh.points}|${mesh.triangles}`;
+    if (!mesh.points || !mesh.triangles) return;
+    const have = this.geom.get(mesh.id);
+    if (have?.key === key || this.loading.has(mesh.id)) return;
+    this.loading.add(mesh.id);
+    try {
+      const [p, t] = await Promise.all([
+        fetch(new URL(mesh.points as string, this.blobBaseHref).href).then((r) => r.arrayBuffer()),
+        fetch(new URL(mesh.triangles as string, this.blobBaseHref).href).then((r) => r.arrayBuffer()),
+      ]);
+      this.geom.set(mesh.id, { key, positions: new Float32Array(p), indices: new Uint32Array(t) });
+    } finally { this.loading.delete(mesh.id); }
+    await this.refresh(scene);
+  }
+  private async refresh(scene: LiveScene): Promise<void> {
+    const view = scene.view;
+    if (!view?.setMeshes) return;
+    const out: SceneMeshData[] = [];
+    for (const m of this.meshes.values()) {
+      const d = this.displayFor(m);
+      if (d && d.visible === false) continue;
+      const g = this.geom.get(m.id);
+      if (!g || g.key !== `${m.points}|${m.triangles}`) { void this.ensureGeom(m, scene); continue; }
+      const col = (d?.color as number[]) ?? [0.8, 0.8, 0.8, 1];
+      out.push({ id: m.id, positions: g.positions, indices: g.indices, color: [col[0], col[1], col[2]], opacity: (d?.opacity as number) ?? 1 });
+    }
+    view.setMeshes(out);
   }
 }
 

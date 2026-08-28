@@ -261,6 +261,23 @@ intersections, nonlinear transforms as `TransformField` modifiers, the transform
 Caution: Slicer's slice widgets own hidden `Red/Green/Yellow Transform` linear transform nodes — never
 attach data to them (I did, briefly; reset).
 
+## S7b status (2026-08-27): models
+mrson `mesh` nodes now carry geometry: triangulated, **world-space** float32 points + uint32 triangles
+as two content-addressed blobs (`points`, `triangles` hashes) plus counts/bounds, cached by polydata +
+transform MTime (display-only changes never re-write geometry); Slicer's internal slice-plane models
+(display node class `vtkMRMLSliceDisplayNode`) stay off the wire.
+Renderer: `SceneRenderer` gained a **mesh pass** — meshes are rasterised before every trace into a
+premultiplied colour target + a ray-distance target (flat headlight shading from screen-space
+derivatives, no normals on the wire); the ray march composites the nearest surface at its depth, so
+volumes in front occlude it and it occludes what is behind — the depth-composite seam the optional
+VTK-render mode will reuse. Bound as group 1 on the trace/stream/timing pipelines; empty passes are
+free. `ModelDisplayableManager` fetches geometry by hash once and hands visible meshes with their
+`modelDisplay` colour/opacity to the view; `rebuild3d` now renders a scene with meshes but no volume.
+Verified: a sphere model (opacity 0.8) renders in the SlicerLive 3D view with fiducial glyphs
+composited in front/behind.
+Not yet: model slice intersections (contours in slice views), per-vertex normals/scalars, wireframe/
+points representations, edge visibility, clipping of meshes by the ROI, mesh picking.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,
