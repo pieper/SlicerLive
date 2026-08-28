@@ -16,6 +16,9 @@ Slicer-independent wire format (no Qt types; a non-Slicer server can implement t
     {"op":"a11yFocus", "id"}                give it keyboard focus
     {"op":"a11ySet", "id", "value"}         set its value (text / number / checked / combobox text)
     {"op":"a11yQuery"}                      re-send the tree now
+    {"op":"ping", "t"} -> {"ev":"pong","t"}  round-trip measurement
+    {"op":"quality", "codec":"png|webp|jpeg", "quality":10..100}   frame codec for slow links (frame header carries "fmt")
+    <- {"ev":"stats", "bytesPerS", "framesPerS", "codec", "quality"}  every 2 s while frames flow
     <- {"ev":"a11y", "nodes":[{id,region,role,name,value,x,y,w,h,enabled,focused,checked?}]}   (region-local coords; sent on change)
     {"op":"selectModule", "name":"SampleData"}
   server -> client (JSON text):
@@ -49,7 +52,8 @@ from mrson_ws import WsServer
 
 FRAME_MS = 33
 FULL_REFRESH_S = 2.0
-A11Y_PERIOD_S = 0.5          # semantic-tree refresh cadence (only broadcast when it changed)
+A11Y_PERIOD_S = 0.5
+STATS_PERIOD_S = 2.0         # bytes/s + frames/s report cadence (only while frames flow)          # semantic-tree refresh cadence (only broadcast when it changed)
 BLOCKED_AFTER_S = 1.0
 
 
@@ -133,6 +137,9 @@ class GuiStream:
         self.blockedSince = None
         self.blockedSent = False
         self.subscribers = []
+        self.grabbing = False
+        self.codec, self.quality = "png", 100          # S13: negotiated by the client (webp/jpeg + quality on slow links)
+        self.statBytes = 0; self.statFrames = 0; self.statSince = time.perf_counter(); self.statSentIdle = 0
         self.server = WsServer(port, on_message=self._on_message, on_close=self._on_close)
         self.paintFilter = _PaintFilter(self)
         slicer.app.installEventFilter(self.paintFilter)
@@ -144,8 +151,8 @@ class GuiStream:
     def note_paint(self, w, rect):
         """Hot path (thousands of paints/s during a repaint storm): no string formatting, no per-region
         Qt calls -- one mapToGlobal for the painted widget, then integer rect math against cached rects."""
-        if not self.regionWidgets:
-            return
+        if not self.regionWidgets or self.grabbing:
+            return                               # paints raised by our own grab() are not changes (else grab->paint->dirty->grab forever)
         top = w.window()
         topKey = id(top) if top is not None else 0
         byWindow = self.regionsByWindow.get(topKey)
@@ -438,9 +445,20 @@ class GuiStream:
 
     # ---- frames -----------------------------------------------------------------------------
     def _png(self, w, rect=None):
-        img = w.grab(rect) if rect is not None else w.grab()
+        self.grabbing = True
+        try:
+            img = w.grab(rect) if rect is not None else w.grab()
+        finally:
+            self.grabbing = False
         buf = qt.QBuffer(); buf.open(qt.QIODevice.WriteOnly)
-        img.save(buf, "PNG"); buf.close()
+        fmt, q = self.codec, self.quality
+        if fmt == "webp":
+            img.save(buf, "WEBP", q)              # q=100 -> lossless-ish; lower = lossy, for remote links
+        elif fmt == "jpeg":
+            img.save(buf, "JPEG", q)
+        else:
+            img.save(buf, "PNG")
+        buf.close()
         return bytes(buf.data().data()), img.width(), img.height()
 
     def _tick(self):
@@ -479,8 +497,15 @@ class GuiStream:
             self.seq += 1
             if rect is not None:
                 self.partialSent = getattr(self, "partialSent", 0) + 1
-            hdr = json.dumps({"region": rid, "seq": self.seq, "x": rect.x() if rect else 0, "y": rect.y() if rect else 0, "w": pw, "h": ph}).encode()
+            hdr = json.dumps({"region": rid, "seq": self.seq, "x": rect.x() if rect else 0, "y": rect.y() if rect else 0, "w": pw, "h": ph, "fmt": self.codec}).encode()
             self._broadcast_bin(struct.pack(">I", len(hdr)) + hdr + png)
+            self.statBytes += 4 + len(hdr) + len(png); self.statFrames += 1
+        if now - self.statSince >= STATS_PERIOD_S:
+            dt = now - self.statSince
+            if self.statFrames or self.statSentIdle < 1:      # one trailing zero-report then quiet
+                self._broadcast_text({"ev": "stats", "bytesPerS": int(self.statBytes / dt), "framesPerS": round(self.statFrames / dt, 1), "codec": self.codec, "quality": self.quality})
+                self.statSentIdle = 0 if self.statFrames else self.statSentIdle + 1
+            self.statBytes = 0; self.statFrames = 0; self.statSince = now
         self._watch_modal(now)
         self._tick_a11y(now)
 
@@ -528,6 +553,8 @@ class GuiStream:
                 if client not in self.subscribers:
                     self.subscribers.append(client)
                 self.lastHash = {}; self.lastRegionsSig = None; self.structureDirty = True
+                if msg.get("codec") in ("png", "webp", "jpeg"):
+                    self.codec = msg["codec"]; self.quality = max(10, min(100, int(msg.get("quality", 100))))
                 client.send_text(json.dumps({"ev": "title", "text": self.mw.windowTitle}))
                 client.send_text(json.dumps(self.menus()))
                 if qt.QApplication.activeModalWidget() is None:
@@ -549,6 +576,14 @@ class GuiStream:
                     a.trigger()
             elif op == "selectModule":
                 slicer.util.selectModule(msg.get("name"))
+            elif op == "ping":
+                client.send_text(json.dumps({"ev": "pong", "t": msg.get("t")}))
+            elif op == "quality":                     # client-driven adaptation: codec + quality for everyone (frames are broadcast)
+                codec = msg.get("codec", "png")
+                if codec in ("png", "webp", "jpeg"):
+                    self.codec = codec
+                self.quality = max(10, min(100, int(msg.get("quality", 100))))
+                self.lastHash = {}                    # re-send everything at the new quality
             elif op == "a11yQuery":
                 self.lastA11ySig = None; self.lastA11y = 0
             elif op == "a11yClick":

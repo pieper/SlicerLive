@@ -10,6 +10,7 @@ export interface MenuItem { id?: string; text?: string; shortcut?: string; enabl
 export interface Menu { title: string; items: MenuItem[] }
 /** One node of the streamed GUI's accessibility tree (region-local CSS px). */
 export interface A11yNode { id: string; region: string; role: string; name: string; value?: unknown; x: number; y: number; w: number; h: number; enabled: boolean; focused: boolean; checked?: boolean }
+export interface LinkStats { rttMs: number; bytesPerS: number; framesPerS: number; codec: string; quality: number }
 export interface ViewCell { id: string; kind: "slice" | "3d" | "plot" | "table"; name: string; x: number; y: number; w: number; h: number; view: Rect }
 
 export interface LegacyGuiOptions {
@@ -20,6 +21,10 @@ export interface LegacyGuiOptions {
   onTitle?: (title: string) => void;
   onStatus?: (s: string) => void;
   onA11y?: (nodes: A11yNode[]) => void;
+  onStats?: (s: LinkStats) => void;
+  /** Adaptive codec for slow links (default on): PNG while the link is good, WebP at falling quality when
+   *  RTT or bytes/s exceed the budget. Set false to pin PNG. */
+  adaptive?: boolean;
   hideKinds?: string[];           // e.g. ["menubar"] when the host provides native menus
 }
 
@@ -37,6 +42,11 @@ export class LegacyGui {
   private a11yLayers = new Map<string, HTMLElement>();
   /** Latest accessibility tree from the server (see a11y ops below). */
   a11y: A11yNode[] = [];
+  /** Link measurements: RTT from our pings, throughput from the server's stats reports. */
+  stats: LinkStats = { rttMs: 0, bytesPerS: 0, framesPerS: 0, codec: "png", quality: 100 };
+  private pingTimer: number | undefined;
+  private rttSamples: number[] = [];
+  private lastAdapt = 0;
   connected = false;
 
   constructor(private root: HTMLElement, private url: string, private opts: LegacyGuiOptions = {}) {
@@ -51,8 +61,13 @@ export class LegacyGui {
   connect() {
     const ws = new WebSocket(this.url);
     ws.binaryType = "arraybuffer";
-    ws.onopen = () => { this.connected = true; this.opts.onStatus?.("gui stream connected"); ws.send(JSON.stringify({ op: "subscribe", dpr: 1 })); this.sendResize(); };
-    ws.onclose = () => { this.connected = false; this.opts.onStatus?.("gui stream closed — retrying"); setTimeout(() => this.connect(), 1500); };
+    ws.onopen = () => {
+      this.connected = true; this.opts.onStatus?.("gui stream connected");
+      ws.send(JSON.stringify({ op: "subscribe", dpr: 1, codec: this.stats.codec, quality: this.stats.quality })); this.sendResize();
+      clearInterval(this.pingTimer);
+      this.pingTimer = setInterval(() => this.send({ op: "ping", t: performance.now() }), 2000) as unknown as number;
+    };
+    ws.onclose = () => { this.connected = false; clearInterval(this.pingTimer); this.opts.onStatus?.("gui stream closed — retrying"); setTimeout(() => this.connect(), 1500); };
     ws.onmessage = (m) => (typeof m.data === "string" ? this.onText(JSON.parse(m.data)) : this.onFrame(new Uint8Array(m.data as ArrayBuffer)));
     this.ws = ws;
   }
@@ -70,6 +85,8 @@ export class LegacyGui {
     else if (j.ev === "blocked") this.opts.onBlocked?.({ title: j.title as string, className: j.className as string });
     else if (j.ev === "unblocked") this.opts.onBlocked?.(null);
     else if (j.ev === "a11y") this.applyA11y(j.nodes as A11yNode[]);
+    else if (j.ev === "pong") this.onPong(performance.now() - (j.t as number));
+    else if (j.ev === "stats") { Object.assign(this.stats, { bytesPerS: j.bytesPerS, framesPerS: j.framesPerS, codec: j.codec, quality: j.quality }); this.opts.onStats?.(this.stats); }
     else if (j.ev === "error") console.warn("gui stream:", j);
   }
 
@@ -173,12 +190,33 @@ export class LegacyGui {
     return new Promise((resolve) => { const prev = this.opts.onA11y; this.opts.onA11y = (n) => { this.opts.onA11y = prev; prev?.(n); resolve(n); }; this.send({ op: "a11yQuery" }); });
   }
 
+  // ---- link adaptation (S13) --------------------------------------------------------------
+  // Chrome is text: PNG is right on a LAN. On a slow/remote link the same dirty rects go as lossy
+  // WebP at a quality that tracks the measured RTT and throughput, and climb back when it recovers.
+  private onPong(rtt: number) {
+    this.rttSamples.push(rtt); if (this.rttSamples.length > 5) this.rttSamples.shift();
+    this.stats.rttMs = Math.round(this.rttSamples.reduce((a, b) => a + b, 0) / this.rttSamples.length);
+    this.opts.onStats?.(this.stats);
+    if (this.opts.adaptive === false || performance.now() - this.lastAdapt < 4000) return;
+    const slow = this.stats.rttMs > 120 || this.stats.bytesPerS > 1_500_000;
+    const fast = this.stats.rttMs < 40 && this.stats.bytesPerS < 300_000;
+    if (slow && (this.stats.codec === "png" || this.stats.quality > 40)) this.setQuality("webp", this.stats.codec === "png" ? 80 : this.stats.quality - 20);
+    else if (fast && this.stats.codec !== "png") this.setQuality(this.stats.quality >= 90 ? "png" : "webp", Math.min(100, this.stats.quality + 10));
+  }
+  /** Pin the frame codec/quality (also what the adaptation calls). */
+  setQuality(codec: "png" | "webp" | "jpeg", quality = 100) {
+    this.lastAdapt = performance.now();
+    this.stats.codec = codec; this.stats.quality = quality;
+    this.send({ op: "quality", codec, quality });
+  }
+
   private async onFrame(buf: Uint8Array) {
     const hl = new DataView(buf.buffer, buf.byteOffset).getUint32(0);
     const hdr = JSON.parse(this.dec.decode(buf.subarray(4, 4 + hl))) as { region: string; x: number; y: number; w: number; h: number };
     const l = this.layers.get(hdr.region);
     if (!l) return;
-    const bmp = await createImageBitmap(new Blob([buf.subarray(4 + hl)], { type: "image/png" }));
+    const fmt = (hdr as { fmt?: string }).fmt ?? "png";
+    const bmp = await createImageBitmap(new Blob([buf.subarray(4 + hl)], { type: fmt === "webp" ? "image/webp" : fmt === "jpeg" ? "image/jpeg" : "image/png" }));
     const ctx = l.canvas.getContext("2d")!;
     const full = hdr.x === 0 && hdr.y === 0 && bmp.width >= l.canvas.width && bmp.height >= l.canvas.height;
     if (full && (l.canvas.width !== bmp.width || l.canvas.height !== bmp.height)) { l.canvas.width = bmp.width; l.canvas.height = bmp.height; }

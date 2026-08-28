@@ -17,6 +17,7 @@
 //   --dpr <n>         device pixel ratio for GUI grabs (QT_SCALE_FACTOR; 2 = retina)  default 1
 //   --roles <list>    capabilities this server advertises, comma separated (default module; POC: app,module)
 //   --extra <args>    extra Slicer args, comma separated (e.g. --extra=--disable-cli-modules)
+//   --token <secret>  require ?token=<secret> on both WebSockets (remote deployments; put wss in front)
 //
 // Prints one JSON line `{"READY": {...}}` on stdout once the servers are up, then stays attached;
 // Ctrl-C (SIGINT/SIGTERM) stops the Slicer child. Exit codes: 0 clean, 2 launch failure, 3 timeout.
@@ -26,7 +27,7 @@
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 
 const args = parseArgs(Deno.args, {
-  string: ["slicer", "http", "ws", "mcp", "mcp-server", "state", "log", "extra", "platform", "roles", "gui", "dpr"],
+  string: ["slicer", "http", "ws", "mcp", "mcp-server", "state", "log", "extra", "platform", "roles", "gui", "dpr", "token"],
   boolean: ["show", "help"],
   default: { http: "2131", ws: "2132", mcp: "2126", gui: "2133", roles: "module", dpr: "1" },
 });
@@ -82,6 +83,7 @@ const env: Record<string, string> = {
   MODULESERVER_GUI_PORT: args.gui!,
   MODULESERVER_MCP_SERVER: mcpServer,
   MODULESERVER_SHOW: args.show ? "1" : "0",
+  ...(args.token ? { MODULESERVER_TOKEN: args.token } : {}),
 };
 const extra = args.extra ? args.extra.split(",").filter(Boolean) : [];
 const cmd = new Deno.Command(slicer, {

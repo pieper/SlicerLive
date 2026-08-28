@@ -14,9 +14,13 @@ async function main() {
   if (!(navigator as unknown as { gpu?: unknown }).gpu) { status("WebGPU not available"); return; }
   const p = new URLSearchParams(location.search);
   const host = p.get("host") ?? "localhost";
-  const guiUrl = p.get("gui") ?? `ws://${host}:2133/`;
-  const wsUrl = p.get("ws") ?? `ws://${host}:2132/`;
-  const httpBase = p.get("http") ?? `http://${host}:2131/mrson/`;
+  // Remote servers (S13): ?host=… picks ws/http, ?secure (or an https page) picks wss/https; ?token=… is
+  // appended to both WebSockets; ?gui/?ws/?http override the URLs entirely (proxied paths, tunnels).
+  const secure = p.has("secure") || location.protocol === "https:";
+  const withToken = (u: string) => (p.get("token") ? u + (u.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(p.get("token")!) : u);
+  const guiUrl = withToken(p.get("gui") ?? `${secure ? "wss" : "ws"}://${host}:2133/`);
+  const wsUrl = withToken(p.get("ws") ?? `${secure ? "wss" : "ws"}://${host}:2132/`);
+  const httpBase = p.get("http") ?? `${secure ? "https" : "http"}://${host}:2131/mrson/`;
   const nativeMenus = p.has("nativeMenus");
 
   const gpu = await initDevice();
@@ -29,6 +33,7 @@ async function main() {
 
   let menus: Menu[] = [];
   const gui = new LegacyGui(document.getElementById("gui")!, guiUrl, {
+    onStats: (st) => { const el = document.getElementById("link"); if (el) el.textContent = `${st.rttMs} ms · ${(st.bytesPerS / 1024).toFixed(0)} KB/s · ${st.codec}${st.codec === "png" ? "" : " q" + st.quality}`; },
     hideKinds: nativeMenus ? ["menubar"] : [],
     onViewport: (v) => {
       // the views container spans the whole window so cells can be placed in window coordinates

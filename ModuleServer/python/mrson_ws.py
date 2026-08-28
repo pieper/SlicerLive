@@ -3,6 +3,9 @@ AND binary frames. The framing helpers are the ones proven in LiveStoryLib/mrson
 binary send + a small server/client abstraction so gui_stream (and later the mrson peer) share it.
 ASCII only.
 """
+import os
+import re
+import urllib.parse
 import base64
 import hashlib
 import struct
@@ -76,11 +79,17 @@ class WsClient:
             header, _, rest = bytes(self.buf).partition(b"\r\n\r\n")
             self.buf = bytearray(rest)
             key = None
-            for line in header.decode("latin1").split("\r\n"):
+            lines = header.decode("latin1").split("\r\n")
+            for line in lines:
                 if line.lower().startswith("sec-websocket-key:"):
                     key = line.split(":", 1)[1].strip()
             if not key:
                 self.socket.close(); return
+            if self.server.token:                      # remote deployments: ws://host/?token=... (or wss behind a proxy)
+                m = re.search(r"[?&]token=([^&\s]+)", lines[0])
+                if not m or urllib.parse.unquote(m.group(1)) != self.server.token:
+                    self.socket.write(qt.QByteArray(b"HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n"))
+                    self.socket.close(); return
             resp = ("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                     "Sec-WebSocket-Accept: " + _accept_key(key) + "\r\n\r\n")
             self.socket.write(qt.QByteArray(resp.encode()))
@@ -110,8 +119,11 @@ class WsClient:
 
 
 class WsServer:
-    def __init__(self, port, on_message, on_close=None):
+    def __init__(self, port, on_message, on_close=None, token=None):
         self.port = port
+        # Shared secret every client must present as ?token= on the upgrade request. Default from the
+        # launcher's MODULESERVER_TOKEN; empty = open (local use).
+        self.token = token if token is not None else os.environ.get("MODULESERVER_TOKEN", "")
         self.on_message = on_message
         self.on_close = on_close
         self.clients = []
