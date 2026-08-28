@@ -24,6 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /opt/slicer && cd /opt/slicer \
  && for i in 1 2 3 4 5; do curl -sSL --retry 5 --retry-all-errors -C - -o slicer.tgz "$SLICER_URL" && break; sleep 5; done \
  && tar xzf slicer.tgz --strip-components=1 && rm slicer.tgz && test -x /opt/slicer/Slicer
+# runtime libs found missing on first launch (kept as a separate layer so the download layer stays cached)
+RUN apt-get update && apt-get install -y --no-install-recommends libglib2.0-0 libpulse-mainloop-glib0 libx11-6 libxext6 libxcb1 libxau6 libxdmcp6 \
+ && rm -rf /var/lib/apt/lists/*
 # ModuleServer code (import, don't copy: LiveStoryLib is the mrson serializer the peer uses)
 COPY ModuleServer/python /app/ModuleServer/python
 COPY LiveStory/LiveStoryLib /app/LiveStory/LiveStoryLib

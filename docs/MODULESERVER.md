@@ -452,9 +452,14 @@ Everything up to Slicer's main window works, and the diagnosis is exact, but the
   markers to `<state>.log` so a remote host can see them.
 
 Conclusion: not a SlicerLive/ModuleServer protocol problem — a Qt-thread-pool interaction with gVisor.
-Next for the remote demo: a real Linux host (JS2 GPU box) under Xvfb, or a Modal runtime without gVisor;
-the container recipe, launcher, token/wss and page parameters are ready for either. The `--probe` diag in
-`moduleserver_modal.py` is a reusable harness (marker files + strace/gdb-as-parent) for the next attempt.
+**Confirmed the same day on a real runtime:** the identical recipe as a Docker image
+(`ModuleServer/packaging/Dockerfile`, run on Colima with Rosetta for amd64) reaches READY in ~10 s with 100
+modules (`app,module` roles, xcb on Xvfb + Mesa, invisible), passes the protocol conformance scenarios 6/6
+against `ws://localhost:3132`, and the page (`?gui=ws://…:3133/&ws=ws://…:3132/&http=http://…:3131/mrson/`)
+streams its Welcome/Segment Editor chrome: RTT 9 ms through the VM, ~15–50 KB/s during a module switch,
+78 a11y nodes, click-by-name works. So the remote leg is a hosting question (any runc/VM host), not a
+code question; Modal specifically needs a non-gVisor runtime. The `--probe` diag in `moduleserver_modal.py`
+is a reusable harness (marker files + strace/gdb-as-parent) for the next sandbox.
 
 ## S14 status (2026-08-28): sandbox ladder
 
@@ -486,7 +491,8 @@ no exec) — the launcher seam and the probe contract are in place for them.
   nightly (or a pinned URL via `--build-arg SLICER_URL`), Xvfb + Mesa GLX, non-root user, read-only-friendly
   (`/session`, `/state`, `/tmp` are the only writable paths), health check on the READY state file, token
   via `MODULESERVER_TOKEN`. This is rung 2 of the sandbox ladder when run `--read-only --network` with a
-  proxy. Needs a real runtime (runc); see S13 for the gVisor deadlock.
+  proxy. Needs a real runtime (runc); see S13 for the gVisor deadlock. **Verified 2026-08-28** on Colima
+  (Rosetta, amd64): builds, READY in ~10 s, 100 modules, conformance 6/6, page streams the chrome.
 - **Desktop bundle**: `desktop/slicer-demo.ts` already hosts the stock UI; bundling a ModuleServer into
   `SlicerLive.app` = ship `ModuleServer/` + `LiveStory/LiveStoryLib` under `Contents/Resources`, launch with
   `launch.ts --sandbox seatbelt --session <SlicerLiveSessions/id>` as an unprivileged child, and point it at
