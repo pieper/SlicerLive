@@ -178,6 +178,18 @@ Remaining in S2: keyed multi-volume / multi-segmentation fields, a second 3D vie
 `SceneRenderer`), per-cell basis slots (cells beyond Red/Green/Yellow share the renderer's three
 orientation slots round-robin), and migrating `mirror-browser.ts` onto `mountLiveViews`.
 
+## Direction (2026-08-28, after dogfooding S0–S15)
+
+Tried end to end, the ModuleServer works at a baseline level but has lots of issues to sort out — and that
+is the point: it proves SlicerLive itself needs to be **fairly complete and take over most of the app**.
+The ModuleServer is **backwards compatibility only** (legacy extensions, rare modules), not where behavior
+should live. The real work from here is **porting**: transferring traditional Slicer behaviors (data
+loading/DICOM, layouts and view controllers, volumes/W-L, markups, segment editor, transforms, models,
+save/export, the core of module panels) into native SlicerLive — TS/WebGPU views, LiveScene +
+DisplayableManagers, web UI — each with a numeric parity oracle against real Slicer. Choosing between
+"make the ModuleServer handle X" and "implement X natively": pick native unless X is legacy-extension
+territory. ModuleServer maintenance stays minimal (bug fixes, compat).
+
 ## S3 status (2026-08-27): interaction completeness (first cut)
 New mrson node types `crosshair`, `interaction`, `selection` (serialize + observe; the interaction node
 fires `InteractionModeChangedEvent`, observed explicitly). Server ops: `crosshair #/cursorRAS`,
