@@ -44,6 +44,13 @@ async function inflateDeflate(buf: ArrayBuffer): Promise<ArrayBuffer> {
   return await new Response(new Response(buf).body!.pipeThrough(ds)).arrayBuffer();
 }
 
+/** Pluggable blob fetch: a SessionStore installs one that serves content-addressed blobs from its
+ *  blobs/ cache and tees network fetches into it. Default = plain fetch. */
+export type BlobFetch = (url: string) => Promise<Response>;
+let blobFetch: BlobFetch = (url) => fetch(url);
+export function setBlobFetch(f: BlobFetch | null): void { blobFetch = f ?? ((url) => fetch(url)); }
+export function getBlobFetch(): BlobFetch { return blobFetch; }
+
 /** Fetch + assemble a zarr volume into an f32 array (C-order z,y,x). `blobBase`
  *  is the URL prefix that `dir` is relative to. onBytes(n) reports each chunk's
  *  compressed size for a progress bar. */
@@ -86,7 +93,7 @@ export async function fetchZarrVolumeNative(
       // Stream the body so onBytes reports progress DURING the download — with
       // large (even single-chunk) volumes on a throttled store, an arrayBuffer()
       // wait looks like a hang to the user.
-      const resp = await fetch(chunkUrl(kk, jj, ii));
+      const resp = await blobFetch(chunkUrl(kk, jj, ii));
       let gz: ArrayBuffer;
       if (resp.body && onBytes) {
         const parts: Uint8Array[] = [];

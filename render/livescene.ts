@@ -12,7 +12,7 @@ import { FiducialField, type Sphere } from "./fiducial-field.ts";
 import { CapsuleField, type Segment as LineSegment } from "./capsule-field.ts";
 import { RoiBoxField } from "./roi-box-field.ts";
 import { ColorizeBaker } from "./bake.ts";
-import { fetchZarrVolume, type ZarrDesc, type ZarrVolume } from "./zarr.ts";
+import { fetchZarrVolume, getBlobFetch, type ZarrDesc, type ZarrVolume } from "./zarr.ts";
 import { lutFromTransferFunctions } from "./scene-volume.ts";
 import type { MrsonNode } from "./mrson.ts";
 import { applyOp, type ApplyResult, type Op } from "./liveops.ts";
@@ -783,8 +783,8 @@ export class ModelDisplayableManager implements DisplayableManager {
     this.loading.add(mesh.id);
     try {
       const [p, t] = await Promise.all([
-        fetch(new URL(mesh.points as string, this.blobBaseHref).href).then((r) => r.arrayBuffer()),
-        fetch(new URL(mesh.triangles as string, this.blobBaseHref).href).then((r) => r.arrayBuffer()),
+        getBlobFetch()(new URL(mesh.points as string, this.blobBaseHref).href).then((r) => r.arrayBuffer()),
+        getBlobFetch()(new URL(mesh.triangles as string, this.blobBaseHref).href).then((r) => r.arrayBuffer()),
       ]);
       this.geom.set(mesh.id, { key, positions: new Float32Array(p), indices: new Uint32Array(t) });
     } finally { this.loading.delete(mesh.id); }

@@ -319,6 +319,26 @@ were that, not the feature. The view-state copy in `live-views` is gone: app-lev
 Not yet: other effects' feedback (scissors polygon, level tracing), relative brush diameter (uses the
 absolute value the effect keeps updated), 3D-view painting, Erase-in-all-segments modes.
 
+## S10 status (2026-08-28): sessions store
+`render/sessions/`: `SessionFS` (memory / Deno / File System Access — the same class serves OPFS) and
+`SessionStore`: `session.json`, `scene.mrson.json` checkpoint, append-only `log/NNNN.ops.jsonl` (every
+`_changes` entry with seq/t/kind/op/origin/role, write-behind 500 ms), checkpoints every N deltas / 15 s,
+reopen = checkpoint + log tail, `bookmarks.json`, `branch(target, name, seq)` (new session dir seeded
+from the state at a seq, blobs shared by hash), an **undo/redo** stack (local edits only; a single-property
+edit undoes as an inverse `patch`, structural changes as `put`/`del`; drags coalesce within 300 ms) whose
+inverse ops go through `LiveScene.write`, so the connected app follows, and `exportActiveSet` ("save" =
+scene + exactly the reachable blobs). `render/moduleserver/session-ui.ts`: directory picker (handle
+persisted in IndexedDB, re-permissioned) or OPFS fallback (`?session=opfs`), ⌘Z/⌘⇧Z/⌘S/⌘B, and a blob-fetch
+hook (`zarr.setBlobFetch`) that serves content-addressed blobs from `blobs/` and tees fetches into it.
+Server: `put` on an existing id now updates it in place (undo/redo/reconcile need that; before it
+created a new node — the source of a "396" display node during testing).
+Verified: 3 Deno tests (close/reopen, undo/redo, export reachability + bookmark + branch); in Chrome on
+OPFS: session files + 12-entry log written, export of 31 nodes + 47 blobs (0 missing), W/L edit → undo →
+redo → undo with Slicer following each step.
+Not yet: desktop shell passing the absolute sessions path to a local ModuleServer, blob-cache warmup on
+open (blobs are cached as fetched), a session picker UI (sessions are auto-named), reset-on-reopen
+semantics when the app's scene differs from the session (today the app's snapshot is what loads).
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

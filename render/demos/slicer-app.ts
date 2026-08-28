@@ -6,6 +6,7 @@
 import { initDevice } from "../device.ts";
 import { LegacyGui, type Menu } from "../moduleserver/legacy-gui.ts";
 import { mountLiveViews } from "../moduleserver/live-views.ts";
+import { mountSessionUI } from "../moduleserver/session-ui.ts";
 
 const status = (m: string) => { const e = document.getElementById("status"); if (e) e.textContent = m; };
 
@@ -21,6 +22,9 @@ async function main() {
   const gpu = await initDevice();
   const viewsEl = document.getElementById("views")!;
   const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, onStatus: status });
+  // Sessions: ⌘Z/⌘⇧Z undo/redo, ⌘S export, ⌘B bookmark; ?session=opfs auto-opens browser storage
+  const session = mountSessionUI(views.live, { onStatus: status, blobBase: () => views.live.blobBase() });
+  if (p.get("session") === "opfs") void session.openOPFS();
 
   let menus: Menu[] = [];
   const gui = new LegacyGui(document.getElementById("gui")!, guiUrl, {
@@ -39,6 +43,6 @@ async function main() {
   });
   gui.connect();
   // host hooks (the Deno shell drives native menus through these)
-  Object.assign(globalThis, { __gui: gui, __views: views, __triggerAction: (id: string) => gui.triggerAction(id), __menuTree: () => menus });
+  Object.assign(globalThis, { __gui: gui, __views: views, __session: session, __triggerAction: (id: string) => gui.triggerAction(id), __menuTree: () => menus });
 }
 main().catch((e) => status("error: " + (e as Error).message));

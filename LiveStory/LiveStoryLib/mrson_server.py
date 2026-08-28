@@ -105,6 +105,27 @@ def _apply_put(op):
     node_m = op.get("node") or {}
     t = node_m.get("type")
     name = node_m.get("name") or ""
+    existing = slicer.mrmlScene.GetNodeByID(op.get("id") or "")
+    if existing is not None:
+        # put on an EXISTING id = replace its state in place (undo/redo, reconcile): apply every patchable
+        # property; markups get their control points rewritten.
+        import vtk
+        if t == "markup" and hasattr(existing, "RemoveAllControlPoints"):
+            existing.RemoveAllControlPoints()
+            for cp in node_m.get("controlPoints") or []:
+                pos = cp.get("position") if isinstance(cp, dict) else cp
+                if pos and len(pos) >= 3:
+                    idx = existing.AddControlPoint(vtk.vtkVector3d(float(pos[0]), float(pos[1]), float(pos[2])))
+                    if isinstance(cp, dict) and cp.get("label"):
+                        existing.SetNthControlPointLabel(idx, cp["label"])
+        for k, v in node_m.items():
+            if k in ("id", "type", "name", "source", "refs", "controlPoints", "markupType", "zarr", "dims", "ijkToRAS", "segments", "points", "triangles"):
+                continue
+            try:
+                _apply_patch(existing, "#/" + k, v)
+            except Exception:  # noqa: BLE001
+                pass
+        return existing.GetID()
     if t == "markup":
         cls = _MARKUP_CLASSES.get(node_m.get("markupType") or "fiducial")
         node = slicer.mrmlScene.AddNewNodeByClass(cls, name)
