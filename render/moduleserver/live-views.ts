@@ -21,7 +21,7 @@ import "./view-cmds.ts";   // registers setCursor / setSliceFrame / viewContextM
 import {
   CameraDisplayableManager, type CameraState, LayoutDisplayableManager, LiveScene, MarkupsDisplayableManager,
   type MirrorView, type OverlayItem, RoiCropDisplayableManager, SegmentationDisplayableManager, SliceDisplayableManager,
-  type SceneMeshData, type SlicePlane, type SliceLayers, ModelDisplayableManager, TransformDisplayableManager, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeLayersDisplayableManager, VolumeRenderingDisplayableManager,
+  type SceneMeshData, type SlicePlane, type SliceLayers, type ThreeDChrome, ModelDisplayableManager, ThreeDViewDisplayableManager, TransformDisplayableManager, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeLayersDisplayableManager, VolumeRenderingDisplayableManager,
 } from "../livescene.ts";
 
 export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
@@ -59,6 +59,53 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
 
   // ── 3D cell (view "1") ──
   const three = makeCell("3D", "3D", "#9fb3d0");
+  const threeOverlay = makeCanvas(three.el, "position:absolute;inset:0;width:100%;height:100%;pointer-events:none");
+  let chrome3d: ThreeDChrome | undefined;
+  const AXIS_LABELS: [Vec3, string][] = [[[1, 0, 0], "R"], [[-1, 0, 0], "L"], [[0, 1, 0], "A"], [[0, -1, 0], "P"], [[0, 0, 1], "S"], [[0, 0, -1], "I"]];
+  /** vtkMRMLViewDisplayableManager chrome: the scene bounding box, R/A/S/L/P/I labels, orientation marker. */
+  const drawThreeOverlay = () => {
+    const ov = threeOverlay, g = ov.getContext("2d")!;
+    if (ov.width !== three.canvas.width || ov.height !== three.canvas.height) { ov.width = three.canvas.width; ov.height = three.canvas.height; }
+    g.clearRect(0, 0, ov.width, ov.height);
+    if (!threeVisible || !chrome3d) return;
+    const w = ov.width, h = ov.height;
+    const proj = (p: Vec3) => camera.worldToDisplay(p, w, h);
+    // bounds: union of volume + mesh AABBs, else the default 100 mm box
+    let lo: Vec3 = [-100, -100, -100], hi: Vec3 = [100, 100, 100];
+    if (volumeField) [lo, hi] = volumeField.aabb().map((v) => [...v] as Vec3) as [Vec3, Vec3];
+    for (const m of meshes) { const b = m.positions; for (let i = 0; i < b.length; i += 3) { lo = [Math.min(lo[0], b[i]), Math.min(lo[1], b[i + 1]), Math.min(lo[2], b[i + 2])]; hi = [Math.max(hi[0], b[i]), Math.max(hi[1], b[i + 1]), Math.max(hi[2], b[i + 2])]; } if (b.length > 3000) break; }
+    if (chrome3d.boxVisible) {
+      g.strokeStyle = "rgba(255,255,255,0.75)"; g.lineWidth = 1 * dpr; g.beginPath();
+      const cs: Vec3[] = []; for (let i = 0; i < 8; i++) cs.push([i & 1 ? hi[0] : lo[0], i & 2 ? hi[1] : lo[1], i & 4 ? hi[2] : lo[2]]);
+      const P = cs.map(proj);
+      for (let i = 0; i < 8; i++) for (const bit of [1, 2, 4]) { const j = i | bit; if (j !== i && P[i].depth > 0 && P[j].depth > 0) { g.moveTo(P[i].x, P[i].y); g.lineTo(P[j].x, P[j].y); } }
+      g.stroke();
+    }
+    if (chrome3d.axisLabelsVisible) {
+      const c: Vec3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+      const half: Vec3 = [(hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2, (hi[2] - lo[2]) / 2];
+      g.font = `bold ${13 * dpr}px system-ui`; g.textAlign = "center"; g.textBaseline = "middle";
+      for (const [d, label] of AXIS_LABELS) {
+        const p = proj([c[0] + d[0] * half[0] * 1.08, c[1] + d[1] * half[1] * 1.08, c[2] + d[2] * half[2] * 1.08]);
+        if (p.depth <= 0) continue;
+        g.fillStyle = "rgba(0,0,0,0.6)"; g.beginPath(); g.arc(p.x, p.y, 10 * dpr, 0, Math.PI * 2); g.fill();
+        g.fillStyle = "#fff"; g.fillText(label, p.x, p.y);
+      }
+    }
+    if (chrome3d.orientationMarkerType > 0) drawOrientationMarker(g, w, h, (p: Vec3) => { const q = camera.worldToDisplay([camera.focalPoint[0] + p[0], camera.focalPoint[1] + p[1], camera.focalPoint[2] + p[2]], w, h); const f = camera.worldToDisplay(camera.focalPoint, w, h); return { dx: q.x - f.x, dy: q.y - f.y }; }, 1);
+  };
+  /** Corner orientation marker (axes glyph): world direction -> screen delta supplied by the caller. */
+  const drawOrientationMarker = (g: CanvasRenderingContext2D, w: number, h: number, dir: (p: Vec3) => { dx: number; dy: number }, scaleMm: number) => {
+    const size = 36 * dpr, cx = w - size - 10 * dpr, cy = h - size - 10 * dpr;
+    const axes: [Vec3, string, string][] = [[[1, 0, 0], "R", "#ff6b6b"], [[0, 1, 0], "A", "#6bff8f"], [[0, 0, 1], "S", "#6b9bff"]];
+    g.lineWidth = 2 * dpr; g.font = `bold ${11 * dpr}px system-ui`; g.textAlign = "center"; g.textBaseline = "middle";
+    for (const [d, label, col] of axes) {
+      const v = dir([d[0] * scaleMm, d[1] * scaleMm, d[2] * scaleMm]);
+      const l = Math.hypot(v.dx, v.dy) || 1; const ex = cx + (v.dx / l) * size * 0.8, ey = cy + (v.dy / l) * size * 0.8;
+      g.strokeStyle = col; g.beginPath(); g.moveTo(cx, cy); g.lineTo(ex, ey); g.stroke();
+      g.fillStyle = col; g.fillText(label, cx + (v.dx / l) * size, cy + (v.dy / l) * size);
+    }
+  };
   const camera = VtkCamera.slicerDefault();
   let scene: SceneRenderer | null = null;
   const fields3d = new Map<string, Field>();
@@ -77,6 +124,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     size: () => ({ w: threeVisible ? three.canvas.width : 0, h: three.canvas.height }),
     setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
     gpu, movingScaleCap: 0.4, target: 8,
+    onFrame: () => drawThreeOverlay(),
   });
   let meshes: SceneMeshData[] = [];
   const rebuild3d = () => {
@@ -114,6 +162,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     attachInteraction(c);
     return c;
   };
+  const fieldNames = new WeakMap<object, string>();
+  const imageName = (f: object) => fieldNames.get(f) ?? "";
   /** The background volume a cell reslices: its composite's background layer, else the legacy shared volume. */
   const bgField = (c: SliceCell): ImageField | null => c.layers?.background?.field ?? volumeField;
   /** Push a cell's layer stack (or the legacy shared volume) into its renderer. */
@@ -175,6 +225,30 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         }
       }
     }
+    // ── slice-view chrome: orientation marker, ruler, corner annotations (DataProbe's SliceViewAnnotations) ──
+    const chrome = c.plane.chrome;
+    if (chrome?.orientationMarkerType) drawOrientationMarker(g, ov.width, ov.height, (p) => { const o = c.slice.rasToView(c.orientKey, off, [0, 0, 0], aspect); const q = c.slice.rasToView(c.orientKey, off, p, aspect); return { dx: (q.u - o.u) * ov.width, dy: (q.v - o.v) * ov.height }; }, 10);
+    if (chrome?.rulerType) {
+      const f = c.slice.mirrorFrame(c.orientKey, aspect);          // mm across the view width
+      const mmPerPx = f.fovX / (ov.width / dpr);
+      const steps = [1, 2, 5, 10, 20, 50, 100, 200]; const targetPx = (ov.width / dpr) * 0.25;
+      const mm = steps.reduce((best, sMm) => Math.abs(sMm / mmPerPx - targetPx) < Math.abs(best / mmPerPx - targetPx) ? sMm : best, steps[0]);
+      const px = (mm / mmPerPx) * dpr, x0 = ov.width / 2 - px / 2, y = ov.height - 14 * dpr;
+      g.strokeStyle = "#fff"; g.lineWidth = (chrome.rulerType === 2 ? 3 : 1.5) * dpr; g.beginPath();
+      g.moveTo(x0, y); g.lineTo(x0 + px, y); g.moveTo(x0, y - 5 * dpr); g.lineTo(x0, y + 5 * dpr); g.moveTo(x0 + px, y - 5 * dpr); g.lineTo(x0 + px, y + 5 * dpr); g.stroke();
+      g.fillStyle = "#fff"; g.font = `${10 * dpr}px system-ui`; g.textAlign = "center"; g.textBaseline = "bottom"; g.fillText(mm >= 10 ? `${mm / 10} cm` : `${mm} mm`, x0 + px / 2, y - 3 * dpr);
+    }
+    {   // corner annotations: background/foreground names (top-left), offset + W/L (bottom-left)
+      const L = c.layers; const bgName = L?.background ? imageName(L.background.field) : (volumeField ? "volume" : "");
+      g.font = `${11 * dpr}px system-ui`; g.textAlign = "left"; g.textBaseline = "top"; g.fillStyle = "rgba(255,255,255,0.85)";
+      let y = 22 * dpr;
+      if (bgName) { g.fillText("B: " + bgName, 6 * dpr, y); y += 13 * dpr; }
+      if (L?.foreground) { g.fillText("F: " + imageName(L.foreground.field), 6 * dpr, y); y += 13 * dpr; }
+      if (L?.label) { g.fillText("L: " + imageName(L.label.field), 6 * dpr, y); }
+      g.textBaseline = "bottom";
+      const wl = L?.background ? `W:${L.background.win.toFixed(0)} L:${L.background.lev.toFixed(0)}` : legacyWL ? `W:${legacyWL.win.toFixed(0)} L:${legacyWL.lev.toFixed(0)}` : "";
+      g.fillText(`${c.plane.orient === "axial" ? "S" : c.plane.orient === "coronal" ? "A" : "R"}: ${c.plane.posMm.toFixed(1)} mm  ${wl}`, 6 * dpr, ov.height - 6 * dpr);
+    }
     const ch = viewState.crosshair;
     if (ch && (ch.mode as number) && ch.crosshairRAS) {           // full-view cross lines (Slicer's crosshair modes)
       const p = proj(ch.crosshairRAS as Vec3);
@@ -216,7 +290,12 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       a3d.draw();
     },
     setClipBox(lo, hi) { clip = lo ? { lo, hi: hi! } : null; if (scene) { if (clip) scene.setClipBox(clip.lo, clip.hi); else scene.setClipPlanes([]); } a3d.draw(); },
-    setSliceLayers(cell, layers) { const c = sliceCell(cell); c.layers = layers; renderSlice(c); },
+    setSliceLayers(cell, layers) {
+      const c = sliceCell(cell); c.layers = layers;
+      for (const l of [layers.background, layers.foreground, layers.label]) if (l && !fieldNames.has(l.field)) fieldNames.set(l.field, (l as { name?: string }).name ?? "");
+      renderSlice(c);
+    },
+    setViewChrome(ch) { chrome3d = ch; if (scene) scene.setBackground?.(ch.backgroundColor[0], ch.backgroundColor[1], ch.backgroundColor[2]); drawThreeOverlay(); a3d.draw(); },
     setMeshes(list) { meshes = list; if (scene) { scene.setMeshes(meshes); a3d.draw(); } else rebuild3d(); },
     setVolumeField(f, wl) {
       volumeField = f; legacyWL = wl;
@@ -236,7 +315,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const live = new LiveScene(cfg.httpBase, [
     new LayoutDisplayableManager(), new CameraDisplayableManager(), new VolumeRenderingDisplayableManager(gpu.device), new VolumeLayersDisplayableManager(gpu.device),
     new SliceDisplayableManager(), new SegmentationDisplayableManager(gpu.device, 1.5), markupsDM, new RoiCropDisplayableManager(),
-    new ViewStateDisplayableManager(), new TransformDisplayableManager(), new ModelDisplayableManager(),
+    new ViewStateDisplayableManager(), new TransformDisplayableManager(), new ModelDisplayableManager(), new ThreeDViewDisplayableManager(),
   ]);
   live.view = view;
   const sync = new LiveSync(live, new WsTransport(cfg.wsUrl));

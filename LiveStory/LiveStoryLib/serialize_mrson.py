@@ -391,6 +391,8 @@ def _slice_view_node(n, node_id):
         # dual to SetSliceOffset (the sliceToRAS translation encodes it, but the scalar round-trips).
         "offset": n.GetSliceOffset(),
         "fieldOfView": list(n.GetFieldOfView()), "source": {"mrmlClass": n.GetClassName()},
+        "sliceVisible": bool(n.GetSliceVisible()), "widgetVisible": bool(n.GetWidgetVisible()),
+        "useLabelOutline": bool(n.GetUseLabelOutline()), **_view_chrome(n),
     }
 
 
@@ -476,9 +478,19 @@ def _color_table_node(n, node_id, max_entries=4096):
             "continuous": continuous, "range": rng, "source": {"mrmlClass": n.GetClassName()}}
 
 
+def _view_chrome(n):
+    """Chrome every view type shares (vtkMRMLAbstractViewNode): orientation marker + ruler."""
+    return {"orientationMarkerType": int(n.GetOrientationMarkerType()), "orientationMarkerSize": int(n.GetOrientationMarkerSize()),
+            "rulerType": int(n.GetRulerType()), "rulerColor": int(n.GetRulerColor()) if hasattr(n, "GetRulerColor") else 0}
+
+
 def _3d_view_node(n, node_id):
     node = {"type": "view", "id": node_id, "name": n.GetName(), "kind": "3d",
             "layoutName": n.GetLayoutName(), "refs": _transform_ref(n), "source": {"mrmlClass": n.GetClassName()}}
+    node.update({"boxVisible": bool(n.GetBoxVisible()), "axisLabelsVisible": bool(n.GetAxisLabelsVisible()),
+                 "backgroundColor": list(n.GetBackgroundColor()), "backgroundColor2": list(n.GetBackgroundColor2()),
+                 "fiducialsVisible": bool(n.GetFiducialsVisible()), "fiducialLabelsVisible": bool(n.GetFiducialLabelsVisible())})
+    node.update(_view_chrome(n))
     for cam in slicer.util.getNodesByClass("vtkMRMLCameraNode"):
         # match camera->view by layout name (GetActiveTag() is deprecated and, being a
         # vtkDeprecation warning, prints to the Python console on EVERY call → main-thread repaint)

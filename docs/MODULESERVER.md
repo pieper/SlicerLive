@@ -278,6 +278,27 @@ composited in front/behind.
 Not yet: model slice intersections (contours in slice views), per-vertex normals/scalars, wireframe/
 points representations, edge visibility, clipping of meshes by the ROI, mesh picking.
 
+## S8 status (2026-08-27): view chrome
+mrson `view` nodes carry the chrome (`boxVisible`, `axisLabelsVisible`, `backgroundColor[2]`,
+`fiducialsVisible`, `orientationMarkerType/Size`, `rulerType`; slice nodes also `sliceVisible`,
+`widgetVisible`, `useLabelOutline`) with patches. Client: `ThreeDViewDisplayableManager` → a 2D overlay
+on the 3D cell draws the scene bounding box (volume ∪ meshes), R/A/S/L/P/I labels and the axes
+orientation marker after every 3D frame, and the app's background colour is applied; slice cells draw
+their orientation marker, a ruler (nice 1/2/5 mm steps from the frame's mm/px), and corner annotations
+(B:/F:/L: layer names, slice offset, W/L); ROI markups render as a wireframe (`RoiBoxField`) and control
+point glyphs honour `glyphScale`.
+Not yet: colour legend, slice planes in 3D, the reformat widget, per-view visibility of markups
+(`fiducialsVisible`), human/cube marker styles (all types draw the axes glyph).
+
+## Known issues (to clean up after the steps)
+- **Event staging** in the streamed GUI (reported by Steve while testing): pointer/key ordering and
+  latency need a pass — candidates: paint-driven capture vs event coalescing on the client, the
+  200 ms frame debounce, and hover→tooltip timing.
+- **Quit must be intercepted by the host**: a Quit reaching the headless Slicer opens the modal
+  "save scene before exit?" dialog and blocks the server (seen 2026-08-27; cancelled over MCP). The
+  host should own Quit (close the page/window, stop the server) and the AppServer should answer that
+  dialog by policy.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

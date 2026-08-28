@@ -155,8 +155,21 @@ def _apply_patch(node, path, value):
         if k0 == "parallelScale": node.GetCamera().SetParallelScale(float(value)); node.Modified(); return True
         return False
 
+    if cls in ("vtkMRMLSliceNode", "vtkMRMLViewNode"):       # chrome shared by every view node
+        if k0 == "orientationMarkerType": node.SetOrientationMarkerType(int(value)); return True
+        if k0 == "orientationMarkerSize": node.SetOrientationMarkerSize(int(value)); return True
+        if k0 == "rulerType": node.SetRulerType(int(value)); return True
+    if cls == "vtkMRMLViewNode":
+        if k0 == "boxVisible": node.SetBoxVisible(1 if value else 0); return True
+        if k0 == "axisLabelsVisible": node.SetAxisLabelsVisible(1 if value else 0); return True
+        if k0 == "backgroundColor" and isinstance(value, (list, tuple)) and len(value) >= 3: node.SetBackgroundColor(float(value[0]), float(value[1]), float(value[2])); return True
+        if k0 == "backgroundColor2" and isinstance(value, (list, tuple)) and len(value) >= 3: node.SetBackgroundColor2(float(value[0]), float(value[1]), float(value[2])); return True
+        return False
     if cls == "vtkMRMLSliceNode":
         # dual of serialize_mrson._slice_view_node: out-of-plane scroll + in-plane zoom.
+        if k0 == "sliceVisible": node.SetSliceVisible(1 if value else 0); return True
+        if k0 == "widgetVisible": node.SetWidgetVisible(1 if value else 0); return True
+        if k0 == "useLabelOutline": node.SetUseLabelOutline(1 if value else 0); return True
         if k0 == "offset": node.SetSliceOffset(float(value)); return True
         if k0 == "fieldOfView" and isinstance(value, (list, tuple)) and len(value) >= 3:
             node.SetFieldOfView(float(value[0]), float(value[1]), float(value[2])); node.UpdateMatrices(); return True

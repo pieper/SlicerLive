@@ -10,6 +10,7 @@
 import { type Field, ImageField, RGBAVolumeField } from "./fields.ts";
 import { FiducialField, type Sphere } from "./fiducial-field.ts";
 import { CapsuleField, type Segment as LineSegment } from "./capsule-field.ts";
+import { RoiBoxField } from "./roi-box-field.ts";
 import { ColorizeBaker } from "./bake.ts";
 import { fetchZarrVolume, type ZarrDesc, type ZarrVolume } from "./zarr.ts";
 import { lutFromTransferFunctions } from "./scene-volume.ts";
@@ -27,6 +28,8 @@ export interface SlicePlane {
   /** Oblique / Reformat: the slice node's actual (u, v, n) RAS basis from sliceToRAS. Absent for the
    *  anatomical presets. When present, posMm is the signed distance along nDir. */
   basis?: { uDir: Vec3; vDir: Vec3; nDir: Vec3 };
+  /** view chrome (vtkMRMLAbstractViewNode): orientation marker type (0 none,1 cube,2 human,3 axes), ruler type (0 none,1 thin,2 thick) */
+  chrome?: { orientationMarkerType: number; orientationMarkerSize: number; rulerType: number };
   // Slicer's in-plane navigation, mirrored: the slice centre (RAS) + field of view (mm).
   // Present when the slice node carries them → the view matches Slicer's pan + zoom; absent →
   // the fitted (FitSliceToBackground) view.
@@ -43,17 +46,24 @@ export type OverlayItem =
   | { kind: "polyline"; points: Vec3[]; color: number[]; widthPx?: number; closed?: boolean }
   | { kind: "text"; ras: Vec3; text: string; color: number[] };
 
-export interface ScalarLayer { field: ImageField; win: number; lev: number; lut?: Uint8Array; interpolate?: boolean }
+export interface ScalarLayer { field: ImageField; win: number; lev: number; lut?: Uint8Array; interpolate?: boolean; name?: string }
 export interface SliceLayers {
   background?: ScalarLayer;
   foreground?: ScalarLayer & { opacity: number; compositing: number };
-  label?: { field: ImageField; table: Uint8Array; opacity: number };
+  label?: { field: ImageField; table: Uint8Array; opacity: number; name?: string };
   linked?: boolean;
 }
 
 export interface SceneMeshData { id: string; positions: Float32Array; indices: Uint32Array; color: [number, number, number]; opacity: number }
 
+export interface ThreeDChrome {
+  id: string; layoutName: string; boxVisible: boolean; axisLabelsVisible: boolean;
+  backgroundColor: number[]; backgroundColor2: number[]; orientationMarkerType: number; rulerType: number;
+}
+
 export interface MirrorView {
+  /** 3D view chrome (optional): box, axis labels, background gradient, orientation marker, ruler. */
+  setViewChrome?(chrome: ThreeDChrome): void;
   /** Per-view 2D overlays (optional): `cell` = a slice cell name or "*" for every slice cell;
    *  `layer` namespaces one producer (e.g. "markups"); [] clears the layer. */
   setOverlay?(cell: string, layer: string, items: OverlayItem[]): void;
@@ -339,7 +349,20 @@ export class MarkupsDisplayableManager implements DisplayableManager {
   private spheresFor(node: MrsonNode): Sphere[] {
     const col = (node.color as number[]) ?? [1, 0.85, 0.2, 1];
     const cps = (node.controlPoints as { position: number[] }[] | undefined) ?? [];
-    return cps.map((cp) => ({ center: cp.position as Vec3, radius: 9, color: [col[0], col[1], col[2], 1] }));
+    const radius = 3 * ((node.glyphScale as number) ?? 3);   // Slicer: glyphScale is % of view height; default 3 -> ~9 px
+    return cps.map((cp) => ({ center: cp.position as Vec3, radius, color: [col[0], col[1], col[2], 1] }));
+  }
+  private roiFields = new Map<string, RoiBoxField>();
+  private syncRoi(node: MrsonNode, scene: LiveScene) {
+    const key = "roi:" + node.id;
+    if (node.markupType !== "roi" || node.visible === false || !node.center || !node.size) {
+      if (this.roiFields.delete(key)) scene.view?.removeField(key);
+      return;
+    }
+    const c = node.center as Vec3, sz = node.size as Vec3, col = (node.color as number[]) ?? [1, 0.85, 0.25, 1];
+    const f = new RoiBoxField(c, [sz[0] / 2, sz[1] / 2, sz[2] / 2], { color: [col[0], col[1], col[2]] });
+    this.roiFields.set(key, f);
+    scene.view?.setField(key, f);
   }
   /** Per-type connector geometry: line/angle connect consecutive control points; curve/closedCurve
    *  use Slicer's interpolated world polyline (closedCurve wraps); plane uses its 4 world corners. */
@@ -437,7 +460,7 @@ export class MarkupsDisplayableManager implements DisplayableManager {
   }
 
   onNodeAdded(node: MrsonNode, scene: LiveScene) {
-    if (node.markupType === "roi") return;                 // ROI crop is RoiCropDM's job
+    if (node.markupType === "roi") { this.syncRoi(node, scene); return; }   // wireframe here; the VR crop is RoiCropDM's job
     if (node.visible === false) { this.onNodeRemoved(node.id, scene); return; }
     if (this.isHeld(node.id)) return;                      // keep the local optimistic drag state
     const first = !this.field;
@@ -445,6 +468,7 @@ export class MarkupsDisplayableManager implements DisplayableManager {
     this.refresh(scene, first);
   }
   onNodeRemoved(id: string, scene: LiveScene) {
+    if (this.roiFields.delete("roi:" + id)) scene.view?.removeField("roi:" + id);
     if (!this.nodes.delete(id) || !this.field) return;
     this.field.setSpheres(this.allSpheres());
     this.lines?.setSegments(this.allSegments());
@@ -530,6 +554,7 @@ export class SliceDisplayableManager implements DisplayableManager {
       : { orient, posMm: trans[0] * nDir[0] + trans[1] * nDir[1] + trans[2] * nDir[2], basis: { uDir, vDir, nDir } };
     const fov = node.fieldOfView as number[] | undefined;   // [fovX, fovY, slabThickness] mm — Slicer's zoom
     if (fov && fov.length >= 2 && fov[0] > 0 && fov[1] > 0) { plane.centerRAS = trans; plane.fovX = fov[0]; plane.fovY = fov[1]; }
+    plane.chrome = { orientationMarkerType: (node.orientationMarkerType as number) ?? 0, orientationMarkerSize: (node.orientationMarkerSize as number) ?? 20, rulerType: (node.rulerType as number) ?? 0 };
     scene.view?.setSlicePlane(cell, plane);
   }
 }
@@ -562,6 +587,20 @@ export class TransformDisplayableManager implements DisplayableManager {
   onNodeAdded(node: MrsonNode) { this.nodes.set(node.id, node); }
   onNodeRemoved(id: string) { this.nodes.delete(id); }
   onSceneClosed() { this.nodes.clear(); }
+}
+
+/** Mirrors vtkMRMLViewDisplayableManager's chrome: box, axis labels, background, orientation marker, ruler. */
+export class ThreeDViewDisplayableManager implements DisplayableManager {
+  interestedTypes = ["view"];
+  onNodeAdded(node: MrsonNode, scene: LiveScene) {
+    if (node.type !== "view" || node.kind !== "3d") return;
+    scene.view?.setViewChrome?.({
+      id: node.id, layoutName: node.layoutName as string,
+      boxVisible: node.boxVisible !== false, axisLabelsVisible: node.axisLabelsVisible !== false,
+      backgroundColor: (node.backgroundColor as number[]) ?? [0.76, 0.76, 0.91], backgroundColor2: (node.backgroundColor2 as number[]) ?? [0.45, 0.45, 0.6],
+      orientationMarkerType: (node.orientationMarkerType as number) ?? 0, rulerType: (node.rulerType as number) ?? 0,
+    });
+  }
 }
 
 /** Mirrors the application layout (which views are shown, and how). */
@@ -856,7 +895,7 @@ export class VolumeLayersDisplayableManager implements DisplayableManager {
     const range = e.zv?.range ?? [0, 1];
     const win = (d?.window as number) ?? (range[1] - range[0]);
     const lev = (d?.level as number) ?? (range[0] + range[1]) / 2;
-    return { field: e.field, win, lev, lut: this.lutFor(d), interpolate: (d?.interpolate as boolean) ?? true };
+    return { field: e.field, win, lev, lut: this.lutFor(d), interpolate: (d?.interpolate as boolean) ?? true, name: e.node.name as string };
   }
   private async refresh(scene: LiveScene): Promise<void> {
     const view = scene.view;
@@ -872,7 +911,7 @@ export class VolumeLayersDisplayableManager implements DisplayableManager {
         const e = this.images.get(lid);
         if (e && !e.field) void this.ensureField(lid, scene);
         const table = this.labelTableFor(e ? this.displayFor(e.node) : undefined);
-        if (e?.field && table) layers.label = { field: e.field, table, opacity: (comp.labelOpacity as number) ?? 1 };
+        if (e?.field && table) layers.label = { field: e.field, table, opacity: (comp.labelOpacity as number) ?? 1, name: e.node.name as string };
       }
       view.setSliceLayers(layoutName, layers);
     }
