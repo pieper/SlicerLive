@@ -563,18 +563,19 @@ export class SliceDisplayableManager implements DisplayableManager {
  *  interaction (viewTransform / place / adjustWindowLevel), selection (what to place, active volumes)
  *  and the crosshair (mode, thickness, cursor + crosshair RAS). Exposes them to the view host via
  *  MirrorView.setViewState (optional) and keeps the latest copies for interaction code to read. */
-export interface ViewState { interaction?: MrsonNode; selection?: MrsonNode; crosshair?: MrsonNode }
+export interface ViewState { interaction?: MrsonNode; selection?: MrsonNode; crosshair?: MrsonNode; segmentEditor?: MrsonNode }
 export class ViewStateDisplayableManager implements DisplayableManager {
-  interestedTypes = ["interaction", "selection", "crosshair"];
+  interestedTypes = ["interaction", "selection", "crosshair", "segmentEditor"];
   state: ViewState = {};
   private push(scene: LiveScene) { (scene.view as MirrorView & { setViewState?: (s: ViewState) => void })?.setViewState?.(this.state); }
   onNodeAdded(node: MrsonNode, scene: LiveScene) {
     if (node.type === "interaction") this.state.interaction = node;
     else if (node.type === "selection") this.state.selection = node;
     else if (node.type === "crosshair") this.state.crosshair = node;
+    else if (node.type === "segmentEditor") this.state.segmentEditor = node;
     this.push(scene);
   }
-  onSceneClosed(scene: LiveScene) { this.state = {}; this.push(scene); }
+  onSceneClosed(scene: LiveScene) { for (const k of Object.keys(this.state)) delete (this.state as Record<string, unknown>)[k]; this.push(scene); }   // same object: views hold a reference
 }
 
 /** Keeps the transform nodes (linear matrices, parent refs). World geometry is baked into every

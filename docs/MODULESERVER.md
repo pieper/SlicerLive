@@ -299,6 +299,26 @@ Not yet: colour legend, slice planes in 3D, the reformat widget, per-view visibi
   host should own Quit (close the page/window, stop the server) and the AppServer should answer that
   dialog by policy.
 
+## S9 status (2026-08-27): segment-editor in-view feedback
+Users paint in SlicerLive's cells, so the direction is the reverse of the old capture: mrson
+`segmentEditor` node (active effect, selected segment, segmentation/source refs, brush params) streams
+from Slicer's `vtkMRMLSegmentEditorNode`; the client draws the brush circle (diameter from
+`BrushAbsoluteDiameter`, cursor hidden) and, while Paint/Erase is active, turns a left drag into
+`segPaint {points, mode, diameterMm, sphere, normal}` batches (initial dab + ~60 ms increments +
+final flush), drawing the in-progress stroke as a translucent tube until the labelmap echo lands.
+Server: rasterises the polyline brush (disk in the view plane or sphere) into the active effect's
+`defaultModifierLabelmap()` and calls `effect.modifySelectedSegmentByLabelmap(lm, Add|Remove)` with
+`saveStateForUndo()` first — exactly what Paint/Erase do, so the result and undo history are Slicer's.
+Verified: a drag in the Red cell grew the segment 261 → 554 voxels; Slicer's echoed labelmap overlay
+appears in the SlicerLive views.
+Learned: the effect API lives on `qSlicerSegmentEditorAbstractEffect` (`w.activeEffect()`), not the widget;
+Slicer clears the active effect when the editor widget re-initialises; my CDP helper hung on
+`location.reload()` evals (fixed: `Page.reload` helper + eval timeout) — several earlier "no-op" results
+were that, not the feature. The view-state copy in `live-views` is gone: app-level state is read from
+`live.nodes` (the model) directly.
+Not yet: other effects' feedback (scissors polygon, level tracing), relative brush diameter (uses the
+absolute value the effect keeps updated), 3D-view painting, Erase-in-all-segments modes.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

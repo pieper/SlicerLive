@@ -30,3 +30,9 @@ registerCmd("placeAt", (node, args) => {
   (node as Record<string, unknown>).placeRequest = { ras: args.ras, at: Date.now() };
   return true;
 });
+
+registerCmd("segPaint", (node, args) => {
+  // a paint/erase stroke for the app's segment editor; the labelmap echo is the authoritative result
+  (node as Record<string, unknown>).lastStroke = { n: (args.points as unknown[] | undefined)?.length ?? 0, at: Date.now(), seq: args.seq };
+  return true;
+});

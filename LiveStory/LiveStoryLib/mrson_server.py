@@ -307,6 +307,76 @@ def _apply_patch(node, path, value):
 
 
 def _apply_cmd(node, cmd, args):
+    if cmd == "segPaint" and node is not None and node.GetClassName() == "vtkMRMLSegmentEditorNode":
+        # A paint/erase stroke drawn in a SlicerLive view: rasterise the brush along the polyline into the
+        # editor widget's modifier labelmap (the segmentation's own geometry) and apply it exactly the way
+        # the Paint/Erase effects do (modifySelectedSegmentByLabelmap) -- so the result IS Slicer's.
+        import vtk
+        import numpy as np
+        from vtk.util import numpy_support as ns
+        w = slicer.modules.segmenteditor.widgetRepresentation().self().editor
+        if w.mrmlSegmentEditorNode() is None or w.mrmlSegmentEditorNode().GetID() != node.GetID():
+            w.setMRMLSegmentEditorNode(node)
+        pts = args.get("points") or []
+        if not pts or not node.GetSegmentationNode() or not node.GetSelectedSegmentID():
+            return False
+        effect = (node.GetActiveEffectName() or "").lower()
+        mode = args.get("mode") or ("remove" if effect.startswith("erase") else "add")
+        diam = float(args.get("diameterMm") or node.GetAttribute("BrushAbsoluteDiameter") or 5.0)
+        sphere = str(args.get("sphere", node.GetAttribute("BrushSphere"))).lower() in ("1", "true")
+        eff = w.activeEffect()                          # the effect owns the modifier labelmap + apply API
+        if eff is None:
+            return False
+        lm = eff.defaultModifierLabelmap()             # vtkOrientedImageData in the segmentation geometry
+        if lm is None:
+            return False
+        try: eff.saveStateForUndo()
+        except Exception: pass  # noqa: BLE001
+        dims = lm.GetDimensions()
+        w2i = vtk.vtkMatrix4x4(); lm.GetWorldToImageMatrix(w2i)
+        sp = lm.GetSpacing()
+        arr = np.zeros((dims[2], dims[1], dims[0]), dtype=np.uint8)
+        r = diam / 2.0
+        # per-axis radius in voxels; disk = in-plane only (slice normal from the view basis), sphere = 3D
+        n_ras = args.get("normal")
+        def ijk(p):
+            q = w2i.MultiplyPoint([float(p[0]), float(p[1]), float(p[2]), 1.0]); return np.array(q[:3])
+        # densify the polyline so consecutive dabs overlap
+        dense = []
+        for i, p in enumerate(pts):
+            if i == 0: dense.append(np.array(p, dtype=float)); continue
+            a = np.array(pts[i - 1], dtype=float); b = np.array(p, dtype=float)
+            n = max(1, int(np.linalg.norm(b - a) / max(r * 0.5, 0.25)))
+            for k in range(1, n + 1): dense.append(a + (b - a) * (k / n))
+        rv = np.array([r / sp[0], r / sp[1], r / sp[2]])
+        for p in dense:
+            c = ijk(p)
+            lo = np.maximum(np.floor(c - rv - 1), 0).astype(int); hi = np.minimum(np.ceil(c + rv + 1), np.array(dims) - 1).astype(int)
+            if np.any(hi < lo): continue
+            I, J, K = np.meshgrid(np.arange(lo[0], hi[0] + 1), np.arange(lo[1], hi[1] + 1), np.arange(lo[2], hi[2] + 1), indexing="ij")
+            d = ((I - c[0]) * sp[0]) ** 2 + ((J - c[1]) * sp[1]) ** 2 + ((K - c[2]) * sp[2]) ** 2
+            if not sphere and n_ras is not None:
+                # disk: keep only voxels within half a voxel of the plane through p with normal n
+                nn = np.array(n_ras, dtype=float); nn /= (np.linalg.norm(nn) or 1.0)
+                offs = ((I - c[0]) * sp[0] * nn[0]) ** 0 * 0  # placeholder to keep shapes
+                # world offsets of voxel centres relative to p along the normal (approx: axis-aligned spacing)
+                dx = (I - c[0]) * sp[0]; dy = (J - c[1]) * sp[1]; dz = (K - c[2]) * sp[2]
+                # image axes are not necessarily RAS axes; convert via the image-to-world matrix columns
+                i2w = vtk.vtkMatrix4x4(); lm.GetImageToWorldMatrix(i2w)
+                ax = np.array([[i2w.GetElement(rr, cc) for cc in range(3)] for rr in range(3)])
+                along = ((I - c[0]) * ax[:, 0][0] + (J - c[1]) * ax[:, 1][0] + (K - c[2]) * ax[:, 2][0]) * nn[0] + \
+                        ((I - c[0]) * ax[:, 0][1] + (J - c[1]) * ax[:, 1][1] + (K - c[2]) * ax[:, 2][1]) * nn[1] + \
+                        ((I - c[0]) * ax[:, 0][2] + (J - c[1]) * ax[:, 1][2] + (K - c[2]) * ax[:, 2][2]) * nn[2]
+                mask = (d <= r * r) & (np.abs(along) <= max(sp) * 0.5)
+            else:
+                mask = d <= r * r
+            sub = arr[lo[2]:hi[2] + 1, lo[1]:hi[1] + 1, lo[0]:hi[0] + 1]
+            sub |= np.transpose(mask, (2, 1, 0)).astype(np.uint8)
+        vtk_arr = ns.numpy_to_vtk(arr.ravel(order="C"), deep=True, array_type=vtk.VTK_UNSIGNED_CHAR)
+        lm.GetPointData().SetScalars(vtk_arr)
+        modeEnum = slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeRemove if mode == "remove" else slicer.qSlicerSegmentEditorAbstractEffect.ModificationModeAdd
+        eff.modifySelectedSegmentByLabelmap(lm, modeEnum)
+        return True
     if cmd == "placeAt" and node is not None and node.GetClassName() == "vtkMRMLInteractionNode":
         # Place mode, server-authoritative: exactly what vtkMRMLMarkupsDisplayableManager does on a click
         # in a view -- use the selection node's active place class / node (creating the node if needed),

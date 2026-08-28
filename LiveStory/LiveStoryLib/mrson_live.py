@@ -108,6 +108,7 @@ _CLASS_TYPE = {
     "vtkMRMLInteractionNode": "interaction",
     "vtkMRMLSelectionNode": "selection",
     "vtkMRMLSliceCompositeNode": "sliceComposite",
+    "vtkMRMLSegmentEditorNode": "segmentEditor",
     "vtkMRMLLinearTransformNode": "transform", "vtkMRMLTransformNode": "transform",
     "vtkMRMLGridTransformNode": "transform", "vtkMRMLBSplineTransformNode": "transform",
     "vtkMRMLLabelMapVolumeNode": "image",
@@ -166,6 +167,8 @@ def _node_event(node):
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._layout_node(node, nid)}
     if t == "transform":
         return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._transform_node(node, nid)}
+    if t == "segmentEditor":
+        return {"event": "NodeAdded", "sourceId": nid, "nodeClass": cls, "node": M._segment_editor_node(node, nid)}
     if t == "mesh":
         import os
         dn0 = node.GetDisplayNode()

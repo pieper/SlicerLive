@@ -155,6 +155,10 @@ def _displays_for(displayable):
 # ---- displayable + other nodes ---------------------------------------------
 
 def _image_node(vol, node_id, blobdir):
+    if vol.GetImageData() is None:                      # a volume without voxels yet (e.g. a freshly created node)
+        return {"type": "image", "id": node_id, "name": vol.GetName(), "frame": "RAS", "dims": [0, 0, 0], "comps": 1,
+                "ijkToRAS": S._volume_ijk_to_ras(vol), "labelmap": vol.GetClassName() == "vtkMRMLLabelMapVolumeNode",
+                "refs": _transform_ref(vol), "source": {"mrmlClass": vol.GetClassName()}}
     arr = slicer.util.arrayFromVolume(vol)
     return {
         "type": "image", "id": node_id, "name": vol.GetName(), "frame": "RAS",
@@ -484,6 +488,23 @@ def _view_chrome(n):
             "rulerType": int(n.GetRulerType()), "rulerColor": int(n.GetRulerColor()) if hasattr(n, "GetRulerColor") else 0}
 
 
+_BRUSH_KEYS = ("BrushAbsoluteDiameter", "BrushRelativeDiameter", "BrushDiameterIsRelative", "BrushSphere",
+               "BrushPixelMode", "Paint.EditMode", "Erase.EditMode", "ColorSmudge", "BrushMinimumAbsoluteDiameter")
+
+
+def _segment_editor_node(n, node_id):
+    seg = n.GetSegmentationNode(); src = n.GetSourceVolumeNode() if hasattr(n, "GetSourceVolumeNode") else None
+    params = {}
+    for k in _BRUSH_KEYS:
+        v = n.GetAttribute(k)
+        if v is not None:
+            params[k] = v
+    return {"type": "segmentEditor", "id": node_id, "name": n.GetName(),
+            "activeEffect": n.GetActiveEffectName() or "", "selectedSegmentID": n.GetSelectedSegmentID() or "",
+            "refs": {**({"segmentation": [seg.GetID()]} if seg else {}), **({"sourceVolume": [src.GetID()]} if src else {})},
+            "params": params, "source": {"mrmlClass": n.GetClassName()}}
+
+
 def _3d_view_node(n, node_id):
     node = {"type": "view", "id": node_id, "name": n.GetName(), "kind": "3d",
             "layoutName": n.GetLayoutName(), "refs": _transform_ref(n), "source": {"mrmlClass": n.GetClassName()}}
@@ -558,7 +579,7 @@ def serialize_mrson(outdir, name):
               ("vtkMRMLSliceNode", _slice_view_node), ("vtkMRMLViewNode", _3d_view_node),
               ("vtkMRMLCrosshairNode", _crosshair_node), ("vtkMRMLInteractionNode", _interaction_node),
               ("vtkMRMLSelectionNode", _selection_node), ("vtkMRMLSliceCompositeNode", _slice_composite_node),
-              ("vtkMRMLTransformNode", _transform_node)]
+              ("vtkMRMLTransformNode", _transform_node), ("vtkMRMLSegmentEditorNode", _segment_editor_node)]
     for cls, build in simple:
         for n in slicer.util.getNodesByClass(cls):
             if n.GetID() in nodes:

@@ -142,8 +142,11 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const cells = new Map<string, SliceCell>();
   let segOverlay: GPUTexture | null = null, segFill = 0.5, segOutline = 1.0;
   const overlays = new Map<string, OverlayItem[]>();   // layer -> items (cell "*")
-  let viewState: ViewState = {};                          // interaction / selection / crosshair nodes
-  const interactionMode = () => (viewState.interaction?.mode as string | undefined) ?? "viewTransform";
+  const viewStateDM = new ViewStateDisplayableManager();  // interaction / selection / crosshair / segmentEditor nodes
+  const viewState: ViewState = viewStateDM.state;         // read the manager's state directly (never a stale copy)
+  // Read app-level state straight from the model (live.nodes): the single source of truth, never a stale copy.
+  const stateNode = (type: string) => live.find(type);
+  const interactionMode = () => (stateNode("interaction")?.mode as string | undefined) ?? "viewTransform";
   let nextOrient = 0;
   const ORIENTS: Orientation[] = ["axial", "coronal", "sagittal"];
 
@@ -249,7 +252,20 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       const wl = L?.background ? `W:${L.background.win.toFixed(0)} L:${L.background.lev.toFixed(0)}` : legacyWL ? `W:${legacyWL.win.toFixed(0)} L:${legacyWL.lev.toFixed(0)}` : "";
       g.fillText(`${c.plane.orient === "axial" ? "S" : c.plane.orient === "coronal" ? "A" : "R"}: ${c.plane.posMm.toFixed(1)} mm  ${wl}`, 6 * dpr, ov.height - 6 * dpr);
     }
-    const ch = viewState.crosshair;
+    // ── segment editor feedback: brush circle at the cursor + the stroke being painted (until the labelmap echo lands) ──
+    if (brushEffect() && (brushCursor?.cell === c || brushStroke?.cell === c)) {
+      const f = c.slice.mirrorFrame(c.orientKey, aspect); const pxPerMm = ov.width / f.fovX;
+      const rPx = (brushDiameterMm() / 2) * pxPerMm;
+      const col = brushEffect() === "remove" ? "rgba(255,80,80,0.9)" : "rgba(255,255,80,0.9)";
+      if (brushStroke?.cell === c && brushStroke.points.length) {
+        g.strokeStyle = brushEffect() === "remove" ? "rgba(255,80,80,0.35)" : "rgba(255,255,80,0.35)"; g.lineWidth = rPx * 2; g.lineCap = "round"; g.lineJoin = "round"; g.beginPath();
+        brushStroke.points.forEach((p, i) => { const q = proj(p); if (i === 0) g.moveTo(q.x, q.y); else g.lineTo(q.x, q.y); });
+        if (brushStroke.points.length === 1) { const q = proj(brushStroke.points[0]); g.lineTo(q.x + 0.01, q.y); }
+        g.stroke(); g.lineCap = "butt"; g.lineJoin = "miter";
+      }
+      if (brushCursor?.cell === c) { const q = proj(brushCursor.ras); g.strokeStyle = col; g.lineWidth = 1.5 * dpr; g.beginPath(); g.arc(q.x, q.y, rPx, 0, Math.PI * 2); g.stroke(); }
+    }
+    const ch = stateNode("crosshair");
     if (ch && (ch.mode as number) && ch.crosshairRAS) {           // full-view cross lines (Slicer's crosshair modes)
       const p = proj(ch.crosshairRAS as Vec3);
       g.strokeStyle = "rgba(255,255,80,0.8)"; g.lineWidth = ((ch.thickness as number) || 1) * dpr; g.beginPath();
@@ -269,7 +285,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
 
   // ── MirrorView ──
   const crosshairOverlay = () => {
-    const ch = viewState.crosshair;
+    const ch = stateNode("crosshair");
     const mode = (ch?.mode as number) ?? 0, ras = ch?.crosshairRAS as Vec3 | undefined;
     if (!mode || !ras) { overlays.delete("crosshair"); return; }
     // Slicer draws the crosshair through crosshairRAS as lines spanning the view; two long polylines per
@@ -278,7 +294,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     overlays.set("crosshair", [{ kind: "point", ras, color: [1, 1, 0.3, 1], radiusPx: 3, label: "" }]);
   };
   const view: MirrorView & { setViewState?: (st: ViewState) => void } = {
-    setViewState(st) { viewState = st; crosshairOverlay(); for (const c of cells.values()) drawOverlay(c); },
+    setViewState(_st) { crosshairOverlay(); for (const c of cells.values()) drawOverlay(c); },
     setOverlay(_cell, layer, items) { if (items.length) overlays.set(layer, items); else overlays.delete(layer); for (const c of cells.values()) drawOverlay(c); },
     setField(k, f) { fields3d.set(k, f); rebuild3d(); },
     removeField(k) { if (fields3d.delete(k)) rebuild3d(); },
@@ -315,7 +331,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const live = new LiveScene(cfg.httpBase, [
     new LayoutDisplayableManager(), new CameraDisplayableManager(), new VolumeRenderingDisplayableManager(gpu.device), new VolumeLayersDisplayableManager(gpu.device),
     new SliceDisplayableManager(), new SegmentationDisplayableManager(gpu.device, 1.5), markupsDM, new RoiCropDisplayableManager(),
-    new ViewStateDisplayableManager(), new TransformDisplayableManager(), new ModelDisplayableManager(), new ThreeDViewDisplayableManager(),
+    viewStateDM, new TransformDisplayableManager(), new ModelDisplayableManager(), new ThreeDViewDisplayableManager(),
   ]);
   live.view = view;
   const sync = new LiveSync(live, new WsTransport(cfg.wsUrl));
@@ -341,7 +357,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
 
   const sliceNodeId = (name: string) => nodeIdFor((nd) => nd.type === "view" && nd.kind === "slice" && nd.layoutName === name);
   const scalarDisplayId = () => nodeIdFor((nd) => nd.type === "scalarVolumeDisplay");
-  const crosshairId = () => viewState.crosshair?.id ?? null;
+  const crosshairId = () => stateNode("crosshair")?.id ?? null;
   /** RAS of a cell pixel (u,v in [0,1]) on the cell's current plane. */
   const cellRas = (c: SliceCell, u: number, v: number): Vec3 => { applyPlane(c); return c.slice.viewToRas(c.orientKey, planeOffset01(c), u, v, c.canvas.width / c.canvas.height); };
   /** Nearest markup control point to a cell pixel within `px`, among in-plane points. */
@@ -358,6 +374,32 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     return best;
   };
   let sliceDrag: { id: string; index: number } | null = null;
+  // ── segment editor: brush cursor + strokes sent to the app (Paint / Erase active in the streamed editor) ──
+  const brushEffect = (): "add" | "remove" | null => {
+    const e = ((stateNode("segmentEditor")?.activeEffect as string) ?? "").toLowerCase();
+    return e === "paint" ? "add" : e === "erase" ? "remove" : null;
+  };
+  const brushDiameterMm = (): number => {
+    const P = (stateNode("segmentEditor")?.params as Record<string, string> | undefined) ?? {};
+    const abs = parseFloat(P.BrushAbsoluteDiameter ?? "");
+    return Number.isFinite(abs) && abs > 0 ? abs : 5;
+  };
+  let brushStroke: { cell: SliceCell; points: Vec3[]; seq: number; lastSent: number; lastPt: Vec3 } | null = null;
+  let strokeSeq = 0;
+  let brushCursor: { cell: SliceCell; ras: Vec3 } | null = null;
+  const sendStroke = (final = false) => {
+    if (!brushStroke) return;
+    const id = stateNode("segmentEditor")?.id; if (!id) return;
+    const pts = brushStroke.points.slice(brushStroke.lastSent);
+    if (pts.length === 0) return;
+    const send = brushStroke.lastSent > 0 ? [brushStroke.lastPt, ...pts] : pts;   // overlap with the previous batch
+    const pl = brushStroke.cell.plane!;
+    const normal: Vec3 = pl.basis ? pl.basis.nDir : pl.orient === "axial" ? [0, 0, 1] : pl.orient === "coronal" ? [0, 1, 0] : [1, 0, 0];
+    const P = (stateNode("segmentEditor")?.params as Record<string, string> | undefined) ?? {};
+    live.write({ op: "cmd", id, cmd: "segPaint", args: { points: send, mode: brushEffect() ?? "add", diameterMm: brushDiameterMm(), sphere: P.BrushSphere === "1", normal, seq: ++strokeSeq, index: strokeSeq } });
+    brushStroke.lastSent = brushStroke.points.length; brushStroke.lastPt = pts[pts.length - 1];
+    if (final) sync.flush();
+  };
   const pushSliceFrame = (c: SliceCell) => {
     const id = sliceNodeId(c.name); const pl = c.plane; if (!id || !pl) return;
     const f = c.slice.mirrorFrame(c.orientKey, c.canvas.width / c.canvas.height);
@@ -394,8 +436,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       hooks: {
         onZoom: () => branch(c),
         onLeftGrab: (u, v, w, h) => {
+          if (brushEffect()) {                                          // Segment Editor Paint/Erase: stroke in this cell
+            brushStroke = { cell: c, points: [cellRas(c, u, v)], seq: 0, lastSent: 0, lastPt: cellRas(c, u, v) };
+            sendStroke();                                               // the initial dab paints immediately
+            return true;
+          }
           if (interactionMode() === "place") {                          // Slicer's Place mode: a click places
-            const id = viewState.interaction?.id; if (!id) return true;
+            const id = stateNode("interaction")?.id; if (!id) return true;
             live.write({ op: "cmd", id, cmd: "placeAt", args: { ras: cellRas(c, u, v), view: c.name } });
             sync.flush();
             return true;                                                  // consume: no scroll-drag starts
@@ -405,20 +452,27 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           sliceDrag = { id: hit.id, index: hit.index }; markupsDM.touch(hit.id, hit.index); return true;
         },
         onLeftDrag: (u, v) => {
+          if (brushStroke) {
+            const ras = cellRas(c, u, v); brushStroke.points.push(ras); brushCursor = { cell: c, ras };
+            const now = performance.now();
+            if (now - (brushStroke as { t?: number }).t! > 60 || !(brushStroke as { t?: number }).t) { (brushStroke as { t?: number }).t = now; sendStroke(); }
+            drawOverlay(c); return;
+          }
           if (!sliceDrag) return;
           const ras = cellRas(c, u, v);
           markupsDM.moveLocal(sliceDrag.id, sliceDrag.index, ras, live);   // optimistic
           markupsDM.touch(sliceDrag.id, sliceDrag.index);
           live.write({ op: "cmd", id: sliceDrag.id, cmd: "setControlPoint", args: { index: sliceDrag.index, position: ras } });
         },
-        onLeftDrop: () => { if (sliceDrag) { sync.flush(); sliceDrag = null; } },
+        onLeftDrop: () => { if (brushStroke) { sendStroke(true); brushStroke = null; drawOverlay(c); } if (sliceDrag) { sync.flush(); sliceDrag = null; } },
         onHover: (u, v, w, h) => {
           // cursor -> the app's crosshair cursor (DataProbe follows); shift-move -> crosshair position too
           const id = crosshairId(); if (!id) return;
           const ras = cellRas(c, u, v);
           live.write({ op: "cmd", id, cmd: "setCursor", args: { ras, view: c.name } });
           if (shiftHeld) live.write({ op: "patch", id, path: "#/crosshairRAS", value: ras });
-          c.canvas.style.cursor = interactionMode() === "place" ? "crosshair" : pickMarkup(c, u, v, w, h) ? "grab" : "default";
+          if (brushEffect()) { brushCursor = { cell: c, ras }; c.canvas.style.cursor = "none"; drawOverlay(c); }
+          else c.canvas.style.cursor = interactionMode() === "place" ? "crosshair" : pickMarkup(c, u, v, w, h) ? "grab" : "default";
         },
       },
     });
@@ -454,7 +508,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     resizeAll(); renderSlices(); if (threeVisible) a3d.draw();
   };
   addEventListener("resize", () => { resizeAll(); renderSlices(); a3d.draw(); });
-  Object.assign(globalThis, { __live: live, __sync: sync, __cells: () => [...cells.keys()], __overlays: () => Object.fromEntries(overlays),
+  Object.assign(globalThis, { __live: live, __sync: sync, __cells: () => [...cells.keys()], __overlays: () => Object.fromEntries(overlays), __viewState: () => viewState, __brush: () => ({ effect: brushEffect(), diam: brushDiameterMm() }),
     __layers: () => Object.fromEntries([...cells].map(([k, c]) => [k, { bg: !!c.layers?.background, fg: c.layers?.foreground ? [c.layers.foreground.opacity, c.layers.foreground.compositing] : null, label: c.layers?.label ? c.layers.label.opacity : null, bgLut: !!c.layers?.background?.lut }])) });
   sync.connect();
   return { live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells };
