@@ -188,6 +188,13 @@ def main():
         ports["mcp"] = mcp
     ports["gui"] = _start_gui()
     _emit({"stage": "gui"})
+
+    def sandboxProbe(reportPath=None):
+        """S14: run the MaliciousTest probes (ModuleServer/sandbox) and return the report dict."""
+        import importlib
+        mt = importlib.import_module("MaliciousTest")
+        return mt.MaliciousTestLogic(sessionDir=_env("MODULESERVER_SESSION_DIR"), httpPort=HTTP_PORT).run(reportPath)
+    slicer.moduleServerSandboxProbe = sandboxProbe
     state = {
         "ready": True,
         "pid": os.getpid(),

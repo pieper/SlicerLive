@@ -442,6 +442,26 @@ Next for the remote demo: a real Linux host (JS2 GPU box) under Xvfb, or a Modal
 the container recipe, launcher, token/wss and page parameters are ready for either. The `--probe` diag in
 `moduleserver_modal.py` is a reusable harness (marker files + strace/gdb-as-parent) for the next attempt.
 
+## S14 status (2026-08-28): sandbox ladder
+
+`docs/MODULESERVER-SANDBOXING.md` is the ladder (rung 0 process / 1 OS guard / 2 container-or-restricted
+exec / 3 VM, per platform) with the contract every rung is measured against:
+`ModuleServer/sandbox/MaliciousTest.py`, a hostile scripted module whose probes (write outside the session,
+read `~/.ssh`/`~/.aws`, HTTPS and raw-TCP egress, spawn a shell, secret-looking env vars; controls: write the
+session, reach the server's own port) are reported as JSON (`slicer.moduleServerSandboxProbe()` over MCP).
+
+Rung 1 on macOS is built and verified: `launch.ts --sandbox seatbelt --session <dir> [--allow-host h:p]`
+writes a Seatbelt profile (`ModuleServer/sandbox/moduleserver-seatbelt.sb`) and runs Slicer under
+`sandbox-exec` with a cleared, allow-listed environment. Probe result on this machine (Qt6 /opt/sr, offscreen,
+147 modules): `rung1: true` — write_home, read_secret, egress, egress_ip, env_leak all denied; write_session
+and localhost succeed; spawn_shell allowed (rung 1 keeps subprocesses for CLI modules; rung 2 removes it).
+Traps met: the CTK launcher opens its executables O_RDWR (profile allows `file-write-data` on exactly those
+binaries); the first run leaked this shell's API tokens into Slicer (fixed: `clearEnv` + allow-list); a probe
+that does an HTTP request to the server's own port from the Qt thread waits for itself (use a TCP connect).
+
+Not done: Linux (bubblewrap/systemd-run) and Windows (AppContainer) rungs, rung 2 (read-only image,
+no exec) — the launcher seam and the probe contract are in place for them.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

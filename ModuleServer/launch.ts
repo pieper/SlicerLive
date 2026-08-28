@@ -18,6 +18,10 @@
 //   --roles <list>    capabilities this server advertises, comma separated (default module; POC: app,module)
 //   --extra <args>    extra Slicer args, comma separated (e.g. --extra=--disable-cli-modules)
 //   --token <secret>  require ?token=<secret> on both WebSockets (remote deployments; put wss in front)
+//   --session <dir>   SlicerLiveSessions/<id> the server may write (blob cache, exports); default: a temp dir
+//   --sandbox <mode>  none (default) | seatbelt (macOS: sandbox-exec, HOSTILE mode: writes only to the session +
+//                    Slicer settings, no secrets, no network except localhost and --allow-host)
+//   --allow-host <h>  host:port the sandboxed server may reach besides localhost (data host); repeatable ,-list
 //
 // Prints one JSON line `{"READY": {...}}` on stdout once the servers are up, then stays attached;
 // Ctrl-C (SIGINT/SIGTERM) stops the Slicer child. Exit codes: 0 clean, 2 launch failure, 3 timeout.
@@ -27,7 +31,7 @@
 import { parseArgs } from "jsr:@std/cli@1/parse-args";
 
 const args = parseArgs(Deno.args, {
-  string: ["slicer", "http", "ws", "mcp", "mcp-server", "state", "log", "extra", "platform", "roles", "gui", "dpr", "token"],
+  string: ["slicer", "http", "ws", "mcp", "mcp-server", "state", "log", "extra", "platform", "roles", "gui", "dpr", "token", "session", "sandbox", "allow-host"],
   boolean: ["show", "help"],
   default: { http: "2131", ws: "2132", mcp: "2126", gui: "2133", roles: "module", dpr: "1" },
 });
@@ -86,10 +90,33 @@ const env: Record<string, string> = {
   ...(args.token ? { MODULESERVER_TOKEN: args.token } : {}),
 };
 const extra = args.extra ? args.extra.split(",").filter(Boolean) : [];
-const cmd = new Deno.Command(slicer, {
-  args: ["--no-splash", "--ignore-slicerrc", ...extra, "--python-script", BOOTSTRAP],
-  env, stdout: "piped", stderr: "piped", stdin: "null",
-});
+const sessionDir = args.session ?? await Deno.makeTempDir({ prefix: "slicerlive-session-" });
+env.MODULESERVER_SESSION_DIR = sessionDir;
+const slicerArgs = ["--no-splash", "--ignore-slicerrc", ...extra, "--python-script", BOOTSTRAP];
+// Sandbox rung (S14). The launcher is the seam: everything the server may touch is decided here.
+let exe = slicer, exeArgs = slicerArgs;
+if (args.sandbox && args.sandbox !== "none") {
+  if (args.sandbox !== "seatbelt" || Deno.build.os !== "darwin") throw new Error(`--sandbox ${args.sandbox} is not available on ${Deno.build.os} (macOS: seatbelt)`);
+  const profile = `${logDir}/moduleserver-${args.ws}.sb`;
+  const hosts = (args["allow-host"] ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+  const template = await Deno.readTextFile(new URL("./sandbox/moduleserver-seatbelt.sb", import.meta.url));
+  await Deno.writeTextFile(profile, template + hosts.map((h) => `(allow network-outbound (remote ip "${h.replace(/"/g, "")}"))\n`).join(""));
+  // the tree the profile treats as the Slicer install: the .app bundle, or (build/unpacked trees like
+  // /opt/sr/Slicer-build/Slicer with python-install beside it) the grandparent directory
+  const slicerHome = /\.app\/Contents\/MacOS\/Slicer$/.test(slicer) ? slicer.replace(/\/Contents\/MacOS\/Slicer$/, "") : slicer.replace(/\/[^/]+\/[^/]+$/, "");
+  exe = "/usr/bin/sandbox-exec";
+  exeArgs = ["-f", profile, "-D", `SESSION_DIR=${sessionDir}`, "-D", `SLICER_HOME=${slicerHome}`, "-D", `STATE_DIR=${logDir}`, "-D", `HOME=${HOME}`,
+    slicer, ...slicerArgs];
+  console.error(`moduleserver: sandbox seatbelt (profile ${profile}; writes: ${sessionDir}; hosts: localhost${hosts.length ? ", " + hosts.join(", ") : ""})`);
+}
+// Hostile mode never inherits the launching shell's environment (API tokens, cloud credentials, ...):
+// only a short allow-list crosses, plus what the launcher set explicitly above.
+const sandboxed = !!args.sandbox && args.sandbox !== "none";
+const KEEP = ["HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "LANG", "LC_ALL", "TZ", "DISPLAY", "XDG_RUNTIME_DIR", "SHELL"];
+const childEnv: Record<string, string> = sandboxed
+  ? Object.fromEntries([...KEEP.map((k) => [k, Deno.env.get(k) ?? ""]).filter(([, v]) => v), ...Object.entries(env)])
+  : env;
+const cmd = new Deno.Command(exe, { args: exeArgs, env: childEnv, clearEnv: sandboxed, stdout: "piped", stderr: "piped", stdin: "null" });
 const child = cmd.spawn();
 const log = await Deno.open(logPath, { write: true, create: true, truncate: true });
 console.error(`moduleserver: ${slicer}\n  platform ${platform || "(default)"}  roles ${args.roles}\n  log ${logPath}\n  state ${statePath}`);

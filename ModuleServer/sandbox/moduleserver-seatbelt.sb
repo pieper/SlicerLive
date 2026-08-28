@@ -1,0 +1,47 @@
+;; macOS Seatbelt profile for a HOSTILE-MODE ModuleServer (S14, rung 1 on macOS).
+;; Instantiated by ModuleServer/launch.ts --sandbox seatbelt with -D parameters:
+;;   SESSION_DIR  the SlicerLiveSessions/<id> dir the server may write (also its blob cache)
+;;   SLICER_HOME  the Slicer install/build tree (read-only, except the launcher quirk below)
+;;   STATE_DIR    ~/.slicerlive/moduleserver (READY state file + log)
+;;   HOME         the user's home (settings/cache subdirs only)
+;;   --allow-host host:port entries are appended by the launcher as explicit rules (data host)
+;;
+;; Shape: "deny what matters" on top of (allow default). A (deny default) profile also works for the
+;; Slicer app itself but the Qt/CTK launcher then fails its own executable check (measured 2026-08-28:
+;; it opens the executables O_RDWR), and enumerating every mach/iokit/sysctl right Qt needs is brittle.
+;; What this confines: writes (session + Slicer settings/cache + temp only), secret reads, and the
+;; network (localhost + allow-hosts only). Denials: `log stream --predicate 'sender == "Sandbox"'`.
+(version 1)
+(allow default)
+
+;; secrets are not readable
+(deny file-read* (subpath (string-append (param "HOME") "/.ssh"))
+                 (subpath (string-append (param "HOME") "/.aws"))
+                 (subpath (string-append (param "HOME") "/.gnupg"))
+                 (subpath (string-append (param "HOME") "/.config/gcloud"))
+                 (subpath (string-append (param "HOME") "/Library/Keychains"))
+                 (literal (string-append (param "HOME") "/.netrc"))
+                 (literal (string-append (param "HOME") "/.modal.toml")))
+
+;; writes: only the session, Slicer's own settings/cache, the state dir and temp
+(deny file-write*)
+(allow file-write* (subpath (param "SESSION_DIR"))
+                   (subpath (param "STATE_DIR"))
+                   (subpath (string-append (param "HOME") "/.config/slicer.org"))
+                   (subpath (string-append (param "HOME") "/.cache/slicer.org"))
+                   (subpath (string-append (param "HOME") "/Library/Caches"))
+                   (subpath (string-append (param "HOME") "/Library/Saved Application State"))
+                   (subpath "/private/tmp")
+                   (subpath "/private/var/folders")
+                   (subpath "/dev"))
+;; launcher quirk: CTK's app launcher opens the executables it is about to run O_RDWR ("Application is
+;; NOT executable" otherwise). Content writes to those few binaries are the one hole rung 1 leaves open;
+;; rung 2 runs from a read-only image instead.
+(allow file-write-data (require-all (subpath (param "SLICER_HOME"))
+                                    (regex #"/(Slicer|SlicerApp-real|python|python3|python3\.[0-9]+)$")))
+
+;; network: the ModuleServer's own ports + the data host only. No general internet.
+(deny network*)
+(allow network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*") (remote unix-socket))
+;; extra hosts appended by the launcher: (allow network-outbound (remote ip "host:port"))
