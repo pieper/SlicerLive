@@ -403,6 +403,45 @@ popups' inner widgets is included but menus (QMenu items) are still pixels — t
 carries them as data for the native-menu host; `QAccessible` roles (tree items, table cells) beyond the
 widget level.
 
+## S13 status (2026-08-28): remote transport
+
+**Local half (done, pushed a5bcb22):**
+- Frame codec negotiation on the gui stream: `subscribe {codec, quality}` / `{"op":"quality"}`; PNG on a
+  LAN, lossy WebP/JPEG on slow links; frame header carries `fmt`. `ping`/`pong` for RTT, `stats` events
+  (bytes/s, frames/s) every 2 s while frames flow. The client adapts on its own (RTT > 120 ms or > 1.5 MB/s
+  -> WebP at falling quality; climbs back when the link recovers); `gui.stats`, `?` readout bottom-left.
+- `?token=` on both WebSockets (`--token` on the launcher, `MODULESERVER_TOKEN`), `wss`/`https` picked
+  automatically on an https page or `?secure`; `?host=`, `?gui=`, `?ws=`, `?http=` for proxies/tunnels.
+- Measured on localhost after the fix below: RTT 1 ms, idle 0 bytes/s, a module switch ~400 KB/s of PNG.
+- **Perf bug found on the way** (present since S1): `grab()` raises a paint event, the paint hook marked the
+  region dirty, the next tick grabbed it again — every region, every 33 ms, forever. The hash check hid it
+  as "0 bytes" while the Qt loop ran ~100 % busy (RTT ~1000 ms). Fixed with a `grabbing` guard.
+- AV1 for chrome is deliberately NOT used: dirty rects of text compress better as PNG/WebP; the existing
+  AV1 sidecar (`server/av1-sidecar.ts`) belongs to the compat-view (VTK pixels) fallback.
+
+**Remote half (NOT done): a Linux ModuleServer on Modal.** `ModuleServer/modal/moduleserver_modal.py`
+builds an image (Slicer Linux nightly 5.13 + Qt5/xcb runtime + Xvfb/Mesa + Debian's Qt5 `offscreen`
+plugin, fonts, gdb/strace) and runs `bootstrap.py` behind `modal.forward()` TLS tunnels with a token.
+Everything up to Slicer's main window works, and the diagnosis is exact, but the server never reaches READY:
+
+- Slicer's `qSlicerAppMainWindow` constructor deadlocks in `qSlicerViewersToolBarPrivate::init` ->
+  `QIcon` -> `QImage::convertToFormat_helper` -> `QSemaphore::acquire` (gdb as parent process; attach is
+  denied in the sandbox). Qt 5.15 converts images >= 128 KB in segments on the global `QThreadPool` and
+  waits; in Modal's gVisor sandbox **no pool worker thread exists at that point** and the segments never run.
+  It is timing-dependent (one run out of ~20 got through in 9 s); disabling pool expiry (`slicer/__init__.py`
+  patch, `expiryTimeout=-1`), pinning to one CPU, xcb vs offscreen, software GL vs none, `--testing`,
+  `--disable-settings`, no network, and every module family on/off make no difference. Bare core, or
+  modules without a main window, complete in < 15 s.
+- Separately, `SimpleFilters` (bundled in the nightly) never returns from its module `__init__` here unless
+  it is ignored (`--modules-to-ignore SimpleFilters`).
+- Slicer's stdout is block-buffered behind the launcher; `bootstrap.py` now also writes READY/ERROR/stage
+  markers to `<state>.log` so a remote host can see them.
+
+Conclusion: not a SlicerLive/ModuleServer protocol problem — a Qt-thread-pool interaction with gVisor.
+Next for the remote demo: a real Linux host (JS2 GPU box) under Xvfb, or a Modal runtime without gVisor;
+the container recipe, launcher, token/wss and page parameters are ready for either. The `--probe` diag in
+`moduleserver_modal.py` is a reusable harness (marker files + strace/gdb-as-parent) for the next attempt.
+
 ## Direct-renderer register (unsupported for now; revisit per module)
 Modules that draw into Slicer's VTK renderers bypassing MRML (LiveScene cannot see them):
 SlicerLayerDisplayableManager, SlicerMorph/MarkupEditor, SlicerHeart/VirtualCathLab, AnglePlanes,

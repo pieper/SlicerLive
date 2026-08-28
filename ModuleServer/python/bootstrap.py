@@ -54,8 +54,18 @@ ROLES = [r for r in _env("MODULESERVER_ROLES", "module").split(",") if r]
 
 
 def _emit(obj):
-    """One machine-readable line on stdout (the launcher scans for READY/ERROR), flushed."""
-    print(json.dumps(obj), flush=True)
+    """READY/ERROR to stdout (the launcher parses it) AND to <state>.log: Slicer's stdio is block-buffered when
+    it is not a tty, so on a remote host a traceback can sit invisible in a buffer for the process lifetime."""
+    line = json.dumps(obj)
+    print(line, flush=True)
+    if STATE_PATH:
+        try:
+            with open(STATE_PATH + ".log", "a") as f:
+                f.write(line + "\n"); f.flush()
+        except OSError:
+            pass
+
+
 
 
 class _NoScreenFilter(qt.QObject):
@@ -167,12 +177,17 @@ def _start_mcp():
 
 
 def main():
+    _emit({"stage": "main"})
     invisible = _make_invisible()
+    _emit({"stage": "invisible", "value": invisible})
     ports = _start_mrson()
+    _emit({"stage": "mrson", "ports": ports})
     mcp = _start_mcp()
+    _emit({"stage": "mcp", "port": mcp})
     if mcp is not None:
         ports["mcp"] = mcp
     ports["gui"] = _start_gui()
+    _emit({"stage": "gui"})
     state = {
         "ready": True,
         "pid": os.getpid(),
@@ -193,6 +208,7 @@ def main():
     _emit({"READY": state})
 
 
+_emit({"stage": "script-entry"})
 try:
     main()
 except Exception:  # noqa: BLE001
