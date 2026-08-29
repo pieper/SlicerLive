@@ -8,6 +8,8 @@ export interface SliceControllerAdapter {
   range(): { min: number; max: number; step: number } | null;
   setOffset(mm: number): void;
   fit(): void;
+  /** optional reformat: when present the orientation shows as a combo (Slicer's orientation menu). */
+  setOrientation?(o: "axial" | "coronal" | "sagittal"): void;
   /** subscribe to external offset/geometry changes (scroll, jump) so the bar re-reads; returns unsubscribe */
   onChange(cb: () => void): () => void;
 }
@@ -21,13 +23,17 @@ export function mountSliceController(host: HTMLElement, cellName: string, a: Sli
   const bar = document.createElement("div");
   bar.className = "sl-slice-bar";
   bar.dataset.cell = cellName;
+  const orientHtml = a.setOrientation
+    ? `<select class="sl-slice-orient" aria-label="Slice orientation"><option value="axial">Axial</option><option value="sagittal">Sagittal</option><option value="coronal">Coronal</option></select>`
+    : `<span class="sl-slice-orient"></span>`;
   bar.innerHTML = `
-    <span class="sl-slice-orient"></span>
+    ${orientHtml}
     <input class="sl-slice-offset" type="range" step="any" aria-label="Slice offset">
     <span class="sl-slice-value"></span>
     <button class="sl-slice-fit" title="Fit to volume">⤢</button>`;
   host.appendChild(bar);
   const orient = bar.querySelector(".sl-slice-orient") as HTMLElement;
+  if (a.setOrientation) (orient as HTMLSelectElement).addEventListener("change", (e) => { a.setOrientation!((e.target as HTMLSelectElement).value as "axial" | "coronal" | "sagittal"); });
   const slider = bar.querySelector(".sl-slice-offset") as HTMLInputElement;
   const value = bar.querySelector(".sl-slice-value") as HTMLElement;
   const fit = bar.querySelector(".sl-slice-fit") as HTMLButtonElement;
@@ -36,7 +42,7 @@ export function mountSliceController(host: HTMLElement, cellName: string, a: Sli
   const refresh = () => {
     if (editing) return;
     const o = a.orientation(), r = a.range(), off = a.offset();
-    orient.textContent = o ? ORIENT_LABEL[o] : "";
+    if (a.setOrientation) { if (o) (orient as HTMLSelectElement).value = o; } else orient.textContent = o ? ORIENT_LABEL[o] : "";
     const disabled = !r || off == null;
     slider.disabled = disabled; fit.disabled = disabled;
     if (r) { slider.min = String(r.min); slider.max = String(r.max); slider.step = String(r.step > 0 ? r.step : "any"); }

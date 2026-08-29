@@ -11,6 +11,8 @@ import type { Gpu } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { type Orientation, SliceRenderer } from "../slice-renderer.ts";
 import { fitFovToVolume } from "../../logic/slice-logic.ts";
+import { broadcastSlice, type LinkSliceState, type SliceLinkFlag } from "../../logic/link.ts";
+import { reformatSliceToRAS } from "../../logic/slice-logic.ts";
 import { VtkCamera } from "../vtk-camera.ts";
 import type { Field, ImageField } from "../fields.ts";
 import { mountAdaptive3d } from "../demos/accum-loop.ts";
@@ -557,6 +559,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     (c as SliceCell & { controller?: SliceController }).controller = mountSliceController(c.el, c.name, {
       orientation: () => c.orientKey, offset: () => getSliceOffset(c.name), range: () => sliceOffsetRange(c.name),
       setOffset: (mm) => setSliceOffset(c.name, mm), fit: () => fitCell(c.name),
+      setOrientation: (o: "axial" | "coronal" | "sagittal") => reformatCell(c.name, o),
       onChange: (cb) => { sliceChangeListeners.add(cb); return () => sliceChangeListeners.delete(cb); },
     });
     // pan (middle / shift+left drag) and right-drag zoom have no hooks: branch on the press that starts
@@ -621,12 +624,66 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     }
     renderSlices();
   };
-  /** Move a native slice node's plane along its normal to `mm` (persists, node-owned). */
+  /** Slicer SliceLink: is this cell's composite linkedControl on? (the toggle sets all composites together). */
+  const compositeLinked = (cell: string): boolean => {
+    const comp = [...live.nodes.values()].find((n) => n.type === "sliceComposite" && n.layoutName === cell);
+    return !!comp?.linkedControl;
+  };
+  const linkStateOf = (cell: string): LinkSliceState | null => {
+    const n = live.nodes.get(nativeSliceId(cell)); if (!n) return null;
+    return { name: cell, sliceToRAS: n.sliceToRAS as number[], fieldOfView: (n.fieldOfView as [number, number, number]) ?? [250, 250, 1], viewGroup: 0 };
+  };
+  const normalOfMatrix = (m: number[]): Vec3 => { const v: Vec3 = [m[2], m[6], m[10]]; const L = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / L, v[1] / L, v[2] / L]; };
+  /** Propagate a change in `sourceCell` to linked native slice cells (vtkMRMLSliceLinkLogic rules). */
+  const propagateLink = (sourceCell: string, flags: SliceLinkFlag[]): void => {
+    if (!compositeLinked(sourceCell)) return;
+    const src = linkStateOf(sourceCell); if (!src) return;
+    const others = [...cells.keys()].map(linkStateOf).filter((x): x is LinkSliceState => !!x && x.name !== sourceCell);
+    const updates = broadcastSlice(src, others, flags);
+    for (const [cell, u] of updates) {
+      const id = nativeSliceId(cell); if (!live.nodes.has(id)) continue;
+      if (u.sliceToRAS) {
+        live.write({ op: "patch", id, path: "#/sliceToRAS", value: u.sliceToRAS });
+        const n = normalOfMatrix(u.sliceToRAS);                                   // keep the redundant offset field consistent
+        live.write({ op: "patch", id, path: "#/offset", value: u.sliceToRAS[3] * n[0] + u.sliceToRAS[7] * n[1] + u.sliceToRAS[11] * n[2] });
+      }
+      if (u.fieldOfView) live.write({ op: "patch", id, path: "#/fieldOfView", value: u.fieldOfView });
+    }
+    renderSlices();
+  };
+
+  /** Move a native slice node's plane to offset `mm` along its CURRENT normal (works for reformatted cells
+   *  whose orientation differs from the cell's original axis). Node-owned, persists, links to same-orientation
+   *  views. Offset = signed distance of the plane origin along the normal (Slicer's convention). */
   const patchNativeOffset = (cell: string, mm: number): boolean => {
-    const def = NATIVE_SLICE[cell]; if (!def) return false;
-    const id = nativeSliceId(cell); if (!live.nodes.has(id)) return false;
-    live.write({ op: "patch", id, path: `#/sliceToRAS/${def.transIdx}`, value: mm });
+    const id = nativeSliceId(cell); const node = live.nodes.get(id); if (!node) return false;
+    const m = (node.sliceToRAS as number[]).slice();
+    const n = normalOfMatrix(m);
+    const t: Vec3 = [m[3], m[7], m[11]];
+    const cur = t[0] * n[0] + t[1] * n[1] + t[2] * n[2];
+    const d = mm - cur;
+    m[3] = t[0] + d * n[0]; m[7] = t[1] + d * n[1]; m[11] = t[2] + d * n[2];
+    live.write({ op: "patch", id, path: "#/sliceToRAS", value: m });
     live.write({ op: "patch", id, path: "#/offset", value: mm });
+    propagateLink(cell, ["SliceToRAS"]);                                          // linked same-orientation views follow
+    return true;
+  };
+
+  /** Reformat a native slice cell to a standard orientation through its current centre
+   *  (vtkMRMLSliceNode::SetOrientation): rebuild the plane, update the cell's orientation so fit/offset math
+   *  follow, re-render, and broadcast to linked views. */
+  const reformatCell = (cell: string, orientation: Orientation): boolean => {
+    const id = nativeSliceId(cell); const node = live.nodes.get(id); if (!node) return false;
+    const m = node.sliceToRAS as number[]; const center: Vec3 = [m[3], m[7], m[11]];
+    const nm = reformatSliceToRAS(orientation, center);
+    const nrm = normalOfMatrix(nm);
+    const c = cells.get(cell); if (c) c.orientKey = orientation;
+    live.write({ op: "patch", id, path: "#/sliceToRAS", value: nm });
+    live.write({ op: "patch", id, path: "#/orientation", value: orientation[0].toUpperCase() + orientation.slice(1) });
+    live.write({ op: "patch", id, path: "#/offset", value: center[0] * nrm[0] + center[1] * nrm[1] + center[2] * nrm[2] });
+    if (c) { const bg = bgField(c); if (bg) { const [lo, hi] = bg.aabb(); const w = c.canvas.width || 1, h = c.canvas.height || 1; const [fx, fy] = fitFovToVolume(orientation, lo, hi, [], w, h); c.slice.setMirrorFrame(orientation, center, fx, fy); c.branched = false; } }
+    propagateLink(cell, ["Orientation"]);
+    renderSlices();
     return true;
   };
 
@@ -686,6 +743,14 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // node can be re-asserted by the peer; pl.posMm is what the renderer actually shows)
     __cellPlanes: () => Object.fromEntries([...cells].filter(([, c]) => c.plane).map(([k, c]) => [k, c.plane!.posMm])),
     __jumpTo: (ras: Vec3) => jumpLocal(ras),
+    // Reformat (W2): set a native slice cell to a standard orientation (vtkMRMLSliceNode::SetOrientation).
+    __reformatCell: (cell: string, orientation: "axial" | "sagittal" | "coronal") => reformatCell(cell, orientation),
+    // Slice linking (W2): toggle linkedControl on every sliceComposite (Slicer's link button), and read a
+    // native slice node's plane/offset for tests.
+    __setLinked: (on: boolean) => { for (const n of live.nodes.values()) if (n.type === "sliceComposite") live.write({ op: "patch", id: n.id, path: "#/linkedControl", value: on }); },
+    __isLinked: () => [...live.nodes.values()].some((n) => n.type === "sliceComposite" && n.linkedControl),
+    __sliceNode: (cell: string) => { const n = live.nodes.get(nativeSliceId(cell)); return n ? { orientation: n.orientation, offset: n.offset, sliceToRAS: n.sliceToRAS } : null; },
+    __setSliceOffset: (cell: string, mm: number) => setSliceOffset(cell, mm),
   });
   return {
     live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells,

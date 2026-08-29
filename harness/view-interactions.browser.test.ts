@@ -80,9 +80,10 @@ Deno.test({ name: "controller: slice bars show orientation + offset and the slid
     const b64 = btoa(String.fromCharCode(...makeNifti({ sform: [1.5, 0, 0, -40, 0, 1.5, 0, -40, 0, 0, 3, -60] })));
     await cdp.eval(`await window.__loadVolumeBytes(Uint8Array.from(atob(${JSON.stringify(b64)}), c=>c.charCodeAt(0)), "ctl.nii"); return 1;`);
     await cdp.waitForValue<number>(`[...document.querySelectorAll('.sl-slice-bar .sl-slice-offset')].filter(s=>!s.disabled).length`, (n) => n >= 3, 15000);
-    const bars = await cdp.evalJson<{ cell: string; orient: string }[]>(`[...document.querySelectorAll('.sl-slice-bar')].map(b=>({cell:b.dataset.cell, orient:b.querySelector('.sl-slice-orient').textContent}))`);
+    // orientation is now a reformat combo (<select>); read its current value (or a legacy label span)
+    const bars = await cdp.evalJson<{ cell: string; orient: string }[]>(`[...document.querySelectorAll('.sl-slice-bar')].map(b=>{const o=b.querySelector('.sl-slice-orient'); return {cell:b.dataset.cell, orient:(o.value||o.textContent||'').toLowerCase()}})`);
     const byCell = Object.fromEntries(bars.map((b) => [b.cell, b.orient]));
-    assertEquals(byCell.Red, "Axial"); assertEquals(byCell.Yellow, "Sagittal"); assertEquals(byCell.Green, "Coronal");
+    assertEquals(byCell.Red, "axial"); assertEquals(byCell.Yellow, "sagittal"); assertEquals(byCell.Green, "coronal");
     // drive the Red slider to max -> the axial plane offset follows to the max
     const max = await cdp.eval<number>(`const s = document.querySelector('.sl-slice-bar[data-cell=Red] .sl-slice-offset'); s.value = s.max; s.dispatchEvent(new Event('input',{bubbles:true})); s.dispatchEvent(new Event('change',{bubbles:true})); return Number(s.max);`);
     await new Promise((r) => setTimeout(r, 300));

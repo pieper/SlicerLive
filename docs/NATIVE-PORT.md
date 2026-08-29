@@ -172,3 +172,23 @@ heavy consumer (W5 masking / W6 harden). Needed by W5 masking, W6 harden, W1 cro
 
 Next: W2 tail (orientation combo for reformat, link/hot-link across slice views); the resample3d WGSL path when
 W5/W6 need the throughput.
+
+## W2 tail — slice linking + reformat (done)
+
+**Slice linking (done)**: `logic/link.ts` is a faithful port of `vtkMRMLSliceLinkLogic::BroadcastSliceNodeEvent`
+— when a slice view's `sliceComposite.linkedControl` is on, an offset/orientation/zoom change broadcasts to the
+other slice views in the same view group: SliceToRAS (offset+plane) only to **orientation-matching** views,
+FieldOfView to all (aspect-corrected per target), an orientation change realigns all. Wired into
+`live-views.ts:patchNativeOffset` via `propagateLink` (gated by `compositeLinked(cell)`); `__setLinked(on)`
+toggles every composite's `linkedControl` (Slicer's link button). Test: `logic/link.test.ts` (5) + browser
+`harness/slice-link.browser.test.ts` (reformat Green→Axial, link on ⇒ Green follows Red, Yellow doesn't; link
+off ⇒ Green stays).
+
+**Orientation combo / reformat (done)**: `logic/slice-logic.ts:reformatSliceToRAS` builds the canonical
+SliceToRAS for an orientation through the current centre (Slicer's `SetOrientation`); `live-views.ts:reformatCell`
+applies it (updates the node + the cell's orientation so fit/offset math follow), and `patchNativeOffset` is now
+general — it moves the plane along its **current** normal, so a reformatted cell scrolls correctly. The slice
+controller bar's orientation is now a `<select>` (reformat combo) instead of a static label. Test: browser
+"reformat combo" (drive Green's combo to Sagittal ⇒ node orientation + plane normal update).
+
+Next: W4 markups (native placement, control-point edit, measurements); the resample3d WGSL path when W5/W6 need it.
