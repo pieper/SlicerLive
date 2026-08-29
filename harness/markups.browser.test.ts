@@ -54,3 +54,22 @@ Deno.test({ name: "markups: place a line + angle by clicking, measurements compu
     assert(!(await cdp.evalJson<{ markupType: string }[]>(`window.__markups()`)).some((m) => m.markupType === "line"), "line deleted");
   } finally { await cdp.closeTab(); }
 } });
+
+Deno.test({ name: "markups: closed curve interpolates a smooth spline + area measurement", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
+  const cdp = await CDP.openTab(STANDALONE);
+  try {
+    await waitReady(cdp, 60000);
+    await cdp.eval<void>(`await window.__loadSample("MRHead"); await window.__slicerlive.idle();`);
+    const red = await cdp.evalJson<{ x: number; y: number; w: number; h: number }>(cellRect("Red"));
+    const click = async (fx: number, fy: number) => { const x = red.x + red.w * fx, y = red.y + red.h * fy; await cdp.mouse("mousePressed", x, y, { button: "left", buttons: 1 }); await cdp.mouse("mouseReleased", x, y, { button: "left", buttons: 0 }); await new Promise((r) => setTimeout(r, 120)); };
+    await cdp.eval<void>(`window.__startPlace("closedCurve", false);`);
+    await click(0.35, 0.35); await click(0.65, 0.35); await click(0.65, 0.65); await click(0.35, 0.65);
+    await cdp.eval<void>(`window.__endPlace(); await window.__slicerlive.idle();`);
+    const cc = (await cdp.evalJson<{ markupType: string; points: number; measurements: { name: string; value: number }[] }[]>(`window.__markups()`)).find((m) => m.markupType === "closedCurve")!;
+    assertEquals(cc.points, 4, "4 control points");
+    assert(cc.measurements.some((m) => m.name === "area" && m.value > 0), `closed curve has area, got ${JSON.stringify(cc.measurements)}`);
+    // linePoints are the interpolated spline (many more than 4)
+    const nLine = await cdp.evalJson<number>(`(() => { const n = [...window.__live.nodes.values()].find(n=>n.type==='markup'&&n.markupType==='closedCurve'); return (n.linePoints||[]).length; })()`);
+    assert(nLine >= 40, `interpolated spline has many points, got ${nLine}`);
+  } finally { await cdp.closeTab(); }
+} });

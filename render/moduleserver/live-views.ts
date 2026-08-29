@@ -14,7 +14,8 @@ import { fitFovToVolume } from "../../logic/slice-logic.ts";
 import { broadcastSlice, type LinkSliceState, type SliceLinkFlag } from "../../logic/link.ts";
 import { reformatSliceToRAS } from "../../logic/slice-logic.ts";
 import { placeClick, removeControlPointOp } from "../../logic/markups/placer.ts";
-import { measurementsFor, type MarkupType } from "../../logic/markups/measurements.ts";
+import { measurementsFor, polygonArea, polylineLength, type MarkupType } from "../../logic/markups/measurements.ts";
+import { interpolateCurve } from "../../logic/markups/curve.ts";
 import { VtkCamera } from "../vtk-camera.ts";
 import type { Field, ImageField } from "../fields.ts";
 import { mountAdaptive3d } from "../demos/accum-loop.ts";
@@ -757,8 +758,19 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   /** Store the type's measurements on a markup node (so the panel + annotations can show them). */
   const storeMeasurements = (id: string) => {
     const n = live.nodes.get(id); if (!n || n.type !== "markup") return;
+    const t = n.markupType as MarkupType;
     const cps = ((n.controlPoints as { position: Vec3 }[] | undefined) ?? []).map((c) => c.position);
-    const ms = measurementsFor(n.markupType as MarkupType, cps, n.size as Vec3 | undefined);
+    if ((t === "curve" || t === "closedCurve") && cps.length >= 2) {
+      const closed = t === "closedCurve";
+      const lp = interpolateCurve(cps, closed);                          // Slicer's Cardinal-spline curve points
+      live.write({ op: "patch", id, path: "#/linePoints", value: lp });  // DM renders the smooth spline
+      const ms = closed
+        ? [{ name: "length", value: polylineLength(lp, false), units: "mm" }, { name: "area", value: polygonArea(lp), units: "mm2" }]
+        : [{ name: "length", value: polylineLength(lp, false), units: "mm" }];
+      live.write({ op: "patch", id, path: "#/measurements", value: ms });
+      return;
+    }
+    const ms = measurementsFor(t, cps, n.size as Vec3 | undefined);
     if (ms.length) live.write({ op: "patch", id, path: "#/measurements", value: ms });
   };
   /** Native placement click: create/extend the markup via the placer, update the interaction node. */

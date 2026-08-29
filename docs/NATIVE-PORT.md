@@ -208,5 +208,15 @@ placed points/lines and stored measurements update on placement and on control-p
 measurement + delete; Esc stops placing. Unit `placer.test.ts` (6); browser `harness/markups.browser.test.ts`
 (place line+angle by clicking → measurements; fiducial 1-click; delete).
 
-Next W4: display props (GlyphScale/GlyphSize/labels), control-point lock/visibility, curve spline interpolation
-(`curve.ts`, Kochanek) + closedCurve area parity, ROI place/handles. Then W5 segment editor.
+**Curve interpolation (done)**: `logic/markups/curve.ts` is a faithful port of Slicer's default curve
+(`vtkMRMLMarkupsCurveNode` = Cardinal spline via `vtkCurveGenerator`/`vtkParametricSpline`/`vtkCardinalSpline`,
+10 points per interpolating segment, clamped zero end-slopes, closed wrap). `interpolateCurve(controlPoints,
+closed)` produces the world `linePoints` the display + measurements use. **Parity**
+(`harness/parity/curve.parity.test.ts`): matches Slicer's `GetCurvePointsWorld` to **2e-6 mm** (open + closed,
+41 points), and ClosedCurve area matches exactly (1974.388). Wired into `live-views.ts:storeMeasurements` — placing
+a curve/closedCurve stores `linePoints` (the `MarkupsDisplayableManager` renders the smooth spline) and measures
+length/area over them. Unit `curve.test.ts` (5); browser markups.browser.test.ts (closed curve → 41-point spline +
+area). This closes the ClosedCurve-area parity gap from step 1.
+
+Next W4: markups display props (GlyphScale/GlyphSize/labels), control-point lock/visibility, ROI place/handles.
+Then W5 segment editor.
