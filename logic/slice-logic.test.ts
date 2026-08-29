@@ -1,6 +1,6 @@
 // T1: fit + offset-range math vs the live-Slicer fixture (harness/fixtures/slicer-startup.json = MRHead).
-import { assert, assertAlmostEquals } from "jsr:@std/assert@1";
-import { fitFovToVolume, offsetRangeResolution } from "./slice-logic.ts";
+import { assert, assertAlmostEquals, assertEquals } from "jsr:@std/assert@1";
+import { fitFovToVolume, offsetRangeResolution, reformatSliceToRAS } from "./slice-logic.ts";
 import { fixture } from "../harness/fixtures.ts";
 
 interface Startup { volume: { dims: number[]; ijkToRAS: number[]; rasLo: number[]; rasHi: number[] }; slices: Record<string, { fieldOfView: number[]; dimensions: number[] }> }
@@ -26,4 +26,16 @@ Deno.test("offsetRangeResolution: bounds along the normal, step = spacing", asyn
   assert(ax.max - ax.min > 250, "axial range spans the S extent (~256)");
   const sag = offsetRangeResolution("sagittal", ijkToRAS, rasLo as [number, number, number], rasHi as [number, number, number]);
   assertAlmostEquals(sag.step, 1.3, 0.01);                      // sagittal normal is R; spacing 1.3
+});
+
+Deno.test("reformatSliceToRAS: canonical planes with the current centre", () => {
+  const c: [number, number, number] = [5, -3, 12];
+  const ax = reformatSliceToRAS("axial", c);
+  // translation column holds the centre
+  assertEquals([ax[3], ax[7], ax[11]], [5, -3, 12]);
+  // plane normal (col 2) is +S for axial, +R for sagittal, +A for coronal
+  const normal = (m: number[]) => [m[2], m[6], m[10]];
+  assertEquals(normal(reformatSliceToRAS("axial", c)), [0, 0, 1]);
+  assertEquals(normal(reformatSliceToRAS("sagittal", c)), [1, 0, 0]);
+  assertEquals(normal(reformatSliceToRAS("coronal", c)), [0, 1, 0]);
 });
