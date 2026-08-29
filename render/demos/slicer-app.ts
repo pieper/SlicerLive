@@ -16,6 +16,8 @@ import { registerVolumesPanel } from "./volumes-panel.ts";
 import { registerTfEditor } from "./tf-editor.ts";
 import { registerMarkupsPanel } from "./markups-panel.ts";
 import { registerSegEditorPanel } from "./seg-editor-panel.ts";
+import { registerTransformsPanel } from "./transforms-panel.ts";
+import { worldMatrix, rowMul, hardenImageIjkToRAS, hardenPoints, withTranslation, IDENTITY4 } from "../../logic/transforms.ts";
 import { createSegmentation, addSegment, applyEffect, computeStats } from "../../logic/segmentation-editor.ts";
 import { LocalBlobStore, loadVolumeIntoScene } from "../../logic/ingest.ts";
 import { parseNifti } from "../../logic/readers/nifti.ts";
@@ -105,6 +107,28 @@ async function main() {
     registerTfEditor(sh, { live: views.live, onStatus: status });
     registerMarkupsPanel(sh, { live: views.live, onStatus: status });
     registerSegEditorPanel(sh, { live: views.live, store, onStatus: status });
+    registerTransformsPanel(sh, { live: views.live, onStatus: status });
+    {
+      let tfSeq = 0;
+      const L = views.live;
+      const nodeTransform = (nodeId: string): string | null => ((L.nodes.get(nodeId)?.refs as Record<string, string[]> | undefined)?.transform ?? [])[0] ?? null;
+      Object.assign(globalThis, {
+        __createTransform: () => { const id = `local-transform-${++tfSeq}`; L.write({ op: "put", id, node: { type: "transform", id, name: `Transform ${tfSeq}`, matrix: IDENTITY4.slice(), refs: {}, source: { mrmlClass: "vtkMRMLLinearTransformNode" }, origin: { local: true } } }); return id; },
+        __applyTransformTo: (nodeId: string, transformId: string) => { const n = L.nodes.get(nodeId); if (!n) return; L.write({ op: "patch", id: nodeId, path: "#/refs", value: { ...(n.refs as Record<string, unknown> ?? {}), transform: [transformId] } }); },
+        __translateTransform: (transformId: string, dx: number, dy: number, dz: number) => { const t = L.nodes.get(transformId); if (!t) return; L.write({ op: "patch", id: transformId, path: "#/matrix", value: withTranslation(t.matrix as number[], [dx, dy, dz]) }); },
+        __identityTransform: (transformId: string) => L.write({ op: "patch", id: transformId, path: "#/matrix", value: IDENTITY4.slice() }),
+        __transforms: () => [...L.nodes.values()].filter((n) => n.type === "transform").map((n) => ({ id: n.id, name: n.name, matrix: n.matrix as number[] })),
+        __nodeTransform: nodeTransform,
+        __nodeWorldMatrix: (nodeId: string) => worldMatrix(nodeTransform(nodeId) ?? undefined, L.nodes),
+        __hardenTransform: (nodeId: string) => {
+          const n = L.nodes.get(nodeId); const tid = nodeTransform(nodeId); if (!n || !tid) return;
+          const world = worldMatrix(tid, L.nodes);
+          if (n.type === "image") L.write({ op: "patch", id: nodeId, path: "#/ijkToRAS", value: hardenImageIjkToRAS(n.ijkToRAS as number[], world) });
+          else if (n.type === "markup") { const cps = ((n.controlPoints as { position: [number, number, number] }[]) ?? []); const moved = hardenPoints(cps.map((c) => c.position), world); L.write({ op: "patch", id: nodeId, path: "#/controlPoints", value: cps.map((c, i) => ({ ...c, position: moved[i] })) }); }
+          const refs = { ...(n.refs as Record<string, unknown> ?? {}) }; delete (refs as Record<string, unknown>).transform; L.write({ op: "patch", id: nodeId, path: "#/refs", value: refs });
+        },
+      });
+    }
     Object.assign(globalThis, {
       __createSegmentation: (srcId: string) => createSegmentation(views.live, store, srcId),
       __addSegment: (segId: string) => addSegment(views.live, segId),

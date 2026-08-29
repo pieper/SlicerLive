@@ -253,3 +253,24 @@ median, labelmap zarr changes + re-bakes).
 Next W5 (optional): interactive paint/erase brush wired natively, masking-intensity-range, Fill Between Slices
 (contour interpolation), Logical operators, segment statistics (shape-stats kernel). Then W6 transforms + models,
 W7 save/export.
+
+## W6 — Transforms + models (in progress)
+
+**Transform hierarchy (done)**: `logic/transforms.ts` — the pure math of `vtkMRMLTransformNode`: `worldMatrix`
+composes a transform's parent chain to world (`GetMatrixTransformToWorld`), `worldForNode` for a transformable's
+`refs.transform`, `rowMul`/`invertRowMajor`, cycle detection (`wouldCycle`, guarded `worldMatrix`), and harden
+(`hardenImageIjkToRAS` = world · ijkToRAS; `hardenPoints` for markups). **Parity**
+(`harness/parity/transforms.parity.test.ts`): worldMatrix matches Slicer's GetMatrixTransformToWorld **exactly**
+(max|Δ| 0) on an A→B→C chain, and harden matches `vtkSlicerTransformLogic.hardenTransform` on a volume (1e-4).
+Unit `transforms.test.ts` (7).
+
+**Native display + panel (done)**: the image DM (`VolumeLayersDisplayableManager`) now composes the transform
+chain — the field is placed with `world(refs.transform) · base ijkToRAS`, re-placed when the transform or its
+matrix changes (backward-compatible: no transform ref → identity → unchanged). `render/demos/transforms-panel.ts`
+— apply a linear transform to the active volume, R/A/S translation sliders, Identity, and Harden. Browser
+`harness/transforms.browser.test.ts` (apply → translate: world carries [10,20,30], base untouched → harden:
+ijkToRAS origin shifts, ref cleared). Hooks `__createTransform`/`__applyTransformTo`/`__translateTransform`/
+`__hardenTransform`/`__nodeWorldMatrix`.
+
+Next W6: apply the chain to the VR 3D field + markups/segmentation DMs, grid (nonlinear) transforms, model display
+props (colour/opacity/representation/2D intersections). Then W7 save/export.

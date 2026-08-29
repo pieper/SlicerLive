@@ -13,6 +13,7 @@ import { CapsuleField, type Segment as LineSegment } from "./capsule-field.ts";
 import { RoiBoxField } from "./roi-box-field.ts";
 import { ColorizeBaker } from "./bake.ts";
 import { fetchZarrVolume, getBlobFetch, type ZarrDesc, type ZarrVolume } from "./zarr.ts";
+import { rowMul, worldForNode } from "../logic/transforms.ts";
 import { lutFromTransferFunctions } from "./scene-volume.ts";
 import type { MrsonNode } from "./mrson.ts";
 import { applyOp, type ApplyResult, type Op } from "./liveops.ts";
@@ -814,8 +815,8 @@ export class ModelDisplayableManager implements DisplayableManager {
  *  colour table) and colour tables, and hands each cell its layer stack. Multiple volumes, different
  *  volumes per view, label maps — the things the singleton VolumeRenderingDM could not express. */
 export class VolumeLayersDisplayableManager implements DisplayableManager {
-  interestedTypes = ["image", "scalarVolumeDisplay", "labelMapDisplay", "colorTable", "sliceComposite"];
-  private images = new Map<string, { node: MrsonNode; field?: ImageField; zv?: ZarrVolume; loading?: boolean }>();
+  interestedTypes = ["image", "scalarVolumeDisplay", "labelMapDisplay", "colorTable", "sliceComposite", "transform"];
+  private images = new Map<string, { node: MrsonNode; field?: ImageField; zv?: ZarrVolume; loading?: boolean; effIjk?: string }>();
   private displays = new Map<string, MrsonNode>();
   private tables = new Map<string, MrsonNode>();
   private composites = new Map<string, MrsonNode>();   // layoutName -> node
@@ -828,11 +829,11 @@ export class VolumeLayersDisplayableManager implements DisplayableManager {
     if (node.type === "image") {
       const e = this.images.get(node.id);
       if (e) {
-        const moved = e.field && JSON.stringify(e.node.ijkToRAS) !== JSON.stringify(node.ijkToRAS);
         e.node = node;
-        if (moved) e.field!.setIjkToRAS(node.ijkToRAS as number[]);   // a transform moved it: re-place, don't re-fetch
+        this.applyEffectiveIjk(node.id, scene);   // base geom and/or transform chain may have changed
       } else this.images.set(node.id, { node });
     }
+    else if (node.type === "transform") { for (const id of this.images.keys()) this.applyEffectiveIjk(id, scene); }
     else if (node.type === "scalarVolumeDisplay" || node.type === "labelMapDisplay") this.displays.set(node.id, node);
     else if (node.type === "colorTable") this.tables.set(node.id, node);
     else if (node.type === "sliceComposite") this.composites.set(node.layoutName as string, node);
@@ -847,6 +848,19 @@ export class VolumeLayersDisplayableManager implements DisplayableManager {
     this.images.clear(); this.displays.clear(); this.tables.clear();
     for (const k of this.composites.keys()) scene.view?.setSliceLayers?.(k, {});
     this.composites.clear();
+  }
+
+  /** world(transform chain) · base ijkToRAS — the geometry the field is actually placed with. */
+  private effIjkOf(node: MrsonNode, scene: LiveScene): number[] {
+    return rowMul(worldForNode(node, scene.nodes), node.ijkToRAS as number[]);
+  }
+  /** Re-place an image's field if its effective (transform-composed) geometry changed. */
+  private applyEffectiveIjk(id: string, scene: LiveScene): void {
+    const e = this.images.get(id); if (!e) return;
+    const eff = this.effIjkOf(e.node, scene); const sig = JSON.stringify(eff);
+    if (sig === e.effIjk) return;
+    e.effIjk = sig;
+    if (e.field) e.field.setIjkToRAS(eff);
   }
 
   private displayFor(image: MrsonNode): MrsonNode | undefined {
@@ -883,7 +897,8 @@ export class VolumeLayersDisplayableManager implements DisplayableManager {
     try {
       e.zv = await fetchZarrVolume(this.blobBaseHref, e.node.zarr as ZarrDesc, this.onBytes);
       const lut = new Uint8Array(256 * 4); for (let i = 0; i < 256; i++) { lut[i * 4] = lut[i * 4 + 1] = lut[i * 4 + 2] = i; lut[i * 4 + 3] = 255; }
-      e.field = new ImageField(this.dev, e.zv.data, e.zv.dims, [1, 1, 1], lut, { clim: e.zv.range, ijkToRAS: e.node.ijkToRAS as number[] });
+      const eff = this.effIjkOf(e.node, scene); e.effIjk = JSON.stringify(eff);
+      e.field = new ImageField(this.dev, e.zv.data, e.zv.dims, [1, 1, 1], lut, { clim: e.zv.range, ijkToRAS: eff });
     } finally { e.loading = false; }
     void this.refresh(scene);      // a layer became available: re-hand the stacks
     return e.field;
