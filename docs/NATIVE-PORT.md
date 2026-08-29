@@ -87,6 +87,12 @@ adapter so it works over native sliceView nodes and a peer's slice nodes alike. 
 Verified: bars per cell (Red=Axial, Yellow=Sagittal, Green=Coronal), and the slider drives the plane to its
 value. The redundant corner cell-name label is hidden (the bar shows orientation).
 
+**Slice intersection lines (done)**: each slice view draws the other slice planes as coloured localizer lines
+(two-plane intersection projected into the view), matching Slicer's crosshair localizers — yellow/green in the
+axial view, etc. `mountLiveViews.sliceIntersectionLines(cell)` returns the line endpoints for tests;
+`setSliceIntersections(on)` toggles. Browser test asserts the sagittal localizer is vertical and the coronal
+horizontal in the axial view.
+
 Next: W2 remaining — orientation combo (reformat), link/hot-link across slice views, 3D controller (reset to
-A/P/L/R/S/I, orthographic), slice intersection lines; then W3 volumes & window/level — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
+A/P/L/R/S/I, orthographic); then W3 volumes & window/level — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
 (Steve's SlicerRad folder browser to be reconciled when that code is available).

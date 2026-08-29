@@ -90,6 +90,28 @@ Deno.test({ name: "controller: slice bars show orientation + offset and the slid
   } finally { await cdp.closeTab(); }
 } });
 
+Deno.test({ name: "intersections: each slice view shows the other planes as coloured localizer lines", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
+  const cdp = await CDP.openTab(`${BASE}slicer-app.html?ws=ws://127.0.0.1:1/&gui=ws://127.0.0.1:1/&http=http://127.0.0.1:1/mrson/`);
+  try {
+    await waitReady(cdp, 60000);
+    const { makeNifti } = await import("../logic/readers/synthetic.ts");
+    const b64 = btoa(String.fromCharCode(...makeNifti({ sform: [1.5, 0, 0, -40, 0, 1.5, 0, -40, 0, 0, 3, -60] })));
+    await cdp.eval(`await window.__loadVolumeBytes(Uint8Array.from(atob(${JSON.stringify(b64)}), c=>c.charCodeAt(0)), "x.nii"); return 1;`);
+    await cdp.waitForValue<number>(`[...window.__live.nodes.values()].filter(n=>n.type==='view'&&n.kind==='slice').length`, (n) => n >= 3, 15000);
+    await cdp.eval(`window.__views.setSliceOffset("Yellow", -37); window.__views.setSliceOffset("Green", -38); return 1;`);
+    await new Promise((r) => setTimeout(r, 200));
+    const lines = await cdp.eval<{ cell: string; a: [number, number]; b: [number, number] }[]>(`return window.__views.sliceIntersectionLines("Red");`);
+    const yellow = lines.find((l) => l.cell === "Yellow")!, green = lines.find((l) => l.cell === "Green")!;
+    assert(yellow && green, "Red view should show Yellow + Green localizers");
+    // in the axial (Red) view: the sagittal (Yellow, x=const) plane is a VERTICAL line (constant u);
+    // the coronal (Green, y=const) plane is a HORIZONTAL line (constant v)
+    assert(Math.abs(yellow.a[0] - yellow.b[0]) < 1e-6, `Yellow localizer should be vertical (u const): ${JSON.stringify(yellow)}`);
+    assert(Math.abs(green.a[1] - green.b[1]) < 1e-6, `Green localizer should be horizontal (v const): ${JSON.stringify(green)}`);
+    // toggle off -> no lines drawn (reader still computes; assert the flag path doesn't throw)
+    await cdp.eval(`window.__views.setSliceIntersections(false); return 1;`);
+  } finally { await cdp.closeTab(); }
+} });
+
 Deno.test({ name: "layout: the picker drives Slicer's layout catalog (OneUpRed, Conventional, FourUp)", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
   const cdp = await CDP.openTab(`${BASE}slicer-app.html`);
   try {

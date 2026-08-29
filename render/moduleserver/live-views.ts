@@ -231,6 +231,27 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
         }
       }
     }
+    // ── slice intersection lines: where every OTHER slice plane cuts THIS plane (Slicer's coloured localizers) ──
+    if (sliceIntersections) {
+      const crossV = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+      const scl = (v: Vec3, k: number): Vec3 => [v[0] * k, v[1] * k, v[2] * k];
+      const add3 = (a: Vec3, b: Vec3): Vec3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+      const normalOf = (cc: SliceCell): Vec3 => cc.plane?.basis ? cc.plane.basis.nDir : cc.orientKey === "axial" ? [0, 0, 1] : cc.orientKey === "coronal" ? [0, 1, 0] : [1, 0, 0];
+      const nc = normalOf(c), dc = c.plane.posMm;
+      for (const o of cells.values()) {
+        if (o === c || o.el.style.display === "none" || !o.plane) continue;
+        const no = normalOf(o), doff = o.plane.posMm;
+        const dir = crossV(nc, no), dd = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+        if (dd < 1e-9) continue;                                    // parallel planes: no intersection line
+        // a point on both planes: p0 = (dc (no×dir) + doff (dir×nc)) / |dir|^2  (standard two-plane intersection)
+        const p0 = scl(add3(scl(crossV(no, dir), dc), scl(crossV(dir, nc), doff)), 1 / dd);
+        const L = 1e4;
+        const a = proj(add3(p0, scl(dir, L))), b = proj(add3(p0, scl(dir, -L)));
+        g.strokeStyle = (CELL_COLORS[o.name] ?? "#c0c8d8"); g.globalAlpha = 0.85; g.lineWidth = 1.5 * dpr;
+        g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.stroke(); g.globalAlpha = 1;
+      }
+    }
+
     // ── slice-view chrome: orientation marker, ruler, corner annotations (DataProbe's SliceViewAnnotations) ──
     const chrome = c.plane.chrome;
     if (chrome?.orientationMarkerType) drawOrientationMarker(g, ov.width, ov.height, (p) => { const o = c.slice.rasToView(c.orientKey, off, [0, 0, 0], aspect); const q = c.slice.rasToView(c.orientKey, off, p, aspect); return { dx: (q.u - o.u) * ov.width, dy: (q.v - o.v) * ov.height }; }, 10);
@@ -508,6 +529,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       sync.flush();
     });
   }
+  let sliceIntersections = true;
   let shiftHeld = false;
   addEventListener("keydown", (e) => { if (e.key === "Shift") shiftHeld = true; }, true);
   addEventListener("keyup", (e) => { if (e.key === "Shift") shiftHeld = false; }, true);
@@ -641,6 +663,24 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     camera: () => ({ position: [...camera.position] as Vec3, focalPoint: [...camera.focalPoint] as Vec3, viewUp: [...camera.viewUp] as Vec3, viewAngle: camera.viewAngle }),
     cells: () => [...cells.keys()],
     getSliceOffset, setSliceOffset, sliceOffsetRange,
+    setSliceIntersections: (on: boolean) => { sliceIntersections = on; renderSlices(); },
+    sliceIntersectionLines: (cell: string) => {
+      const c = cells.get(cell); if (!c || !c.plane) return [];
+      const ov = c.overlay, off = planeOffset01(c), aspect = ov.width / ov.height;
+      const normalOf = (cc: SliceCell): Vec3 => cc.plane?.basis ? cc.plane.basis.nDir : cc.orientKey === "axial" ? [0, 0, 1] : cc.orientKey === "coronal" ? [0, 1, 0] : [1, 0, 0];
+      const crossV = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+      const nc = normalOf(c), dc = c.plane.posMm; const out: { cell: string; a: [number, number]; b: [number, number] }[] = [];
+      for (const o of cells.values()) {
+        if (o === c || o.el.style.display === "none" || !o.plane) continue;
+        const no = normalOf(o), dd0 = crossV(nc, no); const dd = dd0[0] ** 2 + dd0[1] ** 2 + dd0[2] ** 2; if (dd < 1e-9) continue;
+        const co1 = crossV(no, dd0), co2 = crossV(dd0, nc);
+        const p0: Vec3 = [(co1[0] * dc + co2[0] * o.plane.posMm) / dd, (co1[1] * dc + co2[1] * o.plane.posMm) / dd, (co1[2] * dc + co2[2] * o.plane.posMm) / dd];
+        const pa = c.slice.rasToView(c.orientKey, off, [p0[0] + dd0[0] * 1e4, p0[1] + dd0[1] * 1e4, p0[2] + dd0[2] * 1e4], aspect);
+        const pb = c.slice.rasToView(c.orientKey, off, [p0[0] - dd0[0] * 1e4, p0[1] - dd0[1] * 1e4, p0[2] - dd0[2] * 1e4], aspect);
+        out.push({ cell: o.name, a: [pa.u, pa.v], b: [pb.u, pb.v] });
+      }
+      return out;
+    },
     orientationOf: (cell: string) => cells.get(cell)?.orientKey ?? null,
     fitCell,
   };
