@@ -10,6 +10,7 @@ import { getBlobFetch, setBlobFetch } from "../render/zarr.ts";
 import type { Volume } from "./readers/nifti.ts";
 import type { LiveScene } from "../render/livescene.ts";
 import type { MrsonNode } from "../render/mrson.ts";
+import { histogramPercentiles } from "./window-level.ts";
 
 export const CHUNK_MAX: [number, number, number] = [64, 128, 128];   // (cz, cy, cx) — Slicer's _write_zarr rule
 
@@ -84,14 +85,12 @@ export const nextLocalId = (kind: string) => `local-${kind}-${++seq}-${Date.now(
 /** Slicer's default W/L for a new volume is the 0.1..99.9 percentile range (vtkMRMLScalarVolumeDisplayNode::CalculateAutoLevels);
  *  W3 lands the exact histogram; this is the same idea on a subsample so W1 shows something sensible. */
 export function percentileWindowLevel(data: Volume["data"], lo = 0.001, hi = 0.999): { window: number; level: number; range: [number, number] } {
-  const n = data.length, step = Math.max(1, Math.floor(n / 500000));
-  const s: number[] = [];
+  // W3: the exact vtkImageHistogramStatistics-style histogram (logic/window-level.ts), not the old subsample sort.
+  const [a, b] = histogramPercentiles(data as Parameters<typeof histogramPercentiles>[0], lo, hi);
   let mn = Infinity, mx = -Infinity;
-  for (let i = 0; i < n; i += step) { const v = data[i] as number; s.push(v); if (v < mn) mn = v; if (v > mx) mx = v; }
-  s.sort((a, b) => a - b);
-  const a = s[Math.floor(lo * (s.length - 1))], b = s[Math.floor(hi * (s.length - 1))];
-  const window = Math.max(1e-6, b - a), level = (a + b) / 2;
-  return { window, level, range: [mn, mx] };
+  const n = data.length, step = Math.max(1, Math.floor(n / 500000));
+  for (let i = 0; i < n; i += step) { const v = data[i] as number; if (v < mn) mn = v; if (v > mx) mx = v; }
+  return { window: Math.max(1e-6, b - a), level: (a + b) / 2, range: [mn, mx] };
 }
 
 export interface LoadedVolume { imageId: string; displayId: string; nodes: MrsonNode[] }

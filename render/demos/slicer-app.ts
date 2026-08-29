@@ -12,6 +12,7 @@ import { expect, registerSelfTest } from "../selftest.ts";
 import { type AppShell, mountAppShell } from "./app-shell.ts";
 import { cellsFor, DEFAULT_LAYOUT, layoutList } from "../../logic/layouts.ts";
 import { registerLoadPanel } from "./load-panel.ts";
+import { registerVolumesPanel } from "./volumes-panel.ts";
 import { LocalBlobStore, loadVolumeIntoScene } from "../../logic/ingest.ts";
 import { parseNifti } from "../../logic/readers/nifti.ts";
 import { makeNifti, SYNTHETIC_DIMS } from "../../logic/readers/synthetic.ts";
@@ -96,6 +97,21 @@ async function main() {
     // W1: local data — chunks from files are served to the DisplayableManagers like any other blob
     const store = new LocalBlobStore();
     registerLoadPanel(sh, { live: views.live, store, onStatus: status, onLoaded: (i) => { views.fitVolume(i.rasLo, i.rasHi, i.ijkToRAS); (globalThis as unknown as { __lastLoad?: unknown }).__lastLoad = i; } });
+    registerVolumesPanel(sh, { live: views.live, onStatus: status });
+    registerSelfTest("volumes: auto W/L gives window>0 and level in range; presets + threshold + color table apply", async () => {
+      const vol = await parseNifti(makeNifti({ sform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }), "wl-selftest");
+      const r = await loadVolumeIntoScene(views.live, store, vol, { name: "wl-selftest" });
+      const g = globalThis as unknown as { __volumeDisplay: (id: string) => { window: number; level: number; autoWindowLevel: boolean; applyThreshold: boolean; threshold: [number, number]; colorTableId: string } | null; __wlPreset: (id: string, n: string) => void; __setThreshold: (id: string, on: boolean, lo?: number, hi?: number) => void; __setColorTable: (id: string, t: string) => void };
+      const d0 = g.__volumeDisplay(r.imageId); expect(!!d0 && d0.window > 0 && d0.autoWindowLevel, "auto W/L: window>0 and autoWindowLevel");
+      g.__wlPreset(r.imageId, "CT Bone"); const dp = g.__volumeDisplay(r.imageId); expect(!!dp && dp.window === 1800 && dp.level === 400 && dp.autoWindowLevel === false, "CT Bone preset -> 1800/400, auto off");
+      g.__setThreshold(r.imageId, true, 10, 90); const dt = g.__volumeDisplay(r.imageId); expect(!!dt && dt.applyThreshold && dt.threshold[0] === 10 && dt.threshold[1] === 90, "threshold applied");
+      g.__setColorTable(r.imageId, "vtkMRMLColorTableNodeRainbow"); const dc = g.__volumeDisplay(r.imageId); expect(!!dc && dc.colorTableId === "vtkMRMLColorTableNodeRainbow" && views.live.nodes.has("vtkMRMLColorTableNodeRainbow"), "color table attached");
+      // leave the scene as found
+      const comps = [...views.live.nodes.values()].filter((n) => n.type === "sliceComposite");
+      const others = [...views.live.nodes.values()].filter((n) => n.type === "image" && n.id !== r.imageId);
+      for (const c of comps) views.live.write(others.length ? { op: "patch", id: c.id, path: "#/refs/background", value: [others[others.length - 1].id] } : { op: "del", id: c.id });
+      for (const n of r.nodes) views.live.write({ op: "del", id: n.id });
+    });
     registerSelfTest("ingest: a synthetic NIfTI becomes an image node the slices can show", async () => {
       const vol = await parseNifti(makeNifti({ sform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }), "selftest");
       const before = views.live.nodes.size;

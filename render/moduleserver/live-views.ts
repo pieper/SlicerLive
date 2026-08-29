@@ -423,6 +423,15 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
 
   const sliceNodeId = (name: string) => nodeIdFor((nd) => nd.type === "view" && nd.kind === "slice" && nd.layoutName === name);
   const scalarDisplayId = () => nodeIdFor((nd) => nd.type === "scalarVolumeDisplay");
+  /** The display node of a cell's BACKGROUND volume (what Slicer's W/L drag adjusts): the cell's
+   *  sliceComposite -> background image -> refs.display[0]; falls back to any scalar display. */
+  const bgDisplayId = (c: SliceCell): string | undefined => {
+    const comp = [...live.nodes.values()].find((n) => n.type === "sliceComposite" && n.layoutName === c.name);
+    const imgId = ((comp?.refs as Record<string, string[]> | undefined)?.background ?? [])[0];
+    const img = imgId ? live.nodes.get(imgId) : undefined;
+    const did = ((img?.refs as Record<string, string[]> | undefined)?.display ?? [])[0];
+    return did ?? scalarDisplayId() ?? undefined;
+  };
   const crosshairId = () => stateNode("crosshair")?.id ?? null;
   /** RAS of a cell pixel (u,v in [0,1]) on the cell's current plane. */
   const cellRas = (c: SliceCell, u: number, v: number): Vec3 => { applyPlane(c); return c.slice.viewToRas(c.orientKey, planeOffset01(c), u, v, c.canvas.width / c.canvas.height); };
@@ -494,9 +503,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       redraw: () => renderSlice(c),
       // Slicer's AdjustWindowLevel mouse mode: gated by the interaction node streamed from the app
       wl: {
-        enabled: () => interactionMode() === "adjustWindowLevel",
-        get: () => { const d = viewState ? live.nodes.get(scalarDisplayId() ?? "") : undefined; return [(d?.window as number) ?? 100, (d?.level as number) ?? 50]; },
-        set: (win, lev) => { const id = scalarDisplayId(); if (!id) return; live.write({ op: "patch", id, path: "#/window", value: win }); live.write({ op: "patch", id, path: "#/level", value: lev }); c.slice.setWindowLevel(win, lev); renderSlice(c); },
+        enabled: () => { const m = stateNode("interaction"); return m ? (m.mode === "adjustWindowLevel") : !!bgDisplayId(c); },   // Slicer default 2D mouse mode
+        get: () => { const d = live.nodes.get(bgDisplayId(c) ?? ""); return [(d?.window as number) ?? 100, (d?.level as number) ?? 50]; },
+        set: (win, lev) => { const id = bgDisplayId(c); if (!id) return; live.write({ op: "patch", id, path: "#/window", value: win }); live.write({ op: "patch", id, path: "#/level", value: lev }); live.write({ op: "patch", id, path: "#/autoWindowLevel", value: false }); c.slice.setWindowLevel(win, lev); renderSlice(c); },
         range: () => bgField(c) ? bgField(c)!.getClim() : [0, 1],
       },
       hooks: {

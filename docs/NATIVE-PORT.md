@@ -105,3 +105,42 @@ Next: W2 tail — orientation combo (reformat), link/hot-link across slice views
 (auto W/L histogram, W/L drag, presets, threshold, colour tables, TF editor — reusing the plan's histogram/W-L
 kernels) — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
 (Steve's SlicerRad folder browser to be reconciled when that code is available).
+
+## W3 — Volumes & window/level (in progress)
+
+**Auto window/level (done)**: `logic/window-level.ts` `histogramPercentiles` reproduces
+`vtkImageHistogramStatistics` (0.1/99.9 percentiles: unit bins for integer data capped at 2^16, 1000 bins for
+float, subsample above 4M voxels) and `autoWindowLevel` maps them to window=hi−lo, level=(lo+hi)/2 — the same
+rule as `vtkMRMLScalarVolumeDisplayNode::CalculateAutoLevels`. `logic/ingest.ts` now computes the load-time W/L
+through this exact histogram (the old subsample-sort `percentileWindowLevel` delegates to it). **Parity**:
+`harness/parity/window-level.parity.test.ts` — native MRHead auto W/L 152.0/76.0 vs Slicer 151.0/75.5 (window
+tol 2, level tol 1).
+
+**W/L drag (done, reuses `attachSliceControls`)**: Slicer's AdjustWindowLevel mouse mode is the default 2D
+left-drag in the native shell — gain = (rangeHi−rangeLo)/min(viewW,viewH), window += gain·Δx, level += gain·Δy
+(display coords), already implemented faithfully in `render/demos/slice-control.ts`. `live-views.ts` now enables
+it standalone (no peer interaction node ⇒ on when the cell has a background volume) and targets the cell's
+**background** volume display via `bgDisplayId(c)` (composite→image→display), clearing `autoWindowLevel`. Right-drag
+stays zoom, wheel stays scroll. `logic/window-level.ts:adjustWindowLevel` is the unit-tested reference for the gain.
+
+**Presets (done)**: `CT_WL_PRESETS` (CT Soft Tissue/Lung/Bone/Brain/Abdomen/Angio/Mediastinum, PET) matching the
+BIR reader values.
+
+**Color tables (done)**: `logic/color-tables.ts` — Slicer's continuous ramps (Grey, InvertedGrey, Rainbow, Ocean,
+Iron, Fire, Cool, Warm) as 256-entry `colorTable` nodes (the shape `livescene.ts:lutFor` consumes), plus
+`sampleColor(table, scalar, w, l, threshold?)` — a CPU reference of the slice shader's scalar→W/L→LUT→RGBA map
+(threshold is alpha-only). Grey stays the identity ramp so the plain grayscale path is used.
+
+**Volumes panel (done)**: `render/demos/volumes-panel.ts` — active-volume selector, W/L sliders + numeric + Auto
+(recomputes the exact histogram from the volume's chunks) + preset dropdown, threshold (apply + lo/hi), interpolate
+toggle, color-table picker. Every control patches the `scalarVolumeDisplay` node through the LiveScene
+(local-authoritative) so slice + VR update immediately. Programmatic API (`__volumeList`, `__volumeDisplay`,
+`__setWindowLevel`, `__autoWL`, `__wlPreset`, `__setThreshold`, `__setInterpolate`, `__setColorTable`) for tests.
+
+**Tests**: unit `logic/window-level.test.ts` (5) + `logic/color-tables.test.ts` (7); parity above; browser
+`harness/volumes-panel.browser.test.ts` (2: panel API auto/preset/threshold/color-table, and left-drag W/L
+integration — grows window, more for longer drag, level stable, auto cleared, vertical drag moves level); self-test
+"volumes: auto W/L … presets + threshold + color table apply" on `slicer-app.html` (selfTest 6 pass / 0 fail).
+
+Next W3: VR transfer-function editor (`tf-editor.ts`) + the compute-kernel `resample3d`/`histogram` GPU paths
+(the plan's kernels feeding SegmentStatistics/masking later); then W2 tail (orientation combo, link/hot-link).
