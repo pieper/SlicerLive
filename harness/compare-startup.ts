@@ -22,7 +22,7 @@ if (!await c.waitFor(`window.__slicerlive && window.__slicerlive.ready`, 120000)
   console.log("SlicerLive hook never appeared. status:", await c.eval(`return (document.querySelector('#status')||{}).textContent;`));
   Deno.exit(1);
 }
-const live = await c.eval<Record<string, any>>(`return window.__slicerlive.snapshot();`);
+const live = await c.eval<Record<string, unknown>>(`return window.__slicerlive.snapshot();`);
 
 let fails = 0;
 const row = (label: string, a: unknown, b: unknown, ok: boolean, note = "") => {

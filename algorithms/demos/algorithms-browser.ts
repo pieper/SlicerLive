@@ -5,7 +5,6 @@
 // stream. No editing UI yet (by design). Drag to orbit · scroll to zoom.
 // Bundled to live/webgpu/algorithms.js.
 import { initDevice } from "../../render/device.ts";
-import { SceneRenderer } from "../../render/scene-renderer.ts";
 import { attachCameraControls, framedCamera } from "../../render/demos/camera-control.ts";
 import { mountAdaptive3d } from "../../render/demos/accum-loop.ts";
 import { buildAlgorithmsScene } from "./algorithms-scene.ts";

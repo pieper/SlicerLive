@@ -2,12 +2,13 @@ import { VtkCamera } from "../render/vtk-camera.ts";
 import { CameraInteractor, actionForButton } from "../render/vtk-interactor.ts";
 import type { Vec3 } from "../render/mat4.ts";
 import { fixture } from "./fixtures.ts";
-const t = await fixture<any>("slicer-actions-truth.json");
+const t = await fixture<{ cases: Record<string, Record<string, unknown>> }>("slicer-actions-truth.json");
 const [W,H] = t.viewSize; const [x0,y0] = t.origin;
 const BTN: Record<string, 0|1|2> = { left:0, middle:1, right:2 };
 const cmp = (l:string,a:number[],b:number[],tol:number)=>{const d=Math.max(...a.map((v,i)=>Math.abs(v-b[i])));
   console.log(`  ${d<=tol?"OK ":"XX "} ${l.padEnd(11)} slicer=[${a.map(v=>v.toFixed(4)).join(", ")}] ts=[${b.map(v=>v.toFixed(4)).join(", ")}] d=${d.toExponential(2)}`); return d<=tol;};
 let all = true;
+// deno-lint-ignore no-explicit-any
 for (const [name, c] of Object.entries<any>(t.cases)) {
   const cam = new VtkCamera(c.before.position as Vec3, c.before.focalPoint as Vec3, c.before.viewUp as Vec3, 30);
   const it = new CameraInteractor(cam);

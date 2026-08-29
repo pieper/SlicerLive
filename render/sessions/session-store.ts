@@ -193,7 +193,7 @@ export class SessionStore {
 
   // ── blob cache ──
   async cacheBlob(hash: string, bytes: Uint8Array): Promise<void> { if (!(await this.fs.exists("blobs/" + hash))) await this.fs.writeBytes("blobs/" + hash, bytes); }
-  async cachedBlob(hash: string): Promise<Uint8Array | null> { return this.fs.readBytes("blobs/" + hash); }
+  cachedBlob(hash: string): Promise<Uint8Array | null> { return this.fs.readBytes("blobs/" + hash); }
 
   /** "Save": export the current active set (nodes + exactly the blobs they reference) into `target`. */
   async exportActiveSet(target: SessionFS, fetchBlob: (hash: string) => Promise<Uint8Array | null>): Promise<{ nodes: number; blobs: number; missing: string[] }> {

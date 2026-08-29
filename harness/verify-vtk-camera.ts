@@ -3,7 +3,7 @@
 // from a live vtkCamera into /tmp/vtk-camera-truth.json.
 //   deno run -A harness/verify-vtk-camera.ts
 import { VtkCamera } from "../render/vtk-camera.ts";
-import { CameraInteractor, MOTION_FACTOR } from "../render/vtk-interactor.ts";
+import { MOTION_FACTOR } from "../render/vtk-interactor.ts";
 import type { Vec3 } from "../render/mat4.ts";
 import { fixture } from "./fixtures.ts";
 

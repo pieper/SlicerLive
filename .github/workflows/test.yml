@@ -1,0 +1,24 @@
+# Hermetic tier only: unit tests + pure harness checks (no GPU, no Slicer, no network).
+# GPU (T2), browser (T3) and Slicer-parity (T4) tiers run locally / on a self-hosted mac runner:
+#   deno run -A test/run.ts --all        (see docs/HARNESS.md)
+name: test
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.9.x
+      - name: lint
+        # scoped to the directories kept lint-clean; widen as demos/vendor code is cleaned up
+        run: deno lint test harness logic algorithms render/selftest.ts render/introspect.ts render/livescene.ts render/livesync.ts render/liveops.ts render/mrson.ts render/sessions ModuleServer/conformance ModuleServer/mock
+      - name: typecheck entry points
+        # GPU-facing modules trip TS lib strictness under deno check (BufferSource); the model/protocol files are checked
+        run: deno check test/run.ts test/tiers.ts test/oracle.ts harness/cdp.ts harness/slicer.ts harness/ready.ts render/liveops.ts render/mrson.ts render/selftest.ts
+      - name: unit tier
+        run: deno run -A test/run.ts

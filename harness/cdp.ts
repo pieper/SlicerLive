@@ -121,6 +121,40 @@ export class CDP {
     return false;
   }
 
+  /** Evaluate an expression whose value is JSON-serialisable (no `return` needed). */
+  evalJson<T = unknown>(expr: string): Promise<T> { return this.eval<T>(`return (${expr});`); }
+
+  /** Wait until `expr` yields a value satisfying `pred`; resolves with that value (throws on timeout). */
+  async waitForValue<T = unknown>(expr: string, pred: (v: T) => boolean, timeoutMs = 60000, pollMs = 200): Promise<T> {
+    const end = Date.now() + timeoutMs;
+    let last: T | undefined;
+    while (Date.now() < end) {
+      try { last = await this.evalJson<T>(expr); if (pred(last)) return last; } catch { /* mid-navigation */ }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+    throw new Error(`waitForValue(${expr}) timed out; last=${JSON.stringify(last)?.slice(0, 200)}`);
+  }
+
+  /** Open a NEW tab at `url` (PUT /json/new) and attach to it — for tests that must not disturb an existing page. */
+  static async openTab(url: string, port = 9222): Promise<CDP> {
+    // open blank, disable the HTTP cache for this tab, THEN navigate — otherwise a rebuilt bundle can be
+    // served from Chrome's cache and the test runs against stale code (seen 2026-08-29)
+    const r = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: "PUT" });
+    const t = await r.json() as Target;
+    const c = new CDP();
+    await c.connect(t.webSocketDebuggerUrl!);
+    await c.send("Page.enable");
+    await c.send("Network.enable");
+    await c.send("Network.setCacheDisabled", { cacheDisabled: true });
+    await c.goto(url);
+    return c;
+  }
+
+  async closeTab(port = 9222): Promise<void> {
+    try { const info = await this.send<{ targetInfo: { targetId: string } }>("Target.getTargetInfo"); await fetch(`http://127.0.0.1:${port}/json/close/${info.targetInfo.targetId}`); } catch { /* best effort */ }
+    this.close();
+  }
+
   async screenshot(path: string): Promise<void> {
     const r = await this.send<{ data: string }>("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
     await Deno.writeFile(path, Uint8Array.from(atob(r.data), (c) => c.charCodeAt(0)));

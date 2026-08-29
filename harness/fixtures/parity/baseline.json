@@ -1,0 +1,286 @@
+{
+ "name": "baseline",
+ "description": "The 20 MRML<->mrson properties from render/test/parity-run.ts (S0-S10). Both directions per row. Node aliases ($svd $vr $seg $fid $camera $layout $tf) resolve to the FIRST node of that class in the running Slicer (see harness/parity/baseline.parity.test.ts); build the scene with harness/parity/setup.ts.",
+ "rows": [
+  {
+   "id": "svd.window",
+   "property": "scalarVolumeDisplay.window",
+   "node": "$svd",
+   "path": "#/window",
+   "slicerGet": "nd.GetWindow()",
+   "slicerSet": "nd.SetAutoWindowLevel(0); nd.SetWindow(%V%)",
+   "inV": 210,
+   "outV": 175,
+   "tol": 0.5,
+   "ref": "vtkMRMLScalarVolumeDisplayNode"
+  },
+  {
+   "id": "svd.interpolate",
+   "property": "scalarVolumeDisplay.interpolate",
+   "node": "$svd",
+   "path": "#/interpolate",
+   "slicerGet": "nd.GetInterpolate()",
+   "slicerSet": "nd.SetInterpolate(%V%)",
+   "inV": false,
+   "outV": true,
+   "bool": true
+  },
+  {
+   "id": "vr.visible",
+   "property": "volumeRenderingDisplay.visible",
+   "node": "$vr",
+   "path": "#/visible",
+   "slicerGet": "nd.GetVisibility()",
+   "slicerSet": "nd.SetVisibility(%V%)",
+   "inV": true,
+   "outV": false,
+   "bool": true
+  },
+  {
+   "id": "vr.cropEnabled",
+   "property": "volumeRenderingDisplay.cropEnabled",
+   "node": "$vr",
+   "path": "#/cropEnabled",
+   "slicerGet": "nd.GetCroppingEnabled()",
+   "slicerSet": "nd.SetCroppingEnabled(%V%)",
+   "inV": true,
+   "outV": false,
+   "bool": true
+  },
+  {
+   "id": "seg.opacity",
+   "property": "segmentation.opacity",
+   "node": "$seg",
+   "path": "#/opacity",
+   "slicerGet": "nd.GetDisplayNode().GetOpacity()",
+   "slicerSet": "nd.GetDisplayNode().SetOpacity(%V%)",
+   "inV": 0.6,
+   "outV": 0.85,
+   "tol": 0.02
+  },
+  {
+   "id": "seg.outline2D",
+   "property": "segmentation.outline2D.opacity",
+   "node": "$seg",
+   "path": "#/outline2D/opacity",
+   "slicerGet": "nd.GetDisplayNode().GetOpacity2DOutline()",
+   "slicerSet": "nd.GetDisplayNode().SetOpacity2DOutline(%V%)",
+   "inV": 0.4,
+   "outV": 0.7,
+   "tol": 0.02
+  },
+  {
+   "id": "markup.glyphScale",
+   "property": "markup.glyphScale",
+   "node": "$fid",
+   "path": "#/glyphScale",
+   "slicerGet": "nd.GetDisplayNode().GetGlyphScale()",
+   "slicerSet": "nd.GetDisplayNode().SetGlyphScale(%V%)",
+   "inV": 5.0,
+   "outV": 2.5,
+   "tol": 0.05,
+   "unit": "% of view height",
+   "ref": "vtkMRMLMarkupsDisplayNode::GlyphScale"
+  },
+  {
+   "id": "markup.textScale",
+   "property": "markup.textScale",
+   "node": "$fid",
+   "path": "#/textScale",
+   "slicerGet": "nd.GetDisplayNode().GetTextScale()",
+   "slicerSet": "nd.GetDisplayNode().SetTextScale(%V%)",
+   "inV": 4.0,
+   "outV": 2.0,
+   "tol": 0.05
+  },
+  {
+   "id": "markup.locked",
+   "property": "markup.locked",
+   "node": "$fid",
+   "path": "#/locked",
+   "slicerGet": "nd.GetLocked()",
+   "slicerSet": "nd.SetLocked(%V%)",
+   "inV": true,
+   "outV": false,
+   "bool": true
+  },
+  {
+   "id": "markup.color",
+   "property": "markup.color",
+   "node": "$fid",
+   "path": "#/color",
+   "slicerGet": "list(nd.GetDisplayNode().GetSelectedColor())",
+   "slicerSet": "nd.GetDisplayNode().SetSelectedColor(%V%)",
+   "inV": [
+    0.2,
+    0.8,
+    0.4
+   ],
+   "outV": [
+    0.9,
+    0.3,
+    0.1
+   ],
+   "tol": 0.02
+  },
+  {
+   "id": "seg.fill2D",
+   "property": "segmentation.fill2D.opacity",
+   "node": "$seg",
+   "path": "#/fill2D/opacity",
+   "slicerGet": "nd.GetDisplayNode().GetOpacity2DFill()",
+   "slicerSet": "nd.GetDisplayNode().SetOpacity2DFill(%V%)",
+   "inV": 0.35,
+   "outV": 0.65,
+   "tol": 0.02
+  },
+  {
+   "id": "seg.segment0.visible",
+   "property": "segmentation.segments[0].visible",
+   "node": "$seg",
+   "path": "#/segments/0/visible",
+   "slicerGet": "nd.GetDisplayNode().GetSegmentVisibility(nd.GetSegmentation().GetNthSegmentID(0))",
+   "slicerSet": "nd.GetDisplayNode().SetSegmentVisibility(nd.GetSegmentation().GetNthSegmentID(0), %V%)",
+   "inV": false,
+   "outV": true,
+   "bool": true
+  },
+  {
+   "id": "camera.position",
+   "property": "camera.position",
+   "node": "$camera",
+   "path": "#/position",
+   "slicerGet": "list(nd.GetPosition())",
+   "slicerSet": "nd.SetPosition(%V%)",
+   "inV": [
+    10,
+    20,
+    30
+   ],
+   "outV": [
+    -40,
+    -50,
+    -60
+   ],
+   "tol": 0.5,
+   "unit": "mm RAS"
+  },
+  {
+   "id": "camera.viewUp",
+   "property": "camera.viewUp",
+   "node": "$camera",
+   "path": "#/viewUp",
+   "slicerGet": "list(nd.GetViewUp())",
+   "slicerSet": "nd.SetViewUp(%V%)",
+   "inV": [
+    1,
+    0,
+    0
+   ],
+   "outV": [
+    0,
+    0,
+    1
+   ],
+   "tol": 0.02
+  },
+  {
+   "id": "camera.viewAngle",
+   "property": "camera.viewAngle",
+   "node": "$camera",
+   "path": "#/viewAngle",
+   "slicerGet": "nd.GetCamera().GetViewAngle()",
+   "slicerSet": "nd.GetCamera().SetViewAngle(%V%); nd.Modified()",
+   "inV": 25,
+   "outV": 40,
+   "tol": 0.1,
+   "unit": "deg"
+  },
+  {
+   "id": "camera.parallelScale",
+   "property": "camera.parallelScale",
+   "node": "$camera",
+   "path": "#/parallelScale",
+   "slicerGet": "nd.GetCamera().GetParallelScale()",
+   "slicerSet": "nd.GetCamera().SetParallelScale(%V%); nd.Modified()",
+   "inV": 120,
+   "outV": 80,
+   "tol": 0.5
+  },
+  {
+   "id": "slice.offset",
+   "property": "slice.offset",
+   "node": "vtkMRMLSliceNodeRed",
+   "path": "#/offset",
+   "slicerGet": "nd.GetSliceOffset()",
+   "slicerSet": "nd.SetSliceOffset(%V%)",
+   "inV": 12.0,
+   "outV": -8.0,
+   "tol": 0.5,
+   "unit": "mm",
+   "ref": "vtkMRMLSliceNode::SetSliceOffset"
+  },
+  {
+   "id": "slice.fieldOfView",
+   "property": "slice.fieldOfView",
+   "node": "vtkMRMLSliceNodeRed",
+   "path": "#/fieldOfView",
+   "slicerGet": "list(nd.GetFieldOfView())",
+   "slicerSet": "nd.SetFieldOfView(%V%); nd.UpdateMatrices()",
+   "inV": [
+    250,
+    180,
+    1
+   ],
+   "outV": [
+    300,
+    200,
+    1
+   ],
+   "tol": 0.5,
+   "unit": "mm"
+  },
+  {
+   "id": "tf.scalarOpacity3",
+   "property": "transferFunction.scalarOpacity[3].opacity",
+   "node": "$tf",
+   "path": "#/scalarOpacity/3/opacity",
+   "slicerGet": "(lambda v=[0.0,0.0,0.0,0.0]: (nd.GetVolumeProperty().GetScalarOpacity(0).GetNodeValue(3,v), v[1])[1])()",
+   "slicerSet": "so=nd.GetVolumeProperty().GetScalarOpacity(0); v=[0.0,0.0,0.0,0.0]; so.GetNodeValue(3,v); v[1]=%V%; so.SetNodeValue(3,v); nd.Modified()",
+   "inV": 0.62,
+   "outV": 0.44,
+   "tol": 0.01
+  },
+  {
+   "id": "tf.colorStop3",
+   "property": "transferFunction.colorStops[3].rgba",
+   "node": "$tf",
+   "path": "#/colorStops/3/rgba",
+   "slicerGet": "(lambda v=[0.0]*6: (nd.GetVolumeProperty().GetRGBTransferFunction(0).GetNodeValue(3,v), [v[1],v[2],v[3]])[1])()",
+   "slicerSet": "f=nd.GetVolumeProperty().GetRGBTransferFunction(0); v=[0.0]*6; f.GetNodeValue(3,v); _c=[%V%]; v[1],v[2],v[3]=_c[0],_c[1],_c[2]; f.SetNodeValue(3,v); nd.Modified()",
+   "inV": [
+    0.2,
+    0.5,
+    0.9
+   ],
+   "outV": [
+    0.9,
+    0.4,
+    0.1
+   ],
+   "tol": 0.02
+  },
+  {
+   "id": "layout.arrangement",
+   "property": "layout.arrangement",
+   "node": "$layout",
+   "path": "#/arrangement",
+   "slicerGet": "nd.GetViewArrangement()",
+   "slicerSet": "nd.SetViewArrangement(%V%)",
+   "inV": 6,
+   "outV": 3,
+   "tol": 0.1,
+   "ref": "vtkMRMLLayoutNode::SlicerLayout (ends on FourUp=3)"
+  }
+ ]
+}

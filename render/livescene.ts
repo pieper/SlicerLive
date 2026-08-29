@@ -790,6 +790,7 @@ export class ModelDisplayableManager implements DisplayableManager {
     } finally { this.loading.delete(mesh.id); }
     await this.refresh(scene);
   }
+  // deno-lint-ignore require-await
   private async refresh(scene: LiveScene): Promise<void> {
     const view = scene.view;
     if (!view?.setMeshes) return;
@@ -898,6 +899,7 @@ export class VolumeLayersDisplayableManager implements DisplayableManager {
     const lev = (d?.level as number) ?? (range[0] + range[1]) / 2;
     return { field: e.field, win, lev, lut: this.lutFor(d), interpolate: (d?.interpolate as boolean) ?? true, name: e.node.name as string };
   }
+  // deno-lint-ignore require-await
   private async refresh(scene: LiveScene): Promise<void> {
     const view = scene.view;
     if (!view?.setSliceLayers) return;

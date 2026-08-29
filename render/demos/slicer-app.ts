@@ -7,6 +7,8 @@ import { initDevice } from "../device.ts";
 import { LegacyGui, type Menu } from "../moduleserver/legacy-gui.ts";
 import { mountLiveViews } from "../moduleserver/live-views.ts";
 import { mountSessionUI } from "../moduleserver/session-ui.ts";
+import { installIntrospection, type SlicerLiveHook } from "../introspect.ts";
+import { expect, registerSelfTest } from "../selftest.ts";
 
 const status = (m: string) => { const e = document.getElementById("status"); if (e) e.textContent = m; };
 
@@ -26,7 +28,23 @@ async function main() {
   const gpu = await initDevice();
   const viewsEl = document.getElementById("views")!;
   const peers = (p.get("peers") ?? "").split(",").map((x) => x.trim()).filter(Boolean);   // extra ModuleServers (ws urls)
-  const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, peers, onStatus: status });
+  let hook: SlicerLiveHook | null = null;
+  const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, peers, onStatus: status, onFrame: () => hook?.frameRendered() });
+  // window.__slicerlive: numeric state + settle detection + in-page self-tests (tiers T3/T5, docs/HARNESS.md)
+  hook = installIntrospection({
+    getCamera: () => { const c = views.camera(); return { azimuth: 0, elevation: 0, distance: Math.hypot(c.position[0] - c.focalPoint[0], c.position[1] - c.focalPoint[1], c.position[2] - c.focalPoint[2]), ...c }; },
+    setCamera: () => { /* camera edits go through LiveScene ops (setCameraPose) */ },
+    render: () => views.resize(),
+    extra: () => ({ nodes: views.live.nodes.size, cells: views.cells(), syncOpen: views.sync.transport.isOpen }),
+  });
+  registerSelfTest("scene: LiveScene has the view-state nodes", () => {
+    const types = new Set([...views.live.nodes.values()].map((n) => n.type));
+    for (const t of ["layout", "camera", "view"]) expect(types.has(t), `missing node type ${t}`);
+  });
+  registerSelfTest("views: every layout cell has a canvas", () => {
+    expect(views.cells().length > 0, "no view cells");
+    expect(document.querySelectorAll("#views canvas").length >= views.cells().length, "fewer canvases than cells");
+  });
   // Sessions: ⌘Z/⌘⇧Z undo/redo, ⌘S export, ⌘B bookmark; ?session=opfs auto-opens browser storage
   const session = mountSessionUI(views.live, { onStatus: status, blobBase: () => views.live.blobBase() });
   if (p.get("session") === "opfs") void session.openOPFS();

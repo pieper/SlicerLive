@@ -1,3 +1,4 @@
+// @needs-net — hits js2.jetstream-cloud.org; run with SL_NET=1 (test/run.ts skips it otherwise)
 /** Delivery-layer tests. The race's correctness lives here and is invisible in a
  *  screenshot: whether a cached replay hands the decoders exactly the bytes the
  *  network would have, and whether the simulated link actually paces them.

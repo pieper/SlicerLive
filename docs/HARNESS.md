@@ -18,17 +18,33 @@ screenshots. Screenshots illustrate a conclusion; they never derive one.
 # 2. serve the gallery locally so you can iterate without pushing
 cd /Users/pieper/slicer/live && python3 -m http.server 8099
 
-# 3. run the regression suite
+# 3. run the regression suite (ONE entry point; a plain script, not a task runner)
 cd /Users/pieper/slicer/SlicerLive
-deno run -A harness/run-all.ts             # pure checks: fixtures + TS ports, no browser
-deno run -A harness/run-all.ts --browser   # + live-browser checks over CDP
+deno run -A test/run.ts                 # T1 unit: hermetic — what CI runs (unit tests + fixtures/TS-port checks)
+deno run -A test/run.ts --gpu           # + T2: *.gpu.test.ts, headless WebGPU in Deno, goldens in render/test/golden/
+deno run -A test/run.ts --browser       # + T3: *.browser.test.ts over CDP against the served demos (SL_PAGE_BASE)
+deno run -A test/run.ts --parity        # + T4: *.parity.test.ts against a running Slicer (SL_MCP, default :2126)
+deno run -A test/run.ts --all -v        # everything, verbose;  --list shows what each tier would run
+deno run -A test/run.ts --gpu --update-golden   # regenerate goldens (review the PNG diff before committing)
 ```
+
+## Tiers
+
+| Tier | File name | Needs | What it proves |
+|---|---|---|---|
+| T1 unit | `*.test.ts` | nothing (`// @needs-net` files run only with `SL_NET=1`) | model/protocol/logic math; fixture-shape guards; the pure fixture-vs-port checks under `harness/verify-*.ts` |
+| T2 gpu | `*.gpu.test.ts` | `--unstable-webgpu`; self-ignores without an adapter | byte-identical A/B renders in one process; tolerance goldens via `test/golden.ts` (`assertGolden`, `SL_UPDATE_GOLDEN`) |
+| T3 browser | `*.browser.test.ts` | headed Chrome `:9222`, demos served (`SL_PAGE_BASE`, default `http://localhost:8130/` = `python3 -m http.server 8130` in `render/demos`) | the DOM wiring: real synthetic input through `harness/cdp.ts`, settle via `harness/ready.ts` (`__slicerlive.idle()`), and the page's own self-tests (T5) |
+| T4 parity | `*.parity.test.ts` | + Slicer over MCP (`harness/slicer.ts`; build the scene with `deno run -A harness/parity/setup.ts`) | closed-loop MRML↔mrson property rows in `harness/fixtures/parity/*.json` (`test/oracle.ts`), both directions, with tolerances and the Slicer reference per row |
+| T5 self-test | in-page | browser | `window.__slicerlive.selfTest()` runs checks registered with `render/selftest.ts`; T3 asserts `fail === 0` |
+
+Rules: assert numbers, not screenshots; no fixed sleeps (use `waitReady`/`waitIdle`/`waitStable`); one CDP client (`harness/cdp.ts`) and one Slicer client (`harness/slicer.ts`); parity rows reference the Slicer class/algorithm they pin. CI (`.github/workflows/test.yml`) runs T1 only; T2–T4 run locally with the commands above.
 
 ## Two drivers
 
 | Side | Driver | Gives |
 |---|---|---|
-| **Native Slicer** | `slicer-mcp` MCP server (`localhost:2026/mcp`) | `execute_python` (cameras, real interactor events, node state), `screenshot`, `load_sample_data` |
+| **Native Slicer** | `slicer-mcp` MCP server (`localhost:2126/mcp`, the ModuleServer default; override with `SL_MCP`) | `execute_python` (cameras, real interactor events, node state), `screenshot`, `load_sample_data` |
 | **SlicerLive** | Chrome DevTools Protocol → `harness/cdp.ts` | `Input.dispatchMouseEvent` (true browser-level input), `Runtime.evaluate` (exact state), `Page.captureScreenshot` |
 
 ## Regression suite

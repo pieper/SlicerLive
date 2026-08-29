@@ -7,6 +7,7 @@
 // installIntrospection({...}) with whatever it can expose.
 
 import type { Vec3 } from "./mat4.ts";
+import { runSelfTests, type SelfTestReport } from "./selftest.ts";
 
 /** Camera state in BOTH the demo's orbit parameters and the concrete VTK-comparable form. */
 export interface CameraState {
@@ -56,6 +57,14 @@ interface LogEntry { t: number; kind: string; detail: Record<string, unknown> }
 
 export interface SlicerLiveHook extends IntrospectionApi {
   readonly ready: boolean;
+  /** Frames rendered since install (demos call frameRendered() from their render loop). */
+  frameCount: number;
+  frameRendered(): void;
+  /** Resolves after the next rendered frame with no pending work — the settle point tests wait on.
+   *  Demos that don't call frameRendered() get a timeout-free resolve (nothing to wait for). */
+  idle(timeoutMs?: number): Promise<void>;
+  /** Run the registered in-page self-tests (render/selftest.ts). */
+  selfTest(filter?: string): Promise<SelfTestReport>;
   log: LogEntry[];
   logEvent(kind: string, detail?: Record<string, unknown>): void;
   clearLog(): void;
@@ -68,9 +77,23 @@ const LOG_MAX = 500;
 /** Install window.__slicerlive. Safe to call once per demo after the scene is built. */
 export function installIntrospection(api: IntrospectionApi): SlicerLiveHook {
   const log: LogEntry[] = [];
+  const waiters: (() => void)[] = [];
+  let usesFrames = false;
   const hook: SlicerLiveHook = {
     ...api,
     ready: true,
+    frameCount: 0,
+    frameRendered() { usesFrames = true; hook.frameCount++; const w = waiters.splice(0); for (const r of w) r(); },
+    idle(timeoutMs = 10000) {
+      if (!usesFrames) return Promise.resolve();
+      return new Promise((resolve) => {
+        const t = setTimeout(resolve, timeoutMs);
+        // "idle" = two consecutive frames after the request (the second proves nothing was queued behind the first)
+        waiters.push(() => waiters.push(() => { clearTimeout(t); resolve(); }));
+        api.render?.();
+      });
+    },
+    selfTest: (filter) => runSelfTests(filter),
     log,
     logEvent(kind, detail = {}) {
       log.push({ t: Math.round(performance.now()), kind, detail });

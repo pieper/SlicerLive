@@ -24,7 +24,7 @@ import {
   type SceneMeshData, type SlicePlane, type SliceLayers, type ThreeDChrome, ModelDisplayableManager, ThreeDViewDisplayableManager, TransformDisplayableManager, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeLayersDisplayableManager, VolumeRenderingDisplayableManager, ModuleRegistryDisplayableManager } from "../livescene.ts";
 
 export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
-export interface LiveViews { live: LiveScene; sync: LiveSync; resize(): void; setCells(cells: ViewCellRect[]): void }
+export interface LiveViews { live: LiveScene; sync: LiveSync; resize(): void; setCells(cells: ViewCellRect[]): void; camera(): { position: Vec3; focalPoint: Vec3; viewUp: Vec3; viewAngle: number }; cells(): string[] }
 
 const SLAB_MM = 1.5;                  // overlay items within this distance of the plane are "in plane"
 const CELL_COLORS: Record<string, string> = { Red: "#f05a5a", Yellow: "#f0d24a", Green: "#5ad07a" };
@@ -37,7 +37,7 @@ interface SliceCell {
   branched?: boolean;   // a local pan/zoom is in progress: keep the local frame until it is written back
 }
 
-export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; peers?: string[]; onStatus?: (s: string) => void }): LiveViews {
+export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; peers?: string[]; onStatus?: (s: string) => void; onFrame?: () => void }): LiveViews {
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
   const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -123,7 +123,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     size: () => ({ w: threeVisible ? three.canvas.width : 0, h: three.canvas.height }),
     setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
     gpu, movingScaleCap: 0.4, target: 8,
-    onFrame: () => drawThreeOverlay(),
+    onFrame: () => { drawThreeOverlay(); cfg.onFrame?.(); },
   });
   let meshes: SceneMeshData[] = [];
   const rebuild3d = () => {
@@ -517,5 +517,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   sync.connect();
   for (const p of peers) p.connect();
   Object.assign(globalThis, { __peers: peers, __modules: () => [...moduleRegistry.modules.values()] });
-  return { live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells };
+  return {
+    live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells,
+    // numeric state for tests (render/introspect.ts): the 3D camera as a vtkCamera-comparable pose
+    camera: () => ({ position: [...camera.position] as Vec3, focalPoint: [...camera.focalPoint] as Vec3, viewUp: [...camera.viewUp] as Vec3, viewAngle: camera.viewAngle }),
+    cells: () => [...cells.keys()],
+  };
 }

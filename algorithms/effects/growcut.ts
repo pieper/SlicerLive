@@ -214,7 +214,7 @@ export class GrowCutEffect {
 /** Upload a scalar volume (any TypedArray) to an r32float 3D texture aligned to a segmentation grid —
  *  the source image growcut needs. */
 export function uploadImage(dev: GPUDevice, data: ArrayLike<number>, dims: Vec3): GPUTexture {
-  const [dx, dy, dz] = dims;
+  const [dx, dy, _dz] = dims;
   const tex = dev.createTexture({ size: dims as [number, number, number], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC });   // COPY_SRC: imageRange readback
   const f = data instanceof Float32Array ? data : Float32Array.from(data);
   dev.queue.writeTexture({ texture: tex }, f, { bytesPerRow: dx * 4, rowsPerImage: dy }, dims as [number, number, number]);

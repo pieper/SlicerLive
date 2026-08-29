@@ -61,7 +61,7 @@ agent under review, the same way the rest of the codebase is written.
 Prerequisites: [Deno](https://deno.com/) and a WebGPU-capable browser; Node 20+ for the legacy VTK.js
 bundling; 3D Slicer only if you want the LiveStory integration.
 
-There is no build system and no task runner — no `deno.json`, no Makefile, no npm scripts. Everything
+There is no build system and no task runner — no `deno.json`, no Makefile, no npm scripts. Everything The one exception in spirit, not in kind: `deno run -A test/run.ts` is the single test entry point — a plain script that only spawns `deno test` per tier (see docs/HARNESS.md).
 is plain [Deno](https://docs.deno.com/runtime/) subcommands run directly against the sources:
 [`deno lint`](https://docs.deno.com/runtime/reference/cli/lint/) and
 [`deno check`](https://docs.deno.com/runtime/reference/cli/check/) in `render/`,

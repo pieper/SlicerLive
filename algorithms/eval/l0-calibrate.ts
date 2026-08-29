@@ -143,7 +143,7 @@ window.__l0 = (() => {
 `;
 
 // ── critic ────────────────────────────────────────────────────────────────────────────────────
-const b64 = (u: Uint8Array) => { let s = ""; for (const c of u) s += String.fromCharCode(c); return btoa(s); };
+const _b64 = (u: Uint8Array) => { let s = ""; for (const c of u) s += String.fromCharCode(c); return btoa(s); };
 const img = (data: string) => ({ type: "image_url", image_url: { url: "data:image/png;base64," + data } });
 const txt = (text: string) => ({ type: "text", text });
 

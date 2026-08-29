@@ -307,13 +307,17 @@ def _segmentation_node(seg, node_id, blobdir):
     content-addressed zarr blob + per-segment {labelValue, color}. Volume-based only (no surface)."""
     import vtk
     lm = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode")
-    slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(
-        seg, lm, slicer.vtkSegmentation.EXTENT_REFERENCE_GEOMETRY)
-    _ensure_labelmap_geometry(seg, lm)               # EMPTY seg → materialize the reference geometry (zeros)
-    zarr = _zarr_desc(lm, node_id, blobdir)          # content-hashed labelmap chunks
-    arr = slicer.util.arrayFromVolume(lm)
-    m = vtk.vtkMatrix4x4()
-    lm.GetIJKToRASMatrix(m)
+    try:
+        slicer.modules.segmentations.logic().ExportAllSegmentsToLabelmapNode(
+            seg, lm, slicer.vtkSegmentation.EXTENT_REFERENCE_GEOMETRY)
+        _ensure_labelmap_geometry(seg, lm)               # EMPTY seg → materialize the reference geometry (zeros)
+        zarr = _zarr_desc(lm, node_id, blobdir)          # content-hashed labelmap chunks
+        arr = slicer.util.arrayFromVolume(lm)
+        m = vtk.vtkMatrix4x4()
+        lm.GetIJKToRASMatrix(m)
+    except Exception:
+        slicer.mrmlScene.RemoveNode(lm)                  # a failed export must not leak the temp labelmap (it did: 4 orphans, 2026-08-29)
+        raise
     segn = seg.GetSegmentation()
     segments = []
     for i in range(segn.GetNumberOfSegments()):

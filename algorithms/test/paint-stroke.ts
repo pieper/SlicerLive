@@ -17,7 +17,7 @@ const sp = 2;
 const ijkToRAS = [sp, 0, 0, -96, 0, sp, 0, -96, 0, 0, sp, -96, 0, 0, 0, 1];
 
 const seg = new EditableSegmentation(gpu.device, dims, { ijkToRAS });
-const logic = new SegmentationLogic(gpu.device, seg, { color: [0.30, 0.85, 0.55], opacity: 1.0, sigmaVoxels: 1.0 });
+const _logic = new SegmentationLogic(gpu.device, seg, { color: [0.30, 0.85, 0.55], opacity: 1.0, sigmaVoxels: 1.0 });
 const paint = new PaintEffect(seg);
 
 // RAS → voxel index (inverse of the diagonal ijkToRAS): i = (R + 96) / 2.

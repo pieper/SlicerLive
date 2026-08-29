@@ -1,3 +1,4 @@
+// @needs-net — hits js2.jetstream-cloud.org; run with SL_NET=1 (test/run.ts skips it otherwise)
 /** End-to-end against the PUBLISHED staged tier: decode all three stages from
  *  the bucket and check the final one reproduces the monolithic fine.gz codes
  *  exactly. This is the artifact the browser will actually fetch. */

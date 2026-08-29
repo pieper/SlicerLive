@@ -116,6 +116,7 @@ export class SegEditDriver {
 
   /** Apply one COMMITTED edit (all its points at once) — the replay/live path. `stroke`/`scissors`
    *  submit synchronously; `seeds` (grow-from-seeds) awaits the CA to converge, so this is async. */
+  // deno-lint-ignore require-await
   async applyEdit(op: unknown): Promise<void> {
     const e = SegEditDriver.unwrap(op);
     if (!e) return;
