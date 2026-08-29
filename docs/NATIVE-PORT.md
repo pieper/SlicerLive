@@ -142,5 +142,16 @@ toggle, color-table picker. Every control patches the `scalarVolumeDisplay` node
 integration — grows window, more for longer drag, level stable, auto cleared, vertical drag moves level); self-test
 "volumes: auto W/L … presets + threshold + color table apply" on `slicer-app.html` (selfTest 6 pass / 0 fail).
 
-Next W3: VR transfer-function editor (`tf-editor.ts`) + the compute-kernel `resample3d`/`histogram` GPU paths
-(the plan's kernels feeding SegmentStatistics/masking later); then W2 tail (orientation combo, link/hot-link).
+**VR transfer-function editor (done)**: `render/demos/tf-editor.ts` — a "Volume Rendering" panel that enables VR
+on the active scalar volume (`volumeRenderingDisplay {visible, refs.volume, refs.property}`), applies a Slicer CT
+VR preset (`CT_VR_PRESETS` -> a `transferFunction` node's `colorStops` + `scalarOpacity`), and edits the
+scalar-opacity curve on a canvas (drag a handle, click to add, double-click to remove), patching the
+`transferFunction` node so `VolumeRenderingDisplayableManager.reLUT()` rebuilds the LUT and the 3D view updates.
+One transferFunction/VR-display node per scene (the VR DM tracks one image), matching the native single-volume VR
+path. Programmatic API `__setVolumeRendering`, `__setVrPreset`, `__setOpacityStops`, `__vrState`. Browser test
+`harness/tf-editor.browser.test.ts` (enable VR, CT-Bone preset writes sorted color/opacity stops, opacity edit
+persists, frames advance, VR off).
+
+Next W3: the compute-kernel `resample3d`/`histogram` GPU paths (the plan's kernels feeding SegmentStatistics /
+masking / harden later — the CPU histogram already lives in `logic/window-level.ts`); then W2 tail (orientation
+combo for reformat, link/hot-link across slice views).
