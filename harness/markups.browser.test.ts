@@ -73,3 +73,32 @@ Deno.test({ name: "markups: closed curve interpolates a smooth spline + area mea
     assert(nLine >= 40, `interpolated spline has many points, got ${nLine}`);
   } finally { await cdp.closeTab(); }
 } });
+
+Deno.test({ name: "markups: visibility, lock, and glyph size apply to the node", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
+  const cdp = await CDP.openTab(STANDALONE);
+  try {
+    await waitReady(cdp, 60000);
+    await cdp.eval<void>(`await window.__loadSample("MRHead"); await window.__slicerlive.idle();`);
+    const red = await cdp.evalJson<{ x: number; y: number; w: number; h: number }>(cellRect("Red"));
+    const click = async (fx: number, fy: number) => { const x = red.x + red.w * fx, y = red.y + red.h * fy; await cdp.mouse("mousePressed", x, y, { button: "left", buttons: 1 }); await cdp.mouse("mouseReleased", x, y, { button: "left", buttons: 0 }); await new Promise((r) => setTimeout(r, 120)); };
+    // place two fiducials (persistent)
+    await cdp.eval<void>(`window.__startPlace("fiducial", true);`);
+    await click(0.4, 0.4); await click(0.6, 0.6);
+    await cdp.eval<void>(`window.__endPlace(); await window.__slicerlive.idle();`);
+    const id = await cdp.evalJson<string>(`window.__markups()[0].id`);
+
+    // hide -> node.visible false, and it's no longer grabbable (locked-or-hidden not picked)
+    await cdp.eval<void>(`window.__setMarkupProp(${JSON.stringify(id)}, "visible", false);`);
+    assertEquals(await cdp.evalJson<boolean>(`window.__markups().find(m=>m.id===${JSON.stringify(id)}).visible`), false);
+    await cdp.eval<void>(`window.__setMarkupProp(${JSON.stringify(id)}, "visible", true);`);
+
+    // lock -> node.locked true
+    await cdp.eval<void>(`window.__setMarkupProp(${JSON.stringify(id)}, "locked", true);`);
+    assertEquals(await cdp.evalJson<boolean>(`window.__markups().find(m=>m.id===${JSON.stringify(id)}).locked`), true);
+
+    // glyph size -> patches all markups' glyphScale
+    await cdp.eval<void>(`window.__setGlyphScale(6);`);
+    assertEquals(await cdp.evalJson<number>(`window.__glyphScale()`), 6);
+    assertEquals(await cdp.evalJson<number>(`[...window.__live.nodes.values()].find(n=>n.type==='markup').glyphScale`), 6);
+  } finally { await cdp.closeTab(); }
+} });

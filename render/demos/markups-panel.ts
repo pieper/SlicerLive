@@ -14,6 +14,9 @@ interface Hooks {
   __placeState: () => PlaceState | null;
   __markups: () => MarkupInfo[];
   __deleteMarkup: (id: string) => boolean;
+  __setMarkupProp: (id: string, prop: "visible" | "locked", value: boolean) => boolean;
+  __setGlyphScale: (scale: number) => void;
+  __glyphScale: () => number;
 }
 const g = () => globalThis as unknown as Hooks;
 
@@ -39,6 +42,7 @@ export function registerMarkupsPanel(shell: AppShell, opts: { live: LiveScene; o
       <div class="sl-row sl-markup-types">${TYPES.map((x) => `<button data-t="${x.t}" class="${placing === x.t ? "sl-primary" : ""}">${x.label}</button>`).join("")}</div>
       <div class="sl-row"><label><input type="checkbox" class="sl-mk-persist"${persistent ? " checked" : ""}> Place multiple</label>${placing ? `<button class="sl-mk-end">Stop placing</button>` : ""}</div>
       ${placing ? `<p class="sl-hint">Click in a slice view to place ${placing}. Esc / Stop to finish.</p>` : ""}
+      <div class="sl-row"><label>Glyph size</label><input class="sl-mk-glyph" type="range" min="1" max="10" step="0.5" value="${g().__glyphScale?.() ?? 3}"></div>
       <h3>List (${list.length})</h3>
       <div class="sl-markup-list">${list.length ? list.map(nodeRow).join("") : `<p class="sl-hint">No markups yet.</p>`}</div>`;
     const $ = <T extends HTMLElement>(s: string) => root!.querySelector(s) as T;
@@ -50,12 +54,15 @@ export function registerMarkupsPanel(shell: AppShell, opts: { live: LiveScene; o
     }));
     $("input.sl-mk-persist")?.addEventListener("change", () => { if (placing) g().__startPlace(placing as MarkupType, $("input.sl-mk-persist").checked); });
     $(".sl-mk-end")?.addEventListener("click", () => { g().__endPlace(); status("placement stopped"); render(); });
+    $("input.sl-mk-glyph")?.addEventListener("input", (e) => g().__setGlyphScale(Number((e.target as HTMLInputElement).value)));
     root.querySelectorAll(".sl-markup-list [data-del]").forEach((b) => b.addEventListener("click", () => { g().__deleteMarkup((b as HTMLElement).dataset.del!); render(); }));
+    root.querySelectorAll(".sl-markup-list [data-vis]").forEach((b) => b.addEventListener("click", () => { const el = b as HTMLElement; g().__setMarkupProp(el.dataset.vis!, "visible", el.dataset.on !== "1"); render(); }));
+    root.querySelectorAll(".sl-markup-list [data-lock]").forEach((b) => b.addEventListener("click", () => { const el = b as HTMLElement; g().__setMarkupProp(el.dataset.lock!, "locked", el.dataset.on !== "1"); render(); }));
   }
 
   function nodeRow(n: MarkupInfo): string {
     const meas = n.measurements.length ? ` — ${fmt(n.measurements[0])}` : "";
-    return `<div class="sl-markup-row"><span class="sl-mk-name">${n.name} <span class="sl-hint">(${n.markupType}, ${n.points} pt${n.points === 1 ? "" : "s"})${meas}</span></span><button data-del="${n.id}" title="Delete">✕</button></div>`;
+    return `<div class="sl-markup-row"><span class="sl-mk-name">${n.name} <span class="sl-hint">(${n.markupType}, ${n.points} pt${n.points === 1 ? "" : "s"})${meas}</span></span><span class="sl-mk-actions"><button data-vis="${n.id}" data-on="${n.visible ? "1" : "0"}" title="Show/hide">${n.visible ? "👁" : "🚫"}</button><button data-lock="${n.id}" data-on="${n.locked ? "1" : "0"}" title="Lock/unlock">${n.locked ? "🔒" : "🔓"}</button><button data-del="${n.id}" title="Delete">✕</button></span></div>`;
   }
 
   shell.registerPanel({ id: "markups", title: "Markups", order: 5, mount(el) { root = el; render(); } });

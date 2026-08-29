@@ -218,5 +218,10 @@ a curve/closedCurve stores `linePoints` (the `MarkupsDisplayableManager` renders
 length/area over them. Unit `curve.test.ts` (5); browser markups.browser.test.ts (closed curve → 41-point spline +
 area). This closes the ClosedCurve-area parity gap from step 1.
 
-Next W4: markups display props (GlyphScale/GlyphSize/labels), control-point lock/visibility, ROI place/handles.
-Then W5 segment editor.
+**Display props + lock/visibility (done)**: the Markups panel has per-node show/hide (👁) and lock/unlock (🔒)
+toggles and a global glyph-size slider; hooks `__setMarkupProp(id, "visible"|"locked", on)`, `__setGlyphScale`.
+Locked markups are skipped by `pickMarkup` (not grabbable). Browser markups.browser.test.ts (visibility/lock/glyph).
+
+Next W4 (optional polish): ROI place-by-click + box handles (deferred — needs center/size + out-of-plane depth).
+Then W5 segment editor (effects + kernels: ccl/morph/voxelize/autoThreshold; resample3d WGSL path lands here,
+routed through the unified field-op backend — see the unified-field-op-backend direction).

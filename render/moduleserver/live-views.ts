@@ -446,6 +446,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const off = planeOffset01(c), aspect = w / h;
     let best: { id: string; index: number; ras: Vec3 } | null = null, bestD = px * dpr;
     for (const hd of markupsDM.handles()) {
+      if (live.nodes.get(hd.id)?.locked) continue;                       // locked markups aren't grabbable
       const r = c.slice.rasToView(c.orientKey, off, hd.ras, aspect);
       if (Math.abs(r.distMm) > SLAB_MM) continue;
       const d = Math.hypot((r.u - u) * w, (r.v - v) * h);
@@ -818,6 +819,9 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     __markups: () => [...live.nodes.values()].filter((n) => n.type === "markup").map((n) => ({ id: n.id, markupType: n.markupType, name: n.name, points: ((n.controlPoints as { position: Vec3 }[] | undefined) ?? []).length, measurements: n.measurements ?? [], visible: n.visible !== false, locked: !!n.locked })),
     __removeControlPoint: (id: string, index: number) => { const n = live.nodes.get(id); if (!n) return false; const op = removeControlPointOp(n, index); if (op) { live.write(op); storeMeasurements(id); renderSlices(); return true; } live.write({ op: "del", id }); renderSlices(); return true; },
     __deleteMarkup: (id: string) => { if (live.nodes.has(id)) { live.write({ op: "del", id }); renderSlices(); return true; } return false; },
+    __setMarkupProp: (id: string, prop: "visible" | "locked", value: boolean) => { if (live.nodes.has(id)) { live.write({ op: "patch", id, path: `#/${prop}`, value }); renderSlices(); return true; } return false; },
+    __setGlyphScale: (scale: number) => { for (const n of live.nodes.values()) if (n.type === "markup") live.write({ op: "patch", id: n.id, path: "#/glyphScale", value: scale }); renderSlices(); },
+    __glyphScale: () => { const m = [...live.nodes.values()].find((n) => n.type === "markup"); return (m?.glyphScale as number) ?? 3; },
   });
   return {
     live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells,
