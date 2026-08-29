@@ -93,6 +93,15 @@ axial view, etc. `mountLiveViews.sliceIntersectionLines(cell)` returns the line 
 `setSliceIntersections(on)` toggles. Browser test asserts the sagittal localizer is vertical and the coronal
 horizontal in the axial view.
 
-Next: W2 remaining — orientation combo (reformat), link/hot-link across slice views, 3D controller (reset to
-A/P/L/R/S/I, orthographic); then W3 volumes & window/level — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
+**3D controller bar (done)**: look-from buttons (R/A/S/L/P/I) reset the camera to standard anatomical views
+(camera on the axis toward the volume centre, correct viewUp) + an orthographic toggle. `mountLiveViews`
+exposes `resetCamera3D`/`setOrthographic`/`isOrthographic`. Browser test (standalone) asserts A→anterior camera,
+S→superior, and orthographic on/off.
+
+W2 slice + 3D view controllers are now substantially complete and native (layout picker, slice controller bars,
+maximize, crosshair jump, intersection localizers, 3D standard views + orthographic), all tested.
+
+Next: W2 tail — orientation combo (reformat), link/hot-link across slice views; then **W3 volumes & window/level**
+(auto W/L histogram, W/L drag, presets, threshold, colour tables, TF editor — reusing the plan's histogram/W-L
+kernels) — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
 (Steve's SlicerRad folder browser to be reconciled when that code is available).

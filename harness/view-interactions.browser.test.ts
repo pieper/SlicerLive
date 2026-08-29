@@ -112,6 +112,33 @@ Deno.test({ name: "intersections: each slice view shows the other planes as colo
   } finally { await cdp.closeTab(); }
 } });
 
+Deno.test({ name: "3d controller: look-from buttons set standard views; orthographic toggles", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
+  // standalone (no peer to re-assert the camera): load a synthetic volume so there are bounds to frame
+  const cdp = await CDP.openTab(`${BASE}slicer-app.html?ws=ws://127.0.0.1:1/&gui=ws://127.0.0.1:1/&http=http://127.0.0.1:1/mrson/`);
+  try {
+    await waitReady(cdp, 60000);
+    const { makeNifti } = await import("../logic/readers/synthetic.ts");
+    const b64 = btoa(String.fromCharCode(...makeNifti({ sform: [1.5, 0, 0, -40, 0, 1.5, 0, -40, 0, 0, 3, -60] })));
+    await cdp.eval(`await window.__loadVolumeBytes(Uint8Array.from(atob(${JSON.stringify(b64)}), c=>c.charCodeAt(0)), "c.nii"); return 1;`);
+    await cdp.waitForValue<boolean>(`typeof window.__views.resetCamera3D === 'function'`, (v) => v, 20000);
+    const bar = await cdp.evalJson<string>(`[...document.querySelectorAll('.sl-3d-bar button')].map(b=>b.textContent).join('')`);
+    assertEquals(bar, "RASLPI⬚");
+    const cam = () => cdp.evalJson<{ position: number[]; viewUp: number[]; focalPoint: number[] }>(`window.__views.camera()`);
+    await cdp.eval(`window.__views.resetCamera3D("A"); return 1;`); await new Promise((r) => setTimeout(r, 200));
+    const a = await cam();
+    // "A" (anterior): camera on the +A (+y) side of the focal point, looking back; viewUp = S (+z)
+    assert(a.position[1] > a.focalPoint[1] + 1, `A view camera should be anterior: ${JSON.stringify(a)}`);
+    assertEquals(a.viewUp.map((v) => Math.round(v)), [0, 0, 1]);
+    await cdp.eval(`window.__views.resetCamera3D("S"); return 1;`); await new Promise((r) => setTimeout(r, 200));
+    const sv = await cam();
+    assert(sv.position[2] > sv.focalPoint[2] + 1, `S view camera should be superior: ${JSON.stringify(sv)}`);
+    assertEquals(sv.viewUp.map((v) => Math.round(v)), [0, 1, 0]);
+    await cdp.eval(`window.__views.setOrthographic(true); return 1;`);
+    assert(await cdp.evalJson<boolean>(`window.__views.isOrthographic()`), "orthographic did not enable");
+    await cdp.eval(`window.__views.setOrthographic(false); return 1;`);
+  } finally { await cdp.closeTab(); }
+} });
+
 Deno.test({ name: "layout: the picker drives Slicer's layout catalog (OneUpRed, Conventional, FourUp)", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
   const cdp = await CDP.openTab(`${BASE}slicer-app.html`);
   try {

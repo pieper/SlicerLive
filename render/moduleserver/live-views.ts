@@ -378,6 +378,41 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const id = nodeIdFor((n) => n.type === "camera");
     if (id) live.write({ op: "cmd", id, cmd: "setCameraPose", args: { position: camera.position, focalPoint: camera.focalPoint, viewUp: camera.viewUp } });
   };
+  // 3D standard anatomical views (Slicer's reset-to-view: look from R/A/S/L/P/I toward the volume centre) + ortho
+  const volumeCenterRadius = (): { center: Vec3; radius: number } => {
+    let lo: Vec3 | null = null, hi: Vec3 | null = null;
+    const consider = (f: { aabb(): [Vec3, Vec3] } | null | undefined) => { if (!f) return; const [a, b] = f.aabb(); if (!lo) { lo = [...a]; hi = [...b]; } else for (let i = 0; i < 3; i++) { lo![i] = Math.min(lo![i], a[i]); hi![i] = Math.max(hi![i], b[i]); } };
+    if (volumeField) consider(volumeField); else for (const c of cells.values()) consider(bgField(c));
+    if (!lo || !hi) return { center: camera.focalPoint, radius: Math.max(1, camera.distance / 2.6) };
+    const L = lo as Vec3, H = hi as Vec3;
+    return { center: [(L[0] + H[0]) / 2, (L[1] + H[1]) / 2, (L[2] + H[2]) / 2], radius: Math.max(1, Math.hypot(H[0] - L[0], H[1] - L[1], H[2] - L[2]) / 2) };
+  };
+  const VIEW_DIRS: Record<string, { dir: Vec3; up: Vec3 }> = {
+    R: { dir: [1, 0, 0], up: [0, 0, 1] }, L: { dir: [-1, 0, 0], up: [0, 0, 1] },
+    A: { dir: [0, 1, 0], up: [0, 0, 1] }, P: { dir: [0, -1, 0], up: [0, 0, 1] },
+    S: { dir: [0, 0, 1], up: [0, 1, 0] }, I: { dir: [0, 0, -1], up: [0, 1, 0] },
+  };
+  const resetCamera3D = (which: string) => {
+    const v = VIEW_DIRS[which]; if (!v) return;
+    const { center, radius } = volumeCenterRadius(), dist = radius * 2.6;
+    camera.focalPoint = [...center] as Vec3;
+    camera.position = [center[0] + v.dir[0] * dist, center[1] + v.dir[1] * dist, center[2] + v.dir[2] * dist];
+    camera.viewUp = [...v.up] as Vec3; camera.orthogonalizeViewUp();
+    camera.parallelScale = radius;
+    a3d.draw(); pushCamera(); sync.flush();
+  };
+  const setOrthographic = (on: boolean) => { camera.parallelProjection = on; if (on) camera.parallelScale = volumeCenterRadius().radius; a3d.draw(); pushCamera(); };
+
+  // 3D controller bar: look-from buttons (R/A/S/L/P/I) + orthographic toggle (Slicer's 3D view controller)
+  {
+    const bar = document.createElement("div"); bar.className = "sl-3d-bar";
+    for (const k of ["R", "A", "S", "L", "P", "I"]) { const b = document.createElement("button"); b.textContent = k; b.title = `Look from ${k}`; b.addEventListener("click", () => resetCamera3D(k)); bar.appendChild(b); }
+    const ortho = document.createElement("button"); ortho.textContent = "⬚"; ortho.title = "Orthographic projection";
+    ortho.addEventListener("click", () => { const on = !camera.parallelProjection; setOrthographic(on); ortho.setAttribute("aria-pressed", String(on)); });
+    bar.appendChild(ortho);
+    three.el.appendChild(bar);
+  }
+
   const xy3d = (e: PointerEvent) => { const r = three.canvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
   three.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   three.canvas.addEventListener("pointerdown", (e) => { const { x, y } = xy3d(e); cam3d.start(e.button as 0 | 1 | 2, x, y, three.canvas.clientHeight, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey }); three.canvas.setPointerCapture(e.pointerId); });
@@ -664,6 +699,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     cells: () => [...cells.keys()],
     getSliceOffset, setSliceOffset, sliceOffsetRange,
     setSliceIntersections: (on: boolean) => { sliceIntersections = on; renderSlices(); },
+    resetCamera3D, setOrthographic, isOrthographic: () => camera.parallelProjection,
     sliceIntersectionLines: (cell: string) => {
       const c = cells.get(cell); if (!c || !c.plane) return [];
       const ov = c.overlay, off = planeOffset01(c), aspect = ov.width / ov.height;
