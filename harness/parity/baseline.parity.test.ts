@@ -6,10 +6,11 @@
 import { assert } from "jsr:@std/assert@1";
 import { CDP } from "../cdp.ts";
 import { executePython, pyJson, slicerAvailable } from "../slicer.ts";
-import { waitStable } from "../ready.ts";
+import { waitReady, waitStable } from "../ready.ts";
 import { type ParityFile, type ParityRow, pyLit, readPath, same, type Val } from "../../test/oracle.ts";
 
 const PAGE = Deno.env.get("SL_PAGE") ?? "slicer-app.html";
+const BASE = Deno.env.get("SL_PAGE_BASE") ?? "http://localhost:8130/";
 const available = await slicerAvailable();
 
 async function loadFixtures(): Promise<ParityFile[]> {
@@ -39,9 +40,11 @@ Deno.test({
   ignore: !available,
   sanitizeResources: false, sanitizeOps: false,
   async fn() {
-    const cdp = await CDP.attachToPage(9222, PAGE);
-    const hasLive = await cdp.evalJson<boolean>("!!(window.__live && window.__live.nodes)");
-    assert(hasLive, `page ${PAGE} does not expose window.__live`);
+    // a FRESH tab: an existing tab may predate a server restart and hold a stale LiveScene (0/21 that way)
+    const cdp = await CDP.openTab(`${BASE}${PAGE}`);
+    await waitReady(cdp, 60000);
+    await cdp.waitForValue<number>("window.__live && window.__live.nodes ? window.__live.nodes.size : 0", (n) => n > 0, 30000);
+    await cdp.waitForValue<boolean>("!!(window.__sync && window.__sync.transport && window.__sync.transport.isOpen)", (v) => v, 30000);
     const failures: string[] = [];
     let n = 0;
     for (const file of await loadFixtures()) {
@@ -68,7 +71,7 @@ Deno.test({
         if (!inOk || !outOk) failures.push(`${file.name}/${r.id}: ${inOk ? "" : `inbound ${JSON.stringify(bIn)}≠${JSON.stringify(r.inV)} `}${outOk ? "" : `outbound ${JSON.stringify(sOut)}≠${JSON.stringify(r.outV)}`}`);
       }
     }
-    cdp.close();
+    await cdp.closeTab();
     console.log(`  parity: ${n - failures.length}/${n} rows`);
     assert(failures.length === 0, failures.join("\n"));
   },
