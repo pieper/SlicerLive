@@ -152,6 +152,14 @@ path. Programmatic API `__setVolumeRendering`, `__setVrPreset`, `__setOpacitySto
 `harness/tf-editor.browser.test.ts` (enable VR, CT-Bone preset writes sorted color/opacity stops, opacity edit
 persists, frames advance, VR off).
 
-Next W3: the compute-kernel `resample3d`/`histogram` GPU paths (the plan's kernels feeding SegmentStatistics /
-masking / harden later — the CPU histogram already lives in `logic/window-level.ts`); then W2 tail (orientation
-combo for reformat, link/hot-link across slice views).
+**histogram kernel (done)**: `algorithms/kernels/histogram.ts` — the reusable reduction the plan schedules
+(replaces `vtkImageAccumulate`/`vtkImageHistogramStatistics`): `histogram(data,{bins,range})`, `imageStats`
+(min/max/mean/stdev one pass), `dataRange`, `percentileFromCounts`, plus a WGSL compute path `histogramGPU`
+(atomic<u32> bins) that returns **byte-identical integer counts** to the CPU reference. Feeds auto W/L now and
+SegmentStatistics later. Tests: `histogram.test.ts` (6, CPU) + `histogram.gpu.test.ts` (GPU==CPU on ramp,
+clamped edges, 100k-sample deterministic noise). (`logic/window-level.ts:histogramPercentiles` keeps its
+Slicer-tuned int/float binning for the parity-verified auto W/L; the kernel is the general-purpose path.)
+
+Next W3: the `resample3d` kernel (data-path `vtkImageReslice`: nearest/trilinear, direction-aware output
+geometry — needed by W5 masking, W6 harden, W1 crop); then W2 tail (orientation combo for reformat,
+link/hot-link across slice views).
