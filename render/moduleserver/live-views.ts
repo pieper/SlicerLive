@@ -19,6 +19,7 @@ import { WsTransport } from "../transport.ts";
 import { CameraInteractor } from "../vtk-interactor.ts";
 import { attachSliceControls, type SliceControls } from "../demos/slice-control.ts";
 import { attachDoubleClick } from "../demos/view-grid.ts";
+import { mountSliceController, type SliceController } from "../demos/slice-controller.ts";
 import "./view-cmds.ts";   // registers setCursor / setSliceFrame / viewContextMenu client handlers
 import {
   CameraDisplayableManager, type CameraState, LayoutDisplayableManager, LiveScene, MarkupsDisplayableManager,
@@ -50,7 +51,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const el = document.createElement("div"); el.className = "lv-cell"; el.dataset.cell = name;
     el.style.cssText = "position:absolute;display:none;overflow:hidden;background:#0a0b10";
     const canvas = makeCanvas(el, "position:absolute;inset:0;width:100%;height:100%;display:block;background:#000;touch-action:none");
-    const lab = document.createElement("div"); lab.textContent = label;
+    const lab = document.createElement("div"); lab.textContent = label; lab.className = "lv-cell-label";
     lab.style.cssText = `position:absolute;top:4px;left:6px;font:700 11px system-ui;pointer-events:none;opacity:.85;color:${color}`;
     el.appendChild(lab); root.appendChild(el);
     const ctx = canvas.getContext("webgpu") as GPUCanvasContext;
@@ -141,6 +142,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
 
   // ── slice cells (dynamic, keyed by the app's layout names), one SliceRenderer each ──
   const cells = new Map<string, SliceCell>();
+  const sliceChangeListeners = new Set<() => void>();   // controller bars re-read offset/range after any slice render
   let segOverlay: GPUTexture | null = null, segFill = 0.5, segOutline = 1.0;
   const overlays = new Map<string, OverlayItem[]>();   // layer -> items (cell "*")
   const viewStateDM = new ViewStateDisplayableManager();  // interaction / selection / crosshair / segmentEditor nodes
@@ -280,8 +282,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     applyPlane(c);
     c.slice.renderToView(c.ctx.getCurrentTexture().createView({ format: srgb }), c.canvas.width, c.canvas.height);
     drawOverlay(c);
-  
     cfg.onFrame?.();                                   // slice frames count as frames (tests' settle/ready signal)
+    for (const l of sliceChangeListeners) l();
   };
   const renderSlices = () => { for (const c of cells.values()) renderSlice(c); };
   const resizeAll = () => { sizeCanvas(three.canvas); for (const c of cells.values()) sizeCanvas(c.canvas); };
@@ -485,6 +487,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       },
     });
     attachDoubleClick(c.canvas, () => toggleMaximize(c.name));
+    const lbl = c.el.querySelector(".lv-cell-label") as HTMLElement | null; if (lbl) lbl.style.display = "none";
+    // slice controller bar (orientation + offset slider + fit) over this cell, node/peer-agnostic via the adapter
+    (c as SliceCell & { controller?: SliceController }).controller = mountSliceController(c.el, c.name, {
+      orientation: () => c.orientKey, offset: () => getSliceOffset(c.name), range: () => sliceOffsetRange(c.name),
+      setOffset: (mm) => setSliceOffset(c.name, mm), fit: () => fitCell(c.name),
+      onChange: (cb) => { sliceChangeListeners.add(cb); return () => sliceChangeListeners.delete(cb); },
+    });
     // pan (middle / shift+left drag) and right-drag zoom have no hooks: branch on the press that starts
     // them (capture phase, before the control handles it) and write the frame back on release
     c.canvas.addEventListener("pointerdown", (e) => { if (e.button === 1 || e.button === 2 || (e.button === 0 && e.shiftKey)) c.branched = true; }, true);
@@ -555,6 +564,36 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     return true;
   };
 
+  const NORMAL_OF = (c: SliceCell): Vec3 => c.plane?.basis ? c.plane.basis.nDir : c.orientKey === "axial" ? [0, 0, 1] : c.orientKey === "coronal" ? [0, 1, 0] : [1, 0, 0];
+  /** A slice cell's current offset (mm along its normal), its [min,max,step] range, and a setter — the
+   *  slice controller bar's data source. Works for native (node-owned) and peer (patched) cells. */
+  const getSliceOffset = (cell: string): number | null => { const c = cells.get(cell); return c?.plane ? c.plane.posMm : null; };
+  const sliceOffsetRange = (cell: string): { min: number; max: number; step: number } | null => {
+    const c = cells.get(cell); const bg = c ? bgField(c) : null; if (!c || !bg) return null;
+    const [lo, hi] = bg.aabb(), n = NORMAL_OF(c);
+    const a = lo[0] * n[0] + lo[1] * n[1] + lo[2] * n[2], b = hi[0] * n[0] + hi[1] * n[1] + hi[2] * n[2];
+    const step = (bg as { stepMm?: number }).stepMm ?? 1;
+    return { min: Math.min(a, b), max: Math.max(a, b), step: step || 1 };
+  };
+  const fitCell = (cell: string): void => {
+    const c = cells.get(cell), bg = c ? bgField(c) : null; if (!c || !bg) return;
+    const [lo, hi] = bg.aabb();
+    const center: Vec3 = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+    const w = c.canvas.width || 1, h = c.canvas.height || 1;
+    const [fx, fy] = fitFovToVolume(c.orientKey, lo, hi, [], w, h);
+    patchNativeOffset(cell, center[c.orientKey === "axial" ? 2 : c.orientKey === "coronal" ? 1 : 0]);
+    c.slice.setMirrorFrame(c.orientKey, center, fx, fy); c.branched = false; renderSlice(c);
+  };
+  const setSliceOffset = (cell: string, mm: number): void => {
+    const c = cells.get(cell); if (!c) return;
+    if (patchNativeOffset(cell, mm)) return;                       // node-owned: sticks + re-renders via the DM
+    if (!c.plane) return;
+    c.plane.posMm = mm;
+    const id = sliceNodeId(cell);
+    if (id) live.write({ op: "patch", id, path: "#/offset", value: mm });   // peer follows
+    renderSlice(c);
+  };
+
   /** Jump every slice cell to a RAS point (Slicer's crosshair jump) — the native half of shift-move, so a
    *  standalone scene jumps without a Slicer peer. Sets each cell's out-of-plane position to ras·normal. */
   const jumpLocal = (ras: Vec3) => {
@@ -601,5 +640,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // numeric state for tests (render/introspect.ts): the 3D camera as a vtkCamera-comparable pose
     camera: () => ({ position: [...camera.position] as Vec3, focalPoint: [...camera.focalPoint] as Vec3, viewUp: [...camera.viewUp] as Vec3, viewAngle: camera.viewAngle }),
     cells: () => [...cells.keys()],
+    getSliceOffset, setSliceOffset, sliceOffsetRange,
+    orientationOf: (cell: string) => cells.get(cell)?.orientKey ?? null,
+    fitCell,
   };
 }

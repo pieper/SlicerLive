@@ -72,6 +72,24 @@ Deno.test({ name: "view: standalone renders + crosshair jump persists (native sl
   } finally { await cdp.closeTab(); }
 } });
 
+Deno.test({ name: "controller: slice bars show orientation + offset and the slider drives the plane", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
+  const cdp = await CDP.openTab(`${BASE}slicer-app.html?ws=ws://127.0.0.1:1/&gui=ws://127.0.0.1:1/&http=http://127.0.0.1:1/mrson/`);
+  try {
+    await waitReady(cdp, 60000);
+    const { makeNifti } = await import("../logic/readers/synthetic.ts");
+    const b64 = btoa(String.fromCharCode(...makeNifti({ sform: [1.5, 0, 0, -40, 0, 1.5, 0, -40, 0, 0, 3, -60] })));
+    await cdp.eval(`await window.__loadVolumeBytes(Uint8Array.from(atob(${JSON.stringify(b64)}), c=>c.charCodeAt(0)), "ctl.nii"); return 1;`);
+    await cdp.waitForValue<number>(`[...document.querySelectorAll('.sl-slice-bar .sl-slice-offset')].filter(s=>!s.disabled).length`, (n) => n >= 3, 15000);
+    const bars = await cdp.evalJson<{ cell: string; orient: string }[]>(`[...document.querySelectorAll('.sl-slice-bar')].map(b=>({cell:b.dataset.cell, orient:b.querySelector('.sl-slice-orient').textContent}))`);
+    const byCell = Object.fromEntries(bars.map((b) => [b.cell, b.orient]));
+    assertEquals(byCell.Red, "Axial"); assertEquals(byCell.Yellow, "Sagittal"); assertEquals(byCell.Green, "Coronal");
+    // drive the Red slider to max -> the axial plane offset follows to the max
+    const max = await cdp.eval<number>(`const s = document.querySelector('.sl-slice-bar[data-cell=Red] .sl-slice-offset'); s.value = s.max; s.dispatchEvent(new Event('input',{bubbles:true})); s.dispatchEvent(new Event('change',{bubbles:true})); return Number(s.max);`);
+    await new Promise((r) => setTimeout(r, 300));
+    assert(Math.abs((await cdp.evalJson<number>("window.__cellPlanes().Red")) - max) < 1e-3, "slider did not drive the plane");
+  } finally { await cdp.closeTab(); }
+} });
+
 Deno.test({ name: "layout: the picker drives Slicer's layout catalog (OneUpRed, Conventional, FourUp)", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
   const cdp = await CDP.openTab(`${BASE}slicer-app.html`);
   try {

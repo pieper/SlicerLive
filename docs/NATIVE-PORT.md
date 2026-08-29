@@ -80,6 +80,13 @@ node's `sliceToRAS` translation). Verified: a synthetic volume renders in all th
 each cell's offset exactly (axial→S, coronal→A, sagittal→R). When a Slicer peer is connected its `view` nodes own
 the planes (native ones are not created).
 
-Next: W2 slice/3D controller bars (offset slider via `offsetRangeResolution`, orientation combo, link/hot-link,
-fit/reset — driving the native sliceView nodes / patching a peer's), and slice intersection lines — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
+**Slice controller bars (done)**: `render/demos/slice-controller.ts` — the coloured bar Slicer shows above each
+slice view (orientation, offset slider with mm range/step, fit button), plain DOM in the theme, driven by a pure
+adapter so it works over native sliceView nodes and a peer's slice nodes alike. `mountLiveViews` exposes
+`getSliceOffset`/`setSliceOffset`/`sliceOffsetRange`/`fitCell`; the bar re-reads after any slice render.
+Verified: bars per cell (Red=Axial, Yellow=Sagittal, Green=Coronal), and the slider drives the plane to its
+value. The redundant corner cell-name label is hidden (the bar shows orientation).
+
+Next: W2 remaining — orientation combo (reformat), link/hot-link across slice views, 3D controller (reset to
+A/P/L/R/S/I, orthographic), slice intersection lines; then W3 volumes & window/level — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
 (Steve's SlicerRad folder browser to be reconciled when that code is available).

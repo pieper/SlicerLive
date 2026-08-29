@@ -97,3 +97,15 @@ html, body { height: 100%; margin: 0; background: var(--sl-bg); color: var(--sl-
 /* ---- DICOM series list ---- */
 .sl-series-row { margin: 4px 0; }
 .sl-series-row button { width: 100%; text-align: left; }
+
+/* ---- slice controller bar ---- */
+.sl-slice-bar { position: absolute; top: 3px; left: 0; right: 0; z-index: 4; display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; background: linear-gradient(to bottom, rgba(10,11,16,.85), rgba(10,11,16,.35)); pointer-events: auto; }
+.sl-slice-bar[data-cell=Red] { --sl-cell: var(--sl-view-red); }
+.sl-slice-bar[data-cell=Yellow] { --sl-cell: var(--sl-view-yellow); }
+.sl-slice-bar[data-cell=Green] { --sl-cell: var(--sl-view-green); }
+.sl-slice-orient { color: var(--sl-cell, var(--sl-fg-muted)); font: 700 11px var(--sl-font); min-width: 52px; }
+.sl-slice-offset { flex: 1; height: 4px; accent-color: var(--sl-cell, var(--sl-accent)); cursor: pointer; }
+.sl-slice-offset:disabled { opacity: .4; }
+.sl-slice-value { color: var(--sl-fg-muted); font: 11px var(--sl-font-mono); min-width: 42px; text-align: right; }
+.sl-slice-fit { background: transparent; border: 1px solid var(--sl-border); color: var(--sl-fg); border-radius: 4px; font-size: 12px; line-height: 1; padding: 1px 5px; cursor: pointer; }
+.sl-slice-fit:hover { background: var(--sl-surface-3); }
