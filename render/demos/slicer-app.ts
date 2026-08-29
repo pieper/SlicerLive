@@ -15,6 +15,8 @@ import { registerLoadPanel } from "./load-panel.ts";
 import { registerVolumesPanel } from "./volumes-panel.ts";
 import { registerTfEditor } from "./tf-editor.ts";
 import { registerMarkupsPanel } from "./markups-panel.ts";
+import { registerSegEditorPanel } from "./seg-editor-panel.ts";
+import { createSegmentation, addSegment, applyEffect } from "../../logic/segmentation-editor.ts";
 import { LocalBlobStore, loadVolumeIntoScene } from "../../logic/ingest.ts";
 import { parseNifti } from "../../logic/readers/nifti.ts";
 import { makeNifti, SYNTHETIC_DIMS } from "../../logic/readers/synthetic.ts";
@@ -102,6 +104,14 @@ async function main() {
     registerVolumesPanel(sh, { live: views.live, onStatus: status });
     registerTfEditor(sh, { live: views.live, onStatus: status });
     registerMarkupsPanel(sh, { live: views.live, onStatus: status });
+    registerSegEditorPanel(sh, { live: views.live, store, onStatus: status });
+    Object.assign(globalThis, {
+      __createSegmentation: (srcId: string) => createSegmentation(views.live, store, srcId),
+      __addSegment: (segId: string) => addSegment(views.live, segId),
+      __applyEffect: (segId: string, effect: string, params: Record<string, unknown>) => applyEffect(views.live, store, segId, effect as Parameters<typeof applyEffect>[3], params as Parameters<typeof applyEffect>[4]),
+      __segmentations: () => [...views.live.nodes.values()].filter((n) => n.type === "segmentation").map((n) => ({ segId: n.id, name: n.name, segments: (n.segments ?? []) })),
+      __setSegmentProp: (segId: string, labelValue: number, prop: string, value: unknown) => { const n = views.live.nodes.get(segId); if (!n) return; const segs = ((n.segments as { labelValue: number }[]) ?? []).map((s) => s.labelValue === labelValue ? { ...s, [prop]: value } : s); views.live.write({ op: "patch", id: segId, path: "#/segments", value: segs }); },
+    });
     registerSelfTest("volumes: auto W/L gives window>0 and level in range; presets + threshold + color table apply", async () => {
       const vol = await parseNifti(makeNifti({ sform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }), "wl-selftest");
       const r = await loadVolumeIntoScene(views.live, store, vol, { name: "wl-selftest" });

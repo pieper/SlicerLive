@@ -225,3 +225,31 @@ Locked markups are skipped by `pickMarkup` (not grabbable). Browser markups.brow
 Next W4 (optional polish): ROI place-by-click + box handles (deferred — needs center/size + out-of-plane depth).
 Then W5 segment editor (effects + kernels: ccl/morph/voxelize/autoThreshold; resample3d WGSL path lands here,
 routed through the unified field-op backend — see the unified-field-op-backend direction).
+
+
+## W5 — Segment editor (in progress)
+
+**Kernels (done, exact parity)**: `algorithms/kernels/auto-threshold.ts` (Otsu/Huang/Triangle/IsoData — the ITK
+ImageThresholdCalculators; Otsu 45.63 vs itk::OtsuThreshold 45.00), `algorithms/kernels/ccl.ts` (connected
+components 6/18/26-conn + islands; count + sizes match scipy.ndimage.label exactly, 25/25 & 19/19),
+`algorithms/kernels/morph.ts` (erode/dilate/open/close/median over a Euclidean ball; match scipy.ndimage
+voxel-for-voxel, 0/5832).
+
+**Effects layer (done)**: `logic/segment-effects.ts` — pure labelmap effects composing the kernels
+(applyThreshold/applyAutoThreshold, applyIslands, applySmoothing, applyMargin) with a minimal OverwriteMode
+masking model (All/Visible/None) and mm→voxel from spacing; immutable (new labelmap for undo).
+
+**Native editor + panel (done)**: `logic/segmentation-editor.ts` creates a `segmentation` node (empty labelmap
+matching the source geometry + segments) and applies effects by materializing the new labelmap (fetch zarr → run
+effect → re-upload content-addressed → patch `#/zarr`, the SegmentationDisplayableManager re-bakes).
+`render/demos/seg-editor-panel.ts` — create segmentation, segment list (add/select/visibility), and
+Threshold/Auto-Otsu/Islands/Smoothing/Margin buttons. This is where W5 materializes voxels — to be routed through
+the unified field-op backend (GPU + out-of-core) later; interactive paint stays on the GPU EditableSegmentation.
+
+**Tests**: unit auto-threshold(6)/ccl(6)/morph(6)/segment-effects(6); parity auto-threshold(ITK)/ccl(scipy)/
+morph(scipy); browser seg-editor.browser.test.ts (create → Otsu 3.3M vox → keep-largest → margin +2mm 4.2M →
+median, labelmap zarr changes + re-bakes).
+
+Next W5 (optional): interactive paint/erase brush wired natively, masking-intensity-range, Fill Between Slices
+(contour interpolation), Logical operators, segment statistics (shape-stats kernel). Then W6 transforms + models,
+W7 save/export.
