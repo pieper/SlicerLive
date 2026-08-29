@@ -13,8 +13,18 @@ export interface LoadPanelOpts {
   live: LiveScene;
   store: LocalBlobStore;
   dropTarget?: HTMLElement;                 // where a drag-and-drop overlay appears (default: shell.main)
-  onLoaded?: (info: { name: string; imageId: string; source: string }) => void;
+  onLoaded?: (info: { name: string; imageId: string; source: string; rasLo: [number, number, number]; rasHi: [number, number, number]; ijkToRAS: number[] }) => void;
   onStatus?: (s: string) => void;
+}
+
+/** RAS bounding box of a volume from its ijkToRAS + dims (the 8 corners). */
+function rasBounds(dims: [number, number, number], m: number[]): { lo: [number, number, number]; hi: [number, number, number] } {
+  const lo: [number, number, number] = [Infinity, Infinity, Infinity], hi: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (let c = 0; c < 8; c++) {
+    const i = (c & 1) ? dims[0] - 1 : 0, j = (c & 2) ? dims[1] - 1 : 0, k = (c & 4) ? dims[2] - 1 : 0;
+    for (let r = 0; r < 3; r++) { const v = m[r * 4] * i + m[r * 4 + 1] * j + m[r * 4 + 2] * k + m[r * 4 + 3]; if (v < lo[r]) lo[r] = v; if (v > hi[r]) hi[r] = v; }
+  }
+  return { lo, hi };
 }
 
 export function registerLoadPanel(shell: AppShell, opts: LoadPanelOpts): void {
@@ -26,7 +36,8 @@ export function registerLoadPanel(shell: AppShell, opts: LoadPanelOpts): void {
     const vol = await readVolume(bytes, fileName);
     const r = await loadVolumeIntoScene(opts.live, opts.store, vol, { name: vol.name ?? fileName });
     status(`loaded ${vol.name ?? fileName}: ${vol.dims.join("×")} voxels`);
-    opts.onLoaded?.({ name: vol.name ?? fileName, imageId: r.imageId, source });
+    const b = rasBounds(vol.dims, vol.ijkToRAS);
+    opts.onLoaded?.({ name: vol.name ?? fileName, imageId: r.imageId, source, rasLo: b.lo, rasHi: b.hi, ijkToRAS: vol.ijkToRAS });
   }
   async function loadFiles(files: FileList | File[]): Promise<void> {
     for (const f of Array.from(files)) {
@@ -38,7 +49,8 @@ export function registerLoadPanel(shell: AppShell, opts: LoadPanelOpts): void {
   async function loadVolumeObj(vol: Awaited<ReturnType<typeof readVolume>>, source: string): Promise<void> {
     const r = await loadVolumeIntoScene(opts.live, opts.store, vol, { name: vol.name ?? "Volume" });
     status(`loaded ${vol.name}: ${vol.dims.join("×")} voxels`);
-    opts.onLoaded?.({ name: vol.name ?? "Volume", imageId: r.imageId, source });
+    const b = rasBounds(vol.dims, vol.ijkToRAS);
+    opts.onLoaded?.({ name: vol.name ?? "Volume", imageId: r.imageId, source, rasLo: b.lo, rasHi: b.hi, ijkToRAS: vol.ijkToRAS });
   }
 
   shell.registerPanel({ id: "data", title: "Data", order: 1, mount(el) {

@@ -83,7 +83,7 @@ async function main() {
     } });
     // W1: local data — chunks from files are served to the DisplayableManagers like any other blob
     const store = new LocalBlobStore();
-    registerLoadPanel(sh, { live: views.live, store, onStatus: status });
+    registerLoadPanel(sh, { live: views.live, store, onStatus: status, onLoaded: (i) => { views.fitVolume(i.rasLo, i.rasHi, i.ijkToRAS); (globalThis as unknown as { __lastLoad?: unknown }).__lastLoad = i; } });
     registerSelfTest("ingest: a synthetic NIfTI becomes an image node the slices can show", async () => {
       const vol = await parseNifti(makeNifti({ sform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }), "selftest");
       const before = views.live.nodes.size;

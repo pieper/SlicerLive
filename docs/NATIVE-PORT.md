@@ -47,5 +47,19 @@ Open: DICOMweb (QIDO/WADO-RS), the minimal FSA-project study browser behind `Pro
 (reconcile with SlicerRad later), DICOM SEG read (with W7), fitting a newly loaded volume to the views (W2),
 NRRD keeps its native dtype (the reader expands to f32 today), `.nrrd.gz`.
 
-Next: W2 layouts + view controllers — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
+## W2 — layouts + view controllers — STARTED (2026-08-29)
+
+Foundation (pure logic, tested): `logic/slice-logic.ts` — `fitFovToVolume` (vtkMRMLSliceLogic::FitSliceToVolumes:
+fit to the smaller window dimension) **validated to ≤0.5 mm against the live-Slicer MRHead fixture in all three
+orientations**, and `offsetRangeResolution` (slider range + step). `logic/layouts.ts` — Slicer's layout catalog by
+`vtkMRMLLayoutNode` id (Conventional 2, FourUp 3, OneUp3D 4, OneUpRed/Yellow/Green 6/7/8, Dual3D 15,
+ThreeOverThree 21, TwoOverTwo 29) as fractional cells; unit test proves every arrangement tiles the area with no
+overlaps. `mountLiveViews` gained `fitVolume(rasLo,rasHi,ijkToRAS)` (used on a native load; the mirrored-plane
+path still wins when a Slicer peer streams a frame).
+
+Open: native `sliceView` nodes so locally loaded volumes own their slice frames (the local-vs-peer frame
+ownership), slice/3D controller bars (offset slider, orientation combo, link/hot-link, fg opacity, fit, reset),
+the layout picker in the shell, slice intersection lines, `setLayout` cmd + `cellsFor` wired into `setCells`.
+
+Next: W2 view-controller bars + native sliceView nodes — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
 (Steve's SlicerRad folder browser to be reconciled when that code is available).

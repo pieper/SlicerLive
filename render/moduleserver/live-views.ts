@@ -10,6 +10,7 @@
 import type { Gpu } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { type Orientation, SliceRenderer } from "../slice-renderer.ts";
+import { fitFovToVolume } from "../../logic/slice-logic.ts";
 import { VtkCamera } from "../vtk-camera.ts";
 import type { Field, ImageField } from "../fields.ts";
 import { mountAdaptive3d } from "../demos/accum-loop.ts";
@@ -24,7 +25,7 @@ import {
   type SceneMeshData, type SlicePlane, type SliceLayers, type ThreeDChrome, ModelDisplayableManager, ThreeDViewDisplayableManager, TransformDisplayableManager, type Vec3, ViewStateDisplayableManager, type ViewState, VolumeLayersDisplayableManager, VolumeRenderingDisplayableManager, ModuleRegistryDisplayableManager } from "../livescene.ts";
 
 export interface ViewCellRect { id: string; kind: string; name: string; view: { x: number; y: number; w: number; h: number } }
-export interface LiveViews { live: LiveScene; sync: LiveSync; resize(): void; setCells(cells: ViewCellRect[]): void; camera(): { position: Vec3; focalPoint: Vec3; viewUp: Vec3; viewAngle: number }; cells(): string[] }
+export interface LiveViews { live: LiveScene; sync: LiveSync; resize(): void; setCells(cells: ViewCellRect[]): void; camera(): { position: Vec3; focalPoint: Vec3; viewUp: Vec3; viewAngle: number }; cells(): string[]; fitVolume(rasLo: Vec3, rasHi: Vec3, ijkToRAS: number[]): void }
 
 const SLAB_MM = 1.5;                  // overlay items within this distance of the plane are "in plane"
 const CELL_COLORS: Record<string, string> = { Red: "#f05a5a", Yellow: "#f0d24a", Green: "#5ad07a" };
@@ -521,6 +522,19 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   Object.assign(globalThis, { __peers: peers, __modules: () => [...moduleRegistry.modules.values()] });
   return {
     live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells,
+    // W2: frame a volume in every slice cell (vtkMRMLSliceLogic::FitSliceToVolumes) — used on a native load
+    // and by the controller "fit" button; the mirrored plane path (setMirrorFrame) still wins when a Slicer
+    // peer streams a slice frame, so this only takes effect for standalone/native scenes.
+    fitVolume(rasLo: Vec3, rasHi: Vec3, ijkToRAS: number[]) {
+      const center: Vec3 = [(rasLo[0] + rasHi[0]) / 2, (rasLo[1] + rasHi[1]) / 2, (rasLo[2] + rasHi[2]) / 2];
+      for (const c of cells.values()) {
+        if (c.el.style.display === "none") continue;
+        const w = c.canvas.width || 1, h = c.canvas.height || 1;
+        const [fovX, fovY] = fitFovToVolume(c.orientKey, rasLo, rasHi, ijkToRAS, w, h);
+        c.slice.setMirrorFrame(c.orientKey, center, fovX, fovY);
+      }
+      renderSlices();
+    },
     // numeric state for tests (render/introspect.ts): the 3D camera as a vtkCamera-comparable pose
     camera: () => ({ position: [...camera.position] as Vec3, focalPoint: [...camera.focalPoint] as Vec3, viewUp: [...camera.viewUp] as Vec3, viewAngle: camera.viewAngle }),
     cells: () => [...cells.keys()],
