@@ -187,6 +187,16 @@ export class CDP {
     await this.mouse("mouseReleased", x1, y1, { button, buttons: 0, modifiers });
   }
 
+  /** Dispatch a key down/up (for modifier-gated interactions like SHIFT-move crosshair). */
+  async key(type: "keyDown" | "keyUp", key: string, opts: { code?: string; modifiers?: number } = {}) {
+    await this.send("Input.dispatchKeyEvent", { type, key, code: opts.code ?? key, modifiers: opts.modifiers ?? 0, windowsVirtualKeyCode: key === "Shift" ? 16 : 0 });
+  }
+  /** Run `fn` with a modifier key held (keyDown before, keyUp after). */
+  async withKey(key: string, modifiers: number, fn: () => Promise<void>) {
+    await this.key("keyDown", key, { modifiers });
+    try { await fn(); } finally { await this.key("keyUp", key, { modifiers: 0 }); }
+  }
+
   async wheel(x: number, y: number, deltaY: number, modifiers = 0) {
     await this.send("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY, modifiers, buttons: 0 });
   }

@@ -18,6 +18,7 @@ import { LiveSync } from "../livesync.ts";
 import { WsTransport } from "../transport.ts";
 import { CameraInteractor } from "../vtk-interactor.ts";
 import { attachSliceControls, type SliceControls } from "../demos/slice-control.ts";
+import { attachDoubleClick } from "../demos/view-grid.ts";
 import "./view-cmds.ts";   // registers setCursor / setSliceFrame / viewContextMenu client handlers
 import {
   CameraDisplayableManager, type CameraState, LayoutDisplayableManager, LiveScene, MarkupsDisplayableManager,
@@ -477,12 +478,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           const id = crosshairId(); if (!id) return;
           const ras = cellRas(c, u, v);
           live.write({ op: "cmd", id, cmd: "setCursor", args: { ras, view: c.name } });
-          if (shiftHeld) live.write({ op: "patch", id, path: "#/crosshairRAS", value: ras });
+          if (shiftHeld) { live.write({ op: "patch", id, path: "#/crosshairRAS", value: ras }); jumpLocal(ras); }
           if (brushEffect()) { brushCursor = { cell: c, ras }; c.canvas.style.cursor = "none"; drawOverlay(c); }
           else c.canvas.style.cursor = interactionMode() === "place" ? "crosshair" : pickMarkup(c, u, v, w, h) ? "grab" : "default";
         },
       },
     });
+    attachDoubleClick(c.canvas, () => toggleMaximize(c.name));
     // pan (middle / shift+left drag) and right-drag zoom have no hooks: branch on the press that starts
     // them (capture phase, before the control handles it) and write the frame back on release
     c.canvas.addEventListener("pointerdown", (e) => { if (e.button === 1 || e.button === 2 || (e.button === 0 && e.shiftKey)) c.branched = true; }, true);
@@ -501,8 +503,14 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   addEventListener("keydown", (e) => { if (e.key === "Shift") shiftHeld = true; }, true);
   addEventListener("keyup", (e) => { if (e.key === "Shift") shiftHeld = false; }, true);
 
-  const setCells = (rects: ViewCellRect[]) => {
+  let lastRects: ViewCellRect[] = [];
+  let maximizedCell: string | null = null;
+  const applyCells = () => {
     const origin = root.getBoundingClientRect();
+    // when a cell is maximized (double-click, like the MPR demos' attachViewGrid), show only it, full area
+    const rects = maximizedCell
+      ? lastRects.filter((r) => r.name === maximizedCell).map((r) => ({ ...r, view: { x: origin.left, y: origin.top, w: origin.width, h: origin.height } }))
+      : lastRects;
     const shownSlices = new Set<string>();
     threeVisible = false;
     for (const r of rects) {
@@ -513,6 +521,22 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     for (const [name, c] of cells) if (!shownSlices.has(name)) c.el.style.display = "none";
     if (!threeVisible) three.el.style.display = "none";
     resizeAll(); renderSlices(); if (threeVisible) a3d.draw();
+  };
+  const setCells = (rects: ViewCellRect[]) => { lastRects = rects; if (maximizedCell && !rects.some((r) => r.name === maximizedCell)) maximizedCell = null; applyCells(); };
+  /** Double-click a cell to maximize/restore (reuses the MPR demos' behaviour, systematized here). */
+  const toggleMaximize = (name: string) => { maximizedCell = maximizedCell === name ? null : name; applyCells(); };
+  attachDoubleClick(three.canvas, () => toggleMaximize("1"));
+  /** Jump every slice cell to a RAS point (Slicer's crosshair jump) — the native half of shift-move, so a
+   *  standalone scene jumps without a Slicer peer. Sets each cell's out-of-plane position to ras·normal. */
+  const jumpLocal = (ras: Vec3) => {
+    for (const c of cells.values()) {
+      if (c.el.style.display === "none" || !c.plane) continue;
+      const pl = c.plane, n: Vec3 = pl.basis ? pl.basis.nDir : pl.orient === "axial" ? [0, 0, 1] : pl.orient === "coronal" ? [0, 1, 0] : [1, 0, 0];
+      pl.posMm = ras[0] * n[0] + ras[1] * n[1] + ras[2] * n[2];
+      const id = sliceNodeId(c.name);
+      if (id) live.write({ op: "patch", id, path: "#/offset", value: pl.posMm });   // a peer's slices follow too
+      renderSlice(c);
+    }
   };
   addEventListener("resize", () => { resizeAll(); renderSlices(); a3d.draw(); });
   Object.assign(globalThis, { __live: live, __sync: sync, __cells: () => [...cells.keys()], __overlays: () => Object.fromEntries(overlays), __viewState: () => viewState, __brush: () => ({ effect: brushEffect(), diam: brushDiameterMm() }),

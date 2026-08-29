@@ -61,5 +61,12 @@ Open: native `sliceView` nodes so locally loaded volumes own their slice frames 
 ownership), slice/3D controller bars (offset slider, orientation combo, link/hot-link, fg opacity, fit, reset),
 the layout picker in the shell, slice intersection lines, `setLayout` cmd + `cellsFor` wired into `setCells`.
 
-Next: W2 view-controller bars + native sliceView nodes — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
+View interactions **reuse the existing DRY primitives** (checked, not reinvented): `mountLiveViews` already
+reused `attachSliceControls` (wheel/drag/pan/zoom) and `CameraInteractor` (3D orbit); added double-click
+**maximize/restore** via the demos' `attachDoubleClick`, and made SHIFT+move **jump the other slice cells
+natively** (the crosshair jump that previously only reached the Slicer peer). CDP client gained `key`/`withKey`
+so modifier-gated interactions are testable. Browser tests: maximize 4→1→4, and SHIFT+move jumps the other views.
+
+Next: W2 view-controller bars (offset slider, orientation combo, link/hot-link, fit/reset), the layout picker,
+native sliceView nodes so a locally loaded volume owns its slice frame, slice intersection lines — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
 (Steve's SlicerRad folder browser to be reconciled when that code is available).
