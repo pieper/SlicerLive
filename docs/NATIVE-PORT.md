@@ -72,12 +72,14 @@ verified switching OneUpRed→Conventional→FourUp. Double-click maximize and S
 tested. `mountLiveViews` exposes `__cellPlanes`/`__jumpTo` for tests; a `jumpLocal` native crosshair-jump is in
 place but only sticks once slice planes are node-owned (see below).
 
-Known boundary: standalone (peerless) slice cells are blank and shift-jump/offset don't persist because slice
-**planes are derived from a peer's `view` node** — a locally loaded volume has no `sliceView` node yet. The next
-W2 step (native `sliceView` nodes owning the slice plane) fixes standalone rendering AND makes the crosshair jump
-+ offset slider persist; the crosshair jump then reuses the demos' `mountCrosshair` semantics.
+**Native sliceView nodes (done)**: standalone (peerless) scenes now create `view`/slice nodes (Red=Axial,
+Yellow=Sagittal, Green=Coronal) with a `sliceToRAS` + fitted `fieldOfView` when a volume loads, so the same
+`SliceDisplayableManager.setSlicePlane` path a peer uses now drives locally loaded volumes — **standalone
+renders**, and the crosshair jump / offset **persist** because the node owns the plane (`jumpLocal` patches the
+node's `sliceToRAS` translation). Verified: a synthetic volume renders in all three slice views, and a jump lands
+each cell's offset exactly (axial→S, coronal→A, sagittal→R). When a Slicer peer is connected its `view` nodes own
+the planes (native ones are not created).
 
-Next: W2 native `sliceView` nodes (own the slice plane so standalone renders and jump/offset persist), then the
-slice/3D controller bars (offset slider via `offsetRangeResolution`, orientation combo, link/hot-link, fit/reset)
-and slice intersection lines — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
+Next: W2 slice/3D controller bars (offset slider via `offsetRangeResolution`, orientation combo, link/hot-link,
+fit/reset — driving the native sliceView nodes / patching a peer's), and slice intersection lines — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
 (Steve's SlicerRad folder browser to be reconciled when that code is available).

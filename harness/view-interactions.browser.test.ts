@@ -51,6 +51,27 @@ Deno.test({ name: "view: SHIFT+move sets the crosshair RAS under the cursor", ig
   } finally { await cdp.closeTab(); }
 } });
 
+Deno.test({ name: "view: standalone renders + crosshair jump persists (native sliceView nodes)", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
+  const cdp = await CDP.openTab(`${BASE}slicer-app.html?ws=ws://127.0.0.1:1/&gui=ws://127.0.0.1:1/&http=http://127.0.0.1:1/mrson/`);
+  try {
+    await waitReady(cdp, 60000);
+    const { makeNifti } = await import("../logic/readers/synthetic.ts");
+    const b64 = btoa(String.fromCharCode(...makeNifti({ sform: [1.5, 0, 0, -40, 0, 1.5, 0, -40, 0, 0, 3, -60] })));
+    await cdp.eval(`await window.__loadVolumeBytes(Uint8Array.from(atob(${JSON.stringify(b64)}), c=>c.charCodeAt(0)), "sa.nii"); return 1;`);
+    // native sliceView nodes appear and give every anatomical cell a plane
+    await cdp.waitForValue<number>(`[...window.__live.nodes.values()].filter(n=>n.type==='view'&&n.kind==='slice').length`, (n) => n >= 3, 15000);
+    const planes = await cdp.evalJson<Record<string, number>>("window.__cellPlanes()");
+    assert(Object.keys(planes).length >= 3, "standalone cells have no plane");
+    // jump to a RAS point and confirm each cell's offset = ras·normal AND it persists (no peer to re-assert)
+    await cdp.eval(`window.__jumpTo([7, -11, 15]); return 1;`);
+    await new Promise((r) => setTimeout(r, 400));
+    const after = await cdp.evalJson<Record<string, number>>("window.__cellPlanes()");
+    assertEquals(Math.round(after.Red * 10) / 10, 15, "Red(axial) -> S=15");
+    assertEquals(Math.round(after.Green * 10) / 10, -11, "Green(coronal) -> A=-11");
+    assertEquals(Math.round(after.Yellow * 10) / 10, 7, "Yellow(sagittal) -> R=7");
+  } finally { await cdp.closeTab(); }
+} });
+
 Deno.test({ name: "layout: the picker drives Slicer's layout catalog (OneUpRed, Conventional, FourUp)", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
   const cdp = await CDP.openTab(`${BASE}slicer-app.html`);
   try {

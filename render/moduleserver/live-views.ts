@@ -526,15 +526,47 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   /** Double-click a cell to maximize/restore (reuses the MPR demos' behaviour, systematized here). */
   const toggleMaximize = (name: string) => { maximizedCell = maximizedCell === name ? null : name; applyCells(); };
   attachDoubleClick(three.canvas, () => toggleMaximize("1"));
+  // Native sliceView nodes (standalone, no Slicer peer): the SliceDisplayableManager consumes `view`/slice
+  // nodes (sliceToRAS + fieldOfView) and pushes a plane to each cell, so a locally loaded volume renders and
+  // jump/offset persist (the node owns the plane). One per anatomical cell; the same setSlicePlane path a peer
+  // uses. Red=Axial, Yellow=Sagittal, Green=Coronal.
+  const NATIVE_SLICE: Record<string, { orientation: string; axis: 0 | 1 | 2; transIdx: 3 | 7 | 11; mat: (c: Vec3) => number[] }> = {
+    Red: { orientation: "Axial", axis: 2, transIdx: 11, mat: (c) => [1, 0, 0, c[0], 0, 1, 0, c[1], 0, 0, 1, c[2], 0, 0, 0, 1] },
+    Yellow: { orientation: "Sagittal", axis: 0, transIdx: 3, mat: (c) => [0, 0, 1, c[0], 1, 0, 0, c[1], 0, 1, 0, c[2], 0, 0, 0, 1] },
+    Green: { orientation: "Coronal", axis: 1, transIdx: 7, mat: (c) => [1, 0, 0, c[0], 0, 0, 1, c[1], 0, 1, 0, c[2], 0, 0, 0, 1] },
+  };
+  const nativeSliceId = (cell: string) => `nativeSlice-${cell}`;
+  const ensureNativeSlices = (rasLo: Vec3, rasHi: Vec3, ijkToRAS: number[], center: Vec3) => {
+    for (const [cell, def] of Object.entries(NATIVE_SLICE)) {
+      const c = cells.get(cell); if (!c || c.el.style.display === "none") continue;
+      const w = c.canvas.width || 1, h = c.canvas.height || 1;
+      const [fovX, fovY, slab] = fitFovToVolume(c.orientKey, rasLo, rasHi, ijkToRAS, w, h);
+      const id = nativeSliceId(cell);
+      live.write({ op: "put", id, node: { type: "view", kind: "slice", id, name: cell, layoutName: cell, orientation: def.orientation, sliceToRAS: def.mat(center), fieldOfView: [fovX, fovY, slab], offset: center[def.axis], source: { local: true } } });
+    }
+    renderSlices();
+  };
+  /** Move a native slice node's plane along its normal to `mm` (persists, node-owned). */
+  const patchNativeOffset = (cell: string, mm: number): boolean => {
+    const def = NATIVE_SLICE[cell]; if (!def) return false;
+    const id = nativeSliceId(cell); if (!live.nodes.has(id)) return false;
+    live.write({ op: "patch", id, path: `#/sliceToRAS/${def.transIdx}`, value: mm });
+    live.write({ op: "patch", id, path: "#/offset", value: mm });
+    return true;
+  };
+
   /** Jump every slice cell to a RAS point (Slicer's crosshair jump) — the native half of shift-move, so a
    *  standalone scene jumps without a Slicer peer. Sets each cell's out-of-plane position to ras·normal. */
   const jumpLocal = (ras: Vec3) => {
     for (const c of cells.values()) {
-      if (c.el.style.display === "none" || !c.plane) continue;
-      const pl = c.plane, n: Vec3 = pl.basis ? pl.basis.nDir : pl.orient === "axial" ? [0, 0, 1] : pl.orient === "coronal" ? [0, 1, 0] : [1, 0, 0];
-      pl.posMm = ras[0] * n[0] + ras[1] * n[1] + ras[2] * n[2];
+      if (c.el.style.display === "none") continue;
+      const n: Vec3 = c.plane?.basis ? c.plane.basis.nDir : c.orientKey === "axial" ? [0, 0, 1] : c.orientKey === "coronal" ? [0, 1, 0] : [1, 0, 0];
+      const mm = ras[0] * n[0] + ras[1] * n[1] + ras[2] * n[2];
+      if (patchNativeOffset(c.name, mm)) continue;                                  // node-owned: sticks + re-renders via the DM
+      if (!c.plane) continue;
+      c.plane.posMm = mm;
       const id = sliceNodeId(c.name);
-      if (id) live.write({ op: "patch", id, path: "#/offset", value: pl.posMm });   // a peer's slices follow too
+      if (id) live.write({ op: "patch", id, path: "#/offset", value: mm });         // peer's slices follow (transient)
       renderSlice(c);
     }
   };
@@ -557,7 +589,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // peer streams a slice frame, so this only takes effect for standalone/native scenes.
     fitVolume(rasLo: Vec3, rasHi: Vec3, ijkToRAS: number[]) {
       const center: Vec3 = [(rasLo[0] + rasHi[0]) / 2, (rasLo[1] + rasHi[1]) / 2, (rasLo[2] + rasHi[2]) / 2];
-      for (const c of cells.values()) {
+      if (!sync.transport.isOpen) { ensureNativeSlices(rasLo, rasHi, ijkToRAS, center); return; }   // standalone: node-owned planes
+      for (const c of cells.values()) {                                                             // peer: transient mirror frame
         if (c.el.style.display === "none") continue;
         const w = c.canvas.width || 1, h = c.canvas.height || 1;
         const [fovX, fovY] = fitFovToVolume(c.orientKey, rasLo, rasHi, ijkToRAS, w, h);
