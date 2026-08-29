@@ -10,6 +10,10 @@ import { mountSessionUI } from "../moduleserver/session-ui.ts";
 import { installIntrospection, type SlicerLiveHook } from "../introspect.ts";
 import { expect, registerSelfTest } from "../selftest.ts";
 import { type AppShell, fourUpCells, mountAppShell } from "./app-shell.ts";
+import { registerLoadPanel } from "./load-panel.ts";
+import { LocalBlobStore, loadVolumeIntoScene } from "../../logic/ingest.ts";
+import { parseNifti } from "../../logic/readers/nifti.ts";
+import { makeNifti, SYNTHETIC_DIMS } from "../../logic/readers/synthetic.ts";
 
 const status = (m: string) => { const e = document.getElementById("status"); if (e) e.textContent = m; };
 
@@ -77,6 +81,23 @@ async function main() {
         its scene streams into these views. The streamed stock-Slicer chrome is available at
         <a href="?legacy">?legacy</a>.</p>`;
     } });
+    // W1: local data — chunks from files are served to the DisplayableManagers like any other blob
+    const store = new LocalBlobStore();
+    registerLoadPanel(sh, { live: views.live, store, onStatus: status });
+    registerSelfTest("ingest: a synthetic NIfTI becomes an image node the slices can show", async () => {
+      const vol = await parseNifti(makeNifti({ sform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }), "selftest");
+      const before = views.live.nodes.size;
+      const r = await loadVolumeIntoScene(views.live, store, vol, { name: "selftest" });
+      const img = views.live.nodes.get(r.imageId);
+      expect(!!img && JSON.stringify(img.dims) === JSON.stringify(SYNTHETIC_DIMS), "image node missing or wrong dims");
+      expect(views.live.nodes.size > before, "no nodes added");
+      const comps = [...views.live.nodes.values()].filter((n) => n.type === "sliceComposite");
+      expect(comps.length >= 3 && comps.every((c) => (c.refs as { background?: string[] }).background?.[0] === r.imageId), "composites do not point at the new volume");
+      // put the previous background back so a mirrored scene is left as found
+      const others = [...views.live.nodes.values()].filter((n) => n.type === "image" && n.id !== r.imageId);
+      for (const c of comps) views.live.write(others.length ? { op: "patch", id: c.id, path: "#/refs/background", value: [others[others.length - 1].id] } : { op: "del", id: c.id });
+      for (const n of r.nodes) views.live.write({ op: "del", id: n.id });
+    });
     sh.setStatus("SlicerLive — native shell");
     // theme self-tests: the dark theme keeps readable contrast and Slicer's view colours
     const rgb = (c: string) => { const m = c.match(/\d+(\.\d+)?/g) ?? []; return [Number(m[0]) || 0, Number(m[1]) || 0, Number(m[2]) || 0]; };

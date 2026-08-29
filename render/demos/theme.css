@@ -83,3 +83,11 @@ html, body { height: 100%; margin: 0; background: var(--sl-bg); color: var(--sl-
 .lv-cell[data-cell=Green] { --sl-cell: var(--sl-view-green); }
 .lv-cell[data-cell="3D"] { --sl-cell: var(--sl-view-3d); }
 .lv-cell::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--sl-cell, var(--sl-border)); z-index: 3; pointer-events: none; }
+
+/* ---- data panel ---- */
+.sl-hint { color: var(--sl-fg-dim); font-size: 11px; }
+.sl-progress { position: relative; height: 18px; margin: 6px 0; background: var(--sl-surface-2); border-radius: var(--sl-radius); overflow: hidden; }
+.sl-progress-bar { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--sl-accent); transition: width .2s; }
+.sl-progress-text { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--sl-fg); }
+.sl-loaded { margin: 0; padding-left: 16px; }
+.sl-drop { position: absolute; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; background: rgba(79, 149, 216, .18); border: 2px dashed var(--sl-accent); color: var(--sl-fg); font-size: 16px; pointer-events: none; }
