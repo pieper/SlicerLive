@@ -160,6 +160,15 @@ SegmentStatistics later. Tests: `histogram.test.ts` (6, CPU) + `histogram.gpu.te
 clamped edges, 100k-sample deterministic noise). (`logic/window-level.ts:histogramPercentiles` keeps its
 Slicer-tuned int/float binning for the parity-verified auto W/L; the kernel is the general-purpose path.)
 
-Next W3: the `resample3d` kernel (data-path `vtkImageReslice`: nearest/trilinear, direction-aware output
-geometry — needed by W5 masking, W6 harden, W1 crop); then W2 tail (orientation combo for reformat,
-link/hot-link across slice views).
+**resample3d kernel (done)**: `algorithms/kernels/resample3d.ts` — the data path of `vtkImageReslice` /
+`vtkOrientedImageDataResample`: resample an input volume (its own ijkToRAS) onto an output geometry
+(dims + ijkToRAS) with nearest or trilinear interpolation, direction-aware (goes through world RAS, so arbitrary
+rotation/anisotropy works), out-of-extent -> background; integer input keeps integer output. Plus `isotropicGrid`
+(build a cubic-voxel output covering the same RAS box). **Parity**: `harness/parity/resample3d.parity.test.ts` —
+vs Slicer's `vtkImageReslice` on a 10^3 ramp resliced onto an interior anisotropic-scaled grid: nearest exact,
+linear max|Δ| 6.71e-4 (< 1e-3) over 216 voxels. Unit: `resample3d.test.ts` (7: identity, translation, background,
+trilinear midpoint, 90-degree permutation, integer rounding, isotropicGrid). The WGSL path lands with its first
+heavy consumer (W5 masking / W6 harden). Needed by W5 masking, W6 harden, W1 crop.
+
+Next: W2 tail (orientation combo for reformat, link/hot-link across slice views); the resample3d WGSL path when
+W5/W6 need the throughput.
