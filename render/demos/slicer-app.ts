@@ -9,7 +9,8 @@ import { mountLiveViews } from "../moduleserver/live-views.ts";
 import { mountSessionUI } from "../moduleserver/session-ui.ts";
 import { installIntrospection, type SlicerLiveHook } from "../introspect.ts";
 import { expect, registerSelfTest } from "../selftest.ts";
-import { type AppShell, fourUpCells, mountAppShell } from "./app-shell.ts";
+import { type AppShell, mountAppShell } from "./app-shell.ts";
+import { cellsFor, DEFAULT_LAYOUT, layoutList } from "../../logic/layouts.ts";
 import { registerLoadPanel } from "./load-panel.ts";
 import { LocalBlobStore, loadVolumeIntoScene } from "../../logic/ingest.ts";
 import { parseNifti } from "../../logic/readers/nifti.ts";
@@ -69,8 +70,19 @@ async function main() {
   });
   if (shell) {
     const sh = shell;
-    // standalone layout until the layout engine (W2): FourUp over the main area, re-placed on resize
-    sh.onMainResize((r) => views.setCells(fourUpCells(r)));
+    // W2 layout picker: Slicer's catalog (logic/layouts.ts) drives the view cells. The picker sits in the
+    // toolbar; re-laid out on resize. (When a Slicer peer streams a layout it also calls setCells; the last
+    // one wins — a native picker and a peer layout are the same setCells path.)
+    let layoutId = DEFAULT_LAYOUT;
+    const relayout = (r: DOMRect) => views.setCells(cellsFor(layoutId, r.width, r.height, r.left, r.top).map((c) => ({ id: c.view, kind: c.kind, name: c.view, view: c.px })));
+    const sel = document.createElement("select"); sel.className = "sl-module-select"; sel.title = "Layout";
+    for (const l of layoutList()) { const o = document.createElement("option"); o.value = String(l.id); o.textContent = l.name; sel.appendChild(o); }
+    sel.value = String(layoutId);
+    sel.addEventListener("change", () => { layoutId = Number(sel.value); relayout(sh.main.getBoundingClientRect()); (globalThis as unknown as { __layoutId?: number }).__layoutId = layoutId; });
+    sh.toolbar.appendChild(sel);
+    (globalThis as unknown as { __setLayout?: (id: number) => void; __layoutId?: number }).__setLayout = (id: number) => { layoutId = id; sel.value = String(id); relayout(sh.main.getBoundingClientRect()); (globalThis as unknown as { __layoutId?: number }).__layoutId = id; };
+    (globalThis as unknown as { __layoutId?: number }).__layoutId = layoutId;
+    sh.onMainResize((r) => relayout(r));
     sh.registerPanel({ id: "welcome", title: "Welcome", order: 0, mount(el) {
       el.innerHTML = `<h2>Welcome to SlicerLive</h2>
         <p>The native application shell. Modules appear in the selector above as they are ported (data loading,

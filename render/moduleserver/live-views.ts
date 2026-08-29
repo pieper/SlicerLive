@@ -543,7 +543,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     __layers: () => Object.fromEntries([...cells].map(([k, c]) => [k, { bg: !!c.layers?.background, fg: c.layers?.foreground ? [c.layers.foreground.opacity, c.layers.foreground.compositing] : null, label: c.layers?.label ? c.layers.label.opacity : null, bgLut: !!c.layers?.background?.lut }])) });
   sync.connect();
   for (const p of peers) p.connect();
-  Object.assign(globalThis, { __peers: peers, __modules: () => [...moduleRegistry.modules.values()] });
+  Object.assign(globalThis, {
+    __peers: peers, __modules: () => [...moduleRegistry.modules.values()],
+    // local (not node) slice-plane offsets per cell — the truth of a native jump/scroll (a peer-owned view
+    // node can be re-asserted by the peer; pl.posMm is what the renderer actually shows)
+    __cellPlanes: () => Object.fromEntries([...cells].filter(([, c]) => c.plane).map(([k, c]) => [k, c.plane!.posMm])),
+    __jumpTo: (ras: Vec3) => jumpLocal(ras),
+  });
   return {
     live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells,
     // W2: frame a volume in every slice cell (vtkMRMLSliceLogic::FitSliceToVolumes) — used on a native load

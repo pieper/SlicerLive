@@ -67,6 +67,17 @@ reused `attachSliceControls` (wheel/drag/pan/zoom) and `CameraInteractor` (3D or
 natively** (the crosshair jump that previously only reached the Slicer peer). CDP client gained `key`/`withKey`
 so modifier-gated interactions are testable. Browser tests: maximize 4→1→4, and SHIFT+move jumps the other views.
 
-Next: W2 view-controller bars (offset slider, orientation combo, link/hot-link, fit/reset), the layout picker,
-native sliceView nodes so a locally loaded volume owns its slice frame, slice intersection lines — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
+**Layout picker** (toolbar): Slicer's catalog (`logic/layouts.ts`) drives the view cells via `setCells` —
+verified switching OneUpRed→Conventional→FourUp. Double-click maximize and SHIFT+move crosshair are wired and
+tested. `mountLiveViews` exposes `__cellPlanes`/`__jumpTo` for tests; a `jumpLocal` native crosshair-jump is in
+place but only sticks once slice planes are node-owned (see below).
+
+Known boundary: standalone (peerless) slice cells are blank and shift-jump/offset don't persist because slice
+**planes are derived from a peer's `view` node** — a locally loaded volume has no `sliceView` node yet. The next
+W2 step (native `sliceView` nodes owning the slice plane) fixes standalone rendering AND makes the crosshair jump
++ offset slider persist; the crosshair jump then reuses the demos' `mountCrosshair` semantics.
+
+Next: W2 native `sliceView` nodes (own the slice plane so standalone renders and jump/offset persist), then the
+slice/3D controller bars (offset slider via `offsetRangeResolution`, orientation combo, link/hot-link, fit/reset)
+and slice intersection lines — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
 (Steve's SlicerRad folder browser to be reconciled when that code is available).
