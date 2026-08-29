@@ -7,6 +7,7 @@ import { loadVolumeIntoScene, LocalBlobStore } from "../../logic/ingest.ts";
 import { readVolume, sniff } from "../../logic/readers/registry.ts";
 import { downloadSample, SAMPLE_DATA } from "../../logic/sample-data.ts";
 import { fetchZarrVolumeNative, type ZarrDesc } from "../zarr.ts";
+import { indexDirectory, indexFiles, loadDcmjs, loadEntry, type SeriesEntry } from "../../logic/readers/dicom-local.ts";
 
 export interface LoadPanelOpts {
   live: LiveScene;
@@ -34,13 +35,22 @@ export function registerLoadPanel(shell: AppShell, opts: LoadPanelOpts): void {
     }
   }
 
+  async function loadVolumeObj(vol: Awaited<ReturnType<typeof readVolume>>, source: string): Promise<void> {
+    const r = await loadVolumeIntoScene(opts.live, opts.store, vol, { name: vol.name ?? "Volume" });
+    status(`loaded ${vol.name}: ${vol.dims.join("×")} voxels`);
+    opts.onLoaded?.({ name: vol.name ?? "Volume", imageId: r.imageId, source });
+  }
+
   shell.registerPanel({ id: "data", title: "Data", order: 1, mount(el) {
     el.innerHTML = `
       <h2>Data</h2>
       <h3>Load</h3>
       <div class="sl-row"><button class="sl-primary" data-act="open">Open volume file…</button><span class="sl-hint">NRRD, NIfTI (.nii, .nii.gz)</span></div>
-      <p>Or drag files onto the views. DICOM folders and series browsing arrive with the DICOM module.</p>
+      <div class="sl-row"><button data-act="dicom-dir">Open DICOM folder…</button><button data-act="dicom-files">DICOM files…</button></div>
+      <div class="sl-series" hidden><h3>Series</h3><div class="sl-series-list"></div></div>
+      <p>Or drag files onto the views.</p>
       <input type="file" multiple accept=".nrrd,.nhdr,.nii,.nii.gz,.gz" hidden>
+      <input type="file" multiple data-dicom hidden>
       <h3>Sample Data</h3>
       <div class="sl-samples"></div>
       <div class="sl-progress" hidden><div class="sl-progress-bar"></div><span class="sl-progress-text"></span></div>
@@ -58,6 +68,35 @@ export function registerLoadPanel(shell: AppShell, opts: LoadPanelOpts): void {
       } else input.click();
     });
     input.addEventListener("change", () => { if (input.files) void loadFiles(input.files); input.value = ""; });
+
+    // ---- DICOM ----
+    const seriesBox = el.querySelector(".sl-series") as HTMLElement, seriesList = el.querySelector(".sl-series-list") as HTMLElement;
+    const dicomInput = el.querySelector("[data-dicom]") as HTMLInputElement;
+    const showSeries = (entries: SeriesEntry[]) => {
+      seriesList.innerHTML = "";
+      if (!entries.length) { seriesBox.hidden = false; seriesList.innerHTML = "<p>No DICOM image series found.</p>"; return; }
+      seriesBox.hidden = false;
+      for (const e of entries) {
+        const row = document.createElement("div"); row.className = "sl-series-row";
+        const b = document.createElement("button");
+        b.textContent = `${e.modality ?? "?"} · ${e.description || e.seriesInstanceUID.slice(-12)} · ${e.count} img`;
+        b.title = `${e.patientName ?? ""} · ${e.seriesInstanceUID}`;
+        b.addEventListener("click", async () => {
+          try { status(`reconstructing ${e.count} slices…`); await loadVolumeObj(loadEntry(e), "dicom"); }
+          catch (err) { status(`DICOM: ${(err as Error).message}`); }
+        });
+        row.appendChild(b); seriesList.appendChild(row);
+      }
+    };
+    const indexProgress = (p: { scanned: number; dicom: number; note?: string }) => status(`scanning: ${p.dicom} DICOM / ${p.scanned} files${p.note ? " — " + p.note : ""}`);
+    (el.querySelector('[data-act="dicom-dir"]') as HTMLButtonElement).addEventListener("click", async () => {
+      const picker = (globalThis as unknown as { showDirectoryPicker?: (o: unknown) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
+      if (!picker) { status("directory picker unavailable — use ‘DICOM files…’"); return; }
+      try { const dir = await picker({ id: "slicerlive-dicom" }); status("scanning folder…"); showSeries(await indexDirectory(dir, indexProgress)); }
+      catch (e) { if ((e as Error).name !== "AbortError") status((e as Error).message); }
+    });
+    (el.querySelector('[data-act="dicom-files"]') as HTMLButtonElement).addEventListener("click", () => dicomInput.click());
+    dicomInput.addEventListener("change", async () => { if (dicomInput.files?.length) { status("scanning files…"); showSeries(await indexFiles(Array.from(dicomInput.files), indexProgress)); } dicomInput.value = ""; });
 
     const samples = el.querySelector(".sl-samples") as HTMLElement;
     const prog = el.querySelector(".sl-progress") as HTMLElement, bar = el.querySelector(".sl-progress-bar") as HTMLElement, ptxt = el.querySelector(".sl-progress-text") as HTMLElement;
@@ -106,5 +145,19 @@ export function registerLoadPanel(shell: AppShell, opts: LoadPanelOpts): void {
     for (let i = 0; i < zv.data.length; i++) { const v = zv.data[i] as number; sum += v; if (v < mn) mn = v; if (v > mx) mx = v; }
     return { dims: n.dims, ijkToRAS: n.ijkToRAS, sum, min: mn, max: mx, count: zv.data.length, dtype: (n.zarr as ZarrDesc).dtype };
   };
-  Object.assign(globalThis, { __loadVolumeBytes: (bytes: Uint8Array, name: string) => loadBytes(bytes, name, "api"), __loadFiles: loadFiles, __loadSample: (name: string) => downloadSample(name).then((r) => loadBytes(r.bytes, r.dataset.fileName, "sampleData:" + name)), __volumeStats: volumeStats });
+  Object.assign(globalThis, {
+    __loadVolumeBytes: (bytes: Uint8Array, name: string) => loadBytes(bytes, name, "api"),
+    __loadFiles: loadFiles,
+    __loadSample: (name: string) => downloadSample(name).then((r) => loadBytes(r.bytes, r.dataset.fileName, "sampleData:" + name)),
+    __volumeStats: volumeStats,
+    // DICOM: index raw buffers -> pick a series -> load. Returns the series list (for tests/automation).
+    __dcmjs: () => loadDcmjs(),
+    __indexDicom: (buffers: ArrayBuffer[]) => indexFiles(buffers.map((b, i) => new File([b], "i" + i + ".dcm"))),
+    __loadDicomSeries: async (buffers: ArrayBuffer[], which = 0) => {
+      const entries = await indexFiles(buffers.map((b, i) => new File([b], "i" + i + ".dcm")));
+      if (!entries[which]) throw new Error("no series " + which);
+      const r = await loadVolumeIntoScene(opts.live, opts.store, loadEntry(entries[which]), { name: entries[which].description || "DICOM" });
+      return { imageId: r.imageId, series: entries.map((e) => ({ uid: e.seriesInstanceUID, count: e.count, modality: e.modality })) };
+    },
+  });
 }

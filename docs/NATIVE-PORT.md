@@ -35,8 +35,17 @@ release assets carry no CORS headers), the **Data panel** (open file(s), drag-an
 Data with progress). Tests: unit (NIfTI geometry/order, sniffing, chunk rule + round trip through the production
 zarr loader, checksum), browser (bytes → image node + composites), self-test (synthetic NIfTI in-page), **parity:
 native MRHead == Slicer MRHead — dims, ijkToRAS ≤1e-4, voxel sum exact**.
-Open: DICOM (local series via the dcmjs worker, DICOMweb, the minimal project/study browser behind
-`Project/StudyIndex/SeriesSource`), NRRD keeps its native dtype (the reader expands to f32 today), `.nrrd.gz`.
+DICOM (local): `logic/readers/dicom-series.ts` — a PURE reconstructor (subseries split by orientation, sort
+by IPP·normal, ijkToRAS from IOP/IPP/PixelSpacing with LPS→RAS, per-slice rescale; ported from the IDC worker so
+a local and an IDC series reconstruct identically) + a dcmjs parse step (lazy-loaded from a CDN in the browser);
+`logic/readers/dicom-local.ts` indexes a granted folder or dropped files into series and loads a chosen one.
+Data panel gained Open DICOM folder/files + a series list. Tests: 6 unit (geometry, sorting, per-slice rescale,
+single-slice thickness, subseries split) with NO dcmjs, and a browser test that synthesizes a 5-slice CT with
+dcmjs in the page and verifies dims + ijkToRAS. Verified visually: a synthetic CT sphere loads and renders in 3D.
 
-Next: W1 DICOM — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
+Open: DICOMweb (QIDO/WADO-RS), the minimal FSA-project study browser behind `Project/StudyIndex/SeriesSource`
+(reconcile with SlicerRad later), DICOM SEG read (with W7), fitting a newly loaded volume to the views (W2),
+NRRD keeps its native dtype (the reader expands to f32 today), `.nrrd.gz`.
+
+Next: W2 layouts + view controllers — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
 (Steve's SlicerRad folder browser to be reconciled when that code is available).
