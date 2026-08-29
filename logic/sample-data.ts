@@ -14,7 +14,16 @@ export const SAMPLE_DATA: SampleDataset[] = [
   { name: "DTIBrain", title: "DTIBrain", fileName: "DTI-Brain.nrrd", sha256: "5c78d00c86ae8d968caa7a49b870ef8e1c04525b1abc53845751d8bce1f0b91a", kind: "volume", modality: "DTI", mb: 20 },
 ];
 
+/** GitHub release assets carry no CORS headers, so a browser page cannot fetch them; the same files (same
+ *  SHA-256) are mirrored in the CORS-enabled SlicerLive bucket. Deno/desktop can use either. */
+export const SAMPLE_MIRROR = "https://js2.jetstream-cloud.org:8001/swift/v1/slicerlive/sampledata/";
 export function sampleUrl(d: SampleDataset): string { return `${TESTING_DATA_URL}SHA256/${d.sha256}`; }
+export function sampleMirrorUrl(d: SampleDataset): string { return SAMPLE_MIRROR + d.fileName; }
+/** Candidate URLs in order: the mirror first in a browser (CORS), GitHub first elsewhere. */
+export function sampleUrls(d: SampleDataset): string[] {
+  const inBrowser = typeof (globalThis as { document?: unknown }).document !== "undefined";
+  return inBrowser ? [sampleMirrorUrl(d), sampleUrl(d)] : [sampleUrl(d), sampleMirrorUrl(d)];
+}
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const h = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
@@ -38,7 +47,11 @@ export const streamFetch: Fetch = async (url, onBytes) => {
 export async function downloadSample(name: string, fetchImpl: Fetch = streamFetch, onBytes?: (n: number) => void): Promise<{ dataset: SampleDataset; bytes: Uint8Array }> {
   const d = SAMPLE_DATA.find((x) => x.name === name);
   if (!d) throw new Error(`unknown sample dataset ${name}`);
-  const bytes = await fetchImpl(sampleUrl(d), onBytes);
+  let bytes: Uint8Array | null = null, lastErr: unknown;
+  for (const url of sampleUrls(d)) {
+    try { bytes = await fetchImpl(url, onBytes); break; } catch (e) { lastErr = e; }
+  }
+  if (!bytes) throw new Error(`${d.name}: download failed (${String((lastErr as Error)?.message ?? lastErr)})`);
   const got = await sha256Hex(bytes);
   if (got !== d.sha256) throw new Error(`${d.name}: SHA-256 mismatch (got ${got.slice(0, 12)}…, expected ${d.sha256.slice(0, 12)}…)`);
   return { dataset: d, bytes };

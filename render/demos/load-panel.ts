@@ -6,6 +6,7 @@ import type { LiveScene } from "../livescene.ts";
 import { loadVolumeIntoScene, LocalBlobStore } from "../../logic/ingest.ts";
 import { readVolume, sniff } from "../../logic/readers/registry.ts";
 import { downloadSample, SAMPLE_DATA } from "../../logic/sample-data.ts";
+import { fetchZarrVolumeNative, type ZarrDesc } from "../zarr.ts";
 
 export interface LoadPanelOpts {
   live: LiveScene;
@@ -97,5 +98,13 @@ export function registerLoadPanel(shell: AppShell, opts: LoadPanelOpts): void {
   target.addEventListener("dragleave", (e) => { if (!hasFiles(e)) return; if (--depth <= 0) { depth = 0; overlay.hidden = true; } });
   target.addEventListener("drop", (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth = 0; overlay.hidden = true; void loadFiles(e.dataTransfer!.files); });
   // programmatic entry for tests and the desktop shell
-  Object.assign(globalThis, { __loadVolumeBytes: (bytes: Uint8Array, name: string) => loadBytes(bytes, name, "api"), __loadFiles: loadFiles });
+  /** Numeric oracle for parity tests: dims, ijkToRAS and the exact voxel sum of an image node (re-read from its chunks). */
+  const volumeStats = async (imageId: string) => {
+    const n = opts.live.nodes.get(imageId); if (!n || !n.zarr) throw new Error("no such image " + imageId);
+    const zv = await fetchZarrVolumeNative(opts.live.blobBase(), n.zarr as ZarrDesc);
+    let sum = 0, mn = Infinity, mx = -Infinity;
+    for (let i = 0; i < zv.data.length; i++) { const v = zv.data[i] as number; sum += v; if (v < mn) mn = v; if (v > mx) mx = v; }
+    return { dims: n.dims, ijkToRAS: n.ijkToRAS, sum, min: mn, max: mx, count: zv.data.length, dtype: (n.zarr as ZarrDesc).dtype };
+  };
+  Object.assign(globalThis, { __loadVolumeBytes: (bytes: Uint8Array, name: string) => loadBytes(bytes, name, "api"), __loadFiles: loadFiles, __loadSample: (name: string) => downloadSample(name).then((r) => loadBytes(r.bytes, r.dataset.fileName, "sampleData:" + name)), __volumeStats: volumeStats });
 }
