@@ -17,6 +17,8 @@ import { registerTfEditor } from "./tf-editor.ts";
 import { registerMarkupsPanel } from "./markups-panel.ts";
 import { registerSegEditorPanel } from "./seg-editor-panel.ts";
 import { registerTransformsPanel } from "./transforms-panel.ts";
+import { registerSavePanel } from "./save-panel.ts";
+import { exportVolume, exportSegmentation, type ExportFormat } from "../../logic/export.ts";
 import { worldMatrix, rowMul, hardenImageIjkToRAS, hardenPoints, withTranslation, IDENTITY4 } from "../../logic/transforms.ts";
 import { createSegmentation, addSegment, applyEffect, computeStats } from "../../logic/segmentation-editor.ts";
 import { LocalBlobStore, loadVolumeIntoScene } from "../../logic/ingest.ts";
@@ -108,6 +110,16 @@ async function main() {
     registerMarkupsPanel(sh, { live: views.live, onStatus: status });
     registerSegEditorPanel(sh, { live: views.live, store, onStatus: status });
     registerTransformsPanel(sh, { live: views.live, onStatus: status });
+    registerSavePanel(sh, { live: views.live, onStatus: status });
+    Object.assign(globalThis, {
+      __savableNodes: () => [...views.live.nodes.values()].filter((n) => (n.type === "image" || n.type === "segmentation") && n.zarr).map((n) => ({ id: n.id, name: n.name as string, type: n.type })),
+      __exportNode: async (id: string, format: string) => {
+        const n = views.live.nodes.get(id);
+        const r = n?.type === "segmentation" ? await exportSegmentation(views.live, id, format === "nrrd-gz" ? "nrrd-gz" : "nrrd") : await exportVolume(views.live, id, format as ExportFormat);
+        try { const blob = new Blob([r.bytes], { type: r.mime }); const url = URL.createObjectURL(blob); const a = document.createElement("a"); a.href = url; a.download = r.filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000); } catch { /* headless / no DOM download */ }
+        return { filename: r.filename, size: r.bytes.byteLength };
+      },
+    });
     {
       let tfSeq = 0;
       const L = views.live;

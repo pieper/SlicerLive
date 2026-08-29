@@ -274,3 +274,19 @@ ijkToRAS origin shifts, ref cleared). Hooks `__createTransform`/`__applyTransfor
 
 Next W6: apply the chain to the VR 3D field + markups/segmentation DMs, grid (nonlinear) transforms, model display
 props (colour/opacity/representation/2D intersections). Then W7 save/export.
+
+## W7 — Save / export (in progress)
+
+**Volume writers (done, round-trip parity)**: `logic/writers/nrrd.ts` (NRRD, raw + gzip, RAS space so no LPS flip
+— `space directions` = ijkToRAS columns, `space origin` = translation; optional segment keys for .seg.nrrd) and
+`logic/writers/nifti.ts` (NIfTI-1 .nii, sform = ijkToRAS RAS, sform_code 1). Both round-trip through the readers
+(unit) and — the real test — **Slicer loads our files** with matching dims, ijkToRAS, and voxel sum
+(`harness/parity/{nrrd,nifti}-writer.parity.test.ts`: NRRD sum 6825, NIfTI sum 2040, ijkToRAS ≤1e-3).
+
+**Export + Save panel (done)**: `logic/export.ts` fetches a node's content-addressed voxels and serializes
+(exportVolume NRRD/NIfTI, exportSegmentation → .seg.nrrd with Slicer segment keys). `render/demos/save-panel.ts`
+lists savable images/segmentations, format picker, Save → browser download. Browser `harness/save.browser.test.ts`
+(MRHead → NRRD 34 MB + NIfTI, segmentation → .seg.nrrd). Hooks `__savableNodes`/`__exportNode`.
+
+Next W7: STL/PLY mesh export (needs surface-nets from a labelmap), markups .mrk.json, scene bundle (.slb), DICOM-SEG.
+W6 remainder: transform chain on VR/markups, grid transforms, model display.
