@@ -20,7 +20,7 @@ import { registerTransformsPanel } from "./transforms-panel.ts";
 import { registerSavePanel } from "./save-panel.ts";
 import { exportVolume, exportSegmentation, type ExportFormat } from "../../logic/export.ts";
 import { worldMatrix, rowMul, hardenImageIjkToRAS, hardenPoints, withTranslation, IDENTITY4 } from "../../logic/transforms.ts";
-import { createSegmentation, addSegment, applyEffect, computeStats } from "../../logic/segmentation-editor.ts";
+import { createSegmentation, addSegment, applyEffect, computeStats, paintStroke, commitPaint } from "../../logic/segmentation-editor.ts";
 import { LocalBlobStore, loadVolumeIntoScene } from "../../logic/ingest.ts";
 import { parseNifti } from "../../logic/readers/nifti.ts";
 import { makeNifti, SYNTHETIC_DIMS } from "../../logic/readers/synthetic.ts";
@@ -58,7 +58,10 @@ async function main() {
   }
   const peers = (p.get("peers") ?? "").split(",").map((x) => x.trim()).filter(Boolean);   // extra ModuleServers (ws urls)
   let hook: SlicerLiveHook | null = null;
-  const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, peers, onStatus: status, onFrame: () => hook?.frameRendered() });
+  const store = new LocalBlobStore();
+  const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, peers, onStatus: status, onFrame: () => hook?.frameRendered(),
+    onNativePaint: (segId, segment, points, mode, radiusMm, sphere, normal) => { void paintStroke(views.live, segId, points, { segment, radiusMm, mode, sphere, normal }); },
+    onNativePaintCommit: (segId) => { void commitPaint(views.live, store, segId).then((v) => { if (v >= 0) status(`painted: ${v} voxels`); }); } });
   // window.__slicerlive: numeric state + settle detection + in-page self-tests (tiers T3/T5, docs/HARNESS.md)
   hook = installIntrospection({
     getCamera: () => { const c = views.camera(); return { azimuth: 0, elevation: 0, distance: Math.hypot(c.position[0] - c.focalPoint[0], c.position[1] - c.focalPoint[1], c.position[2] - c.focalPoint[2]), ...c }; },
@@ -103,7 +106,6 @@ async function main() {
         <a href="?legacy">?legacy</a>.</p>`;
     } });
     // W1: local data — chunks from files are served to the DisplayableManagers like any other blob
-    const store = new LocalBlobStore();
     registerLoadPanel(sh, { live: views.live, store, onStatus: status, onLoaded: (i) => { views.fitVolume(i.rasLo, i.rasHi, i.ijkToRAS); (globalThis as unknown as { __lastLoad?: unknown }).__lastLoad = i; } });
     registerVolumesPanel(sh, { live: views.live, onStatus: status });
     registerTfEditor(sh, { live: views.live, onStatus: status });
@@ -148,6 +150,13 @@ async function main() {
       __segmentations: () => [...views.live.nodes.values()].filter((n) => n.type === "segmentation").map((n) => ({ segId: n.id, name: n.name, segments: (n.segments ?? []) })),
       __setSegmentProp: (segId: string, labelValue: number, prop: string, value: unknown) => { const n = views.live.nodes.get(segId); if (!n) return; const segs = ((n.segments as { labelValue: number }[]) ?? []).map((s) => s.labelValue === labelValue ? { ...s, [prop]: value } : s); views.live.write({ op: "patch", id: segId, path: "#/segments", value: segs }); },
       __segmentStats: (segId: string) => computeStats(views.live, segId),
+      __setSegTool: (segId: string, tool: string, params: { diameterMm?: number; sphere?: boolean; segment?: number }) => {
+        const id = "local-segmentEditor";
+        const node = { type: "segmentEditor", id, name: "Segment Editor", activeEffect: tool, selectedSegmentId: params.segment ?? 1, params: { BrushAbsoluteDiameter: String(params.diameterMm ?? 8), BrushSphere: params.sphere ? "1" : "0" }, refs: { segmentation: [segId] }, origin: { local: true } };
+        if (views.live.nodes.has(id)) { views.live.write({ op: "patch", id, path: "#/activeEffect", value: tool }); views.live.write({ op: "patch", id, path: "#/selectedSegmentId", value: params.segment ?? 1 }); views.live.write({ op: "patch", id, path: "#/params", value: node.params }); views.live.write({ op: "patch", id, path: "#/refs", value: { segmentation: [segId] } }); }
+        else views.live.write({ op: "put", id, node });
+      },
+      __segTool: () => { const n = views.live.nodes.get("local-segmentEditor"); return n ? { activeEffect: n.activeEffect, diameterMm: Number((n.params as Record<string,string>)?.BrushAbsoluteDiameter ?? 8), sphere: (n.params as Record<string,string>)?.BrushSphere === "1" } : { activeEffect: "", diameterMm: 8, sphere: false }; },
     });
     registerSelfTest("volumes: auto W/L gives window>0 and level in range; presets + threshold + color table apply", async () => {
       const vol = await parseNifti(makeNifti({ sform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }), "wl-selftest");

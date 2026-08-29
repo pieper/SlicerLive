@@ -13,6 +13,8 @@ interface Hooks {
   __setSegmentProp: (segId: string, labelValue: number, prop: string, value: unknown) => void;
   __volumeList: () => { imageId: string; name: string }[];
   __segmentStats: (segId: string) => Promise<{ labelValue: number; voxels: number; volumeMm3: number }[]>;
+  __setSegTool: (segId: string, tool: string, params: { diameterMm?: number; sphere?: boolean; segment?: number }) => void;
+  __segTool: () => { activeEffect: string; diameterMm: number; sphere: boolean };
 }
 const g = () => globalThis as unknown as Hooks;
 
@@ -47,6 +49,9 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
       <h2>Segment Editor</h2>
       <div class="sl-row"><button class="sl-primary sl-seg-new">${segId ? "New segment" : "Create segmentation"}</button></div>
       <div class="sl-seg-list">${segs.map((s) => `<div class="sl-seg-row${s.labelValue === active ? " sl-active" : ""}" data-seg="${s.labelValue}"><span class="sl-seg-swatch" style="background:rgb(${s.color.map((c) => Math.round(c * 255)).join(",")})"></span><span class="sl-seg-name">${s.name}</span><button data-vis="${s.labelValue}" title="Show/hide">${s.visible ? "👁" : "🚫"}</button></div>`).join("") || `<p class="sl-hint">No segments yet.</p>`}</div>
+      <h3>Brush</h3>
+      <div class="sl-row"><button class="sl-eff-paint">Paint</button><button class="sl-eff-erase">Erase</button><label><input type="checkbox" class="sl-brush-sphere"> Sphere</label></div>
+      <div class="sl-row"><label>Diameter (mm)</label><input class="sl-brush-dia" type="range" min="1" max="40" step="1" value="8"><span class="sl-brush-diav">8</span></div>
       <h3>Effects</h3>
       <div class="sl-row"><label>Threshold</label><input class="sl-th-lo" type="number" placeholder="lo" style="width:70px"><input class="sl-th-hi" type="number" placeholder="hi" style="width:70px"><button class="sl-eff-th">Apply</button></div>
       <div class="sl-row"><button class="sl-eff-auto">Auto (Otsu)</button></div>
@@ -74,6 +79,19 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     $(".sl-eff-sub").addEventListener("click", () => effect("logical", { logical: "subtract", other: num(".sl-other") }));
     $(".sl-eff-int").addEventListener("click", () => effect("logical", { logical: "intersect", other: num(".sl-other") }));
     $(".sl-eff-stats").addEventListener("click", async () => { const st = await g().__segmentStats(segId); const el = $(".sl-seg-stats"); el.innerHTML = st.map((x) => `<div class="sl-hint">Segment ${x.labelValue}: ${x.voxels} vox, ${(x.volumeMm3 / 1000).toFixed(2)} mL</div>`).join(""); });
+    const tool = g().__segTool?.() ?? { activeEffect: "", diameterMm: 8, sphere: false };
+    const dia = () => Number(($(".sl-brush-dia") as HTMLInputElement).value);
+    const sphere = () => ($(".sl-brush-sphere") as HTMLInputElement).checked;
+    ($(".sl-brush-dia") as HTMLInputElement).value = String(tool.diameterMm);
+    ($(".sl-brush-sphere") as HTMLInputElement).checked = tool.sphere;
+    ($(".sl-brush-diav") as HTMLElement).textContent = String(tool.diameterMm);
+    if (tool.activeEffect === "paint") $(".sl-eff-paint").classList.add("sl-primary");
+    if (tool.activeEffect === "erase") $(".sl-eff-erase").classList.add("sl-primary");
+    const setTool = async (t: string) => { const id = await ensureSeg(); if (!id) return; const cur = g().__segTool().activeEffect; g().__setSegTool(id, cur === t ? "" : t, { diameterMm: dia(), sphere: sphere(), segment: active }); status(cur === t ? "brush off" : `${t} — drag in a slice view`); render(); };
+    $(".sl-eff-paint").addEventListener("click", () => setTool("paint"));
+    $(".sl-eff-erase").addEventListener("click", () => setTool("erase"));
+    $(".sl-brush-dia").addEventListener("input", (e) => { ($(".sl-brush-diav") as HTMLElement).textContent = (e.target as HTMLInputElement).value; const cur = g().__segTool(); if (cur.activeEffect) g().__setSegTool(segId, cur.activeEffect, { diameterMm: dia(), sphere: sphere(), segment: active }); });
+    $(".sl-brush-sphere").addEventListener("change", () => { const cur = g().__segTool(); if (cur.activeEffect) g().__setSegTool(segId, cur.activeEffect, { diameterMm: dia(), sphere: sphere(), segment: active }); });
   }
 
   shell.registerPanel({ id: "segment", title: "Segment Editor", order: 6, mount(el) { root = el; render(); } });

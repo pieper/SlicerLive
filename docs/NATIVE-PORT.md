@@ -250,7 +250,13 @@ the unified field-op backend (GPU + out-of-core) later; interactive paint stays 
 morph(scipy); browser seg-editor.browser.test.ts (create → Otsu 3.3M vox → keep-largest → margin +2mm 4.2M →
 median, labelmap zarr changes + re-bakes).
 
-Next W5 (optional): interactive paint/erase brush wired natively, masking-intensity-range, Fill Between Slices
+**Native paint/erase (done)**: `logic/segmentation-editor.ts:paintStroke`/`commitPaint` paint a resident CPU
+labelmap in-place during a drag (physical-sphere or 2D-disk rasterization in voxel space) and re-upload on a
+120 ms throttle + at stroke end; `invalidatePaintCache` drops it after a discrete effect. `live-views.ts:sendStroke`
+branches to `cfg.onNativePaint`/`onNativePaintCommit` when the segmentation is local (peer path unchanged). The
+Segment Editor panel gains Paint/Erase + a diameter slider + Sphere toggle. Browser `harness/paint.browser.test.ts`
+(drag paints 5182 voxels; erase -> 207). Reuses the existing brush interaction plumbing (cursor overlay, stroke
+capture) — no reinvention. Next W5 (optional): masking-intensity-range, Fill Between Slices
 (contour interpolation), Logical operators, segment statistics (shape-stats kernel). Then W6 transforms + models,
 W7 save/export.
 

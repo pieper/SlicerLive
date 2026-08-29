@@ -45,7 +45,7 @@ interface SliceCell {
   branched?: boolean;   // a local pan/zoom is in progress: keep the local frame until it is written back
 }
 
-export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; peers?: string[]; onStatus?: (s: string) => void; onFrame?: () => void }): LiveViews {
+export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: string; wsUrl: string; peers?: string[]; onStatus?: (s: string) => void; onFrame?: () => void; onNativePaint?: (segId: string, segment: number, points: Vec3[], mode: "add" | "remove", radiusMm: number, sphere: boolean, normal: Vec3) => void; onNativePaintCommit?: (segId: string) => void }): LiveViews {
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
   const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -468,6 +468,14 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   let brushStroke: { cell: SliceCell; points: Vec3[]; seq: number; lastSent: number; lastPt: Vec3 } | null = null;
   let strokeSeq = 0;
   let brushCursor: { cell: SliceCell; ras: Vec3 } | null = null;
+  let paintCommitTimer: number | undefined;
+  const localSegForEditor = (): { segId: string; segment: number } | null => {
+    const se = stateNode("segmentEditor"); if (!se) return null;
+    const segId = ((se.refs as Record<string, string[]> | undefined)?.segmentation ?? [])[0];
+    const seg = segId ? live.nodes.get(segId) : undefined;
+    if (!seg || !(seg.origin as { local?: boolean } | undefined)?.local) return null;   // peer segmentation -> use the cmd path
+    return { segId, segment: Number(se.selectedSegmentId ?? 1) || 1 };
+  };
   const sendStroke = (final = false) => {
     if (!brushStroke) return;
     const id = stateNode("segmentEditor")?.id; if (!id) return;
@@ -477,9 +485,17 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const pl = brushStroke.cell.plane!;
     const normal: Vec3 = pl.basis ? pl.basis.nDir : pl.orient === "axial" ? [0, 0, 1] : pl.orient === "coronal" ? [0, 1, 0] : [1, 0, 0];
     const P = (stateNode("segmentEditor")?.params as Record<string, string> | undefined) ?? {};
-    live.write({ op: "cmd", id, cmd: "segPaint", args: { points: send, mode: brushEffect() ?? "add", diameterMm: brushDiameterMm(), sphere: P.BrushSphere === "1", normal, seq: ++strokeSeq, index: strokeSeq } });
+    const local = localSegForEditor();
+    if (local && cfg.onNativePaint) {                                 // standalone: paint the resident labelmap
+      cfg.onNativePaint(local.segId, local.segment, send, brushEffect() ?? "add", brushDiameterMm() / 2, P.BrushSphere === "1", normal);
+      clearTimeout(paintCommitTimer);
+      if (final) cfg.onNativePaintCommit?.(local.segId);
+      else paintCommitTimer = setTimeout(() => cfg.onNativePaintCommit?.(local.segId), 120) as unknown as number;
+    } else {
+      live.write({ op: "cmd", id, cmd: "segPaint", args: { points: send, mode: brushEffect() ?? "add", diameterMm: brushDiameterMm(), sphere: P.BrushSphere === "1", normal, seq: ++strokeSeq, index: strokeSeq } });
+      if (final) sync.flush();
+    }
     brushStroke.lastSent = brushStroke.points.length; brushStroke.lastPt = pts[pts.length - 1];
-    if (final) sync.flush();
   };
   const pushSliceFrame = (c: SliceCell) => {
     const id = sliceNodeId(c.name); const pl = c.plane; if (!id || !pl) return;

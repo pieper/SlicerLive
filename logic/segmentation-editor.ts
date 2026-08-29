@@ -11,6 +11,8 @@ import { fetchZarrVolumeNative } from "../render/zarr.ts";
 import { LocalBlobStore, volumeToZarr } from "./ingest.ts";
 import { applyAutoThreshold, applyIslands, applyLogical, applyMargin, applySmoothing, applyThreshold, segmentStatistics, type LogicalOp, type OverwriteMode, type SegmentStats } from "./segment-effects.ts";
 import type { ThresholdMethod } from "../algorithms/kernels/auto-threshold.ts";
+import { applyRowMajor, type Vec3 } from "../render/mat4.ts";
+import { invertRowMajor } from "./transforms.ts";
 
 let segSeq = 0;
 const SEG_PALETTE = [[0.9, 0.3, 0.3], [0.3, 0.7, 0.95], [0.5, 0.85, 0.4], [0.95, 0.8, 0.3], [0.8, 0.5, 0.9], [0.4, 0.85, 0.85]];
@@ -90,6 +92,7 @@ export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId:
   const { desc, blobs } = await volumeToZarr(out, dims, "|u1");
   store.add(blobs);
   live.write({ op: "patch", id: segId, path: "#/zarr", value: desc });
+  invalidatePaintCache(segId);
   let voxels = 0; for (let i = 0; i < out.length; i++) if (out[i] === params.segment) voxels++;
   return { voxels, threshold };
 }
@@ -108,4 +111,64 @@ export async function computeStats(live: LiveScene, segId: string): Promise<Segm
   const labelmap = lab.data instanceof Uint8Array ? lab.data : Uint8Array.from(lab.data as ArrayLike<number>);
   const labels = ((seg.segments as { labelValue: number }[] | undefined) ?? []).map((x) => x.labelValue);
   return segmentStatistics(labelmap, dims, labels, spacingFromIjkToRAS(seg.ijkToRAS as number[]));
+}
+// ── native paint/erase (W5): a resident CPU labelmap painted in-place during a stroke, re-uploaded on a
+//    throttle. Fast sphere/disk rasterization in voxel space; the display re-bakes when #/zarr is patched.
+interface PaintCache { labelmap: Uint8Array; dims: [number, number, number]; invIjk: number[]; spacing: Vec3; dirty: boolean; uploading: boolean; }
+const paintCaches = new Map<string, PaintCache>();
+
+async function paintCache(live: LiveScene, segId: string): Promise<PaintCache | null> {
+  const seg = live.nodes.get(segId); if (!seg?.zarr) return null;
+  const existing = paintCaches.get(segId); if (existing) return existing;
+  const lab = await fetchZarrVolumeNative(live.blobBase(), seg.zarr as ZarrDesc);
+  const labelmap = lab.data instanceof Uint8Array ? lab.data : Uint8Array.from(lab.data as ArrayLike<number>);
+  const ijk = seg.ijkToRAS as number[];
+  const c: PaintCache = { labelmap, dims: seg.dims as [number, number, number], invIjk: invertRowMajor(ijk), spacing: spacingFromIjkToRAS(ijk), dirty: false, uploading: false };
+  paintCaches.set(segId, c);
+  return c;
+}
+/** Drop the resident labelmap (call when the segmentation changes underneath, e.g. after a discrete effect). */
+export function invalidatePaintCache(segId?: string) { if (segId) paintCaches.delete(segId); else paintCaches.clear(); }
+
+export interface PaintParams { segment: number; radiusMm: number; mode: "add" | "remove"; sphere?: boolean; normal?: Vec3; }
+
+/** Rasterize a brush at each RAS point into the resident labelmap (in-place). Marks the cache dirty. */
+export async function paintStroke(live: LiveScene, segId: string, points: Vec3[], params: PaintParams): Promise<void> {
+  const c = await paintCache(live, segId); if (!c) return;
+  const [nx, ny, nz] = c.dims;
+  const [sx, sy, sz] = c.spacing;
+  const r = params.radiusMm, r2 = r * r;
+  const val = params.mode === "add" ? params.segment : 0;
+  const ri = Math.ceil(r / (sx || 1)), rj = Math.ceil(r / (sy || 1)), rk = Math.ceil(r / (sz || 1));
+  const n = params.normal;
+  for (const p of points) {
+    const ijk = applyRowMajor(c.invIjk, p);
+    const ci = Math.round(ijk[0]), cj = Math.round(ijk[1]), ck = Math.round(ijk[2]);
+    for (let dk = -rk; dk <= rk; dk++) for (let dj = -rj; dj <= rj; dj++) for (let di = -ri; di <= ri; di++) {
+      const i = ci + di, j = cj + dj, k = ck + dk;
+      if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
+      const dx = di * sx, dy = dj * sy, dz = dk * sz;
+      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      if (!params.sphere && n) {
+        const along = dx * n[0] + dy * n[1] + dz * n[2];
+        const thick = Math.abs(n[0] * sx) + Math.abs(n[1] * sy) + Math.abs(n[2] * sz);
+        if (Math.abs(along) > thick * 0.5) continue;
+      }
+      c.labelmap[k * nx * ny + j * nx + i] = val;
+    }
+  }
+  c.dirty = true;
+}
+
+/** Upload the resident labelmap and patch the segmentation (call on a throttle + at stroke end). */
+export async function commitPaint(live: LiveScene, store: LocalBlobStore, segId: string): Promise<number> {
+  const c = paintCaches.get(segId); if (!c || !c.dirty || c.uploading) return 0;
+  c.uploading = true; c.dirty = false;
+  try {
+    const { desc, blobs } = await volumeToZarr(c.labelmap, c.dims, "|u1");
+    store.add(blobs);
+    live.write({ op: "patch", id: segId, path: "#/zarr", value: desc });
+    let v = 0; for (let i = 0; i < c.labelmap.length; i++) if (c.labelmap[i]) v++;
+    return v;
+  } finally { c.uploading = false; }
 }
