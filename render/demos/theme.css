@@ -91,3 +91,5 @@ html, body { height: 100%; margin: 0; background: var(--sl-bg); color: var(--sl-
 .sl-progress-text { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--sl-fg); }
 .sl-loaded { margin: 0; padding-left: 16px; }
 .sl-drop { position: absolute; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; background: rgba(79, 149, 216, .18); border: 2px dashed var(--sl-accent); color: var(--sl-fg); font-size: 16px; pointer-events: none; }
+
+.sl-drop[hidden] { display: none; }

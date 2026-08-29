@@ -24,5 +24,19 @@ codecs; ITK-heavy CLIs, pytorch, VMTK stay behind the ModuleServer seam.
   `?legacy` keeps the streamed stock-Slicer chrome. Theme self-tests (WCAG AA contrast, view colours).
 - Fixed on the way: the segmentation serializer leaked temp labelmap nodes on failure; 12 lint findings.
 
-Next: W1 (load data / DICOM) — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
+## W1 — load data / DICOM — IN PROGRESS (2026-08-29)
+
+Done: `logic/readers/nifti.ts` (NIfTI-1/2: sform > qform > pixdim, gz, big-endian; no LPS flip — NIfTI is RAS),
+`logic/readers/registry.ts` (sniff + `readVolume` for NRRD/NIfTI), `logic/ingest.ts` (volume → content-addressed
+zarr chunks with Slicer's exact chunk rule and `sha256-` names, an in-memory blob store chained into
+`setBlobFetch`, `loadVolumeIntoScene` = `image` + display + slice composites), `logic/sample-data.ts` (Slicer's
+catalog + SHA-256 verification; mirrored in the CORS-enabled bucket at `slicerlive/sampledata/` because GitHub
+release assets carry no CORS headers), the **Data panel** (open file(s), drag-and-drop on the views, Sample
+Data with progress). Tests: unit (NIfTI geometry/order, sniffing, chunk rule + round trip through the production
+zarr loader, checksum), browser (bytes → image node + composites), self-test (synthetic NIfTI in-page), **parity:
+native MRHead == Slicer MRHead — dims, ijkToRAS ≤1e-4, voxel sum exact**.
+Open: DICOM (local series via the dcmjs worker, DICOMweb, the minimal project/study browser behind
+`Project/StudyIndex/SeriesSource`), NRRD keeps its native dtype (the reader expands to f32 today), `.nrrd.gz`.
+
+Next: W1 DICOM — minimal DICOM module behind `Project/StudyIndex/SeriesSource` interfaces
 (Steve's SlicerRad folder browser to be reconciled when that code is available).

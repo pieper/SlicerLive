@@ -955,7 +955,12 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     }
     else if (node.type === "volumeRenderingDisplay") { this.vrDisplayId = node.id; this.vrVisible = !!node.visible; }
     else if (node.type === "transferFunction") { this.tf = node; this.reLUT(); }
-    else if (node.type === "scalarVolumeDisplay") { this.scalarDisp = node; this.pushVolume(); }
+    else if (node.type === "scalarVolumeDisplay") {
+      // only THIS volume's display node (another image's display must not hijack our W/L push — a locally
+      // loaded file did exactly that, 2026-08-29); with no image yet, remember it for when one arrives
+      const mine = ((this.image?.refs as Record<string, string[]> | undefined)?.display ?? []).includes(node.id);
+      if (mine || (!this.image && !this.scalarDisp)) { this.scalarDisp = node; this.pushVolume(); }
+    }
     await this.ensureField();
     this.view?.showVolume3D(!!(this.field && this.vrVisible));
   }
