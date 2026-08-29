@@ -273,11 +273,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   };
   const renderSlice = (c: SliceCell) => {
     if (c.el.style.display === "none") return;
-    if (!bgField(c) || !c.plane) { clearCanvas(c.ctx); drawOverlay(c); return; }
+    if (!bgField(c) || !c.plane) { clearCanvas(c.ctx); drawOverlay(c); cfg.onFrame?.(); return; }   // an empty cell still renders a frame
     applyLayers(c);
     applyPlane(c);
     c.slice.renderToView(c.ctx.getCurrentTexture().createView({ format: srgb }), c.canvas.width, c.canvas.height);
     drawOverlay(c);
+  
+    cfg.onFrame?.();                                   // slice frames count as frames (tests' settle/ready signal)
   };
   const renderSlices = () => { for (const c of cells.values()) renderSlice(c); };
   const resizeAll = () => { sizeCanvas(three.canvas); for (const c of cells.values()) sizeCanvas(c.canvas); };

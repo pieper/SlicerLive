@@ -9,6 +9,7 @@ import { mountLiveViews } from "../moduleserver/live-views.ts";
 import { mountSessionUI } from "../moduleserver/session-ui.ts";
 import { installIntrospection, type SlicerLiveHook } from "../introspect.ts";
 import { expect, registerSelfTest } from "../selftest.ts";
+import { type AppShell, fourUpCells, mountAppShell } from "./app-shell.ts";
 
 const status = (m: string) => { const e = document.getElementById("status"); if (e) e.textContent = m; };
 
@@ -26,7 +27,21 @@ async function main() {
   const nativeMenus = p.has("nativeMenus");
 
   const gpu = await initDevice();
-  const viewsEl = document.getElementById("views")!;
+  // Two modes. Default = the NATIVE shell (SlicerLive is the app; a ModuleServer, if any, is just a peer).
+  // ?legacy = the streamed stock-Slicer chrome hosting SlicerLive views (backwards compatibility).
+  const legacy = p.has("legacy");
+  const appEl = document.getElementById("app")!;
+  let shell: AppShell | null = null;
+  let viewsEl: HTMLElement;
+  if (legacy) {
+    document.body.classList.add("legacy");
+    appEl.innerHTML = '<div id="gui"></div><div id="views"></div>';
+    viewsEl = document.getElementById("views")!;
+  } else {
+    shell = mountAppShell(appEl, { title: "SlicerLive" });
+    viewsEl = document.createElement("div"); viewsEl.id = "views"; viewsEl.style.cssText = "position:absolute;inset:0";
+    shell.main.appendChild(viewsEl);
+  }
   const peers = (p.get("peers") ?? "").split(",").map((x) => x.trim()).filter(Boolean);   // extra ModuleServers (ws urls)
   let hook: SlicerLiveHook | null = null;
   const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, peers, onStatus: status, onFrame: () => hook?.frameRendered() });
@@ -37,19 +52,62 @@ async function main() {
     render: () => views.resize(),
     extra: () => ({ nodes: views.live.nodes.size, cells: views.cells(), syncOpen: views.sync.transport.isOpen }),
   });
-  registerSelfTest("scene: LiveScene has the view-state nodes", () => {
-    const types = new Set([...views.live.nodes.values()].map((n) => n.type));
-    for (const t of ["layout", "camera", "view"]) expect(types.has(t), `missing node type ${t}`);
+  registerSelfTest("scene: LiveScene has the view-state nodes (when a peer is connected)", async () => {
+    // the snapshot streams in after connect; give it a moment, and don't fail a standalone page with no peer
+    const has = () => { const types = new Set([...views.live.nodes.values()].map((n) => n.type)); return ["layout", "camera", "view"].every((t) => types.has(t)); };
+    for (let i = 0; i < 25 && !has(); i++) await new Promise((r) => setTimeout(r, 200));
+    if (!views.sync.transport.isOpen && views.live.nodes.size === 0) return;   // standalone, nothing to check
+    expect(has(), `missing view-state node types; have ${[...new Set([...views.live.nodes.values()].map((n) => n.type))].join(",")}`);
   });
   registerSelfTest("views: every layout cell has a canvas", () => {
     expect(views.cells().length > 0, "no view cells");
     expect(document.querySelectorAll("#views canvas").length >= views.cells().length, "fewer canvases than cells");
   });
+  if (shell) {
+    const sh = shell;
+    // standalone layout until the layout engine (W2): FourUp over the main area, re-placed on resize
+    sh.onMainResize((r) => views.setCells(fourUpCells(r)));
+    sh.registerPanel({ id: "welcome", title: "Welcome", order: 0, mount(el) {
+      el.innerHTML = `<h2>Welcome to SlicerLive</h2>
+        <p>The native application shell. Modules appear in the selector above as they are ported (data loading,
+        layouts &amp; view controllers, volumes, markups, segment editor, transforms &amp; models, save/export).</p>
+        <h3>Views</h3><p>Red / Yellow / Green slice views and one 3D view, rendered in WebGPU. Wheel to scroll,
+        drag to orbit, shift-move for the crosshair.</p>
+        <h3>Compatibility</h3><p class="sl-callout">A headless Slicer ModuleServer, when running, appears as a peer:
+        its scene streams into these views. The streamed stock-Slicer chrome is available at
+        <a href="?legacy">?legacy</a>.</p>`;
+    } });
+    sh.setStatus("SlicerLive — native shell");
+    // theme self-tests: the dark theme keeps readable contrast and Slicer's view colours
+    const rgb = (c: string) => { const m = c.match(/\d+(\.\d+)?/g) ?? []; return [Number(m[0]) || 0, Number(m[1]) || 0, Number(m[2]) || 0]; };
+    const lum = ([r, g, b]: number[]) => { const f = (v: number) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
+    const contrast = (a: string, b: string) => { const la = lum(rgb(a)), lb = lum(rgb(b)); return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05); };
+    const token = (name: string) => { const probe = document.createElement("span"); probe.style.color = `var(${name})`; document.body.appendChild(probe); const v = getComputedStyle(probe).color; probe.remove(); return v; };
+    registerSelfTest("theme: text on surfaces meets WCAG AA (4.5:1)", () => {
+      for (const [fg, bg] of [["--sl-fg", "--sl-surface"], ["--sl-fg", "--sl-surface-2"], ["--sl-fg", "--sl-bg"], ["--sl-accent-fg", "--sl-accent"]]) {
+        const c = contrast(token(fg), token(bg)); expect(c >= 4.5, `${fg} on ${bg}: ${c.toFixed(2)}:1`);
+      }
+      expect(contrast(token("--sl-fg-muted"), token("--sl-surface")) >= 3, "muted text below 3:1");
+    });
+    registerSelfTest("theme: slice cells carry Slicer's view colours", () => {
+      for (const [cell, tok] of [["Red", "--sl-view-red"], ["Yellow", "--sl-view-yellow"], ["Green", "--sl-view-green"]]) {
+        const el = document.querySelector(`.lv-cell[data-cell="${cell}"]`) as HTMLElement | null;
+        expect(!!el, `no ${cell} cell`);
+        if (el!.style.display === "none") continue;            // not in the current layout
+        const bar = getComputedStyle(el!, "::before").backgroundColor;
+        expect(bar === token(tok), `${cell} bar ${bar} ≠ ${tok} ${token(tok)}`);
+      }
+    });
+  }
   // Sessions: ⌘Z/⌘⇧Z undo/redo, ⌘S export, ⌘B bookmark; ?session=opfs auto-opens browser storage
   const session = mountSessionUI(views.live, { onStatus: status, blobBase: () => views.live.blobBase() });
   if (p.get("session") === "opfs") void session.openOPFS();
 
   let menus: Menu[] = [];
+  if (!legacy) {
+    Object.assign(globalThis, { __views: views, __session: session, __shell: shell });
+    return;
+  }
   const gui = new LegacyGui(document.getElementById("gui")!, guiUrl, {
     onStats: (st) => { const el = document.getElementById("link"); if (el) el.textContent = `${st.rttMs} ms · ${(st.bytesPerS / 1024).toFixed(0)} KB/s · ${st.codec}${st.codec === "png" ? "" : " q" + st.quality}`; },
     hideKinds: nativeMenus ? ["menubar"] : [],

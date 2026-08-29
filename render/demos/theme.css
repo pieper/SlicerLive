@@ -1,0 +1,85 @@
+/* SlicerLive theme tokens — "feel like Slicer, modernized" (Steve, 2026-08-29).
+   Dark main theme like modern radiology apps; Slicer's slice-view colours preserved (Red/Yellow/Green from
+   vtkMRMLLayoutLogic's layout XML); accents/callouts from the SlicerLive logo palette (sampled from
+   docs/slicerlive-logo.png: blue #4080c0, orange #ff8040, yellow #ffe040, green #40c080).
+   One file, used by the app shell and every panel; components read tokens, never literal colours. */
+:root {
+  color-scheme: dark;
+  /* surfaces */
+  --sl-bg: #0f1115;            /* window background (view gutters) */
+  --sl-surface: #1a1d24;       /* sidebar, toolbar, status */
+  --sl-surface-2: #232730;     /* panels, inputs */
+  --sl-surface-3: #2c313b;     /* hover / raised */
+  --sl-border: #2e333c;
+  --sl-shadow: 0 6px 24px rgba(0, 0, 0, .45);
+  /* text */
+  --sl-fg: #e6e8eb;
+  --sl-fg-muted: #9aa1ab;
+  --sl-fg-dim: #6b727c;
+  /* accents (logo palette) */
+  --sl-accent: #4f95d8;        /* primary: Slicer blue, lifted for contrast on dark */
+  --sl-accent-hover: #6fadea;
+  --sl-accent-fg: #0b1220;     /* text on an accent fill */
+  --sl-callout: #ff8a4c;       /* orange: attention, unsaved, placement mode */
+  --sl-warn: #ffd54a;          /* yellow */
+  --sl-ok: #4cc98a;            /* green */
+  --sl-error: #f0655b;
+  /* Slicer view colours (exact values from Slicer's layout descriptions) */
+  --sl-view-red: #F34A33;
+  --sl-view-yellow: #EDD54C;
+  --sl-view-green: #6EB04B;
+  --sl-view-3d: #7C8DBF;       /* Slicer's 3D view bar */
+  --sl-view-fg: #ffffff;
+  /* type + shape */
+  --sl-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --sl-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sl-size: 12px;
+  --sl-radius: 6px;
+  --sl-gap: 8px;
+  --sl-top-h: 44px;
+  --sl-status-h: 22px;
+}
+
+/* ---- app shell ------------------------------------------------------------------------------------- */
+html, body { height: 100%; margin: 0; background: var(--sl-bg); color: var(--sl-fg); font: var(--sl-size) var(--sl-font); overflow: hidden; }
+.sl-app { position: relative; display: flex; flex-direction: column; width: 100vw; height: 100vh; }
+.sl-top { display: flex; align-items: center; gap: 14px; height: var(--sl-top-h); padding: 0 10px; background: var(--sl-surface); border-bottom: 1px solid var(--sl-border); }
+.sl-brand { display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: .2px; }
+.sl-brand-mark { width: 18px; height: 18px; border-radius: 5px; background: linear-gradient(135deg, var(--sl-accent), var(--sl-callout)); }
+.sl-modules { display: flex; align-items: center; gap: 6px; }
+.sl-modules-label { color: var(--sl-fg-muted); }
+.sl-module-select, .sl-panel select, .sl-panel input[type=text], .sl-panel input[type=number], .sl-panel input[type=url] {
+  background: var(--sl-surface-2); color: var(--sl-fg); border: 1px solid var(--sl-border); border-radius: var(--sl-radius); padding: 4px 8px; font: inherit; min-width: 160px;
+}
+.sl-module-select:focus, .sl-panel input:focus, .sl-panel select:focus, .sl-tool:focus-visible { outline: 2px solid var(--sl-accent); outline-offset: 1px; }
+.sl-toolbar { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.sl-tool { background: var(--sl-surface-2); color: var(--sl-fg); border: 1px solid var(--sl-border); border-radius: var(--sl-radius); padding: 4px 9px; font: inherit; cursor: pointer; }
+.sl-tool:hover { background: var(--sl-surface-3); }
+.sl-tool[aria-pressed=true] { background: var(--sl-accent); color: var(--sl-accent-fg); border-color: var(--sl-accent); }
+.sl-body { display: flex; flex: 1; min-height: 0; }
+.sl-sidebar { display: flex; flex-direction: column; min-width: 200px; background: var(--sl-surface); border-right: 1px solid var(--sl-border); overflow: auto; }
+.sl-panels { flex: 1; }
+.sl-panel { padding: 10px 12px; }
+.sl-panel h2 { font-size: 13px; margin: 0 0 8px; color: var(--sl-fg); }
+.sl-panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--sl-fg-muted); margin: 14px 0 6px; }
+.sl-panel p, .sl-panel li { color: var(--sl-fg-muted); line-height: 1.45; }
+.sl-panel a { color: var(--sl-accent); }
+.sl-panel button { background: var(--sl-surface-2); color: var(--sl-fg); border: 1px solid var(--sl-border); border-radius: var(--sl-radius); padding: 5px 10px; font: inherit; cursor: pointer; }
+.sl-panel button:hover { background: var(--sl-surface-3); }
+.sl-panel button.sl-primary { background: var(--sl-accent); color: var(--sl-accent-fg); border-color: var(--sl-accent); }
+.sl-panel button.sl-primary:hover { background: var(--sl-accent-hover); }
+.sl-panel .sl-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.sl-panel .sl-row label { color: var(--sl-fg-muted); min-width: 96px; }
+.sl-panel .sl-callout { border-left: 3px solid var(--sl-callout); background: var(--sl-surface-2); padding: 6px 10px; border-radius: 0 var(--sl-radius) var(--sl-radius) 0; color: var(--sl-fg); }
+.sl-splitter { width: 5px; cursor: col-resize; background: var(--sl-surface); border-right: 1px solid var(--sl-border); }
+.sl-splitter:hover { background: var(--sl-surface-3); }
+.sl-main { position: relative; flex: 1; min-width: 0; background: var(--sl-bg); overflow: hidden; }
+.sl-status { display: flex; align-items: center; height: var(--sl-status-h); padding: 0 10px; background: var(--sl-surface); border-top: 1px solid var(--sl-border); color: var(--sl-fg-muted); font-size: 11px; }
+
+/* ---- view cells: Slicer's colour bars survive the dark theme ---- */
+.lv-cell { background: #000; }
+.lv-cell[data-cell=Red] { --sl-cell: var(--sl-view-red); }
+.lv-cell[data-cell=Yellow] { --sl-cell: var(--sl-view-yellow); }
+.lv-cell[data-cell=Green] { --sl-cell: var(--sl-view-green); }
+.lv-cell[data-cell="3D"] { --sl-cell: var(--sl-view-3d); }
+.lv-cell::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 3px; background: var(--sl-cell, var(--sl-border)); z-index: 3; pointer-events: none; }
