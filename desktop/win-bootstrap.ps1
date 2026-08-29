@@ -9,7 +9,10 @@
 # stages a ready-to-run folder on the Desktop.
 $ErrorActionPreference = "Continue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$root = Join-Path $env:USERPROFILE "Desktop\SlicerLive"
+# Public desktop, so the folder shows for every account — this also runs
+# unattended as SYSTEM from the Vultr startup script (win-startup.cmd), where
+# $env:USERPROFILE would be the SYSTEM profile.
+$root = "C:\Users\Public\Desktop\SlicerLive"
 $work = "C:\slicerlive-build"
 $raw = "https://raw.githubusercontent.com/pieper/SlicerLive/main/desktop"
 $webviewRelease = "https://github.com/webview/webview_deno/releases/download/0.9.0"
@@ -79,4 +82,5 @@ Set-Location $root
 
 Step "done"
 Get-ChildItem $root | ForEach-Object { "  " + $_.Name }
+Set-Content -Path "$root\BOOTSTRAP-DONE.txt" -Value ("bootstrap finished " + (Get-Date -Format s))
 Write-Host "`nStaged at $root - double-click SlicerLive.exe. Startup log: $root\SlicerLive.log" -ForegroundColor Green

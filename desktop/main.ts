@@ -187,7 +187,29 @@ webview.init(`
     b.onclick = onclick;
     document.body.appendChild(b);
   };
+  // No WebGPU adapter = every demo silently stays black. Say so in the page.
+  const checkGpu = async () => {
+    let reason = "";
+    if (!navigator.gpu) reason = "navigator.gpu is not available in this WebView.";
+    else {
+      try {
+        const a = await navigator.gpu.requestAdapter();
+        if (!a) reason = "navigator.gpu.requestAdapter() returned no adapter — this machine has no GPU/driver the browser engine will use.";
+      } catch (e) { reason = "requestAdapter failed: " + e; }
+    }
+    if (!reason) return;
+    const b = document.createElement("div");
+    b.style.cssText = "position:fixed;left:0;right:0;bottom:0;z-index:2147483646;padding:12px 18px;background:#5a1e1e;" +
+      "color:#ffe3e3;font:13px/1.45 -apple-system,system-ui,sans-serif;border-top:1px solid #a33;box-shadow:0 -6px 20px rgba(0,0,0,.4)";
+    b.innerHTML = "<b>WebGPU is not available, so the demos cannot render.</b> " + reason +
+      " SlicerLive renders on your GPU through WebGPU (Chrome/Edge 113+, Safari 26+, WebView2 with a GPU driver)." +
+      "${mac ? "" : " Without a GPU you can try SlicerLive-softgpu.cmd for a slow software fallback."}" +
+      "<span style='float:right;cursor:pointer;opacity:.7' title='dismiss'>✕</span>";
+    b.querySelector("span").onclick = () => b.remove();
+    document.body.appendChild(b);
+  };
   addEventListener("DOMContentLoaded", () => {
+    checkGpu();
     const home = location.pathname === "/" || location.pathname === "/index.html";
     let left = 10;
     if (!home) {
