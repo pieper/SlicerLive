@@ -13,6 +13,8 @@ import { type Orientation, SliceRenderer } from "../slice-renderer.ts";
 import { fitFovToVolume } from "../../logic/slice-logic.ts";
 import { broadcastSlice, type LinkSliceState, type SliceLinkFlag } from "../../logic/link.ts";
 import { reformatSliceToRAS } from "../../logic/slice-logic.ts";
+import { placeClick, removeControlPointOp } from "../../logic/markups/placer.ts";
+import { measurementsFor, type MarkupType } from "../../logic/markups/measurements.ts";
 import { VtkCamera } from "../vtk-camera.ts";
 import type { Field, ImageField } from "../fields.ts";
 import { mountAdaptive3d } from "../demos/accum-loop.ts";
@@ -519,8 +521,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
             return true;
           }
           if (interactionMode() === "place") {                          // Slicer's Place mode: a click places
+            const ras = cellRas(c, u, v);
+            if (placeAtNative(ras)) return true;                          // native placer (standalone)
             const id = stateNode("interaction")?.id; if (!id) return true;
-            live.write({ op: "cmd", id, cmd: "placeAt", args: { ras: cellRas(c, u, v), view: c.name } });
+            live.write({ op: "cmd", id, cmd: "placeAt", args: { ras, view: c.name } });   // peer path
             sync.flush();
             return true;                                                  // consume: no scroll-drag starts
           }
@@ -540,6 +544,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           markupsDM.moveLocal(sliceDrag.id, sliceDrag.index, ras, live);   // optimistic
           markupsDM.touch(sliceDrag.id, sliceDrag.index);
           live.write({ op: "cmd", id: sliceDrag.id, cmd: "setControlPoint", args: { index: sliceDrag.index, position: ras } });
+          storeMeasurements(sliceDrag.id);
         },
         onLeftDrop: () => { if (brushStroke) { sendStroke(true); brushStroke = null; drawOverlay(c); } if (sliceDrag) { sync.flush(); sliceDrag = null; } },
         onHover: (u, v, w, h) => {
@@ -732,6 +737,49 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       renderSlice(c);
     }
   };
+  // ── native markups placement (W4): the interaction node + placer state machine drive put/patch ops ──
+  let markupSeq = 0;
+  const nextMarkupId = () => `local-markup-${++markupSeq}`;
+  const INTERACTION_ID = "local-interaction";
+  const ensureInteraction = () => {
+    if (!live.nodes.has(INTERACTION_ID)) live.write({ op: "put", id: INTERACTION_ID, node: { type: "interaction", id: INTERACTION_ID, name: "Interaction", mode: "viewTransform", placeNodeId: "", markupType: "", placeModePersistence: false, source: { mrmlClass: "vtkMRMLInteractionNode" }, origin: { local: true } } });
+    return live.nodes.get(INTERACTION_ID)!;
+  };
+  /** Start Slicer Place mode for a markup type (the markups panel calls this). */
+  const startPlace = (markupType: MarkupType, persistent = false) => {
+    ensureInteraction();
+    live.write({ op: "patch", id: INTERACTION_ID, path: "#/mode", value: "place" });
+    live.write({ op: "patch", id: INTERACTION_ID, path: "#/markupType", value: markupType });
+    live.write({ op: "patch", id: INTERACTION_ID, path: "#/placeModePersistence", value: persistent });
+    live.write({ op: "patch", id: INTERACTION_ID, path: "#/placeNodeId", value: "" });
+  };
+  const endPlace = () => { if (live.nodes.has(INTERACTION_ID)) { live.write({ op: "patch", id: INTERACTION_ID, path: "#/mode", value: "viewTransform" }); live.write({ op: "patch", id: INTERACTION_ID, path: "#/placeNodeId", value: "" }); } };
+  /** Store the type's measurements on a markup node (so the panel + annotations can show them). */
+  const storeMeasurements = (id: string) => {
+    const n = live.nodes.get(id); if (!n || n.type !== "markup") return;
+    const cps = ((n.controlPoints as { position: Vec3 }[] | undefined) ?? []).map((c) => c.position);
+    const ms = measurementsFor(n.markupType as MarkupType, cps, n.size as Vec3 | undefined);
+    if (ms.length) live.write({ op: "patch", id, path: "#/measurements", value: ms });
+  };
+  /** Native placement click: create/extend the markup via the placer, update the interaction node. */
+  const placeAtNative = (ras: Vec3): boolean => {
+    const inter = live.nodes.get(INTERACTION_ID); if (!inter || inter.mode !== "place" || !inter.markupType) return false;
+    const markupType = inter.markupType as MarkupType;
+    const placeId = (inter.placeNodeId as string) || "";
+    const node = placeId ? live.nodes.get(placeId) ?? null : null;
+    const newId = placeId || nextMarkupId();
+    const r = placeClick(markupType, node, ras, newId);
+    for (const op of r.ops) live.write(op);
+    storeMeasurements(r.nodeId);
+    if (r.complete) {
+      live.write({ op: "patch", id: INTERACTION_ID, path: "#/placeNodeId", value: "" });
+      if (!inter.placeModePersistence) live.write({ op: "patch", id: INTERACTION_ID, path: "#/mode", value: "viewTransform" });
+    } else {
+      live.write({ op: "patch", id: INTERACTION_ID, path: "#/placeNodeId", value: r.nodeId });
+    }
+    renderSlices();
+    return true;
+  };
   addEventListener("resize", () => { resizeAll(); renderSlices(); a3d.draw(); });
   Object.assign(globalThis, { __live: live, __sync: sync, __cells: () => [...cells.keys()], __overlays: () => Object.fromEntries(overlays), __viewState: () => viewState, __brush: () => ({ effect: brushEffect(), diam: brushDiameterMm() }),
     __layers: () => Object.fromEntries([...cells].map(([k, c]) => [k, { bg: !!c.layers?.background, fg: c.layers?.foreground ? [c.layers.foreground.opacity, c.layers.foreground.compositing] : null, label: c.layers?.label ? c.layers.label.opacity : null, bgLut: !!c.layers?.background?.lut }])) });
@@ -751,6 +799,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     __isLinked: () => [...live.nodes.values()].some((n) => n.type === "sliceComposite" && n.linkedControl),
     __sliceNode: (cell: string) => { const n = live.nodes.get(nativeSliceId(cell)); return n ? { orientation: n.orientation, offset: n.offset, sliceToRAS: n.sliceToRAS } : null; },
     __setSliceOffset: (cell: string, mm: number) => setSliceOffset(cell, mm),
+    // Markups (W4): place mode, list, delete a control point, and read a node's measurements.
+    __startPlace: (markupType: MarkupType, persistent = false) => startPlace(markupType, persistent),
+    __endPlace: () => endPlace(),
+    __placeState: () => { const i = live.nodes.get("local-interaction"); return i ? { mode: i.mode, markupType: i.markupType, persistent: i.placeModePersistence, placeNodeId: i.placeNodeId } : null; },
+    __markups: () => [...live.nodes.values()].filter((n) => n.type === "markup").map((n) => ({ id: n.id, markupType: n.markupType, name: n.name, points: ((n.controlPoints as { position: Vec3 }[] | undefined) ?? []).length, measurements: n.measurements ?? [], visible: n.visible !== false, locked: !!n.locked })),
+    __removeControlPoint: (id: string, index: number) => { const n = live.nodes.get(id); if (!n) return false; const op = removeControlPointOp(n, index); if (op) { live.write(op); storeMeasurements(id); renderSlices(); return true; } live.write({ op: "del", id }); renderSlices(); return true; },
+    __deleteMarkup: (id: string) => { if (live.nodes.has(id)) { live.write({ op: "del", id }); renderSlices(); return true; } return false; },
   });
   return {
     live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells,

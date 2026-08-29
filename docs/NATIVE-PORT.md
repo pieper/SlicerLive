@@ -191,4 +191,22 @@ general — it moves the plane along its **current** normal, so a reformatted ce
 controller bar's orientation is now a `<select>` (reformat combo) instead of a static label. Test: browser
 "reformat combo" (drive Green's combo to Sagittal ⇒ node orientation + plane normal update).
 
-Next: W4 markups (native placement, control-point edit, measurements); the resample3d WGSL path when W5/W6 need it.
+## W4 — Markups (in progress)
+
+**Measurements (done)**: `logic/markups/measurements.ts` — distance, polylineLength (open/closed), angleDeg,
+polygonArea (Newell, planar-in-3D), boxVolume, `measurementsFor(type,...)`. Parity: line length 5 + angle 90
+match `vtkMRMLMeasurement` exactly; ClosedCurve is a spline in Slicer (area 18.225/length 15.387 over interpolated
+points), so the area/length FORMULAS are validated on Slicer's own curve points to 0.5% (spline interpolation is a
+later `curve.ts` port). Unit `measurements.test.ts` (6).
+
+**Placement (done)**: `logic/markups/placer.ts` — a pure state machine (`placeClick`, `POINTS_NEEDED`,
+`removeControlPointOp`): a click creates a new `markup` node or appends a control point; completes at the type's
+point count (fiducial 1, line 2, angle 3, plane 3, roi 2; curves user-ended). Wired natively in `live-views.ts`
+(`interaction` node + `placeAtNative` + `startPlace/endPlace`), so the native `MarkupsDisplayableManager` renders
+placed points/lines and stored measurements update on placement and on control-point drag. `render/demos/markups-panel.ts`
+— place toolbar (Point/Line/Angle/Curve/Closed Curve/ROI), place-multiple toggle, node list with per-node
+measurement + delete; Esc stops placing. Unit `placer.test.ts` (6); browser `harness/markups.browser.test.ts`
+(place line+angle by clicking → measurements; fiducial 1-click; delete).
+
+Next W4: display props (GlyphScale/GlyphSize/labels), control-point lock/visibility, curve spline interpolation
+(`curve.ts`, Kochanek) + closedCurve area parity, ROI place/handles. Then W5 segment editor.

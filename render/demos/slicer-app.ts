@@ -14,6 +14,7 @@ import { cellsFor, DEFAULT_LAYOUT, layoutList } from "../../logic/layouts.ts";
 import { registerLoadPanel } from "./load-panel.ts";
 import { registerVolumesPanel } from "./volumes-panel.ts";
 import { registerTfEditor } from "./tf-editor.ts";
+import { registerMarkupsPanel } from "./markups-panel.ts";
 import { LocalBlobStore, loadVolumeIntoScene } from "../../logic/ingest.ts";
 import { parseNifti } from "../../logic/readers/nifti.ts";
 import { makeNifti, SYNTHETIC_DIMS } from "../../logic/readers/synthetic.ts";
@@ -100,6 +101,7 @@ async function main() {
     registerLoadPanel(sh, { live: views.live, store, onStatus: status, onLoaded: (i) => { views.fitVolume(i.rasLo, i.rasHi, i.ijkToRAS); (globalThis as unknown as { __lastLoad?: unknown }).__lastLoad = i; } });
     registerVolumesPanel(sh, { live: views.live, onStatus: status });
     registerTfEditor(sh, { live: views.live, onStatus: status });
+    registerMarkupsPanel(sh, { live: views.live, onStatus: status });
     registerSelfTest("volumes: auto W/L gives window>0 and level in range; presets + threshold + color table apply", async () => {
       const vol = await parseNifti(makeNifti({ sform: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }), "wl-selftest");
       const r = await loadVolumeIntoScene(views.live, store, vol, { name: "wl-selftest" });
