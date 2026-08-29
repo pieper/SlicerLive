@@ -42,6 +42,17 @@ Deno.test({ name: "segment editor: create, auto-threshold, islands, margin, smoo
     const sm = await cdp.eval<{ voxels: number }>(`return await window.__applyEffect(${JSON.stringify(seg.segId)}, "smoothing", { segment: 1, smooth: "median", radiusVoxels: 1 });`);
     assert(sm.voxels > 0, "smoothing keeps the segment");
 
+    // statistics: segment 1's voxel count matches the last effect's, volume > 0
+    const stats = await cdp.eval<{ labelValue: number; voxels: number; volumeMm3: number }[]>(`return await window.__segmentStats(${JSON.stringify(seg.segId)});`);
+    const s1 = stats.find((x) => x.labelValue === 1)!;
+    assert(s1.voxels === sm.voxels, `stats voxel count matches (${s1.voxels} vs ${sm.voxels})`);
+    assert(s1.volumeMm3 > 0, "segment volume > 0");
+
+    // logical union with an empty segment 2 leaves the count unchanged
+    await cdp.eval<void>(`window.__addSegment(${JSON.stringify(seg.segId)});`);
+    const uni = await cdp.eval<{ voxels: number }>(`return await window.__applyEffect(${JSON.stringify(seg.segId)}, "logical", { segment: 1, logical: "union", other: 2 });`);
+    assert(uni.voxels === sm.voxels, "union with empty segment keeps the count");
+
     // still rendering
     await cdp.eval<void>(`await window.__slicerlive.idle();`);
     assert(await cdp.evalJson<number>(`window.__slicerlive.frameCount`) > 0, "frames rendered");

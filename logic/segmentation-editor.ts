@@ -9,7 +9,7 @@ import type { MrsonNode } from "../render/mrson.ts";
 import type { ZarrDesc } from "../render/zarr.ts";
 import { fetchZarrVolumeNative } from "../render/zarr.ts";
 import { LocalBlobStore, volumeToZarr } from "./ingest.ts";
-import { applyAutoThreshold, applyIslands, applyMargin, applySmoothing, applyThreshold, type OverwriteMode } from "./segment-effects.ts";
+import { applyAutoThreshold, applyIslands, applyLogical, applyMargin, applySmoothing, applyThreshold, segmentStatistics, type LogicalOp, type OverwriteMode, type SegmentStats } from "./segment-effects.ts";
 import type { ThresholdMethod } from "../algorithms/kernels/auto-threshold.ts";
 
 let segSeq = 0;
@@ -57,10 +57,12 @@ export interface EffectParams {
   smooth?: "median" | "open" | "close"; radiusVoxels?: number;
   // margin
   marginMm?: number;
+  // logical
+  logical?: LogicalOp; other?: number;
 }
 
 /** Apply an effect, materialize the new labelmap, patch the segmentation node. Returns the segment's voxel count. */
-export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId: string, effect: "threshold" | "autoThreshold" | "islands" | "smoothing" | "margin", params: EffectParams): Promise<{ voxels: number; threshold?: number }> {
+export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId: string, effect: "threshold" | "autoThreshold" | "islands" | "smoothing" | "margin" | "logical", params: EffectParams): Promise<{ voxels: number; threshold?: number }> {
   const seg = live.nodes.get(segId); if (!seg?.zarr) throw new Error("no segmentation " + segId);
   const dims = seg.dims as [number, number, number];
   const lab = await fetchZarrVolumeNative(live.blobBase(), seg.zarr as ZarrDesc);
@@ -78,6 +80,8 @@ export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId:
     out = applyIslands(labelmap, dims, { segment: params.segment, overwrite: params.overwrite, operation: params.islands ?? "keepLargest", minSize: params.minSize });
   } else if (effect === "smoothing") {
     out = applySmoothing(labelmap, dims, { segment: params.segment, overwrite: params.overwrite, method: params.smooth ?? "median", radiusVoxels: params.radiusVoxels });
+  } else if (effect === "logical") {
+    out = applyLogical(labelmap, dims, { segment: params.segment, overwrite: params.overwrite, operation: params.logical ?? "union", other: params.other });
   } else {
     const sp = spacingFromIjkToRAS(seg.ijkToRAS as number[]);
     out = applyMargin(labelmap, dims, { segment: params.segment, overwrite: params.overwrite, marginMm: params.marginMm ?? 0, spacingMm: sp });
@@ -93,4 +97,15 @@ export async function applyEffect(live: LiveScene, store: LocalBlobStore, segId:
 function spacingFromIjkToRAS(m: number[]): [number, number, number] {
   const col = (c: number): number => Math.hypot(m[c], m[4 + c], m[8 + c]);
   return [col(0), col(1), col(2)];
+}
+
+
+/** Per-segment statistics (voxel count, volume mm^3, bounds) for a segmentation. */
+export async function computeStats(live: LiveScene, segId: string): Promise<SegmentStats[]> {
+  const seg = live.nodes.get(segId); if (!seg?.zarr) return [];
+  const dims = seg.dims as [number, number, number];
+  const lab = await fetchZarrVolumeNative(live.blobBase(), seg.zarr as ZarrDesc);
+  const labelmap = lab.data instanceof Uint8Array ? lab.data : Uint8Array.from(lab.data as ArrayLike<number>);
+  const labels = ((seg.segments as { labelValue: number }[] | undefined) ?? []).map((x) => x.labelValue);
+  return segmentStatistics(labelmap, dims, labels, spacingFromIjkToRAS(seg.ijkToRAS as number[]));
 }

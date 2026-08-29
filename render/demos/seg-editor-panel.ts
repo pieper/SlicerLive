@@ -12,6 +12,7 @@ interface Hooks {
   __segmentations: () => { segId: string; name: string; segments: { labelValue: number; name: string; color: number[]; visible: boolean }[] }[];
   __setSegmentProp: (segId: string, labelValue: number, prop: string, value: unknown) => void;
   __volumeList: () => { imageId: string; name: string }[];
+  __segmentStats: (segId: string) => Promise<{ labelValue: number; voxels: number; volumeMm3: number }[]>;
 }
 const g = () => globalThis as unknown as Hooks;
 
@@ -51,7 +52,10 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
       <div class="sl-row"><button class="sl-eff-auto">Auto (Otsu)</button></div>
       <div class="sl-row"><label>Islands</label><button class="sl-eff-largest">Keep largest</button><button class="sl-eff-small">Remove small</button></div>
       <div class="sl-row"><label>Smoothing</label><button class="sl-eff-median">Median</button><button class="sl-eff-open">Open</button><button class="sl-eff-close">Close</button></div>
-      <div class="sl-row"><label>Margin (mm)</label><input class="sl-margin" type="number" value="2" step="0.5" style="width:70px"><button class="sl-eff-grow">Grow</button><button class="sl-eff-shrink">Shrink</button></div>`;
+      <div class="sl-row"><label>Margin (mm)</label><input class="sl-margin" type="number" value="2" step="0.5" style="width:70px"><button class="sl-eff-grow">Grow</button><button class="sl-eff-shrink">Shrink</button></div>
+      <div class="sl-row"><label>Logical (vs seg)</label><input class="sl-other" type="number" value="2" step="1" style="width:60px"><button class="sl-eff-union">∪</button><button class="sl-eff-sub">−</button><button class="sl-eff-int">∩</button></div>
+      <div class="sl-row"><button class="sl-eff-stats">Statistics</button></div>
+      <div class="sl-seg-stats"></div>`;
     const $ = <T extends HTMLElement>(s: string) => root!.querySelector(s) as T;
     const num = (s: string) => Number(($(s) as HTMLInputElement).value);
     $(".sl-seg-new").addEventListener("click", async () => { if (!segId) { await ensureSeg(); } else { active = g().__addSegment(segId); } render(); });
@@ -66,6 +70,10 @@ export function registerSegEditorPanel(shell: AppShell, opts: { live: LiveScene;
     $(".sl-eff-close").addEventListener("click", () => effect("smoothing", { smooth: "close", radiusVoxels: 1 }));
     $(".sl-eff-grow").addEventListener("click", () => effect("margin", { marginMm: Math.abs(num(".sl-margin")) }));
     $(".sl-eff-shrink").addEventListener("click", () => effect("margin", { marginMm: -Math.abs(num(".sl-margin")) }));
+    $(".sl-eff-union").addEventListener("click", () => effect("logical", { logical: "union", other: num(".sl-other") }));
+    $(".sl-eff-sub").addEventListener("click", () => effect("logical", { logical: "subtract", other: num(".sl-other") }));
+    $(".sl-eff-int").addEventListener("click", () => effect("logical", { logical: "intersect", other: num(".sl-other") }));
+    $(".sl-eff-stats").addEventListener("click", async () => { const st = await g().__segmentStats(segId); const el = $(".sl-seg-stats"); el.innerHTML = st.map((x) => `<div class="sl-hint">Segment ${x.labelValue}: ${x.voxels} vox, ${(x.volumeMm3 / 1000).toFixed(2)} mL</div>`).join(""); });
   }
 
   shell.registerPanel({ id: "segment", title: "Segment Editor", order: 6, mount(el) { root = el; render(); } });

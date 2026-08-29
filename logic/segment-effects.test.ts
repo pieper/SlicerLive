@@ -1,6 +1,6 @@
 // T1 unit (W5): segment-editor effects on labelmap arrays (masking, threshold, islands, smoothing, margin).
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { applyIslands, applyMargin, applySmoothing, applyThreshold, segmentMask } from "./segment-effects.ts";
+import { applyIslands, applyLogical, applyMargin, applySmoothing, applyThreshold, segmentMask, segmentStatistics } from "./segment-effects.ts";
 
 const dims: [number, number, number] = [8, 8, 3];
 const idx = (i: number, j: number, k: number) => k * 64 + j * 8 + i;
@@ -52,4 +52,30 @@ Deno.test("smoothing median removes an isolated speck of the active segment", ()
 Deno.test("segmentMask extracts the active segment as 1/0", () => {
   const lm = Uint8Array.from([0, 1, 2, 1, 0]);
   assertEquals(Array.from(segmentMask(lm, 1)), [0, 1, 0, 1, 0]);
+});
+
+Deno.test("logical operators between two segments", () => {
+  // segment 1 = {0,1,2}, segment 2 = {2,3}
+  const lm = Uint8Array.from([1, 1, 1, 2, 2, 0]);   // voxels 0-2 seg1, 3-4 seg2... adjust: [1,1,1,2,2,0]
+  // put overlap: make voxel 2 shared is impossible in a labelmap; use disjoint. seg1={0,1}, seg2={2,3}
+  const m = Uint8Array.from([1, 1, 2, 2, 0, 0]);
+  // union of seg1 with seg2 -> voxels 0,1,2,3 become seg1
+  const u = applyLogical(m, [6, 1, 1], { segment: 1, operation: "union", other: 2 });
+  assertEquals(Array.from(u), [1, 1, 1, 1, 0, 0]);
+  // subtract seg2 from seg1 (disjoint) leaves seg1 unchanged
+  const sub = applyLogical(m, [6, 1, 1], { segment: 1, operation: "subtract", other: 2 });
+  assertEquals(sub[0], 1); assertEquals(sub[2], 2);
+  // invert seg1 within the volume
+  const inv = applyLogical(m, [6, 1, 1], { segment: 1, operation: "invert" });
+  assertEquals(inv[0], 0); assertEquals(inv[4], 1);
+});
+
+Deno.test("segmentStatistics: voxel count, volume, bounds", () => {
+  const dims: [number, number, number] = [4, 4, 1];
+  const lm = new Uint8Array(16);
+  lm[0] = 1; lm[1] = 1; lm[5] = 1;   // 3 voxels of segment 1
+  const [s] = segmentStatistics(lm, dims, [1], [2, 2, 3]);
+  assertEquals(s.voxels, 3);
+  assertEquals(s.volumeMm3, 3 * 2 * 2 * 3);   // 36
+  assertEquals(s.boundsIjk, [0, 1, 0, 1, 0, 0]);
 });

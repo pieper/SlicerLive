@@ -85,3 +85,46 @@ export function applyMargin(labelmap: Scalars, dims: Dims, opts: MaskOpts & { ma
   const result = opts.marginMm >= 0 ? binaryDilate(mask, dims, rVox) : binaryErode(mask, dims, rVox);
   return writeBack(labelmap, result, opts);
 }
+
+export type LogicalOp = "union" | "subtract" | "intersect" | "invert";
+
+/** Logical operators between the active segment and another (Slicer's Logical operators effect). For "invert",
+ *  the active segment becomes background-within-the-volume and vice-versa (bounded to non-other voxels). */
+export function applyLogical(labelmap: Scalars, _dims: Dims, opts: MaskOpts & { operation: LogicalOp; other?: number }): Uint8Array {
+  const seg = opts.segment, other = opts.other ?? 0;
+  const out = Uint8Array.from(labelmap as ArrayLike<number>);
+  for (let i = 0; i < out.length; i++) {
+    const a = labelmap[i] === seg ? 1 : 0, b = labelmap[i] === other ? 1 : 0;
+    let keep: number;
+    switch (opts.operation) {
+      case "union": keep = a || b ? 1 : 0; break;
+      case "subtract": keep = a && !b ? 1 : 0; break;         // active minus other
+      case "intersect": keep = a && b ? 1 : 0; break;
+      case "invert": keep = a ? 0 : 1; break;
+    }
+    if (keep) { if (canWrite(out[i], opts)) out[i] = seg; }
+    else if (out[i] === seg) out[i] = 0;
+  }
+  return out;
+}
+
+export interface SegmentStats { labelValue: number; voxels: number; volumeMm3: number; boundsIjk: [number, number, number, number, number, number] | null; }
+
+/** Per-segment voxel count, volume (mm^3 = voxels * voxel volume), and IJK bounds. */
+export function segmentStatistics(labelmap: Scalars, dims: Dims, labelValues: number[], spacingMm: [number, number, number]): SegmentStats[] {
+  const [nx, ny] = dims;
+  const voxVol = Math.abs(spacingMm[0] * spacingMm[1] * spacingMm[2]);
+  const stats = new Map<number, { n: number; lo: [number, number, number]; hi: [number, number, number] }>();
+  for (const lv of labelValues) stats.set(lv, { n: 0, lo: [Infinity, Infinity, Infinity], hi: [-Infinity, -Infinity, -Infinity] });
+  for (let p = 0; p < labelmap.length; p++) {
+    const lv = labelmap[p]; const s = stats.get(lv); if (!s) continue;
+    const i = p % nx, j = Math.floor(p / nx) % ny, k = Math.floor(p / (nx * ny));
+    s.n++;
+    s.lo[0] = Math.min(s.lo[0], i); s.lo[1] = Math.min(s.lo[1], j); s.lo[2] = Math.min(s.lo[2], k);
+    s.hi[0] = Math.max(s.hi[0], i); s.hi[1] = Math.max(s.hi[1], j); s.hi[2] = Math.max(s.hi[2], k);
+  }
+  return labelValues.map((lv) => {
+    const s = stats.get(lv)!;
+    return { labelValue: lv, voxels: s.n, volumeMm3: s.n * voxVol, boundsIjk: s.n ? [s.lo[0], s.hi[0], s.lo[1], s.hi[1], s.lo[2], s.hi[2]] : null };
+  });
+}
