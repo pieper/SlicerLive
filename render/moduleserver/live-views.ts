@@ -514,13 +514,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     c.controls = attachSliceControls(c.canvas, {
       orient: c.orientKey, getSlice: () => c.slice,
       step: (fwd) => {
-        const pl = c.plane; const bg = bgField(c); if (!pl || !bg) return;
-        const n: Vec3 = pl.basis ? pl.basis.nDir : pl.orient === "axial" ? [0, 0, 1] : pl.orient === "coronal" ? [0, 1, 0] : [1, 0, 0];
-        const [lo, hi] = bg.aabb();
-        const ext = Math.abs(n[0]) * (hi[0] - lo[0]) + Math.abs(n[1]) * (hi[1] - lo[1]) + Math.abs(n[2]) * (hi[2] - lo[2]);
-        pl.posMm += ext * 0.02 * (fwd ? -1 : 1);
-        const id = sliceNodeId(c.name);
-        if (id) live.write({ op: "patch", id, path: "#/offset", value: pl.posMm });   // the app's slice follows (parity-proven)
+        // one slice per wheel notch, through the NATIVE-node path (setSliceOffset -> patchNativeOffset keeps
+        // sliceToRAS AND offset in sync). Before: step() patched only #/offset, so the DM re-pushed the plane
+        // from the stale sliceToRAS and the slice snapped back -> jitter (worst on the 1.3mm sagittal axis).
+        const cur = getSliceOffset(c.name); const range = sliceOffsetRange(c.name);
+        if (cur == null || !range) return;
+        const stepMm = range.step > 0 ? range.step : 1;
+        setSliceOffset(c.name, cur + stepMm * (fwd ? -1 : 1));
       },
       redraw: () => renderSlice(c),
       // Slicer's AdjustWindowLevel mouse mode: gated by the interaction node streamed from the app
@@ -718,7 +718,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     const c = cells.get(cell); const bg = c ? bgField(c) : null; if (!c || !bg) return null;
     const [lo, hi] = bg.aabb(), n = NORMAL_OF(c);
     const a = lo[0] * n[0] + lo[1] * n[1] + lo[2] * n[2], b = hi[0] * n[0] + hi[1] * n[1] + hi[2] * n[2];
-    const step = (bg as { stepMm?: number }).stepMm ?? 1;
+    // step = the spacing along the normal (Slicer's GetSliceOffsetRangeResolution): the voxel size of the
+    // volume axis most parallel to the slice normal (so a 1.3mm sagittal steps 1.3mm, a 1mm axial steps 1mm).
+    let step = (bg as { stepMm?: number }).stepMm ?? 1;
+    const comp = [...live.nodes.values()].find((nd) => nd.type === "sliceComposite" && nd.layoutName === c.name);
+    const imgId = ((comp?.refs as Record<string, string[]> | undefined)?.background ?? [])[0];
+    const m = imgId ? (live.nodes.get(imgId)?.ijkToRAS as number[] | undefined) : undefined;
+    if (m) { let bestDot = 0; for (let ax = 0; ax < 3; ax++) { const dx = m[ax], dy = m[4 + ax], dz = m[8 + ax]; const sp = Math.hypot(dx, dy, dz) || 1; const dot = Math.abs((dx * n[0] + dy * n[1] + dz * n[2]) / sp); if (dot > bestDot) { bestDot = dot; step = sp; } } }
     return { min: Math.min(a, b), max: Math.max(a, b), step: step || 1 };
   };
   const fitCell = (cell: string): void => {
