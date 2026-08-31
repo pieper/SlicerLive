@@ -69,13 +69,12 @@ Deno.test({ name: "segments: added segments get distinct Slicer default colours 
   const cdp = await CDP.openTab(STANDALONE);
   try {
     await waitReady(cdp, 60000);
-    const img = await cdp.eval<string>(`await window.__loadSample("MRHead"); await window.__slicerlive.idle(); return window.__volumeList()[0].imageId;`);
+    await cdp.eval<void>(`await window.__loadSample("MRHead"); await window.__slicerlive.idle();`);
     await cdp.eval<void>(`await window.__shell.showPanel("segment");`);
     await cdp.eval<void>(`document.querySelector(".sl-seg-new").click(); await new Promise(r=>setTimeout(r,300));`);
     const segId = await cdp.eval<string>(`return window.__segmentations()[0].segId;`);
     // select paint, then add a second segment -> the paint target must follow to segment 2
     await cdp.eval<void>(`document.querySelector(".sl-eff-paint").click(); document.querySelector(".sl-seg-new").click(); await window.__slicerlive.idle();`);
-    const tool = await cdp.evalJson<{ activeEffect: string }>(`(()=>{const n=window.__live.nodes.get("local-segmentEditor"); return {activeEffect:n.activeEffect, sel:n.selectedSegmentId};})()`);
     const sel = await cdp.evalJson<number>(`window.__live.nodes.get("local-segmentEditor").selectedSegmentId`);
     assertEquals(sel, 2, "paint target followed to the new segment");
     // distinct colours (Slicer default: segment 1 != segment 2)

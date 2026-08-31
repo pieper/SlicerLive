@@ -1,7 +1,7 @@
 // T3 (W1 DICOM): synthesize a small multi-slice CT series with dcmjs IN THE PAGE, feed the buffers to the
 // DICOM loader, and verify the reconstructed geometry (dims, ijkToRAS) and that it lands as an image node.
 // Uses the page's dcmjs (loaded by the DICOM reader) so no server is needed.
-import { assert, assertEquals } from "jsr:@std/assert@1";
+import { assertEquals } from "jsr:@std/assert@1";
 import { CDP } from "./cdp.ts";
 import { waitReady } from "./ready.ts";
 

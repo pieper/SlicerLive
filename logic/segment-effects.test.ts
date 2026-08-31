@@ -56,8 +56,7 @@ Deno.test("segmentMask extracts the active segment as 1/0", () => {
 
 Deno.test("logical operators between two segments", () => {
   // segment 1 = {0,1,2}, segment 2 = {2,3}
-  const lm = Uint8Array.from([1, 1, 1, 2, 2, 0]);   // voxels 0-2 seg1, 3-4 seg2... adjust: [1,1,1,2,2,0]
-  // put overlap: make voxel 2 shared is impossible in a labelmap; use disjoint. seg1={0,1}, seg2={2,3}
+  // seg1={0,1}, seg2={2,3} (disjoint; a labelmap voxel holds one segment)
   const m = Uint8Array.from([1, 1, 2, 2, 0, 0]);
   // union of seg1 with seg2 -> voxels 0,1,2,3 become seg1
   const u = applyLogical(m, [6, 1, 1], { segment: 1, operation: "union", other: 2 });

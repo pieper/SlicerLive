@@ -1,6 +1,6 @@
 // T4 (W3): native MRHead auto window/level (Slicer's percentile 0.1/99.9 histogram) matches Slicer's
 // vtkMRMLScalarVolumeDisplayNode auto levels within tolerance. Needs Slicer + headed Chrome + net (Sample Data).
-import { assert, assertAlmostEquals } from "jsr:@std/assert@1";
+import { assertAlmostEquals } from "jsr:@std/assert@1";
 import { CDP } from "../cdp.ts";
 import { waitReady } from "../ready.ts";
 import { pyJson, slicerAvailable } from "../slicer.ts";

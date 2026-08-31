@@ -1,5 +1,5 @@
 // T1 unit (W5): connected-components + islands on small 3D phantoms.
-import { assert, assertEquals } from "jsr:@std/assert@1";
+import { assertEquals } from "jsr:@std/assert@1";
 import { connectedComponents, keepLargestIsland, removeSmallIslands } from "./ccl.ts";
 
 const dims: [number, number, number] = [6, 6, 1];
