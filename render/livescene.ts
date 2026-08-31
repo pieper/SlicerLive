@@ -909,6 +909,7 @@ export class VolumeLayersDisplayableManager implements DisplayableManager {
     if (!id) return undefined;
     const e = this.images.get(id);
     if (!e) return undefined;
+    if (e.node.visible === false) return undefined;   // Subject Hierarchy: a hidden volume drops out of the slice layers
     if (!e.field) { void this.ensureField(id, scene); return undefined; }
     const d = this.displayFor(e.node);
     const range = e.zv?.range ?? [0, 1];

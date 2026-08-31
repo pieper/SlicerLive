@@ -41,9 +41,13 @@ Deno.test({ name: "data: Subject Hierarchy lists all node types + operations; Sa
     await cdp.eval<void>(`document.querySelector('.sl-sh-row[data-id="${mk}"] [data-del]').click(); await window.__slicerlive.idle();`);
     assert(!(await cdp.evalJson<{ id: string }[]>(shRows)).some((r) => r.id === mk), "markup deleted from hierarchy");
 
-    // toggle image visibility via the hierarchy -> node.visible flips
-    const vis0 = await cdp.evalJson<boolean>(`window.__live.nodes.get(${JSON.stringify(img)}).visible !== false`);
+    // toggle image visibility via the hierarchy -> node.visible flips AND the volume leaves the slice layers
+    assert(await cdp.evalJson<boolean>(`window.__layers().Red.bg`), "volume shown as slice background");
     await cdp.eval<void>(`document.querySelector('.sl-sh-row[data-id="${img}"] [data-vis]').click(); await window.__slicerlive.idle();`);
-    assertEquals(await cdp.evalJson<boolean>(`window.__live.nodes.get(${JSON.stringify(img)}).visible !== false`), !vis0, "visibility toggled");
+    assertEquals(await cdp.evalJson<boolean>(`window.__live.nodes.get(${JSON.stringify(img)}).visible !== false`), false, "node.visible false");
+    assertEquals(await cdp.evalJson<boolean>(`window.__layers().Red.bg`), false, "hidden volume removed from the slice (like Slicer)");
+    // toggle back -> reappears
+    await cdp.eval<void>(`document.querySelector('.sl-sh-row[data-id="${img}"] [data-vis]').click(); await window.__slicerlive.idle();`);
+    assert(await cdp.evalJson<boolean>(`window.__layers().Red.bg`), "volume restored to the slice");
   } finally { await cdp.closeTab(); }
 } });
