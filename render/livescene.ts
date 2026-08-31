@@ -400,8 +400,10 @@ export class MarkupsDisplayableManager implements DisplayableManager {
     const out: OverlayItem[] = [];
     for (const n of this.nodes.values()) {
       const col = (n.color as number[]) ?? [1, 0.85, 0.2, 1];
+      if (n.visible === false) continue;                                    // hidden markups draw nothing
       const cps = (n.controlPoints as { position: number[]; label?: string }[] | undefined) ?? [];
-      for (const cp of cps) out.push({ kind: "point", ras: cp.position as Vec3, color: col, radiusPx: 5, label: cp.label });
+      const radiusPx = Math.max(2, ((n.glyphScale as number) ?? 3) * 2);   // 2D glyph size tracks GlyphScale (Slicer)
+      for (const cp of cps) out.push({ kind: "point", ras: cp.position as Vec3, color: col, radiusPx, label: cp.label });
       const segs = this.segmentsFor(n);
       if (segs.length) {
         const pts: Vec3[] = [segs[0].a, ...segs.map((sg) => sg.b)];

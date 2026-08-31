@@ -102,3 +102,25 @@ Deno.test({ name: "markups: visibility, lock, and glyph size apply to the node",
     assertEquals(await cdp.evalJson<number>(`[...window.__live.nodes.values()].find(n=>n.type==='markup').glyphScale`), 6);
   } finally { await cdp.closeTab(); }
 } });
+
+Deno.test({ name: "markups: glyph size changes the rendered 2D glyph radius (fix #4)", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
+  const cdp = await CDP.openTab(STANDALONE);
+  try {
+    await waitReady(cdp, 60000);
+    await cdp.eval<void>(`await window.__loadSample("MRHead"); await window.__slicerlive.idle();`);
+    const red = await cdp.evalJson<{ x: number; y: number; w: number; h: number }>(cellRect("Red"));
+    // place a fiducial
+    await cdp.eval<void>(`window.__startPlace("fiducial", false);`);
+    await cdp.mouse("mousePressed", red.x + red.w * 0.5, red.y + red.h * 0.5, { button: "left", buttons: 1 });
+    await cdp.mouse("mouseReleased", red.x + red.w * 0.5, red.y + red.h * 0.5, { button: "left", buttons: 0 });
+    await cdp.eval<void>(`await window.__slicerlive.idle();`);
+    const radiusAt = `(() => { const ov = window.__overlays().markups || []; const pt = ov.find(i => i.kind === "point"); return pt ? pt.radiusPx : null; })()`;
+    await cdp.eval<void>(`window.__setGlyphScale(3); await window.__slicerlive.idle();`);
+    const r3 = await cdp.evalJson<number>(radiusAt);
+    await cdp.eval<void>(`window.__setGlyphScale(8); await window.__slicerlive.idle();`);
+    const r8 = await cdp.evalJson<number>(radiusAt);
+    console.log(`  glyph radiusPx: scale3=${r3} scale8=${r8}`);
+    assert(r3 !== null && r8 !== null, "glyph overlay item present");
+    assert(r8 > r3, `larger glyph scale -> larger radius (${r8} > ${r3})`);
+  } finally { await cdp.closeTab(); }
+} });
