@@ -20,6 +20,8 @@ import { VtkCamera } from "../vtk-camera.ts";
 import type { Field, ImageField } from "../fields.ts";
 import { SlicePlaneField } from "../slice-plane-field.ts";
 import { mountAdaptive3d } from "../demos/accum-loop.ts";
+import { mountSliceScheduler } from "../slice-scheduler.ts";
+import { BudgetController } from "../budget-controller.ts";
 import { LiveSync } from "../livesync.ts";
 import { WsTransport } from "../transport.ts";
 import { CameraInteractor } from "../vtk-interactor.ts";
@@ -148,7 +150,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
 
   // ── slice cells (dynamic, keyed by the app's layout names), one SliceRenderer each ──
   const cells = new Map<string, SliceCell>();
-  const sliceChangeListeners = new Set<() => void>();   // controller bars re-read offset/range after any slice render
+  const sliceChangeListeners = new Set<() => void>();   // controller bars: refreshed via notifyBars() at the DM->view boundary
   let segOverlay: GPUTexture | null = null, segFill = 0.5, segOutline = 1.0;
   const overlays = new Map<string, OverlayItem[]>();   // layer -> items (cell "*")
   const viewStateDM = new ViewStateDisplayableManager();  // interaction / selection / crosshair / segmentEditor nodes
@@ -302,17 +304,44 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       g.moveTo(0, p.y); g.lineTo(ov.width, p.y); g.moveTo(p.x, 0); g.lineTo(p.x, ov.height); g.stroke();
     }
   };
-  const renderSlice = (c: SliceCell) => {
+  // Closed-loop budget for the MOVING (interactive) slice frames: measured GPU time steers a resolution
+  // scale so a heavy reslice (weak GPU, retina 4-up, multi-layer composite) degrades to keep latency low,
+  // snapping back to native the moment the view settles. A cheap reslice sits at scale 1 (native).
+  const sliceBudget = new BudgetController({ targetMs: 14 });
+  /** Paint one cell's reslice + overlay. `moving` → render downsampled and blit up (renderUpscaled) at
+   *  the budgeted scale; else native. The coalesced scheduler decides moving-vs-settled and when. */
+  const paintSlice = (c: SliceCell, moving: boolean) => {
     if (c.el.style.display === "none") return;
     if (!bgField(c) || !c.plane) { clearCanvas(c.ctx); drawOverlay(c); cfg.onFrame?.(); return; }   // an empty cell still renders a frame
     applyLayers(c);
     applyPlane(c);
-    c.slice.renderToView(c.ctx.getCurrentTexture().createView({ format: srgb }), c.canvas.width, c.canvas.height);
+    const view = c.ctx.getCurrentTexture().createView({ format: srgb });
+    const vw = c.canvas.width, vh = c.canvas.height;
+    const s = moving ? sliceBudget.scale(vw, vh) : 1;
+    if (s > 0.98) c.slice.renderToView(view, vw, vh);
+    else {
+      const rw = Math.max(16, Math.round(vw * s)), rh = Math.max(16, Math.round(vh * s)), t0 = performance.now();
+      c.slice.renderUpscaled(view, rw, rh, vw, vh);
+      gpu.device.queue.onSubmittedWorkDone().then(() => sliceBudget.update(performance.now() - t0)).catch(() => {});
+    }
     drawOverlay(c);
     cfg.onFrame?.();                                   // slice frames count as frames (tests' settle/ready signal)
-    for (const l of sliceChangeListeners) l();
   };
-  const renderSlices = () => { for (const c of cells.values()) renderSlice(c); };
+  // Coalesced adaptive scheduler: DisplayableManagers / interaction handlers MARK cells dirty; one rAF
+  // loop renders each at most once per frame (60fps when changing), goes dormant when idle, and degrades
+  // to MOVING (downsampled) frames while interacting — the 2D analogue of the a3d loop.
+  const sched = mountSliceScheduler({
+    listCells: () => [...cells.keys()],
+    drawSlice: (cell, moving) => { const c = cells.get(cell); if (c) paintSlice(c, moving); },
+    drawOverlay: (cell) => { const c = cells.get(cell); if (c) { drawOverlay(c); cfg.onFrame?.(); } },
+  });
+  const renderSlice = (c: SliceCell) => sched.markSlice(c.name);   // mark dirty → coalesced adaptive render
+  const renderSlices = () => sched.markAll();
+  // Controller bars are node observers (Slicer's qMRMLSliceControllerWidget): they refresh whenever the
+  // DM updates a slice's plane/layers/volume — which is what a slice/composite/image/display node change,
+  // OR an async field becoming available, drives. Fired from the DM→view boundary (setSlicePlane/
+  // setSliceLayers/setVolumeField), NOT from the render loop, so the UI tracks the model, not the frames.
+  const notifyBars = () => { for (const l of sliceChangeListeners) l(); };
   const resizeAll = () => { sizeCanvas(three.canvas); for (const c of cells.values()) sizeCanvas(c.canvas); };
 
   // ── MirrorView ──
@@ -326,8 +355,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     overlays.set("crosshair", [{ kind: "point", ras, color: [1, 1, 0.3, 1], radiusPx: 3, label: "" }]);
   };
   const view: MirrorView & { setViewState?: (st: ViewState) => void } = {
-    setViewState(_st) { crosshairOverlay(); for (const c of cells.values()) drawOverlay(c); },
-    setOverlay(_cell, layer, items) { if (items.length) overlays.set(layer, items); else overlays.delete(layer); for (const c of cells.values()) drawOverlay(c); },
+    setViewState(_st) { crosshairOverlay(); for (const c of cells.keys()) sched.markOverlay(c); },
+    setOverlay(_cell, layer, items) { if (items.length) overlays.set(layer, items); else overlays.delete(layer); for (const c of cells.keys()) sched.markOverlay(c); },
     setField(k, f) { fields3d.set(k, f); rebuild3d(); },
     removeField(k) { if (fields3d.delete(k)) rebuild3d(); },
     redraw() { scene?.syncUniforms(); a3d.draw(); },
@@ -341,17 +370,17 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     setSliceLayers(cell, layers) {
       const c = sliceCell(cell); c.layers = layers;
       for (const l of [layers.background, layers.foreground, layers.label]) if (l && !fieldNames.has(l.field)) fieldNames.set(l.field, (l as { name?: string }).name ?? "");
-      renderSlice(c);
+      renderSlice(c); notifyBars();
     },
     setViewChrome(ch) { chrome3d = ch; if (scene) scene.setBackground?.(ch.backgroundColor[0], ch.backgroundColor[1], ch.backgroundColor[2]); drawThreeOverlay(); a3d.draw(); },
     setMeshes(list) { meshes = list; if (scene) { scene.setMeshes(meshes); a3d.draw(); } else rebuild3d(); },
     setVolumeField(f, wl) {
       volumeField = f; legacyWL = wl;
       volumeReady = !!f;
-      renderSlices(); rebuild3d();
+      renderSlices(); rebuild3d(); notifyBars();
     },
     showVolume3D(show) { volumeShown3D = show; rebuild3d(); },
-    setSlicePlane(cell, pl) { const c = sliceCell(cell); c.plane = pl; renderSlice(c); },
+    setSlicePlane(cell, pl) { const c = sliceCell(cell); c.plane = pl; renderSlice(c); notifyBars(); },
     setLayout(_name) { /* the app's layout engine places cells (setCells) */ },
     setSegmentationOverlay(tex, fillOpacity, outlineOpacity) {
       segOverlay = tex; segFill = fillOpacity; segOutline = outlineOpacity;
@@ -556,7 +585,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
             const ras = cellRas(c, u, v); brushStroke.points.push(ras); brushCursor = { cell: c, ras };
             const now = performance.now();
             if (now - (brushStroke as { t?: number }).t! > 60 || !(brushStroke as { t?: number }).t) { (brushStroke as { t?: number }).t = now; sendStroke(); }
-            drawOverlay(c); return;
+            sched.markOverlay(c.name); return;
           }
           if (!sliceDrag) return;
           const ras = cellRas(c, u, v);
@@ -565,14 +594,14 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
           live.write({ op: "cmd", id: sliceDrag.id, cmd: "setControlPoint", args: { index: sliceDrag.index, position: ras } });
           storeMeasurements(sliceDrag.id);
         },
-        onLeftDrop: () => { if (brushStroke) { sendStroke(true); brushStroke = null; drawOverlay(c); } if (sliceDrag) { sync.flush(); sliceDrag = null; } },
+        onLeftDrop: () => { if (brushStroke) { sendStroke(true); brushStroke = null; sched.markOverlay(c.name); } if (sliceDrag) { sync.flush(); sliceDrag = null; } },
         onHover: (u, v, w, h) => {
           // cursor -> the app's crosshair cursor (DataProbe follows); shift-move -> crosshair position too
           const id = crosshairId(); if (!id) return;
           const ras = cellRas(c, u, v);
           live.write({ op: "cmd", id, cmd: "setCursor", args: { ras, view: c.name } });
           if (shiftHeld) { live.write({ op: "patch", id, path: "#/crosshairRAS", value: ras }); jumpLocal(ras); }
-          if (brushEffect()) { brushCursor = { cell: c, ras }; c.canvas.style.cursor = "none"; drawOverlay(c); }
+          if (brushEffect()) { brushCursor = { cell: c, ras }; c.canvas.style.cursor = "none"; sched.markOverlay(c.name); }
           else c.canvas.style.cursor = interactionMode() === "place" ? "crosshair" : pickMarkup(c, u, v, w, h) ? "grab" : "default";
         },
       },
@@ -624,7 +653,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     }
     for (const [name, c] of cells) if (!shownSlices.has(name)) c.el.style.display = "none";
     if (!threeVisible) three.el.style.display = "none";
-    resizeAll(); renderSlices(); if (threeVisible) a3d.draw();
+    resizeAll(); sched.render(); if (threeVisible) a3d.draw();
   };
   const setCells = (rects: ViewCellRect[]) => { lastRects = rects; if (maximizedCell && !rects.some((r) => r.name === maximizedCell)) maximizedCell = null; applyCells(); };
   /** Double-click a cell to maximize/restore (reuses the MPR demos' behaviour, systematized here). */
@@ -737,7 +766,10 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   // volume geometry, a transform, the slice node's offset/orientation) arrives as a node upsert on the
   // _changes feed and hot-updates the plane. This is why W/L now reaches the plane with no extra wiring.
   const SLICE3D_DEPS = new Set(["scalarVolumeDisplay", "labelMapDisplay", "sliceComposite", "image", "transform", "colorTable", "view"]);
-  live.subscribe((ch) => { if (sliceIn3D.size && (ch.kind === "reset" || (ch.type != null && SLICE3D_DEPS.has(ch.type)))) refreshSlicesIn3D(); });
+  live.subscribe((ch) => {
+    if (ch.kind !== "reset" && (ch.type == null || !SLICE3D_DEPS.has(ch.type))) return;
+    if (sliceIn3D.size) refreshSlicesIn3D();
+  });
 
   /** Reformat a native slice cell to a standard orientation through its current centre
    *  (vtkMRMLSliceNode::SetOrientation): rebuild the plane, update the cell's orientation so fit/offset math
@@ -862,7 +894,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     renderSlices();
     return true;
   };
-  addEventListener("resize", () => { resizeAll(); renderSlices(); a3d.draw(); });
+  addEventListener("resize", () => { resizeAll(); sched.render(); a3d.draw(); });
   Object.assign(globalThis, { __live: live, __sync: sync, __cells: () => [...cells.keys()], __overlays: () => Object.fromEntries(overlays), __viewState: () => viewState, __brush: () => ({ effect: brushEffect(), diam: brushDiameterMm() }),
     __layers: () => Object.fromEntries([...cells].map(([k, c]) => [k, { bg: !!c.layers?.background, fg: c.layers?.foreground ? [c.layers.foreground.opacity, c.layers.foreground.compositing] : null, label: c.layers?.label ? c.layers.label.opacity : null, bgLut: !!c.layers?.background?.lut }])) });
   if (cfg.connect !== false) { sync.connect(); for (const p of peers) p.connect(); }   // peer connect is opt-in (native-first); standalone by default
@@ -895,7 +927,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     __glyphScale: () => { const m = [...live.nodes.values()].find((n) => n.type === "markup"); return (m?.glyphScale as number) ?? 3; },
   });
   return {
-    live, sync, resize() { resizeAll(); renderSlices(); a3d.draw(); }, setCells,
+    live, sync, resize() { resizeAll(); sched.render(); a3d.draw(); }, setCells,
     // W2: frame a volume in every slice cell (vtkMRMLSliceLogic::FitSliceToVolumes) — used on a native load
     // and by the controller "fit" button; the mirrored plane path (setMirrorFrame) still wins when a Slicer
     // peer streams a slice frame, so this only takes effect for standalone/native scenes.

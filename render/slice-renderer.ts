@@ -206,6 +206,15 @@ export class SliceRenderer {
   private ubuf: GPUBuffer;
   private u = new Float32Array(80);  // p2t(16) origin(4) uvec(4) vvec(4) params(4) size(4) | p2tFg(16) fgParams(4) p2tLabel(16) labelParams(4)
   private bind?: GPUBindGroup;
+  // Adaptive downsample (moving frames): render the reslice into a low-res target, then bilinear-blit
+  // it up to the view — the 2D analogue of SceneRenderer.renderUpscaled. Lets a slice cell degrade
+  // resolution under load to keep interactive latency low, snapping back to native when settled.
+  private blitPipeline?: GPURenderPipeline;
+  private lowTex?: GPUTexture;
+  private lowView?: GPUTextureView;
+  private lowW = 0;
+  private lowH = 0;
+  private blitBind?: GPUBindGroup;
   private overlay?: GPUTexture;
   private labels?: GPUTexture;
   private palette?: GPUTexture;
@@ -617,6 +626,55 @@ export class SliceRenderer {
   }
 
   renderToView(view: GPUTextureView, w: number, h: number) { this.drawInto(view, w, h); }
+
+  /** Bilinear-blit pipeline (fullscreen triangle) that upsamples the low-res reslice to the view. */
+  private ensureBlit() {
+    if (this.blitPipeline) return;
+    const m = this.dev.createShaderModule({
+      code: /* wgsl */ `
+struct VO { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+  var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  var o: VO; o.pos = vec4<f32>(p[i], 0.0, 1.0);
+  o.uv = vec2<f32>((p[i].x + 1.0) * 0.5, (1.0 - p[i].y) * 0.5); return o;
+}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@fragment fn fs(in: VO) -> @location(0) vec4<f32> { return textureSample(src, samp, in.uv); }`,
+    });
+    this.blitPipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: m, entryPoint: "vs" },
+      fragment: { module: m, entryPoint: "fs", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+    });
+  }
+  private ensureLow(w: number, h: number) {
+    this.ensureBlit();
+    if (this.lowTex && this.lowW === w && this.lowH === h) return;
+    this.lowTex?.destroy();
+    this.lowTex = this.dev.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    this.lowView = this.lowTex.createView();
+    this.lowW = w; this.lowH = h;
+    this.blitBind = this.dev.createBindGroup({
+      layout: this.blitPipeline!.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: this.lowView }, { binding: 1, resource: this.sampler }],
+    });
+  }
+  /** Adaptive (moving-frame) render: reslice at `rw×rh` into an off-screen target, then bilinear-blit
+   *  up to the `vw×vh` view. Single frame, no accumulation — use while interacting; call renderToView
+   *  (native) when the view settles. At rw==vw/rh==vh this is a native render plus a pass-through blit. */
+  renderUpscaled(view: GPUTextureView, rw: number, rh: number, vw: number, vh: number) {
+    if (rw >= vw && rh >= vh) { this.drawInto(view, vw, vh); return; }   // not downsampling → native, no blit
+    this.ensureLow(rw, rh);
+    this.drawInto(this.lowView!, rw, rh);
+    const enc = this.dev.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    pass.setPipeline(this.blitPipeline!); pass.setBindGroup(0, this.blitBind!); pass.draw(3); pass.end();
+    this.dev.queue.submit([enc.finish()]);
+    // Keep the picking/geometry state (uSpanMm/cX) consistent with the VIEW resolution: drawInto set it
+    // from the low-res aspect, which matches (aspect is rw/rh ≈ vw/vh), so no correction is needed.
+  }
 
   async renderToRGBA(w: number, h: number): Promise<Uint8Array> {
     const target = this.dev.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
