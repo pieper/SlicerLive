@@ -159,6 +159,9 @@ export class ImageField implements Field {
   sampleStep(): number { return this.stepMm; }
   /** The r32float 3D scalar texture (e.g. to share with a SliceRenderer for MPR). */
   volumeTexture(): GPUTexture { return this.volTex; }
+  /** r8unorm volumes sample /255, so clim is packed /normScale in the shader; a slice plane sharing this
+   *  texture must use the same factor. 1 for f32 volumes. */
+  normScaleOf(): number { return this.normScale; }
 
   /** Centre of the volume in world (RAS) at identity — a natural pivot for a transform widget. */
   worldCenter(): Vec3 {

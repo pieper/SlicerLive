@@ -18,6 +18,7 @@ import { measurementsFor, polygonArea, polylineLength, type MarkupType } from ".
 import { interpolateCurve } from "../../logic/markups/curve.ts";
 import { VtkCamera } from "../vtk-camera.ts";
 import type { Field, ImageField } from "../fields.ts";
+import { SlicePlaneField } from "../slice-plane-field.ts";
 import { mountAdaptive3d } from "../demos/accum-loop.ts";
 import { LiveSync } from "../livesync.ts";
 import { WsTransport } from "../transport.ts";
@@ -583,6 +584,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
       orientation: () => c.orientKey, offset: () => getSliceOffset(c.name), range: () => sliceOffsetRange(c.name),
       setOffset: (mm) => setSliceOffset(c.name, mm), fit: () => fitCell(c.name),
       setOrientation: (o: "axial" | "coronal" | "sagittal") => reformatCell(c.name, o),
+      toggle3D: () => setSliceIn3D(c.name, !sliceIn3D.has(c.name)),
+      in3D: () => sliceIn3D.has(c.name),
       onChange: (cb) => { sliceChangeListeners.add(cb); return () => sliceChangeListeners.delete(cb); },
     });
     // pan (middle / shift+left drag) and right-drag zoom have no hooks: branch on the press that starts
@@ -689,7 +692,45 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     live.write({ op: "patch", id, path: "#/sliceToRAS", value: m });
     live.write({ op: "patch", id, path: "#/offset", value: mm });
     propagateLink(cell, ["SliceToRAS"]);                                          // linked same-orientation views follow
+    refreshSlicesIn3D();                                                          // hot-update the dropped slice in 3D
     return true;
+  };
+
+  // ── Slice Model / Drop-Slice (show a slice as a plane at its RAS location in 3D; hot-updates on scroll) ──
+  const sliceIn3D = new Map<string, SlicePlaneField>();
+  const unit = (v: Vec3): Vec3 => { const L = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / L, v[1] / L, v[2] / L]; };
+  /** Plane geometry + W/L for a cell's dropped slice, from its native slice node + background volume. */
+  const slicePlaneOpts = (c: SliceCell) => {
+    const bg = bgField(c); const node = live.nodes.get(nativeSliceId(c.name)); const m = node?.sliceToRAS as number[] | undefined;
+    if (!bg || !m) return null;
+    const origin: Vec3 = [m[3], m[7], m[11]];
+    const normal = unit([m[2], m[6], m[10]]), uAxis = unit([m[0], m[4], m[8]]), vAxis = unit([m[1], m[5], m[9]]);
+    const [lo, hi] = bg.aabb();
+    let hu = 0, hv = 0;                                        // half-extents = the volume's in-plane reach from the origin
+    for (const sx of [lo[0], hi[0]]) for (const sy of [lo[1], hi[1]]) for (const sz of [lo[2], hi[2]]) {
+      const r: Vec3 = [sx - origin[0], sy - origin[1], sz - origin[2]];
+      hu = Math.max(hu, Math.abs(r[0] * uAxis[0] + r[1] * uAxis[1] + r[2] * uAxis[2]));
+      hv = Math.max(hv, Math.abs(r[0] * vAxis[0] + r[1] * vAxis[1] + r[2] * vAxis[2]));
+    }
+    const d = live.nodes.get(bgDisplayId(c) ?? "");
+    const cr = bg.getClim(); const win = (d?.window as number) ?? (cr[1] - cr[0]); const lev = (d?.level as number) ?? (cr[0] + cr[1]) / 2;
+    return { p2t: bg.patientToTexture(), origin, normal, uAxis, vAxis, halfExtU: hu, halfExtV: hv, clim: [lev - win / 2, lev + win / 2] as [number, number], halfThick: Math.max(0.25, (bg as { stepMm?: number }).stepMm ? (bg as { stepMm?: number }).stepMm! / 2 : 0.5), normScale: bg.normScaleOf() };
+  };
+  const sliceFieldKey = (cell: string) => "slice3d:" + cell;
+  /** Toggle a cell's slice model in the 3D view. */
+  const setSliceIn3D = (cell: string, on: boolean) => {
+    const c = cells.get(cell); if (!c) return;
+    if (!on) { if (sliceIn3D.delete(cell)) { fields3d.delete(sliceFieldKey(cell)); rebuild3d(); } return; }
+    const opts = slicePlaneOpts(c); const bg = bgField(c); if (!opts || !bg) return;
+    const f = new SlicePlaneField(bg.volumeTexture(), opts);
+    sliceIn3D.set(cell, f); fields3d.set(sliceFieldKey(cell), f); rebuild3d();
+    const node = live.nodes.get(nativeSliceId(cell)); if (node) live.write({ op: "patch", id: node.id, path: "#/visibleIn3D", value: true });
+  };
+  /** Hot-update every dropped slice's plane (called after an offset/geometry change) without a pipeline rebuild. */
+  const refreshSlicesIn3D = () => {
+    if (!sliceIn3D.size) return;
+    for (const [cell, f] of sliceIn3D) { const c = cells.get(cell); const o = c ? slicePlaneOpts(c) : null; if (o) f.setPlane(o); }
+    scene?.syncUniforms(); a3d.draw();
   };
 
   /** Reformat a native slice cell to a standard orientation through its current centre
@@ -707,6 +748,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     if (c) { const bg = bgField(c); if (bg) { const [lo, hi] = bg.aabb(); const w = c.canvas.width || 1, h = c.canvas.height || 1; const [fx, fy] = fitFovToVolume(orientation, lo, hi, [], w, h); c.slice.setMirrorFrame(orientation, center, fx, fy); c.branched = false; } }
     propagateLink(cell, ["Orientation"]);
     renderSlices();
+    refreshSlicesIn3D();
     return true;
   };
 
@@ -833,6 +875,8 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     __isLinked: () => [...live.nodes.values()].some((n) => n.type === "sliceComposite" && n.linkedControl),
     __sliceNode: (cell: string) => { const n = live.nodes.get(nativeSliceId(cell)); return n ? { orientation: n.orientation, offset: n.offset, sliceToRAS: n.sliceToRAS } : null; },
     __setSliceOffset: (cell: string, mm: number) => setSliceOffset(cell, mm),
+    __setSliceIn3D: (cell: string, on: boolean) => setSliceIn3D(cell, on),
+    __sliceIn3D: () => [...sliceIn3D.keys()],
     __sliceZoom: (cell: string) => { const c = cells.get(cell); return c ? c.slice.zoom(c.orientKey) : null; },
     // Markups (W4): place mode, list, delete a control point, and read a node's measurements.
     __startPlace: (markupType: MarkupType, persistent = false) => startPlace(markupType, persistent),
@@ -864,7 +908,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     // numeric state for tests (render/introspect.ts): the 3D camera as a vtkCamera-comparable pose
     camera: () => ({ position: [...camera.position] as Vec3, focalPoint: [...camera.focalPoint] as Vec3, viewUp: [...camera.viewUp] as Vec3, viewAngle: camera.viewAngle }),
     cells: () => [...cells.keys()],
-    getSliceOffset, setSliceOffset, sliceOffsetRange,
+    getSliceOffset, setSliceOffset, sliceOffsetRange, setSliceIn3D, sliceIn3D: () => [...sliceIn3D.keys()],
     setSliceIntersections: (on: boolean) => { sliceIntersections = on; renderSlices(); },
     resetCamera3D, setOrthographic, isOrthographic: () => camera.parallelProjection,
     sliceIntersectionLines: (cell: string) => {

@@ -10,6 +10,9 @@ export interface SliceControllerAdapter {
   fit(): void;
   /** optional reformat: when present the orientation shows as a combo (Slicer's orientation menu). */
   setOrientation?(o: "axial" | "coronal" | "sagittal"): void;
+  /** optional "show this slice in the 3D view" (Slice Model / Drop-Slice) toggle + current state. */
+  toggle3D?(): void;
+  in3D?(): boolean;
   /** subscribe to external offset/geometry changes (scroll, jump) so the bar re-reads; returns unsubscribe */
   onChange(cb: () => void): () => void;
 }
@@ -30,6 +33,7 @@ export function mountSliceController(host: HTMLElement, cellName: string, a: Sli
     ${orientHtml}
     <input class="sl-slice-offset" type="range" step="any" aria-label="Slice offset">
     <span class="sl-slice-value"></span>
+    ${a.toggle3D ? `<button class="sl-slice-3d" title="Show this slice in 3D">3D</button>` : ""}
     <button class="sl-slice-fit" title="Fit to volume">⤢</button>`;
   host.appendChild(bar);
   const orient = bar.querySelector(".sl-slice-orient") as HTMLElement;
@@ -37,6 +41,7 @@ export function mountSliceController(host: HTMLElement, cellName: string, a: Sli
   const slider = bar.querySelector(".sl-slice-offset") as HTMLInputElement;
   const value = bar.querySelector(".sl-slice-value") as HTMLElement;
   const fit = bar.querySelector(".sl-slice-fit") as HTMLButtonElement;
+  const btn3d = bar.querySelector(".sl-slice-3d") as HTMLButtonElement | null;
 
   let editing = false;
   const refresh = () => {
@@ -46,6 +51,7 @@ export function mountSliceController(host: HTMLElement, cellName: string, a: Sli
     const disabled = !r || off == null;
     slider.disabled = disabled; fit.disabled = disabled;
     if (r) { slider.min = String(r.min); slider.max = String(r.max); slider.step = String(r.step > 0 ? r.step : "any"); }
+    if (btn3d && a.in3D) btn3d.classList.toggle("sl-active", a.in3D());
     if (off != null) { slider.value = String(off); value.textContent = off.toFixed(1); }
     else value.textContent = "";
   };
@@ -53,6 +59,7 @@ export function mountSliceController(host: HTMLElement, cellName: string, a: Sli
   slider.addEventListener("change", () => { editing = false; refresh(); });
   slider.addEventListener("pointerup", () => { editing = false; });
   fit.addEventListener("click", () => { a.fit(); refresh(); });
+  btn3d?.addEventListener("click", () => { a.toggle3D?.(); refresh(); });
   const unsub = a.onChange(refresh);
   refresh();
   return { el: bar, refresh, detach() { unsub(); bar.remove(); } };
