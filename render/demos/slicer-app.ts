@@ -12,6 +12,7 @@ import { expect, registerSelfTest } from "../selftest.ts";
 import { type AppShell, mountAppShell } from "./app-shell.ts";
 import { cellsFor, DEFAULT_LAYOUT, layoutList } from "../../logic/layouts.ts";
 import { registerLoadPanel } from "./load-panel.ts";
+import { registerSampleDataPanel } from "./sample-data-panel.ts";
 import { registerVolumesPanel } from "./volumes-panel.ts";
 import { registerTfEditor } from "./tf-editor.ts";
 import { registerMarkupsPanel } from "./markups-panel.ts";
@@ -107,6 +108,7 @@ async function main() {
     } });
     // W1: local data — chunks from files are served to the DisplayableManagers like any other blob
     registerLoadPanel(sh, { live: views.live, store, onStatus: status, onLoaded: (i) => { views.fitVolume(i.rasLo, i.rasHi, i.ijkToRAS); (globalThis as unknown as { __lastLoad?: unknown }).__lastLoad = i; } });
+    registerSampleDataPanel(sh, { onStatus: status });
     registerVolumesPanel(sh, { live: views.live, onStatus: status });
     registerTfEditor(sh, { live: views.live, onStatus: status });
     registerMarkupsPanel(sh, { live: views.live, onStatus: status });

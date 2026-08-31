@@ -5,9 +5,9 @@ import type { AppShell } from "./app-shell.ts";
 import type { LiveScene } from "../livescene.ts";
 import { loadVolumeIntoScene, LocalBlobStore } from "../../logic/ingest.ts";
 import { readVolume, sniff } from "../../logic/readers/registry.ts";
-import { downloadSample, SAMPLE_DATA } from "../../logic/sample-data.ts";
 import { fetchZarrVolumeNative, type ZarrDesc } from "../zarr.ts";
 import { indexDirectory, indexFiles, loadDcmjs, loadEntry, type SeriesEntry } from "../../logic/readers/dicom-local.ts";
+import { downloadSample } from "../../logic/sample-data.ts";
 
 export interface LoadPanelOpts {
   live: LiveScene;
@@ -63,11 +63,8 @@ export function registerLoadPanel(shell: AppShell, opts: LoadPanelOpts): void {
       <p>Or drag files onto the views.</p>
       <input type="file" multiple accept=".nrrd,.nhdr,.nii,.nii.gz,.gz" hidden>
       <input type="file" multiple data-dicom hidden>
-      <h3>Sample Data</h3>
-      <div class="sl-samples"></div>
-      <div class="sl-progress" hidden><div class="sl-progress-bar"></div><span class="sl-progress-text"></span></div>
-      <h3>Loaded</h3>
-      <ul class="sl-loaded"></ul>`;
+      <h3>Subject Hierarchy</h3>
+      <div class="sl-sh"></div>`;
     const input = el.querySelector("input[type=file]") as HTMLInputElement;
     const openBtn = el.querySelector('[data-act="open"]') as HTMLButtonElement;
     openBtn.addEventListener("click", async () => {
@@ -110,30 +107,22 @@ export function registerLoadPanel(shell: AppShell, opts: LoadPanelOpts): void {
     (el.querySelector('[data-act="dicom-files"]') as HTMLButtonElement).addEventListener("click", () => dicomInput.click());
     dicomInput.addEventListener("change", async () => { if (dicomInput.files?.length) { status("scanning files…"); showSeries(await indexFiles(Array.from(dicomInput.files), indexProgress)); } dicomInput.value = ""; });
 
-    const samples = el.querySelector(".sl-samples") as HTMLElement;
-    const prog = el.querySelector(".sl-progress") as HTMLElement, bar = el.querySelector(".sl-progress-bar") as HTMLElement, ptxt = el.querySelector(".sl-progress-text") as HTMLElement;
-    for (const d of SAMPLE_DATA) {
-      const row = document.createElement("div"); row.className = "sl-row";
-      const b = document.createElement("button"); b.textContent = d.title; b.title = `${d.fileName} · ${d.modality ?? ""} · ~${d.mb ?? "?"} MB · SHA-256 verified`;
-      b.addEventListener("click", async () => {
-        b.disabled = true; prog.hidden = false; bar.style.width = "0%"; ptxt.textContent = `downloading ${d.title}…`;
-        let got = 0; const total = (d.mb ?? 20) * 1048576;
-        try {
-          const r = await downloadSample(d.name, undefined, (n) => { got += n; bar.style.width = Math.min(100, 100 * got / total).toFixed(0) + "%"; ptxt.textContent = `${d.title}: ${(got / 1048576).toFixed(1)} MB`; });
-          ptxt.textContent = "verified ✓";
-          await loadBytes(r.bytes, d.fileName, "sampleData:" + d.name);
-        } catch (e) { status(`${d.title}: ${(e as Error).message}`); }
-        finally { b.disabled = false; setTimeout(() => { prog.hidden = true; }, 1500); }
-      });
-      row.appendChild(b); const meta = document.createElement("span"); meta.className = "sl-hint"; meta.textContent = `${d.modality ?? ""} ${d.mb ? `~${d.mb} MB` : ""}`; row.appendChild(meta);
-      samples.appendChild(row);
-    }
-    const loadedList = el.querySelector(".sl-loaded") as HTMLElement;
+    // Subject Hierarchy: every data node (any type) unless hidden, with per-node operations.
+    const shEl = el.querySelector(".sl-sh") as HTMLElement;
+    const DATA_TYPES = new Set(["image", "segmentation", "markup", "model", "transform"]);
+    const ICON: Record<string, string> = { image: "🧊", segmentation: "🎨", markup: "📍", model: "🧩", transform: "⭮" };
     const refresh = () => {
-      loadedList.innerHTML = "";
-      for (const n of opts.live.nodes.values()) if (n.type === "image") { const li = document.createElement("li"); li.textContent = `${n.name ?? n.id} — ${(n.dims as number[] | undefined)?.join("×") ?? "?"}`; loadedList.appendChild(li); }
+      const nodes = [...opts.live.nodes.values()].filter((n) => DATA_TYPES.has(n.type as string) && !(n as { hidden?: boolean }).hidden);
+      shEl.innerHTML = nodes.length ? nodes.map((n) => {
+        const kind = n.type === "image" && (n as { labelmap?: boolean }).labelmap ? "labelmap" : n.type;
+        const detail = n.type === "image" ? ((n.dims as number[] | undefined)?.join("×") ?? "") : n.type === "markup" ? `${((n.controlPoints as unknown[] | undefined) ?? []).length} pts` : "";
+        return `<div class="sl-sh-row" data-id="${n.id}"><span class="sl-sh-icon">${ICON[n.type as string] ?? "•"}</span><span class="sl-sh-name" title="${kind}">${n.name ?? n.id}</span><span class="sl-hint">${detail}</span><span class="sl-sh-ops"><button data-vis="${n.id}" title="Show/hide">${(n.visible === false) ? "🚫" : "👁"}</button><button data-ren="${n.id}" title="Rename">✎</button><button data-del="${n.id}" title="Delete">✕</button></span></div>`;
+      }).join("") : `<p class="sl-hint">No data yet — open a file or load sample data.</p>`;
+      shEl.querySelectorAll("[data-vis]").forEach((b) => b.addEventListener("click", () => { const id = (b as HTMLElement).dataset.vis!; const n = opts.live.nodes.get(id); opts.live.write({ op: "patch", id, path: "#/visible", value: n?.visible === false }); }));
+      shEl.querySelectorAll("[data-ren]").forEach((b) => b.addEventListener("click", () => { const id = (b as HTMLElement).dataset.ren!; const n = opts.live.nodes.get(id); const name = globalThis.prompt?.("Rename", (n?.name as string) ?? id); if (name) opts.live.write({ op: "patch", id, path: "#/name", value: name }); }));
+      shEl.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => { opts.live.write({ op: "del", id: (b as HTMLElement).dataset.del! }); }));
     };
-    opts.live.subscribe((c) => { if (c.type === "image") refresh(); });
+    opts.live.subscribe((c) => { if (DATA_TYPES.has(c.type as string) || c.kind === "remove") refresh(); });
     refresh();
   } });
 
