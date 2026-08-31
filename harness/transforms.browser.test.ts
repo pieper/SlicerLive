@@ -56,3 +56,23 @@ Deno.test({ name: "transforms: adjusting the transform moves the volume in the s
     assertAlmostEquals(after2 - before, 10, 1e-2, "field tracks a second adjustment");
   } finally { await cdp.closeTab(); }
 } });
+
+Deno.test({ name: "transforms: a real slider DRAG moves the volume the full amount (fix #1 mid-drag re-render)", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
+  const cdp = await CDP.openTab(STANDALONE);
+  try {
+    await waitReady(cdp, 60000);
+    await cdp.eval<void>(`await window.__loadSample("MRHead"); await window.__slicerlive.idle(); await window.__shell.showPanel("transforms");`);
+    await cdp.eval<void>(`document.querySelector(".sl-tf-apply").click(); await window.__slicerlive.idle();`);
+    // simulate a real drag: many input events on the SAME captured element (as pointer capture does),
+    // bracketed by pointerdown/change. Before the fix, the panel re-rendered per event and detached the slider.
+    const tx = await cdp.eval<number>(`
+      const s = document.querySelector("input.sl-tf-x");
+      s.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+      for (let v = 10; v <= 80; v += 10) { s.value = String(v); s.dispatchEvent(new Event("input", { bubbles: true })); }
+      s.dispatchEvent(new Event("change", { bubbles: true }));
+      await window.__slicerlive.idle();
+      return window.__transforms()[0].matrix[3];
+    `);
+    assertAlmostEquals(tx, 80, 1e-6, `drag accumulated to the final slider value (got ${tx}, not stuck at the first step)`);
+  } finally { await cdp.closeTab(); }
+} });

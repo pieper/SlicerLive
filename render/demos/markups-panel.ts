@@ -28,6 +28,7 @@ const TYPES: { t: MarkupType; label: string }[] = [
 export function registerMarkupsPanel(shell: AppShell, opts: { live: LiveScene; onStatus?: (s: string) => void }): void {
   const { live } = opts;
   let root: HTMLElement | null = null;
+  let dragging = false;   // suppress subscribe-driven re-render while the glyph slider is dragged
   const status = (s: string) => { opts.onStatus?.(s); shell.setStatus(s); };
   const fmt = (m: { value: number; units: string }) => `${m.value.toFixed(m.units === "deg" ? 1 : 2)} ${m.units === "deg" ? "°" : m.units === "mm2" ? "mm²" : m.units === "mm3" ? "mm³" : m.units}`;
 
@@ -54,7 +55,10 @@ export function registerMarkupsPanel(shell: AppShell, opts: { live: LiveScene; o
     }));
     $("input.sl-mk-persist")?.addEventListener("change", () => { if (placing) g().__startPlace(placing as MarkupType, $("input.sl-mk-persist").checked); });
     $(".sl-mk-end")?.addEventListener("click", () => { g().__endPlace(); status("placement stopped"); render(); });
-    $("input.sl-mk-glyph")?.addEventListener("input", (e) => g().__setGlyphScale(Number((e.target as HTMLInputElement).value)));
+    const glyph = $("input.sl-mk-glyph");
+    glyph?.addEventListener("pointerdown", () => { dragging = true; });
+    glyph?.addEventListener("input", (e) => g().__setGlyphScale(Number((e.target as HTMLInputElement).value)));
+    glyph?.addEventListener("change", () => { dragging = false; render(); });
     root.querySelectorAll(".sl-markup-list [data-del]").forEach((b) => b.addEventListener("click", () => { g().__deleteMarkup((b as HTMLElement).dataset.del!); render(); }));
     root.querySelectorAll(".sl-markup-list [data-vis]").forEach((b) => b.addEventListener("click", () => { const el = b as HTMLElement; g().__setMarkupProp(el.dataset.vis!, "visible", el.dataset.on !== "1"); render(); }));
     root.querySelectorAll(".sl-markup-list [data-lock]").forEach((b) => b.addEventListener("click", () => { const el = b as HTMLElement; g().__setMarkupProp(el.dataset.lock!, "locked", el.dataset.on !== "1"); render(); }));
@@ -66,6 +70,6 @@ export function registerMarkupsPanel(shell: AppShell, opts: { live: LiveScene; o
   }
 
   shell.registerPanel({ id: "markups", title: "Markups", order: 5, mount(el) { root = el; render(); } });
-  live.subscribe((c) => { if (c.type === "markup" || c.type === "interaction" || c.kind === "remove") render(); });
+  live.subscribe((c) => { if (!dragging && (c.type === "markup" || c.type === "interaction" || c.kind === "remove")) render(); });
   addEventListener("keydown", (e) => { if (e.key === "Escape") { const ps = g().__placeState?.(); if (ps?.mode === "place") { g().__endPlace(); render(); } } });
 }

@@ -22,6 +22,7 @@ export function registerTransformsPanel(shell: AppShell, opts: { live: LiveScene
   let root: HTMLElement | null = null;
   const status = (s: string) => { opts.onStatus?.(s); shell.setStatus(s); };
   let target = "";   // the node the panel transforms
+  let dragging = false;   // while a slider is dragged, suppress the subscribe-driven re-render (which would detach the slider)
 
   function render() {
     if (!root) return;
@@ -46,12 +47,15 @@ export function registerTransformsPanel(shell: AppShell, opts: { live: LiveScene
     $(".sl-tf-apply").addEventListener("click", () => { if (g().__nodeTransform(target)) return; const id = g().__createTransform(); g().__applyTransformTo(target, id); status("transform applied"); render(); });
     const setAbs = () => { const cur = g().__transforms().find((t) => t.id === g().__nodeTransform(target))!.matrix; const x = Number($<HTMLInputElement>("input.sl-tf-x").value), y = Number($<HTMLInputElement>("input.sl-tf-y").value), z = Number($<HTMLInputElement>("input.sl-tf-z").value); g().__translateTransform(g().__nodeTransform(target)!, x - cur[3], y - cur[7], z - cur[11]); };
     for (const [ax, lab] of [["x", "xv"], ["y", "yv"], ["z", "zv"]] as const) {
-      $(`input.sl-tf-${ax}`)?.addEventListener("input", (e) => { ($(`.sl-tf-${lab}`) as HTMLElement).textContent = Number((e.target as HTMLInputElement).value).toFixed(0); setAbs(); });
+      const sl = $(`input.sl-tf-${ax}`);
+      sl?.addEventListener("pointerdown", () => { dragging = true; });
+      sl?.addEventListener("input", (e) => { ($(`.sl-tf-${lab}`) as HTMLElement).textContent = Number((e.target as HTMLInputElement).value).toFixed(0); setAbs(); });
+      sl?.addEventListener("change", () => { dragging = false; render(); });
     }
     $(".sl-tf-identity")?.addEventListener("click", () => { g().__identityTransform(g().__nodeTransform(target)!); render(); });
     $(".sl-tf-harden")?.addEventListener("click", () => { g().__hardenTransform(target); status("transform hardened"); render(); });
   }
 
   shell.registerPanel({ id: "transforms", title: "Transforms", order: 7, mount(el) { root = el; render(); } });
-  live.subscribe((c) => { if (c.type === "transform" || c.type === "image") render(); });
+  live.subscribe((c) => { if (!dragging && (c.type === "transform" || c.type === "image")) render(); });
 }

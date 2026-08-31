@@ -17,6 +17,7 @@ interface VolInfo { imageId: string; displayId: string; name: string; range: [nu
 export function registerVolumesPanel(shell: AppShell, opts: VolumesPanelOpts): void {
   const { live } = opts;
   let activeId = "";
+  let dragging = false;   // suppress subscribe-driven re-render while a W/L slider is dragged (avoids detaching it)
 
   const scalarVolumes = (): VolInfo[] => {
     const out: VolInfo[] = [];
@@ -107,6 +108,7 @@ export function registerVolumesPanel(shell: AppShell, opts: VolumesPanelOpts): v
     $("select.sl-vol-active").addEventListener("change", (e) => { activeId = (e.target as HTMLSelectElement).value; render(); });
     const w = $<HTMLInputElement>("input.sl-w"), wn = $<HTMLInputElement>("input.sl-wn"), l = $<HTMLInputElement>("input.sl-l"), ln = $<HTMLInputElement>("input.sl-ln");
     const pushWL = () => { setWindowLevel(activeId, +w.value, +l.value); status(`W/L ${(+w.value).toFixed(0)}/${(+l.value).toFixed(0)}`); };
+    for (const el of [w, l]) { el.addEventListener("pointerdown", () => { dragging = true; }); el.addEventListener("change", () => { dragging = false; render(); }); }
     w.addEventListener("input", () => { wn.value = (+w.value).toFixed(1); pushWL(); });
     l.addEventListener("input", () => { ln.value = (+l.value).toFixed(1); pushWL(); });
     wn.addEventListener("change", () => { w.value = wn.value; pushWL(); });
@@ -123,5 +125,5 @@ export function registerVolumesPanel(shell: AppShell, opts: VolumesPanelOpts): v
 
   shell.registerPanel({ id: "volumes", title: "Volumes", order: 3, mount(el) { root = el; render(); } });
   // re-render when volumes are added/removed or a display node changes elsewhere
-  live.subscribe((c) => { if (c.type === "image" || c.type === "scalarVolumeDisplay" || c.kind === "remove") render(); });
+  live.subscribe((c) => { if (!dragging && (c.type === "image" || c.type === "scalarVolumeDisplay" || c.kind === "remove")) render(); });
 }
