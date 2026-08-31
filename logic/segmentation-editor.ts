@@ -15,7 +15,8 @@ import { applyRowMajor, type Vec3 } from "../render/mat4.ts";
 import { invertRowMajor } from "./transforms.ts";
 
 let segSeq = 0;
-const SEG_PALETTE = [[0.9, 0.3, 0.3], [0.3, 0.7, 0.95], [0.5, 0.85, 0.4], [0.95, 0.8, 0.3], [0.8, 0.5, 0.9], [0.4, 0.85, 0.85]];
+// Slicer default new-segment colours (GenericAnatomyColors sequence, from vtkSegment defaults).
+const SEG_PALETTE = [[0.502, 0.6824, 0.502], [0.9451, 0.8392, 0.5686], [0.6941, 0.4784, 0.3961], [0.4353, 0.7216, 0.8235], [0.8471, 0.3961, 0.3098], [0.8667, 0.5098, 0.3961]];
 
 async function emptyLabelmap(store: LocalBlobStore, dims: [number, number, number]): Promise<ZarrDesc> {
   const { desc, blobs } = await volumeToZarr(new Uint8Array(dims[0] * dims[1] * dims[2]), dims, "|u1");
@@ -132,7 +133,9 @@ export function invalidatePaintCache(segId?: string) { if (segId) paintCaches.de
 
 export interface PaintParams { segment: number; radiusMm: number; mode: "add" | "remove"; sphere?: boolean; normal?: Vec3; }
 
-/** Rasterize a brush at each RAS point into the resident labelmap (in-place). Marks the cache dirty. */
+/** Rasterize a brush swept along the stroke into the resident labelmap (in-place). Consecutive points are
+ *  connected by interpolation (step <= half the radius) so a fast drag leaves a CONTINUOUS stroke, not gaps.
+ *  Marks the cache dirty. */
 export async function paintStroke(live: LiveScene, segId: string, points: Vec3[], params: PaintParams): Promise<void> {
   const c = await paintCache(live, segId); if (!c) return;
   const [nx, ny, nz] = c.dims;
@@ -141,7 +144,9 @@ export async function paintStroke(live: LiveScene, segId: string, points: Vec3[]
   const val = params.mode === "add" ? params.segment : 0;
   const ri = Math.ceil(r / (sx || 1)), rj = Math.ceil(r / (sy || 1)), rk = Math.ceil(r / (sz || 1));
   const n = params.normal;
-  for (const p of points) {
+  const thick = n ? Math.abs(n[0] * sx) + Math.abs(n[1] * sy) + Math.abs(n[2] * sz) : 0;
+
+  const stamp = (p: Vec3) => {
     const ijk = applyRowMajor(c.invIjk, p);
     const ci = Math.round(ijk[0]), cj = Math.round(ijk[1]), ck = Math.round(ijk[2]);
     for (let dk = -rk; dk <= rk; dk++) for (let dj = -rj; dj <= rj; dj++) for (let di = -ri; di <= ri; di++) {
@@ -149,13 +154,21 @@ export async function paintStroke(live: LiveScene, segId: string, points: Vec3[]
       if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
       const dx = di * sx, dy = dj * sy, dz = dk * sz;
       if (dx * dx + dy * dy + dz * dz > r2) continue;
-      if (!params.sphere && n) {
-        const along = dx * n[0] + dy * n[1] + dz * n[2];
-        const thick = Math.abs(n[0] * sx) + Math.abs(n[1] * sy) + Math.abs(n[2] * sz);
-        if (Math.abs(along) > thick * 0.5) continue;
-      }
+      if (!params.sphere && n && Math.abs(dx * n[0] + dy * n[1] + dz * n[2]) > thick * 0.5) continue;   // one-voxel-thick disk in the slice plane
       c.labelmap[k * nx * ny + j * nx + i] = val;
     }
+  };
+
+  const stepMm = Math.max(0.5, Math.min(r, sx, sy, sz) * 0.5 || r * 0.5);   // dense enough to overlap adjacent stamps
+  let prev: Vec3 | null = null;
+  for (const p of points) {
+    if (prev) {
+      const seg: Vec3 = [p[0] - prev[0], p[1] - prev[1], p[2] - prev[2]];
+      const len = Math.hypot(seg[0], seg[1], seg[2]);
+      const steps = Math.max(1, Math.ceil(len / stepMm));
+      for (let sIdx = 1; sIdx <= steps; sIdx++) { const t = sIdx / steps; stamp([prev[0] + seg[0] * t, prev[1] + seg[1] * t, prev[2] + seg[2] * t]); }
+    } else stamp(p);
+    prev = p;
   }
   c.dirty = true;
 }
