@@ -50,16 +50,27 @@ export function registerTfEditor(shell: AppShell, opts: TfEditorOpts): void {
     setVolumeRendering(imageId, true);
   };
   const setOpacityStops = (stops: OpacityStop[]) => { ensureTf(); const s = stops.slice().sort((a, b) => a.value - b.value); live.write({ op: "patch", id: TF_ID, path: "#/scalarOpacity", value: s }); };
+  /** Shift ALL transfer-function points (colour + opacity) by `delta` intensity units as a unit (Slicer's
+   *  Volume Rendering "Shift" slider). */
+  const shiftTf = (delta: number) => {
+    if (!tfNode() || !delta) return;
+    const cs = colorStops().map((c) => ({ ...c, value: c.value + delta }));
+    const os = opacityStops().map((o) => ({ ...o, value: o.value + delta }));
+    live.write({ op: "patch", id: TF_ID, path: "#/colorStops", value: cs });
+    live.write({ op: "patch", id: TF_ID, path: "#/scalarOpacity", value: os });
+  };
 
   Object.assign(globalThis, {
     __vrState: (imageId?: string) => { const vr = vrNode(), tf = tfNode(); return { visible: !!vr?.visible, volume: ((vr?.refs as Record<string, string[]> | undefined)?.volume ?? [])[0] ?? imageId, preset: tf?.preset as string | undefined, colorStops: colorStops(), scalarOpacity: opacityStops() }; },
     __setVolumeRendering: setVolumeRendering,
     __setVrPreset: applyPreset,
     __setOpacityStops: setOpacityStops,
+    __shiftTf: shiftTf,
   });
 
   // ── UI ────────────────────────────────────────────────────────────────────
   let root: HTMLElement | null = null;
+  let shiftLast = 0;   // last Shift-slider value applied (deltas move the whole TF as a unit)
   const status = (s: string) => { opts.onStatus?.(s); shell.setStatus(s); };
   const W = 260, H = 120, PAD = 6;
 
@@ -125,13 +136,16 @@ export function registerTfEditor(shell: AppShell, opts: TfEditorOpts): void {
       <div class="sl-row"><label>Volume</label><select class="sl-vr-active">${volOpts}</select></div>
       <div class="sl-row"><label><input type="checkbox" class="sl-vr-on"${vr?.visible ? " checked" : ""}> Show in 3D</label></div>
       <div class="sl-row"><label>Preset</label><select class="sl-vr-preset"><option value="">Choose…</option>${presetOpts}</select></div>
+      <div class="sl-row"><label>Shift</label><input class="sl-vr-shift" type="range" min="-500" max="500" step="1" value="0"><span class="sl-vr-shiftv">0</span></div>
       <h3>Scalar opacity</h3>
       <canvas class="sl-tf-canvas" width="${W}" height="${H}" style="width:100%;border:1px solid var(--sl-border,#2a2f3a);border-radius:4px;cursor:crosshair"></canvas>
       <p class="sl-hint">Drag a handle to change opacity, click to add, double-click to remove.</p>`;
     const $ = <T extends HTMLElement>(s: string) => root!.querySelector(s) as T;
     $("select.sl-vr-active").addEventListener("change", (e) => { activeId = (e.target as HTMLSelectElement).value; render(); });
     $("input.sl-vr-on").addEventListener("change", (e) => { setVolumeRendering(activeId, (e.target as HTMLInputElement).checked); status((e.target as HTMLInputElement).checked ? "volume rendering on" : "volume rendering off"); });
-    $("select.sl-vr-preset").addEventListener("change", (e) => { const nm = (e.target as HTMLSelectElement).value; if (nm) { applyPreset(activeId, nm); status(`VR preset ${nm}`); render(); } });
+    $("select.sl-vr-preset").addEventListener("change", (e) => { const nm = (e.target as HTMLSelectElement).value; if (nm) { applyPreset(activeId, nm); shiftLast = 0; render(); status(`VR preset ${nm}`); } });
+    const shiftEl = $<HTMLInputElement>("input.sl-vr-shift");
+    shiftEl.addEventListener("input", (e) => { const v = Number((e.target as HTMLInputElement).value); shiftTf(v - shiftLast); shiftLast = v; ($(".sl-vr-shiftv") as HTMLElement).textContent = String(v); });
     const cv = $<HTMLCanvasElement>("canvas.sl-tf-canvas"); drawCurve(cv); mountCanvasEditing(cv);
   }
 

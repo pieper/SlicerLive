@@ -1,7 +1,7 @@
 // T3 (W3): the Volume Rendering panel / TF editor. Load MRHead, enable VR, apply a CT preset (writes the
 // transferFunction colorStops + scalarOpacity that VolumeRenderingDisplayableManager consumes), edit the
 // opacity stops, and confirm the 3D view keeps rendering. Standalone page. Needs static server + Chrome.
-import { assert, assertEquals } from "jsr:@std/assert@1";
+import { assert, assertAlmostEquals, assertEquals } from "jsr:@std/assert@1";
 import { CDP } from "./cdp.ts";
 import { waitReady } from "./ready.ts";
 
@@ -46,5 +46,25 @@ Deno.test({ name: "tf editor: enable VR, apply preset, edit opacity", ignore: !c
     // turn VR off
     const off = await cdp.eval<{ visible: boolean }>(`window.__setVolumeRendering(${JSON.stringify(id)}, false); await window.__slicerlive.idle(); return window.__vrState(${JSON.stringify(id)});`);
     assertEquals(off.visible, false, "VR off");
+  } finally { await cdp.closeTab(); }
+} });
+
+Deno.test({ name: "tf editor: Shift moves all transfer-function points as a unit (fix #2)", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
+  const cdp = await CDP.openTab(STANDALONE);
+  try {
+    await waitReady(cdp, 60000);
+    const id = await cdp.eval<string>(`await window.__loadSample("MRHead"); return window.__volumeList()[0].imageId;`);
+    await cdp.eval<void>(`window.__setVrPreset(${JSON.stringify(id)}, "CT-Bone"); await window.__slicerlive.idle();`);
+    const before = await cdp.evalJson<{ colorStops: { value: number }[]; scalarOpacity: { value: number }[] }>(`window.__vrState(${JSON.stringify(id)})`);
+    // shift by +150
+    await cdp.eval<void>(`window.__shiftTf(150); await window.__slicerlive.idle();`);
+    const after = await cdp.evalJson<{ colorStops: { value: number }[]; scalarOpacity: { value: number }[] }>(`window.__vrState(${JSON.stringify(id)})`);
+    // every colour + opacity point moved by exactly +150
+    for (let i = 0; i < before.colorStops.length; i++) assertAlmostEquals(after.colorStops[i].value, before.colorStops[i].value + 150, 1e-6, `colorStop ${i}`);
+    for (let i = 0; i < before.scalarOpacity.length; i++) assertAlmostEquals(after.scalarOpacity[i].value, before.scalarOpacity[i].value + 150, 1e-6, `opacityStop ${i}`);
+    // the shape is preserved (spacing between points unchanged)
+    const gap0 = before.colorStops[1].value - before.colorStops[0].value;
+    const gap1 = after.colorStops[1].value - after.colorStops[0].value;
+    assertAlmostEquals(gap0, gap1, 1e-6, "TF shape preserved under shift");
   } finally { await cdp.closeTab(); }
 } });
