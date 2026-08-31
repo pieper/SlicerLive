@@ -40,6 +40,9 @@ async function main() {
   const wsUrl = withToken(p.get("ws") ?? `${secure ? "wss" : "ws"}://${host}:2132/`);
   const httpBase = p.get("http") ?? `${secure ? "https" : "http"}://${host}:2131/mrson/`;
   const nativeMenus = p.has("nativeMenus");
+  // Native-first: SlicerLive runs STANDALONE by default. Connect to a ModuleServer peer only when explicitly
+  // asked (?ws=, ?peers=, ?host=, or ?connect) so a stray ModuleServer never hijacks the native session.
+  const wantPeer = p.has("ws") || p.has("peers") || p.has("host") || p.has("connect") || p.has("gui");
 
   const gpu = await initDevice();
   // Two modes. Default = the NATIVE shell (SlicerLive is the app; a ModuleServer, if any, is just a peer).
@@ -60,7 +63,7 @@ async function main() {
   const peers = (p.get("peers") ?? "").split(",").map((x) => x.trim()).filter(Boolean);   // extra ModuleServers (ws urls)
   let hook: SlicerLiveHook | null = null;
   const store = new LocalBlobStore();
-  const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, peers, onStatus: status, onFrame: () => hook?.frameRendered(),
+  const views = mountLiveViews(gpu, viewsEl, { httpBase, wsUrl, peers, connect: wantPeer, onStatus: status, onFrame: () => hook?.frameRendered(),
     onNativePaint: (segId, segment, points, mode, radiusMm, sphere, normal) => { void paintStroke(views.live, segId, points, { segment, radiusMm, mode, sphere, normal }); },
     onNativePaintCommit: (segId) => { void commitPaint(views.live, store, segId).then((v) => { if (v >= 0) status(`painted: ${v} voxels`); }); } });
   // window.__slicerlive: numeric state + settle detection + in-page self-tests (tiers T3/T5, docs/HARNESS.md)
@@ -188,7 +191,7 @@ async function main() {
       for (const c of comps) views.live.write(others.length ? { op: "patch", id: c.id, path: "#/refs/background", value: [others[others.length - 1].id] } : { op: "del", id: c.id });
       for (const n of r.nodes) views.live.write({ op: "del", id: n.id });
     });
-    sh.setStatus("SlicerLive — native shell");
+    sh.setStatus(wantPeer ? "SlicerLive — connected to ModuleServer" : "SlicerLive — native shell (standalone)");
     // theme self-tests: the dark theme keeps readable contrast and Slicer's view colours
     const rgb = (c: string) => { const m = c.match(/\d+(\.\d+)?/g) ?? []; return [Number(m[0]) || 0, Number(m[1]) || 0, Number(m[2]) || 0]; };
     const lum = ([r, g, b]: number[]) => { const f = (v: number) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
