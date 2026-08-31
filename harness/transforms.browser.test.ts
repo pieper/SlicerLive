@@ -37,3 +37,22 @@ Deno.test({ name: "transforms: apply + translate + harden a volume", ignore: !ch
     assert(await cdp.evalJson<number>(`window.__slicerlive.frameCount`) > 0, "frames rendered");
   } finally { await cdp.closeTab(); }
 } });
+
+Deno.test({ name: "transforms: adjusting the transform moves the volume in the slice (live, not hardened)", ignore: !chrome, sanitizeResources: false, sanitizeOps: false, async fn() {
+  const cdp = await CDP.openTab(STANDALONE);
+  try {
+    await waitReady(cdp, 60000);
+    const img = await cdp.eval<string>(`await window.__loadSample("MRHead"); await window.__slicerlive.idle(); return window.__volumeList()[0].imageId;`);
+    // sagittal (Yellow) normal is R, so an R-translation shifts its offset range by that amount
+    await cdp.waitForValue<number | null>(`window.__views.sliceOffsetRange("Yellow") ? window.__views.sliceOffsetRange("Yellow").min : null`, (v) => v !== null, 20000);
+    const before = await cdp.evalJson<number>(`window.__views.sliceOffsetRange("Yellow").min`);
+    const tid = await cdp.eval<string>(`const id = window.__createTransform(); window.__applyTransformTo(${JSON.stringify(img)}, id); return id;`);
+    await cdp.eval<void>(`window.__translateTransform(${JSON.stringify(tid)}, 40, 0, 0); await window.__slicerlive.idle();`);
+    const after = await cdp.evalJson<number>(`window.__views.sliceOffsetRange("Yellow").min`);
+    assertAlmostEquals(after - before, 40, 1e-2, `sagittal field shifted by the R-translation (${before} -> ${after})`);
+    // and it tracks continuously as the transform changes
+    await cdp.eval<void>(`window.__translateTransform(${JSON.stringify(tid)}, -30, 0, 0); await window.__slicerlive.idle();`);
+    const after2 = await cdp.evalJson<number>(`window.__views.sliceOffsetRange("Yellow").min`);
+    assertAlmostEquals(after2 - before, 10, 1e-2, "field tracks a second adjustment");
+  } finally { await cdp.closeTab(); }
+} });

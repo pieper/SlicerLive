@@ -13,7 +13,7 @@ import { CapsuleField, type Segment as LineSegment } from "./capsule-field.ts";
 import { RoiBoxField } from "./roi-box-field.ts";
 import { ColorizeBaker } from "./bake.ts";
 import { fetchZarrVolume, getBlobFetch, type ZarrDesc, type ZarrVolume } from "./zarr.ts";
-import { rowMul, worldForNode } from "../logic/transforms.ts";
+import { IDENTITY4, rowMul, worldForNode } from "../logic/transforms.ts";
 import { lutFromTransferFunctions } from "./scene-volume.ts";
 import type { MrsonNode } from "./mrson.ts";
 import { applyOp, type ApplyResult, type Op } from "./liveops.ts";
@@ -943,7 +943,7 @@ export class VolumeLayersDisplayableManager implements DisplayableManager {
  *  and includes it in the 3D view only when a volume-rendering display is VISIBLE
  *  (view.showVolume3D). TF changes re-LUT in place; window/level updates the slice display. */
 export class VolumeRenderingDisplayableManager implements DisplayableManager {
-  interestedTypes = ["image", "volumeRenderingDisplay", "scalarVolumeDisplay", "transferFunction"];
+  interestedTypes = ["image", "volumeRenderingDisplay", "scalarVolumeDisplay", "transferFunction", "transform"];
   private image?: MrsonNode;
   private tf?: MrsonNode;
   private scalarDisp?: MrsonNode;
@@ -963,11 +963,12 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     if (node.type === "image") {
       if (!this.image) this.image = node;
       else if (node.id === this.image.id) {
-        const moved = this.field && JSON.stringify(this.image.ijkToRAS) !== JSON.stringify(node.ijkToRAS);
+        const prev = this.effSig;
         this.image = node;
-        if (moved) { this.field!.setIjkToRAS(node.ijkToRAS as number[]); this.view?.setVolumeField(this.field!, this.wl()); this.view?.redraw(); }
+        this.replaceGeometry(scene, prev);
       }
     }
+    else if (node.type === "transform") { if (this.image) { const prev = this.effSig; this.replaceGeometry(scene, prev); } }
     else if (node.type === "volumeRenderingDisplay") { this.vrDisplayId = node.id; this.vrVisible = !!node.visible; }
     else if (node.type === "transferFunction") { this.tf = node; this.reLUT(); }
     else if (node.type === "scalarVolumeDisplay") {
@@ -976,7 +977,7 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
       const mine = ((this.image?.refs as Record<string, string[]> | undefined)?.display ?? []).includes(node.id);
       if (mine || (!this.image && !this.scalarDisp)) { this.scalarDisp = node; this.pushVolume(); }
     }
-    await this.ensureField();
+    await this.ensureField(scene);
     this.view?.showVolume3D(!!(this.field && this.vrVisible));
   }
   onEvent() {/* changes arrive as NodeAdded upserts, handled above */}
@@ -994,6 +995,19 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
     scene.view?.showVolume3D(false);
   }
 
+  private effSig = "";
+  /** world(transform chain) · base ijkToRAS for the tracked image. */
+  private effIjk(scene: LiveScene): number[] {
+    return this.image ? rowMul(worldForNode(this.image, scene.nodes), this.image.ijkToRAS as number[]) : IDENTITY4.slice();
+  }
+  /** Re-place the 3D field if the effective geometry changed (base moved or a transform edited). */
+  private replaceGeometry(scene: LiveScene, prevSig: string) {
+    const eff = this.effIjk(scene); const sig = JSON.stringify(eff);
+    if (sig === prevSig) return;
+    this.effSig = sig;
+    if (this.field) { this.field.setIjkToRAS(eff); this.view?.setVolumeField(this.field, this.wl()); this.view?.redraw(); }
+  }
+
   private wl(): { win: number; lev: number } {
     const range = this.zv?.range ?? [0, 1];
     const win = (this.scalarDisp?.window as number) ?? (range[1] - range[0]);
@@ -1003,11 +1017,12 @@ export class VolumeRenderingDisplayableManager implements DisplayableManager {
   private pushVolume() { if (this.field) this.view?.setVolumeField(this.field, this.wl()); }
   private reLUT() { if (this.field && this.zv) { this.field.setLUT(this.buildLUT(this.zv.range)); this.view?.redraw(); } }
 
-  private async ensureField(): Promise<void> {
+  private async ensureField(scene: LiveScene): Promise<void> {
     if (this.field || this.building || !this.image?.zarr) return;
     this.building = true;
     if (!this.zv) this.zv = await fetchZarrVolume(this.blobBaseHref, this.image.zarr as ZarrDesc, this.onBytes);
-    const ijkToRAS = this.image.ijkToRAS as number[];
+    const ijkToRAS = rowMul(worldForNode(this.image, scene.nodes), this.image.ijkToRAS as number[]);   // apply the transform chain
+    this.effSig = JSON.stringify(ijkToRAS);
     this.field = new ImageField(this.dev, this.zv.data, this.zv.dims, [1, 1, 1], this.buildLUT(this.zv.range), { clim: this.zv.range, ijkToRAS, shade: [0.25, 0.75, 0.5, 24] });
     this.building = false;
     this.view?.setVolumeField(this.field, this.wl());   // slices reslice it now; 3D uses it when VR on
