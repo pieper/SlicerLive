@@ -56,12 +56,18 @@ Deno.test({ name: "paint: fast drag in disk mode leaves a continuous stroke, not
     const painted = await cdp.eval<number>(segVoxels(seg.segId));
     console.log(`  continuous stroke: ${painted} voxels`);
     // interpolation fills the whole swept line -> far more than a handful of disks
-    assert(painted > 1000, `stroke is continuous (${painted} voxels)`);
+    assert(painted > 500, `stroke is continuous (${painted} voxels; gappy baseline was ~87)`);
     // and it is ONE connected island (keep-largest keeps essentially all of it -> no gaps)
     await cdp.eval<void>(`await window.__applyEffect(${JSON.stringify(seg.segId)}, "islands", { segment: 1, islands: "keepLargest" });`);
     const largest = await cdp.eval<number>(segVoxels(seg.segId));
     console.log(`  largest island: ${largest} voxels`);
     assert(largest > painted * 0.9, `the stroke is a single connected island (${largest}/${painted})`);
+    // and it is PLANAR: on a rotated volume (MRHead axes are permuted) a 2D disk must stay ~one voxel thick
+    // along the axis aligned with the slice normal (fix: rotate voxel offsets through the direction cosines).
+    const b = (await cdp.evalJson<{ boundsIjk: number[] }>(`(await window.__segmentStats(${JSON.stringify(seg.segId)})).find(x=>x.labelValue===1)`)).boundsIjk;
+    const ext = [b[1] - b[0], b[3] - b[2], b[5] - b[4]];
+    console.log(`  disk voxel extents i/j/k: ${ext.join("/")}`);
+    assert(Math.min(...ext) <= 2, `disk is planar — thin (<=2 voxels) along the slice-normal axis, got extents ${ext.join("/")}`);
   } finally { await cdp.closeTab(); }
 } });
 

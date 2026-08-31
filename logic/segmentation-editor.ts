@@ -115,7 +115,7 @@ export async function computeStats(live: LiveScene, segId: string): Promise<Segm
 }
 // ── native paint/erase (W5): a resident CPU labelmap painted in-place during a stroke, re-uploaded on a
 //    throttle. Fast sphere/disk rasterization in voxel space; the display re-bakes when #/zarr is patched.
-interface PaintCache { labelmap: Uint8Array; dims: [number, number, number]; invIjk: number[]; spacing: Vec3; dirty: boolean; uploading: boolean; }
+interface PaintCache { labelmap: Uint8Array; dims: [number, number, number]; ijkToRAS: number[]; invIjk: number[]; spacing: Vec3; dirty: boolean; uploading: boolean; }
 const paintCaches = new Map<string, PaintCache>();
 
 async function paintCache(live: LiveScene, segId: string): Promise<PaintCache | null> {
@@ -124,7 +124,7 @@ async function paintCache(live: LiveScene, segId: string): Promise<PaintCache | 
   const lab = await fetchZarrVolumeNative(live.blobBase(), seg.zarr as ZarrDesc);
   const labelmap = lab.data instanceof Uint8Array ? lab.data : Uint8Array.from(lab.data as ArrayLike<number>);
   const ijk = seg.ijkToRAS as number[];
-  const c: PaintCache = { labelmap, dims: seg.dims as [number, number, number], invIjk: invertRowMajor(ijk), spacing: spacingFromIjkToRAS(ijk), dirty: false, uploading: false };
+  const c: PaintCache = { labelmap, dims: seg.dims as [number, number, number], ijkToRAS: ijk, invIjk: invertRowMajor(ijk), spacing: spacingFromIjkToRAS(ijk), dirty: false, uploading: false };
   paintCaches.set(segId, c);
   return c;
 }
@@ -144,7 +144,12 @@ export async function paintStroke(live: LiveScene, segId: string, points: Vec3[]
   const val = params.mode === "add" ? params.segment : 0;
   const ri = Math.ceil(r / (sx || 1)), rj = Math.ceil(r / (sy || 1)), rk = Math.ceil(r / (sz || 1));
   const n = params.normal;
-  const thick = n ? Math.abs(n[0] * sx) + Math.abs(n[1] * sy) + Math.abs(n[2] * sz) : 0;
+  const m = c.ijkToRAS;   // direction cosines: a voxel step (di,dj,dk) maps to a RAS offset via the 3x3 linear part
+  // disk half-thickness along the normal = the RAS extent of the volume axis MOST aligned with the slice normal
+  // (so a 2D brush is exactly one voxel thick in the volume plane parallel to the slice, whatever the axes are).
+  let halfThick = 0;
+  if (n) for (let a = 0; a < 3; a++) halfThick = Math.max(halfThick, Math.abs(m[a] * n[0] + m[4 + a] * n[1] + m[8 + a] * n[2]));
+  halfThick *= 0.5;
 
   const stamp = (p: Vec3) => {
     const ijk = applyRowMajor(c.invIjk, p);
@@ -152,9 +157,11 @@ export async function paintStroke(live: LiveScene, segId: string, points: Vec3[]
     for (let dk = -rk; dk <= rk; dk++) for (let dj = -rj; dj <= rj; dj++) for (let di = -ri; di <= ri; di++) {
       const i = ci + di, j = cj + dj, k = ck + dk;
       if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
-      const dx = di * sx, dy = dj * sy, dz = dk * sz;
-      if (dx * dx + dy * dy + dz * dz > r2) continue;
-      if (!params.sphere && n && Math.abs(dx * n[0] + dy * n[1] + dz * n[2]) > thick * 0.5) continue;   // one-voxel-thick disk in the slice plane
+      const rx = m[0] * di + m[1] * dj + m[2] * dk;   // RAS offset of this voxel from the stamp centre
+      const ry = m[4] * di + m[5] * dj + m[6] * dk;
+      const rz = m[8] * di + m[9] * dj + m[10] * dk;
+      if (rx * rx + ry * ry + rz * rz > r2) continue;                                        // sphere/disk radius (RAS mm)
+      if (!params.sphere && n && Math.abs(rx * n[0] + ry * n[1] + rz * n[2]) > halfThick) continue;   // one-voxel-thick, in the slice plane
       c.labelmap[k * nx * ny + j * nx + i] = val;
     }
   };
