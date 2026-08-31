@@ -692,8 +692,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     live.write({ op: "patch", id, path: "#/sliceToRAS", value: m });
     live.write({ op: "patch", id, path: "#/offset", value: mm });
     propagateLink(cell, ["SliceToRAS"]);                                          // linked same-orientation views follow
-    refreshSlicesIn3D();                                                          // hot-update the dropped slice in 3D
-    return true;
+    return true;   // the #/sliceToRAS upsert on the _changes feed hot-updates any dropped slice in 3D
   };
 
   // ── Slice Model / Drop-Slice (show a slice as a plane at its RAS location in 3D; hot-updates on scroll) ──
@@ -732,6 +731,13 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     for (const [cell, f] of sliceIn3D) { const c = cells.get(cell); const o = c ? slicePlaneOpts(c) : null; if (o) f.setPlane(o); }
     scene?.syncUniforms(); a3d.draw();
   };
+  // A dropped slice is just another VIEW of the same nodes, so — like a Slicer displayable manager — it
+  // re-derives from GRANULAR LiveScene changes rather than from hand-placed calls at each mutation site.
+  // Everything a plane depends on (W/L + LUT on the display node, the background ref on the composite, the
+  // volume geometry, a transform, the slice node's offset/orientation) arrives as a node upsert on the
+  // _changes feed and hot-updates the plane. This is why W/L now reaches the plane with no extra wiring.
+  const SLICE3D_DEPS = new Set(["scalarVolumeDisplay", "labelMapDisplay", "sliceComposite", "image", "transform", "colorTable", "view"]);
+  live.subscribe((ch) => { if (sliceIn3D.size && (ch.kind === "reset" || (ch.type != null && SLICE3D_DEPS.has(ch.type)))) refreshSlicesIn3D(); });
 
   /** Reformat a native slice cell to a standard orientation through its current centre
    *  (vtkMRMLSliceNode::SetOrientation): rebuild the plane, update the cell's orientation so fit/offset math
@@ -747,8 +753,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     live.write({ op: "patch", id, path: "#/offset", value: center[0] * nrm[0] + center[1] * nrm[1] + center[2] * nrm[2] });
     if (c) { const bg = bgField(c); if (bg) { const [lo, hi] = bg.aabb(); const w = c.canvas.width || 1, h = c.canvas.height || 1; const [fx, fy] = fitFovToVolume(orientation, lo, hi, [], w, h); c.slice.setMirrorFrame(orientation, center, fx, fy); c.branched = false; } }
     propagateLink(cell, ["Orientation"]);
-    renderSlices();
-    refreshSlicesIn3D();
+    renderSlices();   // the slice-node upserts above hot-update any dropped slice in 3D via the _changes feed
     return true;
   };
 

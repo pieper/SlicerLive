@@ -33,6 +33,15 @@ Deno.test({ name: "slice model: drop a slice into 3D, hot-update on scroll, togg
     const afterScroll = await shot();
     assert(withSlice !== afterScroll, "dropped slice hot-updated in 3D as the slice offset changed");
 
+    // change window/level -> the dropped plane re-derives from the scalarVolumeDisplay node change on the
+    // _changes feed (granular event flow, not a hand-placed refresh). Regression guard for the W/L-not-syncing bug.
+    const imgId = await cdp.evalJson<string>(`(window.__savableNodes().find(n => n.type === "image") || {}).id`);
+    assert(imgId, "found the loaded image node");
+    await cdp.eval<void>(`window.__wlPreset(${JSON.stringify(imgId)}, "CT Bone"); await window.__slicerlive.idle();`);
+    await new Promise((r) => setTimeout(r, 400));
+    const afterWL = await shot();
+    assert(afterScroll !== afterWL, "dropped slice hot-updated in 3D when window/level changed");
+
     // toggle off
     await cdp.eval<void>(`document.querySelector('.sl-slice-bar[data-cell="Red"] .sl-slice-3d').click(); await window.__slicerlive.idle();`);
     assertEquals(await cdp.evalJson<number>(`window.__sliceIn3D().length`), 0, "dropped slice removed");
