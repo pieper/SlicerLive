@@ -1,7 +1,7 @@
 // T3 (#2): wheel stack-scroll steps by the spacing along the slice normal and keeps the native slice node in
 // sync (before: step() patched only #/offset, the DM re-pushed the stale sliceToRAS, and the plane snapped
 // back -> jitter, worst on MRHead's 1.3mm sagittal axis). Standalone. Needs static server + Chrome.
-import { assert, assertAlmostEquals } from "jsr:@std/assert@1";
+import { assertAlmostEquals } from "jsr:@std/assert@1";
 import { CDP } from "./cdp.ts";
 import { waitReady } from "./ready.ts";
 
