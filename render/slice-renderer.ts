@@ -527,14 +527,16 @@ export class SliceRenderer {
    *  plane's in-plane axes. The out-of-plane offset is applied separately via setPlane. */
   setMirrorFrame(orient: Orientation, centerRAS: Vec3, fovX: number, fovY: number) {
     const b = this.basisOf(orient);
-    const ux = this.extentAlong(b.uDir), vx = this.extentAlong(b.vDir);
-    const uExt = ux.hi - ux.lo, vExt = vx.hi - vx.lo;
-    const zoom = Math.max(uExt / Math.max(fovX, 1e-6), vExt / Math.max(fovY, 1e-6));
+    // invert the SAME fit the interactive display uses (fitUV), so a zoom round-trips without snapping. The
+    // node's fovX/fovY carries the aspect (fovX/fovY == uS0/vS0), so recover uS0 at that aspect and divide.
+    const aspect = fovX / Math.max(fovY, 1e-6);
+    const { uS0 } = this.fitUV(orient, aspect);
+    const zoom = Math.max(1e-3, uS0 / Math.max(fovX, 1e-6));
     const volC: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
     const d: Vec3 = [centerRAS[0] - volC[0], centerRAS[1] - volC[1], centerRAS[2] - volC[2]];
     const panU = d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2];
     const panV = d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2];
-    this.viewState[orient] = { panU, panV, zoom: Math.max(1e-3, zoom) };
+    this.viewState[orient] = { panU, panV, zoom };
   }
 
   /** The current pan/zoom of a plane expressed the way Slicer's slice node stores it: in-plane centre
@@ -543,10 +545,8 @@ export class SliceRenderer {
   mirrorFrame(orient: Orientation, aspectWH: number): { centerRAS: Vec3; fovX: number; fovY: number } {
     const b = this.basisOf(orient);
     const st = this.viewState[orient];
-    const ux = this.extentAlong(b.uDir), vx = this.extentAlong(b.vDir);
-    const uExt = ux.hi - ux.lo, vExt = vx.hi - vx.lo;
-    const fit = Math.min(uExt, vExt) / st.zoom;                 // the smaller extent fills the smaller viewport side
-    const fovY = aspectWH >= 1 ? fit : fit / aspectWH, fovX = aspectWH >= 1 ? fit * aspectWH : fit;
+    const { uS0, vS0 } = this.fitUV(orient, aspectWH);          // the SAME base fit the display uses
+    const fovX = uS0 / st.zoom, fovY = vS0 / st.zoom;
     const volC: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
     const centerRAS: Vec3 = [
       volC[0] + b.uDir[0] * st.panU + b.vDir[0] * st.panV,

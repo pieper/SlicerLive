@@ -828,6 +828,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     __isLinked: () => [...live.nodes.values()].some((n) => n.type === "sliceComposite" && n.linkedControl),
     __sliceNode: (cell: string) => { const n = live.nodes.get(nativeSliceId(cell)); return n ? { orientation: n.orientation, offset: n.offset, sliceToRAS: n.sliceToRAS } : null; },
     __setSliceOffset: (cell: string, mm: number) => setSliceOffset(cell, mm),
+    __sliceZoom: (cell: string) => { const c = cells.get(cell); return c ? c.slice.zoom(c.orientKey) : null; },
     // Markups (W4): place mode, list, delete a control point, and read a node's measurements.
     __startPlace: (markupType: MarkupType, persistent = false) => startPlace(markupType, persistent),
     __endPlace: () => endPlace(),
