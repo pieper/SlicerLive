@@ -119,7 +119,7 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
   const camera = VtkCamera.slicerDefault();
   let scene: SceneRenderer | null = null;
   const fields3d = new Map<string, Field>();
-  let volumeField: ImageField | null = null, volumeShown3D = false, volumeReady = false;
+  let volumeField: ImageField | null = null, volumeShown3D = false;
   let clip: { lo: Vec3; hi: Vec3 } | null = null;
   let threeVisible = false;
   const sizeCanvas = (c: HTMLCanvasElement) => { c.width = Math.max(1, Math.round(c.clientWidth * dpr)); c.height = Math.max(1, Math.round(c.clientHeight * dpr)); };
@@ -376,7 +376,6 @@ export function mountLiveViews(gpu: Gpu, root: HTMLElement, cfg: { httpBase: str
     setMeshes(list) { meshes = list; if (scene) { scene.setMeshes(meshes); a3d.draw(); } else rebuild3d(); },
     setVolumeField(f, wl) {
       volumeField = f; legacyWL = wl;
-      volumeReady = !!f;
       renderSlices(); rebuild3d(); notifyBars();
     },
     showVolume3D(show) { volumeShown3D = show; rebuild3d(); },
