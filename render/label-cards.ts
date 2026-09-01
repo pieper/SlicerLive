@@ -238,7 +238,7 @@ export class CardOverlay {
     return { x: b.x - sz.w / 2 + bt.x + bt.w / 2, y: b.y - sz.h / 2 + bt.y + bt.h / 2 };
   }
 
-  render(view: GPUTextureView, camera: VtkCamera, vp: Viewport, dtSec: number): void {
+  render(view: GPUTextureView, camera: VtkCamera, vp: Viewport, dtSec: number, keepOuts?: { x: number; y: number; radius: number }[]): void {
     if (!this.cards.length) return;
     const anchors = this.cards.map((c) => camera.worldToDisplay(c.spec.anchorRAS, vp.w, vp.h));
     this.lastVisible = anchors.map((a) => a.depth > 0);
@@ -246,7 +246,7 @@ export class CardOverlay {
     const sizes = this.cards.map((c) => this.size(c));
     if (!this.seeded || this.bodies.length !== this.cards.length) { this.bodies = seedCards(anchorsPx, sizes); this.seeded = true; }
     else for (let i = 0; i < this.bodies.length; i++) { this.bodies[i].w = sizes[i].w; this.bodies[i].h = sizes[i].h; }
-    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec);
+    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, keepOuts ? { keepOuts } : undefined);
 
     const shape: number[] = [], text: number[] = [];
     const rect = (cx: number, cy: number, hw: number, hh: number, radius: number, border: number, fill: RGBA, brd: RGBA) => {

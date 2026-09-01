@@ -57,3 +57,24 @@ Deno.test("converges: total overlap decreases from the initial coincident state"
   const after = totalOverlap();
   assert(after < before * 0.02, `overlap collapsed ${before.toFixed(0)} -> ${after.toFixed(0)}`);
 });
+
+Deno.test("keep-out: each card hugs OUTSIDE its own segment and clears ALL segments", () => {
+  const VP2 = { w: 1200, h: 800 };
+  // three segment circles spread around the centre; card i belongs to keepOuts[i]
+  const kos = [{ x: 500, y: 400, radius: 90 }, { x: 720, y: 400, radius: 70 }, { x: 610, y: 560, radius: 60 }];
+  const anchors = kos.map((k) => ({ x: k.x, y: k.y }));
+  const sizes = anchors.map(() => ({ w: 150, h: 66 }));
+  const cards = seedCards(anchors, sizes);
+  for (let i = 0; i < 600; i++) layoutStep(cards, anchors, VP2, 1 / 60, { keepOuts: kos });
+  for (let i = 0; i < cards.length; i++) {
+    const c = cards[i], halfDiag = 0.5 * Math.hypot(c.w, c.h);
+    // clears EVERY segment circle (never obscures a rendering)
+    for (const k of kos) {
+      const d = Math.hypot(c.x - k.x, c.y - k.y);
+      assert(d >= k.radius + halfDiag - 3, `card ${i} clears segment @(${k.x},${k.y}) (d=${d.toFixed(0)} need>=${(k.radius + halfDiag).toFixed(0)})`);
+    }
+    // hugs its OWN segment: within a comfortable band just outside it
+    const own = kos[i], dOwn = Math.hypot(c.x - own.x, c.y - own.y);
+    assert(dOwn <= own.radius + halfDiag + 80, `card ${i} hugs its own segment (d=${dOwn.toFixed(0)})`);
+  }
+});

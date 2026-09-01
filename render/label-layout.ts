@@ -18,11 +18,15 @@ export interface LayoutOpts {
   maxSpeed?: number;         // clamp (css px / s)
   margin?: number;           // keep cards this far inside the viewport (css px)
   gap?: number;              // desired clear space between cards (css px)
-  standoff?: number;         // preferred distance of the card centre from its anchor (css px)
+  standoff?: number;         // preferred distance of the card centre from its anchor (css px) — no keep-out
+  keepOuts?: { x: number; y: number; radius: number }[];  // per-segment projected circles: card i hugs OUTSIDE keepOuts[i], and is pushed off ANY it overlaps
+  ringGap?: number;          // small gap so a card HUGS just outside its segment (css px)
+  keepOutForce?: number;     // outward push strength when a card intrudes on any segment
 }
 
-const DEFAULTS: Required<LayoutOpts> = {
-  anchorSpring: 18, repulsion: 90000, damping: 0.86, maxSpeed: 1600, margin: 8, gap: 10, standoff: 96,
+const DEFAULTS: Required<Omit<LayoutOpts, "keepOuts">> = {
+  anchorSpring: 26, repulsion: 90000, damping: 0.86, maxSpeed: 1600, margin: 8, gap: 10, standoff: 96,
+  ringGap: 14, keepOutForce: 40,
 };
 
 /** Deterministic initial placement: fan the cards out around their anchors on a fixed golden-angle
@@ -49,16 +53,39 @@ export function layoutStep(
   const n = cards.length;
   const fx = new Float64Array(n), fy = new Float64Array(n);
 
-  // Anchor spring — pull the card toward a point `standoff` px out from its anchor along the current
-  // card→anchor direction, so cards prefer to sit off the specimen (leaving the leader line visible)
-  // rather than directly on the pin. Falls back to straight-to-anchor when coincident.
+  // Anchor spring. With per-segment keep-out circles (each segment's projected bounds), pull card i to a
+  // point just OUTSIDE its own segment (keepOuts[i]) on the side AWAY from the rest of the anatomy — so the
+  // card HUGS its segment without covering it, leader line short. Without keep-outs, sit `standoff` off the
+  // pin. A separate push shoves a card off ANY segment circle it intrudes on (never obscure a rendering).
+  const kos = o.keepOuts;
+  const GA = 2.399963229728653;
+  let gx = 0, gy = 0;
+  if (kos && kos.length) { for (const k of kos) { gx += k.x; gy += k.y; } gx /= kos.length; gy /= kos.length; }
   for (let i = 0; i < n; i++) {
     const a = anchorsPx[i], c = cards[i];
-    const dx = c.x - a.x, dy = c.y - a.y;
-    const d = Math.hypot(dx, dy) || 1;
-    const tx = a.x + (dx / d) * o.standoff, ty = a.y + (dy / d) * o.standoff;
+    const halfDiag = 0.5 * Math.hypot(c.w, c.h);            // centre must clear a circle by this much
+    const own = kos && kos[i];
+    let tx: number, ty: number;
+    if (own) {
+      let dirx = own.x - gx, diry = own.y - gy;             // outward: away from the anatomy's overall centre
+      let dl = Math.hypot(dirx, diry);
+      if (dl < 1e-2) { dirx = Math.cos(i * GA); diry = Math.sin(i * GA); dl = 1; }   // lone/central segment: fan out
+      dirx /= dl; diry /= dl;
+      const R = own.radius + halfDiag + o.ringGap;          // hug: just outside the segment
+      tx = own.x + dirx * R; ty = own.y + diry * R;
+    } else {
+      const dx = c.x - a.x, dy = c.y - a.y, d = Math.hypot(dx, dy) || 1;
+      tx = a.x + (dx / d) * o.standoff; ty = a.y + (dy / d) * o.standoff;
+    }
     fx[i] += (tx - c.x) * o.anchorSpring;
     fy[i] += (ty - c.y) * o.anchorSpring;
+    // push the card off ANY segment circle it overlaps (don't obscure that rendering)
+    if (kos) for (const k of kos) {
+      let dx = c.x - k.x, dy = c.y - k.y; let d = Math.hypot(dx, dy);
+      if (d < 1e-3) { dx = Math.cos(i * GA); dy = Math.sin(i * GA); d = 1; }
+      const need = k.radius + halfDiag;
+      if (d < need) { const push = (need - d) * o.keepOutForce; fx[i] += (dx / d) * push; fy[i] += (dy / d) * push; }
+    }
   }
 
   // Card–card repulsion — push apart when their padded AABBs overlap, along the centre separation.

@@ -32,16 +32,18 @@ const MAX_CARDS = 12;
 const statusEl = document.getElementById("status") as HTMLElement | null;
 const setStatus = (t: string) => { if (statusEl) statusEl.textContent = t; };
 
-interface SegStat { centroidRAS: Vec3; voxels: number; volumeCc: number; hu?: { mean: number; std: number } }
+interface SegStat { centroidRAS: Vec3; voxels: number; volumeCc: number; hu?: { mean: number; std: number }; bboxLo: Vec3; bboxHi: Vec3 }
 /** Per-segment centroid (RAS), voxel count, volume (cc), and HU mean/std — one pass over the labelmap +
  *  CT scalars on the CT grid. `scalars` (HU) is optional (only CT). */
 function segStats(lab: Uint8Array, dims: [number, number, number], M: number[], scalars?: Int16Array | Float32Array): Map<number, SegStat> {
   const [nx, ny, nz] = dims;
-  const acc = new Map<number, { n: number; x: number; y: number; z: number; s: number; s2: number }>();
+  const acc = new Map<number, { n: number; x: number; y: number; z: number; s: number; s2: number; lo: Vec3; hi: Vec3 }>();
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
     const idx = (k * ny + j) * nx + i, v = lab[idx]; if (!v) continue;
-    let e = acc.get(v); if (!e) { e = { n: 0, x: 0, y: 0, z: 0, s: 0, s2: 0 }; acc.set(v, e); }
+    let e = acc.get(v); if (!e) { e = { n: 0, x: 0, y: 0, z: 0, s: 0, s2: 0, lo: [i, j, k] as Vec3, hi: [i, j, k] as Vec3 }; acc.set(v, e); }
     e.n++; e.x += i; e.y += j; e.z += k;
+    if (i < e.lo[0]) e.lo[0] = i; if (j < e.lo[1]) e.lo[1] = j; if (k < e.lo[2]) e.lo[2] = k;
+    if (i > e.hi[0]) e.hi[0] = i; if (j > e.hi[1]) e.hi[1] = j; if (k > e.hi[2]) e.hi[2] = k;
     if (scalars) { const hu = scalars[idx]; e.s += hu; e.s2 += hu * hu; }
   }
   // |det| of the 3x3 direction/scale block = voxel volume (mm^3)
@@ -50,7 +52,7 @@ function segStats(lab: Uint8Array, dims: [number, number, number], M: number[], 
   for (const [v, e] of acc) {
     const cx = e.x / e.n, cy = e.y / e.n, cz = e.z / e.n;
     const centroidRAS: Vec3 = [M[0] * cx + M[1] * cy + M[2] * cz + M[3], M[4] * cx + M[5] * cy + M[6] * cz + M[7], M[8] * cx + M[9] * cy + M[10] * cz + M[11]];
-    const st: SegStat = { centroidRAS, voxels: e.n, volumeCc: (e.n * voxMm3) / 1000 };
+    const st: SegStat = { centroidRAS, voxels: e.n, volumeCc: (e.n * voxMm3) / 1000, bboxLo: e.lo, bboxHi: e.hi };
     if (scalars) { const mean = e.s / e.n; st.hu = { mean, std: Math.sqrt(Math.max(0, e.s2 / e.n - mean * mean)) }; }
     out.set(v, st);
   }
@@ -93,11 +95,17 @@ async function main() {
   const stats = segStats(res.seg.lab, res.ct.dims, res.ct.ijkToRAS, isCT ? (res.ct.vol as Int16Array) : undefined);
   const term = res.seg.terminology ?? {};
   const chosen = [...sc.segments].sort((a, b) => b.voxels - a.voxels).slice(0, MAX_CARDS);
-  const specs: CardSpec[] = chosen.flatMap((s) => {
-    const st = stats.get(s.num); if (!st) return [];
-    return [{ anchorRAS: st.centroidRAS, id: s.num, title: s.name, subtitle: bodyText(term[s.num] as Term | undefined, s.name),
-      swatch: s.color, stat: { voxels: st.voxels, volumeCc: st.volumeCc, hu: st.hu } }];
-  });
+  const M = res.ct.ijkToRAS;
+  const cornerRAS = (i: number, j: number, k: number): Vec3 => [M[0] * i + M[1] * j + M[2] * k + M[3], M[4] * i + M[5] * j + M[6] * k + M[7], M[8] * i + M[9] * j + M[10] * k + M[11]];
+  const specs: CardSpec[] = [];
+  const geom: { corners: Vec3[] }[] = [];   // per-card RAS bbox corners (for the keep-out circle)
+  for (const s of chosen) {
+    const st = stats.get(s.num); if (!st) continue;
+    specs.push({ anchorRAS: st.centroidRAS, id: s.num, title: s.name, subtitle: bodyText(term[s.num] as Term | undefined, s.name),
+      swatch: s.color, stat: { voxels: st.voxels, volumeCc: st.volumeCc, hu: st.hu } });
+    const [lx, ly, lz] = st.bboxLo, [hx, hy, hz] = st.bboxHi;
+    geom.push({ corners: [[lx,ly,lz],[hx,ly,lz],[lx,hy,lz],[hx,hy,lz],[lx,ly,hz],[hx,ly,hz],[lx,hy,hz],[hx,hy,hz]].map(([i,j,k]) => cornerRAS(i, j, k)) });
+  }
 
   const dpr = globalThis.devicePixelRatio || 1;
   const font = buildFontAtlas({ sizePx: 44, spread: 6, fontFamily: "Helvetica, \"Helvetica Neue\", Arial, sans-serif" });
@@ -153,7 +161,14 @@ async function main() {
     const view = ctx.getCurrentTexture().createView({ format: srgb });
     sc.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
     sc.scene.renderToView(view, w, h);
-    overlay.render(view, camera, { w, h, dpr }, dt);
+    // per-segment projected keep-out circles: each card hugs just outside its own segment and never
+    // covers any segment (the anatomy renderings stay unobscured).
+    const keepOuts = geom.map((g, i) => {
+      const cc = camera.worldToDisplay(specs[i].anchorRAS as Vec3, w, h);
+      let r = 0; for (const c of g.corners) { const p = camera.worldToDisplay(c, w, h); if (p.depth > 0) r = Math.max(r, Math.hypot(p.x - cc.x, p.y - cc.y)); }
+      return { x: cc.x, y: cc.y, radius: r };
+    });
+    overlay.render(view, camera, { w, h, dpr }, dt, keepOuts);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
