@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SlicerLive — Label Cards (KiTS)</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d12; color: #dfe4ee; font: 13px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; overflow: hidden; }
+  #wrap { position: fixed; inset: 0; }
+  #c-threeD { width: 100%; height: 100%; display: block; touch-action: none; }
+  #status { position: fixed; left: 12px; top: 10px; padding: 4px 10px; background: rgba(0,0,0,0.45); border-radius: 6px; pointer-events: none; }
+  #title { position: fixed; right: 12px; top: 10px; opacity: 0.7; pointer-events: none; }
+</style>
+</head>
+<body>
+  <div id="wrap"><canvas id="c-threeD"></canvas></div>
+  <div id="status">starting…</div>
+  <div id="title">SlicerLive · label cards</div>
+  <script type="module" src="./cards.js"></script>
+</body>
+</html>

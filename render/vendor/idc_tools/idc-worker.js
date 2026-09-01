@@ -163,11 +163,26 @@ function buildLabelmap(ds, bits, ct) {
     const sPs = (shared.PixelMeasuresSequence?.[0]?.PixelSpacing || ct.ps).map(Number);
     const colW = sIop.slice(0, 3).map((v) => v * sPs[1]);
     const rowW = sIop.slice(3, 6).map((v) => v * sPs[0]);
-    const colors = [], names = {};
+    const colors = [], names = {}, terminology = {};
+    // one coded entry {scheme, value, meaning} from a DICOM code sequence's first item (or null)
+    const code = (seq) => {
+        const c = seq && seq[0];
+        if (!c) return null;
+        return { scheme: c.CodingSchemeDesignator || '', value: c.CodeValue || '', meaning: c.CodeMeaning || '' };
+    };
     for (const s of (ds.SegmentSequence || [])) {
         const rgb = s.RecommendedDisplayCIELabValue ? dcmjs.data.Colors.dicomlab2RGB(s.RecommendedDisplayCIELabValue) : [1, 1, 1];
-        colors.push([Number(s.SegmentNumber), rgb[0], rgb[1], rgb[2]]);
-        names[Number(s.SegmentNumber)] = s.SegmentLabel || ('Segment ' + s.SegmentNumber);
+        const num = Number(s.SegmentNumber);
+        colors.push([num, rgb[0], rgb[1], rgb[2]]);
+        names[num] = s.SegmentLabel || ('Segment ' + s.SegmentNumber);
+        // coded anatomical terminology (SegmentedPropertyType is the primary label; category/modifier/region add context)
+        const type = s.SegmentedPropertyTypeCodeSequence;
+        terminology[num] = {
+            category: code(s.SegmentedPropertyCategoryCodeSequence),
+            type: code(type),
+            typeModifier: code(type && type[0] && type[0].SegmentedPropertyTypeModifierCodeSequence),
+            region: code(s.AnatomicRegionSequence),
+        };
     }
     const seenSeg = new Set();
     const perFrame = ds.PerFrameFunctionalGroupsSequence || [];
@@ -199,7 +214,7 @@ function buildLabelmap(ds, bits, ct) {
         if (f % 200 === 0)
             prog(`SEG ${f}/${perFrame.length}`, 0.55 + 0.4 * f / perFrame.length);
     }
-    return { lab, colors, names };
+    return { lab, colors, names, terminology };
 }
 function invAffine(m) {
     const a = [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]], t = [m[3], m[7], m[11]];
@@ -280,7 +295,7 @@ self.onmessage = async (e) => {
                 parsed = { ds, bits: new Uint8Array(pd) };
             }
             const seg = buildLabelmap(parsed.ds, parsed.bits, ct);
-            post({ t: 'labelmap', lab: seg.lab, colors: seg.colors, names: seg.names }, [seg.lab.buffer]);
+            post({ t: 'labelmap', lab: seg.lab, colors: seg.colors, names: seg.names, terminology: seg.terminology }, [seg.lab.buffer]);
         }
         post({ t: 'alldone' });
     }

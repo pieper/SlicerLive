@@ -42,7 +42,7 @@ function runWorker(ctKeys, segKeys, ctBucket, segBucket, modality, handlers, opt
                     break;
                 }
                 case 'labelmap': {
-                    seg = { lab: new Uint8Array(m.lab), colors: m.colors, names: m.names };
+                    seg = { lab: new Uint8Array(m.lab), colors: m.colors, names: m.names, terminology: m.terminology };
                     chain = chain.then(() => handlers.onLabelmap?.(seg)).catch((err) => console.error('[idc_tools] onLabelmap', err));
                     break;
                 }

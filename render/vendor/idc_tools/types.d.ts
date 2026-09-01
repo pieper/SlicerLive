@@ -20,6 +20,15 @@ export interface SegLabelmap {
     /** [segmentNumber, r, g, b] with r,g,b in 0..1 */
     colors: [number, number, number, number][];
     names: Record<number, string>;
+    /** per-segment coded terminology (DICOM SEG SegmentedProperty* / AnatomicRegion), keyed by SegmentNumber */
+    terminology?: Record<number, SegmentTerminology>;
+}
+export interface CodedEntry { scheme: string; value: string; meaning: string }
+export interface SegmentTerminology {
+    category: CodedEntry | null;
+    type: CodedEntry | null;
+    typeModifier: CodedEntry | null;
+    region: CodedEntry | null;
 }
 /** One spinnable IDC series pair (compact keys match segroulette.json). */
 export interface SeriesEntry {
