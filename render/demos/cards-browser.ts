@@ -32,19 +32,27 @@ const MAX_CARDS = 12;
 const statusEl = document.getElementById("status") as HTMLElement | null;
 const setStatus = (t: string) => { if (statusEl) statusEl.textContent = t; };
 
-/** Per-segment centroid in RAS, from the labelmap on its own (CT) grid. */
-function centroids(lab: Uint8Array, dims: [number, number, number], M: number[]): Map<number, Vec3> {
+interface SegStat { centroidRAS: Vec3; voxels: number; volumeCc: number; hu?: { mean: number; std: number } }
+/** Per-segment centroid (RAS), voxel count, volume (cc), and HU mean/std — one pass over the labelmap +
+ *  CT scalars on the CT grid. `scalars` (HU) is optional (only CT). */
+function segStats(lab: Uint8Array, dims: [number, number, number], M: number[], scalars?: Int16Array | Float32Array): Map<number, SegStat> {
   const [nx, ny, nz] = dims;
-  const acc = new Map<number, { n: number; x: number; y: number; z: number }>();
+  const acc = new Map<number, { n: number; x: number; y: number; z: number; s: number; s2: number }>();
   for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
-    const v = lab[(k * ny + j) * nx + i]; if (!v) continue;
-    let e = acc.get(v); if (!e) { e = { n: 0, x: 0, y: 0, z: 0 }; acc.set(v, e); }
+    const idx = (k * ny + j) * nx + i, v = lab[idx]; if (!v) continue;
+    let e = acc.get(v); if (!e) { e = { n: 0, x: 0, y: 0, z: 0, s: 0, s2: 0 }; acc.set(v, e); }
     e.n++; e.x += i; e.y += j; e.z += k;
+    if (scalars) { const hu = scalars[idx]; e.s += hu; e.s2 += hu * hu; }
   }
-  const out = new Map<number, Vec3>();
+  // |det| of the 3x3 direction/scale block = voxel volume (mm^3)
+  const voxMm3 = Math.abs(M[0] * (M[5] * M[10] - M[6] * M[9]) - M[1] * (M[4] * M[10] - M[6] * M[8]) + M[2] * (M[4] * M[9] - M[5] * M[8]));
+  const out = new Map<number, SegStat>();
   for (const [v, e] of acc) {
     const cx = e.x / e.n, cy = e.y / e.n, cz = e.z / e.n;
-    out.set(v, [M[0] * cx + M[1] * cy + M[2] * cz + M[3], M[4] * cx + M[5] * cy + M[6] * cz + M[7], M[8] * cx + M[9] * cy + M[10] * cz + M[11]]);
+    const centroidRAS: Vec3 = [M[0] * cx + M[1] * cy + M[2] * cz + M[3], M[4] * cx + M[5] * cy + M[6] * cz + M[7], M[8] * cx + M[9] * cy + M[10] * cz + M[11]];
+    const st: SegStat = { centroidRAS, voxels: e.n, volumeCc: (e.n * voxMm3) / 1000 };
+    if (scalars) { const mean = e.s / e.n; st.hu = { mean, std: Math.sqrt(Math.max(0, e.s2 / e.n - mean * mean)) }; }
+    out.set(v, st);
   }
   return out;
 }
@@ -80,25 +88,60 @@ async function main() {
   const sc: SegrouletteScene = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
   sc.setVolumeOpacity?.(0.0);   // show the segmentation surfaces cleanly (no volume haze) for the PoC
 
-  // per-segment RAS anchor (centroid), and the ≤12 largest segments as cards
-  const cen = centroids(res.seg.lab, res.ct.dims, res.ct.ijkToRAS);
+  // per-segment anchor + stats; the <=12 largest segments become cards
+  const isCT = (res.ct.modality ?? "CT") === "CT";
+  const stats = segStats(res.seg.lab, res.ct.dims, res.ct.ijkToRAS, isCT ? (res.ct.vol as Int16Array) : undefined);
   const term = res.seg.terminology ?? {};
   const chosen = [...sc.segments].sort((a, b) => b.voxels - a.voxels).slice(0, MAX_CARDS);
   const specs: CardSpec[] = chosen.flatMap((s) => {
-    const a = cen.get(s.num); if (!a) return [];
-    return [{ anchorRAS: a, title: s.name, body: bodyText(term[s.num] as Term | undefined, s.name), accent: s.color }];
+    const st = stats.get(s.num); if (!st) return [];
+    return [{ anchorRAS: st.centroidRAS, id: s.num, title: s.name, subtitle: bodyText(term[s.num] as Term | undefined, s.name),
+      swatch: s.color, stat: { voxels: st.voxels, volumeCc: st.volumeCc, hu: st.hu } }];
   });
 
   const dpr = globalThis.devicePixelRatio || 1;
-  const font = buildFontAtlas({ sizePx: 44, spread: 6 });
+  const font = buildFontAtlas({ sizePx: 44, spread: 6, fontFamily: "Helvetica, \"Helvetica Neue\", Arial, sans-serif" });
   const overlay = new CardOverlay(gpu, srgb, font);
   overlay.setCards(specs, dpr);
-  // test/introspection hook: what cards were built (a screenshot is the pixel ground truth for rendering)
-  (globalThis as unknown as { __cards?: unknown }).__cards = { count: specs.length, titles: specs.map((s) => s.title), bodies: specs.map((s) => s.body ?? null) };
-  setStatus(`${specs.length} segment${specs.length === 1 ? "" : "s"} — drag to orbit`);
+
+  // per-segment 3D opacity actions driven by the card buttons
+  const applyAction = (id: number, action: "isolate" | "hide" | "reset") => {
+    if (action === "reset") { for (const s of sc.segments) sc.setSegmentOpacity(s.num, 1); }
+    else if (action === "hide") { sc.setSegmentOpacity(id, 0); }
+    else if (action === "isolate") { for (const s of sc.segments) sc.setSegmentOpacity(s.num, s.num === id ? 1 : 0.4); }
+  };
+
+  // test/introspection hook (device-px coords). click() exercises the real hitTest path.
+  (globalThis as unknown as { __cards?: unknown }).__cards = {
+    count: specs.length, titles: specs.map((s) => s.title), bodies: specs.map((s) => s.subtitle ?? null),
+    stats: specs.map((s) => s.stat),
+    toggle: (i: number) => overlay.toggle(i),
+    act: (i: number, a: "isolate" | "hide" | "reset") => applyAction(specs[i].id!, a),
+    cardCenter: (i: number) => overlay.cardCenter(i),
+    buttonCenter: (i: number, part: "isolate" | "hide" | "reset") => overlay.buttonCenter(i, part),
+    click(x: number, y: number) { const h = overlay.hitTest(x, y); if (!h) return null; if (h.action === "toggle") overlay.toggle(h.index); else applyAction(specs[h.index].id!, h.action); return h; },
+  };
+  setStatus(`${specs.length} segment${specs.length === 1 ? "" : "s"} — click a card for details; drag to orbit`);
 
   const camera = framedCamera(sc.center, sc.radius);
   attachCameraControls(canvas, camera, { onChange: () => {/* continuous loop redraws */} });
+
+  // Card interaction: a click on a card flips it / triggers a back-face button; a drag orbits (camera).
+  // Capture phase + stopPropagation so a click that lands on a card never starts a camera orbit.
+  const dprPx = (e: PointerEvent) => { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * dpr, y: (e.clientY - r.top) * dpr }; };
+  let down: { x: number; y: number; hit: boolean } | null = null;
+  canvas.addEventListener("pointerdown", (e) => {
+    const p = dprPx(e);
+    if (overlay.hitTest(p.x, p.y)) { down = { x: e.clientX, y: e.clientY, hit: true }; e.stopPropagation(); canvas.setPointerCapture(e.pointerId); }
+    else down = { x: e.clientX, y: e.clientY, hit: false };
+  }, true);
+  canvas.addEventListener("pointerup", (e) => {
+    if (down?.hit && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) {
+      const p = dprPx(e); const h = overlay.hitTest(p.x, p.y);
+      if (h) { if (h.action === "toggle") overlay.toggle(h.index); else applyAction(specs[h.index].id!, h.action); }
+    }
+    down = null;
+  }, true);
 
   const resize = () => { canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr)); canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr)); };
   resize(); addEventListener("resize", resize);
