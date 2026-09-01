@@ -16,6 +16,8 @@ import { attachDoubleClick, attachViewGrid } from "./view-grid.ts";
 import { attachWidgetControls } from "./widget-control.ts";
 import type { Box, HandleMeta } from "./roi-widget.ts";
 import { mountAdaptive3d } from "./accum-loop.ts";
+import { buildFontAtlas } from "../sdf-text.ts";
+import { mountSegmentCards } from "../segment-cards.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
 import { installIdcInfo } from "./idc-info.ts";
 import { createMosaic } from "./mosaic.ts";
@@ -79,15 +81,34 @@ async function main() {
   // frames (coalesced to display rate); settling converges to a supersampled AA image. Slices are
   // cheap 2D, on-demand. `draw3d()` kicks the loop; onFrame keeps the crosshair overlay in sync.
   let xhair: Crosshair4up | null = null;
+  const dpr3 = Math.min(2, globalThis.devicePixelRatio || 1);
+  const cardFont = buildFontAtlas({ sizePx: 44, spread: 6, fontFamily: "Helvetica, \"Helvetica Neue\", Arial, sans-serif" });
+  let cardDt = performance.now();
   const a3d = mountAdaptive3d({
     scene: () => rs?.scene ?? null,
     view: () => cx.threeD.getCurrentTexture().createView({ format: srgb }),
     size: () => ({ w: cv.threeD.width, h: cv.threeD.height }),
     setCamera: (sc, w, h) => sc.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
     gpu,
-    onFrame: () => xhair?.redraw(),
+    onFrame: () => {
+      xhair?.redraw();
+      const now = performance.now(), dt = (now - cardDt) / 1000; cardDt = now;
+      const moving = segCards.draw(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height, dpr3, dt);
+      if (moving) a3d.draw();   // keep the loop alive while the cards are still gliding
+    },
   });
   const draw3d = () => a3d.draw();
+  // Segment label cards over the 3D view (name + terminology; click to expand stats + Isolate/Hide/Reset)
+  const segCards = mountSegmentCards(gpu, srgb, cardFont, cv.threeD, camera, {
+    apply: (id, action) => {
+      if (!rs) return;
+      if (action === "reset") for (const s of rs.segments) rs.setSegmentOpacity(s.num, 1);
+      else if (action === "hide") rs.setSegmentOpacity(id, 0);
+      else for (const s of rs.segments) rs.setSegmentOpacity(s.num, s.num === id ? 1 : 0.4);
+      redrawSlices(); draw3d();
+    },
+    redraw: () => draw3d(),
+  });
   const drawAll = () => { for (const p of planes) drawSlice(p); draw3d(); xhair?.redraw(); };
 
   // SHARED shift-move crosshair pick — same one-call mount every MPR demo uses. Getters keep it
@@ -184,7 +205,7 @@ async function main() {
 
   async function spin() {
     spinBtn.disabled = true;
-    mosaic.reset();
+    mosaic.reset(); segCards.clear();
     status(SEG_PARAM ? "loading the requested SEG series…" : COL_PARAM ? `spinning within ${COL_PARAM}…` : "spinning… picking a random IDC series");
     try {
       const res: LoadResult = await pickAndLoad();
@@ -204,6 +225,7 @@ async function main() {
       showMeta(res.entry, rs);
       const d3 = document.querySelector(".lab.d3");
       if (d3) d3.textContent = rs.mode === "sdf" ? "3D · SDF surface" : "3D · volume";
+      segCards.setScene(res.ct, res.seg ?? null, rs.segments);
       resize();
       mosaic.done();   // scene is up → fade out the download mosaic
       status(`${res.entry?.col ?? "IDC"} · ${res.entry?.m ?? ""} · ${rs.segments.length} segment${rs.segments.length === 1 ? "" : "s"} · scroll a slice, drag 3D to orbit · Spin for another`);

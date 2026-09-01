@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SlicerLive — SEGRoulette</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: #000; color: #d8d8e0; font-family: -apple-system, system-ui, sans-serif; display: flex; flex-direction: column; }
+  header { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; padding: 7px 14px 7px 54px; border-bottom: 1px solid #23232f; background: #0e0e16; }
+  h1 { margin: 0; font-size: 15px; white-space: nowrap; }
+  .badge { display: inline-block; font-size: 10px; color: #04121c; background: linear-gradient(180deg, #9fe9ff, #54c6f0);
+           font-weight: 700; border-radius: 5px; padding: 1px 6px; vertical-align: middle; margin-left: 4px; }
+  a { color: #7fa8e0; }
+  button#spin { font: 600 13px -apple-system, system-ui, sans-serif; color: #04121c; cursor: pointer; white-space: nowrap;
+    background: linear-gradient(180deg, #9fe9ff, #54c6f0); border: 0; border-radius: 7px; padding: 6px 13px; }
+  button#spin:disabled { opacity: .5; cursor: default; }
+  #info { font-size: 12px; line-height: 1.35; flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #info .col { font-weight: 650; text-transform: uppercase; letter-spacing: .3px; }
+  #info .mod { font-weight: 600; color: #9fe9ff; margin: 0 6px; }
+  #info .sd { opacity: .75; margin-left: 6px; }
+  #info .n { opacity: .6; margin-left: 6px; }
+  .sub { font-size: 11px; opacity: .6; white-space: nowrap; }
+  /* the 4-up IS the page */
+  main { flex: 1 1 auto; min-height: 0; padding: 4px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 4px; width: 100%; height: 100%; }
+  .cell { position: relative; min-width: 0; min-height: 0; }
+  .cell canvas { width: 100%; height: 100%; display: block; border-radius: 5px; background: #000; touch-action: none; }
+  .cell .lab { position: absolute; top: 6px; left: 8px; font-size: 11px; font-weight: 700; letter-spacing: .3px; opacity: .9; pointer-events: none; }
+  .grid.has-max > .cell { display: none; }
+  .grid.has-max > .cell.max { display: block; grid-area: 1 / 1 / -1 / -1; }
+  #c-axial, #c-coronal, #c-sagittal { cursor: ns-resize; } #c-threeD { cursor: grab; }
+  .lab.red { color: #f05a5a; } .lab.green { color: #5ad07a; } .lab.yellow { color: #e8c85a; } .lab.d3 { color: #9fe9ff; }
+  #status { position: fixed; bottom: 6px; left: 10px; font-size: 11px; color: #9fb3d0; font-family: ui-monospace, monospace; pointer-events: none; text-shadow: 0 0 3px #000; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SEGRoulette<span class="badge">WebGPU</span></h1>
+  <button id="spin">🎲 Spin</button>
+  <span id="details-host"></span>
+  <div id="info"></div>
+  <span class="sub">scroll a slice · right-drag zoom · double-click maximize · drag 3D to orbit ·
+    <a href="https://github.com/pieper/SlicerLive" target="_blank">SlicerLive</a></span>
+</header>
+<main>
+  <div class="grid" id="grid">
+    <div class="cell" data-cell="axial"><span class="lab red">AXIAL</span><canvas id="c-axial"></canvas></div>
+    <div class="cell" data-cell="threeD"><span class="lab d3" id="lab-threeD">3D · SegmentField iso</span><canvas id="c-threeD"></canvas></div>
+    <div class="cell" data-cell="coronal"><span class="lab green">CORONAL</span><canvas id="c-coronal"></canvas></div>
+    <div class="cell" data-cell="sagittal"><span class="lab yellow">SAGITTAL</span><canvas id="c-sagittal"></canvas></div>
+  </div>
+</main>
+<div id="status">loading…</div>
+<script type="module" src="./segroulette.js"></script>
+</body>
+</html>
