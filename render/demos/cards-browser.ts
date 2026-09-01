@@ -13,6 +13,7 @@
 import { initDevice } from "../device.ts";
 import { buildSegrouletteScene, type SegrouletteScene } from "./segroulette-scene.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
+import { mountAdaptive3d } from "./accum-loop.ts";
 import { buildFontAtlas } from "../sdf-text.ts";
 import { type CardSpec, CardOverlay } from "../label-cards.ts";
 import { loadSeries } from "../vendor/idc_tools/index.js";
@@ -132,7 +133,7 @@ async function main() {
   setStatus(`${specs.length} segment${specs.length === 1 ? "" : "s"} — click a card for details; drag to orbit`);
 
   const camera = framedCamera(sc.center, sc.radius);
-  attachCameraControls(canvas, camera, { onChange: () => {/* continuous loop redraws */} });
+  attachCameraControls(canvas, camera, { onChange: () => a3d.draw() });
 
   // Card interaction: a click on a card flips it / triggers a back-face button; a drag orbits (camera).
   // Capture phase + stopPropagation so a click that lands on a card never starts a camera orbit.
@@ -146,32 +147,60 @@ async function main() {
   canvas.addEventListener("pointerup", (e) => {
     if (down?.hit && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) {
       const p = dprPx(e); const h = overlay.hitTest(p.x, p.y);
-      if (h) { if (h.action === "toggle") overlay.toggle(h.index); else applyAction(specs[h.index].id!, h.action); }
+      if (h) { if (h.action === "toggle") overlay.toggle(h.index); else applyAction(specs[h.index].id!, h.action); a3d.draw(); }
     }
     down = null;
   }, true);
 
   const resize = () => { canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr)); canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr)); };
-  resize(); addEventListener("resize", resize);
+  resize(); addEventListener("resize", () => { resize(); a3d.draw(); });
 
-  let last = performance.now();
-  const frame = () => {
-    const now = performance.now(), dt = (now - last) / 1000; last = now;
+  // rAF-independent profiler: render N frames back-to-back, timing scene vs overlay vs GPU.
+  (globalThis as unknown as { __bench?: unknown }).__bench = async (N = 120, scale = 1) => {
+    let sceneAcc = 0, ovAcc = 0, layoutAcc = 0, buildAcc = 0, submitAcc = 0, gpuAcc = 0;
     const w = canvas.width, h = canvas.height;
-    const view = ctx.getCurrentTexture().createView({ format: srgb });
-    sc.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
-    sc.scene.renderToView(view, w, h);
-    // per-segment projected keep-out circles: each card hugs just outside its own segment and never
-    // covers any segment (the anatomy renderings stay unobscured).
-    const keepOuts = geom.map((g, i) => {
-      const cc = camera.worldToDisplay(specs[i].anchorRAS as Vec3, w, h);
-      let r = 0; for (const c of g.corners) { const p = camera.worldToDisplay(c, w, h); if (p.depth > 0) r = Math.max(r, Math.hypot(p.x - cc.x, p.y - cc.y)); }
-      return { x: cc.x, y: cc.y, radius: r };
-    });
-    overlay.render(view, camera, { w, h, dpr }, dt, keepOuts);
-    requestAnimationFrame(frame);
+    for (let f = 0; f < N; f++) {
+      camera.azimuth(0.6);   // keep it "moving" so nothing is cached
+      const view = ctx.getCurrentTexture().createView({ format: srgb });
+      let t = performance.now();
+      if (scale >= 0.999) { sc.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h); sc.scene.renderToView(view, w, h); }
+      else { const rw = Math.max(16, Math.round(w * scale)), rh = Math.max(16, Math.round(h * scale)); sc.scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, rw, rh); sc.scene.renderUpscaled(view, rw, rh, w, h); }
+      sceneAcc += performance.now() - t;
+      const kos = geom.map((g, i) => { const cc = camera.worldToDisplay(specs[i].anchorRAS as Vec3, w, h); let r = 0; for (const c of g.corners) { const p = camera.worldToDisplay(c, w, h); if (p.depth > 0) r = Math.max(r, Math.hypot(p.x - cc.x, p.y - cc.y)); } return { x: cc.x, y: cc.y, radius: r }; });
+      t = performance.now();
+      overlay.render(view, camera, { w, h, dpr }, 1 / 60, kos);
+      ovAcc += performance.now() - t;
+      layoutAcc += overlay.perf.layoutMs; buildAcc += overlay.perf.buildMs; submitAcc += overlay.perf.submitMs;
+      t = performance.now();
+      await gpu.device.queue.onSubmittedWorkDone();
+      gpuAcc += performance.now() - t;
+    }
+    return { frames: N, canvas: [w, h], sceneMs: sceneAcc / N, overlayMs: ovAcc / N, layoutMs: layoutAcc / N, buildMs: buildAcc / N, submitMs: submitAcc / N, gpuWaitMs: gpuAcc / N };
   };
-  requestAnimationFrame(frame);
+  // Adaptive 3D: budget-scaled MOVING frames (renderUpscaled) while interacting, a crisp full-res SETTLE
+  // when still, and DORMANT when nothing changes — the fix for the full-res-every-frame lag (GPU ~410ms
+  // at retina). The card overlay is drawn on top of every scene frame; a light ticker keeps the loop
+  // alive only while the cards are still reflowing (then it too goes idle).
+  let lastFrame = performance.now();
+  const keepOutsNow = (w: number, h: number) => geom.map((g, i) => {
+    const cc = camera.worldToDisplay(specs[i].anchorRAS as Vec3, w, h);
+    let r = 0; for (const c of g.corners) { const p = camera.worldToDisplay(c, w, h); if (p.depth > 0) r = Math.max(r, Math.hypot(p.x - cc.x, p.y - cc.y)); }
+    return { x: cc.x, y: cc.y, radius: r };
+  });
+  const a3d = mountAdaptive3d({
+    scene: () => sc.scene,
+    view: () => ctx.getCurrentTexture().createView({ format: srgb }),
+    size: () => ({ w: canvas.width, h: canvas.height }),
+    setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
+    gpu, movingScaleCap: 0.5, target: 8,
+    onFrame: () => {
+      const now = performance.now(), dt = (now - lastFrame) / 1000; lastFrame = now;
+      const w = canvas.width, h = canvas.height;
+      overlay.render(ctx.getCurrentTexture().createView({ format: srgb }), camera, { w, h, dpr }, dt, keepOutsNow(w, h));
+      if (!overlay.settled()) a3d.draw();   // keep rendering while the cards are still gliding, then go idle
+    },
+  });
+  a3d.draw();
 }
 
 main().catch((e) => { console.error(e); setStatus("error: " + (e as Error).message); });

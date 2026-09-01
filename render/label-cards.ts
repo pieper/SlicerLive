@@ -127,6 +127,10 @@ export class CardOverlay {
   private bodies: CardBody[] = [];
   private seeded = false;
   private lastVisible: boolean[] = [];
+  perf = { layoutMs: 0, buildMs: 0, submitMs: 0 };
+  private maxSpeed = 0;
+  /** True when every card is at rest — lets the host stop rendering (dormant) until the next change. */
+  settled(): boolean { return this.maxSpeed < 1.5; }
 
   constructor(gpu: Gpu, format: GPUTextureFormat, font: FontAtlas, style: CardStyle = {}) {
     this.dev = gpu.device;
@@ -246,7 +250,11 @@ export class CardOverlay {
     const sizes = this.cards.map((c) => this.size(c));
     if (!this.seeded || this.bodies.length !== this.cards.length) { this.bodies = seedCards(anchorsPx, sizes); this.seeded = true; }
     else for (let i = 0; i < this.bodies.length; i++) { this.bodies[i].w = sizes[i].w; this.bodies[i].h = sizes[i].h; }
+    const _t0 = performance.now();
     layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, keepOuts ? { keepOuts } : undefined);
+    this.perf.layoutMs = performance.now() - _t0;
+    let ms = 0; for (const b of this.bodies) ms = Math.max(ms, Math.hypot(b.vx, b.vy)); this.maxSpeed = ms;
+    const _t1 = performance.now();
 
     const shape: number[] = [], text: number[] = [];
     const rect = (cx: number, cy: number, hw: number, hh: number, radius: number, border: number, fill: RGBA, brd: RGBA) => {
@@ -281,6 +289,8 @@ export class CardOverlay {
       }
     }
 
+    this.perf.buildMs = performance.now() - _t1;
+    const _t2 = performance.now();
     this.dev.queue.writeBuffer(this.vpBuf, 0, new Float32Array([vp.w, vp.h, vp.dpr, 0]));
     const shapeArr = new Float32Array(shape), textArr = new Float32Array(text);
     this.shapeBuf = this.ensure(this.shapeBuf, shapeArr.byteLength, "shape"); if (shapeArr.length) this.dev.queue.writeBuffer(this.shapeBuf, 0, shapeArr);
@@ -292,6 +302,7 @@ export class CardOverlay {
     if (textArr.length) { pass.setPipeline(this.textPipe); pass.setBindGroup(0, this.textBind); pass.setVertexBuffer(0, this.textBuf); pass.draw(textArr.length / 8); }
     pass.end();
     this.dev.queue.submit([enc.finish()]);
+    this.perf.submitMs = performance.now() - _t2;
   }
 
   private ensure(buf: GPUBuffer | undefined, bytes: number, tag: string): GPUBuffer {
