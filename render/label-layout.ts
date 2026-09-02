@@ -26,7 +26,7 @@ export interface LayoutOpts {
 }
 
 const DEFAULTS: Required<Omit<LayoutOpts, "keepOuts" | "boundary">> = {
-  anchorSpring: 26, repulsion: 90000, damping: 0.86, maxSpeed: 1600, margin: 8, gap: 10, standoff: 96,
+  anchorSpring: 26, repulsion: 200, damping: 0.86, maxSpeed: 1600, margin: 8, gap: 10, standoff: 96,
   ringGap: 14, keepOutForce: 40,
 };
 
@@ -112,21 +112,24 @@ export function layoutStep(
     }
   }
 
-  // Card–card repulsion — push apart when their padded AABBs overlap, along the centre separation.
+  // Card–card separation — when two padded AABBs overlap, push apart along the axis of LEAST penetration
+  // with a force LINEAR in the penetration depth. This rests exactly at "just touching" (force → 0 as the
+  // overlap closes), so cards gently spread instead of settling into a shallow overlap. (A centre-line
+  // 1/d² force fails here: two wide cards stacked vertically have a large centre distance, so its
+  // magnitude collapses and the anchor spring wins — the overlap the user was seeing.)
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
       const a = cards[i], b = cards[j];
       const ox = (a.w + b.w) / 2 + o.gap - Math.abs(a.x - b.x);
       const oy = (a.h + b.h) / 2 + o.gap - Math.abs(a.y - b.y);
       if (ox <= 0 || oy <= 0) continue;                 // not overlapping
-      let dx = a.x - b.x, dy = a.y - b.y;
-      let d = Math.hypot(dx, dy);
-      if (d < 1e-3) { dx = (i - j) || 1; dy = 1; d = Math.hypot(dx, dy); }  // deterministic tie-break
-      const overlap = Math.min(ox, oy);
-      const f = (o.repulsion * overlap) / (d * d);
-      const ux = dx / d, uy = dy / d;
-      fx[i] += ux * f; fy[i] += uy * f;
-      fx[j] -= ux * f; fy[j] -= uy * f;
+      if (ox <= oy) {
+        const s = Math.sign(a.x - b.x || (i - j) || 1), f = o.repulsion * ox;
+        fx[i] += s * f; fx[j] -= s * f;
+      } else {
+        const s = Math.sign(a.y - b.y || (i - j) || 1), f = o.repulsion * oy;
+        fy[i] += s * f; fy[j] -= s * f;
+      }
     }
   }
 

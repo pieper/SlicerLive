@@ -40,6 +40,7 @@ interface Button extends Rect { part: CardAction; label: TextRun }
 interface PreparedCard {
   spec: CardSpec;
   cw: number; ch: number; ew: number; eh: number;   // collapsed / expanded size
+  bw: number; bh: number;                            // blot size (compact mode: swatch only)
   head: { runs: TextRun[]; swatch?: Rect & { color: RGBA } };
   extra: { runs: TextRun[]; buttons: Button[] };
   expanded: boolean;
@@ -122,6 +123,7 @@ export class CardOverlay {
   private font: FontAtlas;
   private st: Required<Omit<CardStyle, "scale">>;
   private dpr = 1;
+  private compact = false;   // many segments → cards collapse to a colour blot, full card on click
 
   private shapeBuf?: GPUBuffer; private shapeCap = 0;
   private textBuf?: GPUBuffer; private textCap = 0;
@@ -174,10 +176,11 @@ export class CardOverlay {
     this.textBind = this.dev.createBindGroup({ layout: this.textPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.vpBuf } }, { binding: 1, resource: this.atlasTex.createView() }, { binding: 2, resource: sampler }] });
   }
 
-  setCards(specs: CardSpec[], dpr = 1): void {
-    this.dpr = dpr;
+  setCards(specs: CardSpec[], dpr = 1, compact = false): void {
+    this.dpr = dpr; this.compact = compact;
     const s = this.st, titlePx = s.titlePx * dpr, bodyPx = s.bodyPx * dpr, pad = s.padPx * dpr, gap = s.gapPx * dpr, maxT = s.maxTextPx * dpr;
     const sw = Math.round(titlePx), btnH = Math.round(bodyPx + 10 * dpr), btnGap = 4 * dpr, btnInnerPad = 8 * dpr;
+    const blot = Math.round(sw + pad);   // compact blot = swatch + a little padding (a small clickable square)
     const num = (n: number) => n.toLocaleString("en-US");
 
     this.cards = specs.map((spec) => {
@@ -216,12 +219,16 @@ export class CardOverlay {
         y += btnH + btnGap;
       }
       const eh = Math.ceil(y - btnGap + pad);
-      return { spec, cw, ch, ew, eh: Math.max(eh, ch), head, extra, expanded: false };
+      return { spec, cw, ch, ew, eh: Math.max(eh, ch), bw: blot, bh: blot, head, extra, expanded: false };
     });
     this.seeded = false;
   }
 
-  private size(c: PreparedCard): { w: number; h: number } { return c.expanded ? { w: c.ew, h: c.eh } : { w: c.cw, h: c.ch }; }
+  private size(c: PreparedCard): { w: number; h: number } {
+    if (c.expanded) return { w: c.ew, h: c.eh };
+    if (this.compact) return { w: c.bw, h: c.bh };
+    return { w: c.cw, h: c.ch };
+  }
 
   hitTest(px: number, py: number): HitResult | null {
     for (let i = this.cards.length - 1; i >= 0; i--) {
@@ -302,6 +309,14 @@ export class CardOverlay {
       const hw = sz.w / 2, hh = sz.h / 2, ox = b.x - hw, oy = b.y - hh;
       const edge = boxEdgeToward(b.x, b.y, hw, hh, a.x, a.y);
       line(edge.x, edge.y, a.x, a.y, this.st.leaderPx * this.dpr, this.st.leaderRGBA);
+      if (this.compact && !c.expanded) {
+        // BLOT: just the segment colour in a small square (black border) — full card opens on click.
+        const col = c.head.swatch?.color ?? [0.6, 0.6, 0.62, 1];
+        rect(b.x, b.y, hw, hh, this.st.radiusPx * this.dpr, this.st.borderPx * this.dpr, this.st.glassRGBA, this.st.borderRGBA);
+        const sp = Math.min(hw, hh) - this.st.padPx * this.dpr * 0.4;
+        rect(b.x, b.y, sp, sp, 2 * this.dpr, 1.5 * this.dpr, col, BLACK);
+        continue;
+      }
       rect(b.x, b.y, hw, hh, this.st.radiusPx * this.dpr, this.st.borderPx * this.dpr, this.st.glassRGBA, this.st.borderRGBA);
       if (c.head.swatch) { const w2 = c.head.swatch; rect(ox + w2.x + w2.w / 2, oy + w2.y + w2.h / 2, w2.w / 2, w2.h / 2, 2 * this.dpr, 1.5 * this.dpr, w2.color, BLACK); }
       glyphs(c.head.runs, ox, oy);

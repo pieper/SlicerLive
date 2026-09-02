@@ -67,6 +67,8 @@ export interface SegmentCards {
   draw(view: GPUTextureView, w: number, h: number, dpr: number, dtSec: number): boolean;
   clear(): void;
   count(): number;
+  /** CSS-space centre of card i (for tests/introspection); null if not laid out yet. */
+  bodyCss(i: number): { x: number; y: number } | null;
 }
 
 /** Wire a CardOverlay to a 3D canvas + camera. `apply` performs an Isolate/Hide/Reset on the host's
@@ -76,7 +78,9 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
   apply: (id: number, action: "isolate" | "hide" | "reset", segments: SegmentInfo[]) => void;
   redraw: () => void;
   style?: CardStyle;
-  maxCards?: number;
+  maxCards?: number;         // full cards shown when few segments (default 12)
+  compactThreshold?: number; // > this many visible segments → collapse to colour blots (default 10)
+  maxCardsCompact?: number;  // blots shown in compact mode (default 40)
 }): SegmentCards {
   const overlay = new CardOverlay(gpu, format, font, hooks.style);
   const dpr = globalThis.devicePixelRatio || 1;
@@ -103,8 +107,10 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
     setScene(ct, seg, segments) {
       segs = segments;
       if (!ct || !seg) { geom = []; sceneBox = []; overlay.setCards([], dpr); return; }
-      const r = build(ct, seg, segments, hooks.maxCards ?? 12);
-      geom = r.geom; overlay.setCards(r.specs, dpr);
+      const compact = segments.length > (hooks.compactThreshold ?? 10);
+      const cap = compact ? (hooks.maxCardsCompact ?? 40) : (hooks.maxCards ?? 12);
+      const r = build(ct, seg, segments, cap);
+      geom = r.geom; overlay.setCards(r.specs, dpr, compact);
       const [nx, ny, nz] = ct.dims, M = ct.ijkToRAS;
       const ras = (i: number, j: number, k: number): Vec3 => [M[0] * i + M[1] * j + M[2] * k + M[3], M[4] * i + M[5] * j + M[6] * k + M[7], M[8] * i + M[9] * j + M[10] * k + M[11]];
       sceneBox = [[0, 0, 0], [nx, 0, 0], [0, ny, 0], [nx, ny, 0], [0, 0, nz], [nx, 0, nz], [0, ny, nz], [nx, ny, nz]].map(([i, j, k]) => ras(i, j, k));
@@ -119,7 +125,8 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
       overlay.render(view, camera, { w, h, dpr }, dt, undefined, extra);
       return !overlay.settled();
     },
-    clear() { geom = []; overlay.setCards([], dpr); },
+    clear() { geom = []; sceneBox = []; overlay.setCards([], dpr); },
     count() { return geom.length; },
+    bodyCss(i) { const b = overlay.body(i); return b ? { x: b.x / dpr, y: b.y / dpr } : null; },
   };
 }

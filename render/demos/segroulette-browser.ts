@@ -113,6 +113,7 @@ async function main() {
     redraw: () => draw3d(),
     maxCards: 12,
   });
+  (globalThis as unknown as { __segCards?: unknown }).__segCards = segCards;   // test hook
   const drawAll = () => { for (const p of planes) drawSlice(p); draw3d(); xhair?.redraw(); };
 
   // SHARED shift-move crosshair pick — same one-call mount every MPR demo uses. Getters keep it
