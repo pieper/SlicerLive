@@ -82,6 +82,7 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
   const dpr = globalThis.devicePixelRatio || 1;
   let geom: Geom[] = [];
   let segs: SegmentInfo[] = [];
+  let sceneBox: Vec3[] = [];   // the volume's 8 RAS corners → keep cards outside the whole data's screen AABB
 
   const px = (e: PointerEvent) => { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left) * dpr, y: (e.clientY - r.top) * dpr }; };
   let down: { x: number; y: number; hit: boolean } | null = null;
@@ -101,18 +102,21 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
   return {
     setScene(ct, seg, segments) {
       segs = segments;
-      if (!ct || !seg) { geom = []; overlay.setCards([], dpr); return; }
+      if (!ct || !seg) { geom = []; sceneBox = []; overlay.setCards([], dpr); return; }
       const r = build(ct, seg, segments, hooks.maxCards ?? 12);
       geom = r.geom; overlay.setCards(r.specs, dpr);
+      const [nx, ny, nz] = ct.dims, M = ct.ijkToRAS;
+      const ras = (i: number, j: number, k: number): Vec3 => [M[0] * i + M[1] * j + M[2] * k + M[3], M[4] * i + M[5] * j + M[6] * k + M[7], M[8] * i + M[9] * j + M[10] * k + M[11]];
+      sceneBox = [[0, 0, 0], [nx, 0, 0], [0, ny, 0], [nx, ny, 0], [0, 0, nz], [nx, 0, nz], [0, ny, nz], [nx, ny, nz]].map(([i, j, k]) => ras(i, j, k));
     },
     draw(view, w, h, _dpr, dt) {
       if (!geom.length) return false;
-      const keepOuts = geom.map((g, i) => {
-        const cc = camera.worldToDisplay(overlay.spec(i)!.anchorRAS as Vec3, w, h);
-        let r = 0; for (const c of g.corners) { const p = camera.worldToDisplay(c, w, h); if (p.depth > 0) r = Math.max(r, Math.hypot(p.x - cc.x, p.y - cc.y)); }
-        return { x: cc.x, y: cc.y, radius: r };
-      });
-      overlay.render(view, camera, { w, h, dpr }, dt, keepOuts);
+      // Form-fitting keep-out: project the volume's 8 corners → a screen-space AABB (a tall body gives a
+      // tall rectangle, not a fat circle). Cards ring OUTSIDE it, out to the sides, clamped on-screen.
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const c of sceneBox) { const p = camera.worldToDisplay(c, w, h); if (p.depth <= 0) continue; minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
+      const extra = Number.isFinite(minX) ? { boundary: { minX: Math.max(minX, 0), minY: Math.max(minY, 0), maxX: Math.min(maxX, w), maxY: Math.min(maxY, h) }, ringGap: 22 * dpr } : undefined;
+      overlay.render(view, camera, { w, h, dpr }, dt, undefined, extra);
       return !overlay.settled();
     },
     clear() { geom = []; overlay.setCards([], dpr); },

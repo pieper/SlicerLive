@@ -102,7 +102,10 @@ const PREMUL_BLEND: GPUBlendState = {
   alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
 };
 
+export interface LayoutExtra { boundary?: { minX: number; minY: number; maxX: number; maxY: number }; ringGap?: number }
+
 export interface CardStyle {
+  scale?: number;   // multiply all px metrics (card + text size) — e.g. 2 for a larger card in a busy 3D cell
   titlePx?: number; bodyPx?: number; padPx?: number; gapPx?: number; maxTextPx?: number;
   radiusPx?: number; borderPx?: number; glassRGBA?: RGBA; borderRGBA?: RGBA;
   leaderRGBA?: RGBA; leaderPx?: number; buttonRGBA?: RGBA;
@@ -117,7 +120,7 @@ export class CardOverlay {
   private textBind: GPUBindGroup;
   private atlasTex: GPUTexture;
   private font: FontAtlas;
-  private st: Required<CardStyle>;
+  private st: Required<Omit<CardStyle, "scale">>;
   private dpr = 1;
 
   private shapeBuf?: GPUBuffer; private shapeCap = 0;
@@ -135,11 +138,12 @@ export class CardOverlay {
   constructor(gpu: Gpu, format: GPUTextureFormat, font: FontAtlas, style: CardStyle = {}) {
     this.dev = gpu.device;
     this.font = font;
+    const sc = style.scale ?? 1;
     this.st = {
-      titlePx: style.titlePx ?? 15, bodyPx: style.bodyPx ?? 12, padPx: style.padPx ?? 10, gapPx: style.gapPx ?? 5,
-      maxTextPx: style.maxTextPx ?? 240, radiusPx: style.radiusPx ?? 6, borderPx: style.borderPx ?? 1.25,
+      titlePx: (style.titlePx ?? 15) * sc, bodyPx: (style.bodyPx ?? 12) * sc, padPx: (style.padPx ?? 10) * sc, gapPx: (style.gapPx ?? 5) * sc,
+      maxTextPx: (style.maxTextPx ?? 240) * sc, radiusPx: (style.radiusPx ?? 6) * sc, borderPx: (style.borderPx ?? 1.25) * sc,
       glassRGBA: style.glassRGBA ?? [1, 1, 1, 0.82], borderRGBA: style.borderRGBA ?? [0, 0, 0, 0.92],
-      leaderRGBA: style.leaderRGBA ?? [0.05, 0.05, 0.05, 0.85], leaderPx: style.leaderPx ?? 1.5,
+      leaderRGBA: style.leaderRGBA ?? [0.05, 0.05, 0.05, 0.85], leaderPx: (style.leaderPx ?? 1.5) * sc,
       buttonRGBA: style.buttonRGBA ?? [0.9, 0.91, 0.95, 1],
     };
 
@@ -244,7 +248,7 @@ export class CardOverlay {
 
   /** Run the force layout for one frame WITHOUT drawing (the CardField path renders via the ray-march).
    *  Updates card body positions + visibility. Returns true while still moving. */
-  layout(camera: VtkCamera, vp: Viewport, dtSec: number, keepOuts?: { x: number; y: number; radius: number }[]): boolean {
+  layout(camera: VtkCamera, vp: Viewport, dtSec: number, keepOuts?: { x: number; y: number; radius: number }[], extra?: LayoutExtra): boolean {
     if (!this.cards.length) return false;
     const anchors = this.cards.map((c) => camera.worldToDisplay(c.spec.anchorRAS, vp.w, vp.h));
     this.lastVisible = anchors.map((a) => a.depth > 0);
@@ -252,7 +256,7 @@ export class CardOverlay {
     const sizes = this.cards.map((c) => this.size(c));
     if (!this.seeded || this.bodies.length !== this.cards.length) { this.bodies = seedCards(anchorsPx, sizes); this.seeded = true; }
     else for (let i = 0; i < this.bodies.length; i++) { this.bodies[i].w = sizes[i].w; this.bodies[i].h = sizes[i].h; }
-    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, keepOuts ? { keepOuts } : undefined);
+    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, { keepOuts, boundary: extra?.boundary, ringGap: extra?.ringGap });
     return !this.settled();
   }
   /** Card body (screen centre + size) for index — for the CardField billboard. */
@@ -261,7 +265,7 @@ export class CardOverlay {
   count(): number { return this.cards.length; }
   expanded(index: number): boolean { return !!this.cards[index]?.expanded; }
 
-  render(view: GPUTextureView, camera: VtkCamera, vp: Viewport, dtSec: number, keepOuts?: { x: number; y: number; radius: number }[]): void {
+  render(view: GPUTextureView, camera: VtkCamera, vp: Viewport, dtSec: number, keepOuts?: { x: number; y: number; radius: number }[], extra?: LayoutExtra): void {
     if (!this.cards.length) return;
     const anchors = this.cards.map((c) => camera.worldToDisplay(c.spec.anchorRAS, vp.w, vp.h));
     this.lastVisible = anchors.map((a) => a.depth > 0);
@@ -270,7 +274,7 @@ export class CardOverlay {
     if (!this.seeded || this.bodies.length !== this.cards.length) { this.bodies = seedCards(anchorsPx, sizes); this.seeded = true; }
     else for (let i = 0; i < this.bodies.length; i++) { this.bodies[i].w = sizes[i].w; this.bodies[i].h = sizes[i].h; }
     const _t0 = performance.now();
-    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, keepOuts ? { keepOuts } : undefined);
+    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, { keepOuts, boundary: extra?.boundary, ringGap: extra?.ringGap });
     this.perf.layoutMs = performance.now() - _t0;
     let ms = 0; for (const b of this.bodies) ms = Math.max(ms, Math.hypot(b.vx, b.vy)); this.maxSpeed = ms;
     const _t1 = performance.now();

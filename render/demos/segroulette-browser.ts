@@ -16,7 +16,8 @@ import { attachDoubleClick, attachViewGrid } from "./view-grid.ts";
 import { attachWidgetControls } from "./widget-control.ts";
 import type { Box, HandleMeta } from "./roi-widget.ts";
 import { mountAdaptive3d } from "./accum-loop.ts";
-import { mountSceneCards } from "../scene-cards.ts";
+import { buildFontAtlas } from "../sdf-text.ts";
+import { mountSegmentCards } from "../segment-cards.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
 import { installIdcInfo } from "./idc-info.ts";
 import { createMosaic } from "./mosaic.ts";
@@ -80,30 +81,38 @@ async function main() {
   // frames (coalesced to display rate); settling converges to a supersampled AA image. Slices are
   // cheap 2D, on-demand. `draw3d()` kicks the loop; onFrame keeps the crosshair overlay in sync.
   let xhair: Crosshair4up | null = null;
+  const dpr3 = Math.min(2, globalThis.devicePixelRatio || 1);
+  const cardFont = buildFontAtlas({ sizePx: 44, spread: 6, fontFamily: "Helvetica, \"Helvetica Neue\", Arial, sans-serif" });
   let cardDt = performance.now();
-  let cardsMoving = false;
-  // Scene-native label cards: glass-slab CardFields + yarn-thread CapsuleFields composited in the SAME
-  // 3D ray-march as the anatomy. Force layout + billboard run in setCamera (before the scene renders).
-  const segCards = mountSceneCards(gpu, camera, cv.threeD, {
-    setExtraFields: (f) => rs?.setExtraFields(f),
-    sync: () => rs?.scene.syncUniforms(),
-    center: () => rs?.center ?? [0, 0, 0],
-    radius: () => rs?.radius ?? 100,
-    setSegmentOpacity: (num, o) => { rs?.setSegmentOpacity(num, o); redrawSlices(); },
-  }, { maxCards: 12 });
+  // Segment label cards over the 3D view — SHARP 2D overlay (stays full-res while the volume moves and
+  // temporally settles). Force layout uses the whole-scene screen AABB so cards ring out to the sides,
+  // clear of the visible data. (The ray-marched glass-slab CardField path is kept in render/card-field.ts
+  // + render/scene-cards.ts for the future hybrid: priority text at full-res frame rate, ray-cast settling.)
   const a3d = mountAdaptive3d({
     scene: () => rs?.scene ?? null,
     view: () => cx.threeD.getCurrentTexture().createView({ format: srgb }),
     size: () => ({ w: cv.threeD.width, h: cv.threeD.height }),
-    setCamera: (sc, w, h) => {
-      const now = performance.now(), dt = (now - cardDt) / 1000; cardDt = now;
-      if (rs) cardsMoving = segCards.update(cv.threeD.width, cv.threeD.height, dt);   // billboard + syncUniforms
-      sc.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
-    },
+    setCamera: (sc, w, h) => sc.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
     gpu,
-    onFrame: () => { xhair?.redraw(); if (cardsMoving) a3d.draw(); },
+    onFrame: () => {
+      xhair?.redraw();
+      const now = performance.now(), dt = (now - cardDt) / 1000; cardDt = now;
+      const moving = segCards.draw(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height, dpr3, dt);
+      if (moving) a3d.draw();   // keep the loop alive while the cards are still gliding
+    },
   });
   const draw3d = () => a3d.draw();
+  const segCards = mountSegmentCards(gpu, srgb, cardFont, cv.threeD, camera, {
+    apply: (id, action) => {
+      if (!rs) return;
+      if (action === "reset") for (const s of rs.segments) rs.setSegmentOpacity(s.num, 1);
+      else if (action === "hide") rs.setSegmentOpacity(id, 0);
+      else for (const s of rs.segments) rs.setSegmentOpacity(s.num, s.num === id ? 1 : 0.4);
+      redrawSlices(); draw3d();
+    },
+    redraw: () => draw3d(),
+    maxCards: 12,
+  });
   const drawAll = () => { for (const p of planes) drawSlice(p); draw3d(); xhair?.redraw(); };
 
   // SHARED shift-move crosshair pick — same one-call mount every MPR demo uses. Getters keep it

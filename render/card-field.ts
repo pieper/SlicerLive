@@ -1,3 +1,8 @@
+// NOTE — HYBRID (future): this ray-marched glass-card field composites text INTO the volume march
+// (real thickness, frosted glass, occlusion). SEGRoulette currently uses the sharp 2D overlay
+// (render/label-cards.ts) instead, because overlay text stays full-res while the volume settles. Keep
+// this path: the intended end state is a hybrid — priority elements (text) rendered at full-res frame
+// rate while other ray-cast elements settle to full res behind them. See render/scene-cards.ts.
 // CardField — a text/glass "label card" as a first-class ray-march Field (not a screen overlay). The
 // card is a camera-facing GLASS SLAB with real thickness: the compositor marches it together with the
 // anatomy, so overlapping/intersecting cards resolve by depth for free, and the frosted look falls out
