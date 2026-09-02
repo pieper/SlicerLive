@@ -112,6 +112,23 @@ async function main() {
     },
     redraw: () => draw3d(),
     maxCards: 12,
+    // Keep cards clear of the on-screen chrome over the 3D cell: the SlicerLive logo badge (top-right)
+    // and the "3D · …" cell label (top-left). Rects are canvas-relative DEVICE px, clipped to the cell.
+    reserved: () => {
+      const cr = cv.threeD.getBoundingClientRect();
+      if (!cr.width || !cr.height) return [];
+      const sx = cv.threeD.width / cr.width, sy = cv.threeD.height / cr.height, pad = 6;
+      const out: { x: number; y: number; w: number; h: number }[] = [];
+      for (const sel of ["#sl-badge", "#lab-threeD"]) {
+        const el = document.querySelector(sel) as HTMLElement | null;
+        if (!el) continue;
+        const r = el.getBoundingClientRect();
+        const x0 = Math.max(r.left, cr.left), y0 = Math.max(r.top, cr.top), x1 = Math.min(r.right, cr.right), y1 = Math.min(r.bottom, cr.bottom);
+        if (x1 <= x0 || y1 <= y0) continue;   // not over this cell
+        out.push({ x: (x0 - cr.left) * sx - pad, y: (y0 - cr.top) * sy - pad, w: (x1 - x0) * sx + 2 * pad, h: (y1 - y0) * sy + 2 * pad });
+      }
+      return out;
+    },
   });
   (globalThis as unknown as { __segCards?: unknown }).__segCards = segCards;   // test hook
   const drawAll = () => { for (const p of planes) drawSlice(p); draw3d(); xhair?.redraw(); };

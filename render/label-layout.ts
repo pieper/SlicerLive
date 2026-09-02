@@ -21,11 +21,12 @@ export interface LayoutOpts {
   standoff?: number;         // preferred distance of the card centre from its anchor (css px) — no keep-out
   keepOuts?: { x: number; y: number; radius: number }[];  // per-segment projected circles: card i hugs OUTSIDE keepOuts[i], and is pushed off ANY it overlaps
   boundary?: { minX: number; minY: number; maxX: number; maxY: number };  // screen-space AABB of ALL visible data: cards ring OUTSIDE it, toward their anchor (form-fitting, not a circle)
+  reserved?: { x: number; y: number; w: number; h: number }[];  // screen rects cards must stay OUT of (logos, on-screen labels)
   ringGap?: number;          // small gap so a card HUGS just outside its segment (css px)
   keepOutForce?: number;     // outward push strength when a card intrudes on any segment
 }
 
-const DEFAULTS: Required<Omit<LayoutOpts, "keepOuts" | "boundary">> = {
+const DEFAULTS: Required<Omit<LayoutOpts, "keepOuts" | "boundary" | "reserved">> = {
   anchorSpring: 26, repulsion: 200, damping: 0.86, maxSpeed: 1600, margin: 8, gap: 10, standoff: 96,
   ringGap: 14, keepOutForce: 40,
 };
@@ -68,13 +69,23 @@ export function layoutStep(
   // pins them overlapping. Instead give each card an EVENLY-SPACED slot around the box perimeter, ordered
   // by anchor angle — locality is preserved (neighbours keep neighbouring slots) but no two cards ever
   // target the same point, so they can't stack. Kept for small counts is the direct anchor-direction ring.
-  let slotRank: Int32Array | null = null;
+  let slotArc: Float64Array | null = null;   // per-card target arc length along the ring perimeter
+  let slotRX = 0, slotRY = 0;
   if (o.boundary && n > 8) {
     const bnd = o.boundary, bcx = (bnd.minX + bnd.maxX) / 2, bcy = (bnd.minY + bnd.maxY) / 2;
+    slotRX = (bnd.maxX - bnd.minX) / 2 + o.ringGap;
+    slotRY = (bnd.maxY - bnd.minY) / 2 + o.ringGap;
+    const P = 2 * (2 * slotRX + 2 * slotRY);
     const order = Array.from({ length: n }, (_, i) => i)
       .sort((i, j) => Math.atan2(anchorsPx[i].y - bcy, anchorsPx[i].x - bcx) - Math.atan2(anchorsPx[j].y - bcy, anchorsPx[j].x - bcx));
-    slotRank = new Int32Array(n);
-    order.forEach((idx, k) => { slotRank![idx] = k; });
+    // Each card claims arc length = its own footprint (+gap); leftover perimeter is shared out EVENLY so
+    // cards spread into the free space instead of a wide pair clinging while narrow cards sit with slack.
+    const foot = order.map((idx) => Math.max(cards[idx].w, cards[idx].h) + o.gap);
+    let total = 0; for (const f of foot) total += f;
+    const extra = Math.max(0, P - total) / n;   // even breathing room per card
+    slotArc = new Float64Array(n);
+    let acc = 0;
+    for (let k = 0; k < n; k++) { acc += (foot[k] + extra) / 2; slotArc[order[k]] = acc % P; acc += (foot[k] + extra) / 2; }
   }
   for (let i = 0; i < n; i++) {
     const a = anchorsPx[i], c = cards[i];
@@ -85,11 +96,11 @@ export function layoutStep(
     if (bnd) {
       const bcx = (bnd.minX + bnd.maxX) / 2, bcy = (bnd.minY + bnd.maxY) / 2;
       const bhx = (bnd.maxX - bnd.minX) / 2, bhy = (bnd.maxY - bnd.minY) / 2;
-      if (slotRank) {
-        // MANY cards: even PERIMETER (arc-length) slots on the ring rectangle just outside the box, ordered
+      if (slotArc) {
+        // MANY cards: footprint-weighted PERIMETER slots on the ring rectangle just outside the box, ordered
         // by anchor angle. Uniform LINEAR spacing (angular spacing would bunch on the long vertical sides).
-        const RX = bhx + o.ringGap, RY = bhy + o.ringGap, W = 2 * RX, H = 2 * RY, P = 2 * (W + H);
-        let s = ((slotRank[i] + 0.5) / n) * P;   // arc length clockwise from the top-left corner
+        const RX = slotRX, RY = slotRY, W = 2 * RX, H = 2 * RY;
+        let s = slotArc[i];   // arc length clockwise from the top-left corner
         let rx: number, ry: number, nx: number, ny: number;
         if (s < W) { rx = -RX + s; ry = -RY; nx = 0; ny = -1; }                       // top
         else if ((s -= W) < H) { rx = RX; ry = -RY + s; nx = 1; ny = 0; }             // right
@@ -127,6 +138,18 @@ export function layoutStep(
       if (penx > 0 && peny > 0) {   // card centre inside the expanded box → eject along least penetration
         if (penx < peny) fx[i] += Math.sign(c.x - bcx || 1) * penx * o.keepOutForce;
         else fy[i] += Math.sign(c.y - bcy || 1) * peny * o.keepOutForce;
+      }
+    }
+    // push the card fully OUT of any reserved rect (logo, on-screen text labels) it overlaps. Firmer than
+    // the segment keep-out (these must never be covered), so it wins over the perimeter-slot spring.
+    if (o.reserved) for (const r of o.reserved) {
+      const rcx = r.x + r.w / 2, rcy = r.y + r.h / 2;
+      const px = (c.w + r.w) / 2 + o.gap - Math.abs(c.x - rcx);
+      const py = (c.h + r.h) / 2 + o.gap - Math.abs(c.y - rcy);
+      if (px > 0 && py > 0) {
+        const F = o.keepOutForce * 2.5;
+        if (px < py) fx[i] += Math.sign(c.x - rcx || 1) * px * F;
+        else fy[i] += Math.sign(c.y - rcy || 1) * py * F;
       }
     }
     // push the card off ANY segment circle it overlaps (don't obscure that rendering)
@@ -173,6 +196,41 @@ export function layoutStep(
     else if (c.x > viewport.w - hw) { c.x = viewport.w - hw; if (c.vx > 0) c.vx = 0; }
     if (c.y < hh) { c.y = hh; if (c.vy < 0) c.vy = 0; }
     else if (c.y > viewport.h - hh) { c.y = viewport.h - hh; if (c.vy > 0) c.vy = 0; }
+  }
+
+  // Positional de-overlap (HARD constraint). The force terms above settle NEAR a non-overlapping layout but
+  // competing springs can leave a slight resting overlap (the "clinging" cards) or a sliver over the chrome.
+  // A few Gauss–Seidel relaxation sweeps move cards directly apart / off the reserved rects each frame, so
+  // by the time the view goes dormant nothing actually covers another card or a label. It's a no-op at a
+  // clean equilibrium, so it doesn't perturb a settled layout.
+  for (let iter = 0; iter < 4; iter++) {
+    let moved = false;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = cards[i], b = cards[j];
+        const ox = (a.w + b.w) / 2 + o.gap - Math.abs(a.x - b.x);
+        const oy = (a.h + b.h) / 2 + o.gap - Math.abs(a.y - b.y);
+        if (ox <= 0 || oy <= 0) continue;
+        moved = true;
+        if (ox <= oy) { const m = (Math.sign(a.x - b.x || (i - j) || 1) * ox) / 2; a.x += m; b.x -= m; }
+        else { const m = (Math.sign(a.y - b.y || (i - j) || 1) * oy) / 2; a.y += m; b.y -= m; }
+      }
+    }
+    if (o.reserved) for (let i = 0; i < n; i++) {
+      const c = cards[i];
+      for (const r of o.reserved) {
+        const rcx = r.x + r.w / 2, rcy = r.y + r.h / 2;
+        const px = (c.w + r.w) / 2 + o.gap - Math.abs(c.x - rcx);
+        const py = (c.h + r.h) / 2 + o.gap - Math.abs(c.y - rcy);
+        if (px > 0 && py > 0) { moved = true; if (px < py) c.x += Math.sign(c.x - rcx || 1) * px; else c.y += Math.sign(c.y - rcy || 1) * py; }
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      const c = cards[i], hw = c.w / 2 + o.margin, hh = c.h / 2 + o.margin;
+      c.x = Math.min(Math.max(c.x, hw), viewport.w - hw);
+      c.y = Math.min(Math.max(c.y, hh), viewport.h - hh);
+    }
+    if (!moved) break;
   }
 }
 

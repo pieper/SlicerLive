@@ -81,6 +81,7 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
   maxCards?: number;         // full cards shown when few segments (default 12)
   compactThreshold?: number; // > this many visible segments → collapse to colour blots (default 10)
   maxCardsCompact?: number;  // mini cards shown in compact mode (default 30)
+  reserved?: () => { x: number; y: number; w: number; h: number }[];   // DEVICE-px rects (canvas-relative) cards must avoid: logo, on-screen labels
 }): SegmentCards {
   const overlay = new CardOverlay(gpu, format, font, hooks.style);
   const dpr = globalThis.devicePixelRatio || 1;
@@ -108,7 +109,7 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
       segs = segments;
       if (!ct || !seg) { geom = []; sceneBox = []; overlay.setCards([], dpr); return; }
       const compact = segments.length > (hooks.compactThreshold ?? 10);
-      const cap = compact ? (hooks.maxCardsCompact ?? 18) : (hooks.maxCards ?? 12);
+      const cap = compact ? (hooks.maxCardsCompact ?? 15) : (hooks.maxCards ?? 12);
       const r = build(ct, seg, segments, cap);
       geom = r.geom; overlay.setCards(r.specs, dpr, compact);
       const [nx, ny, nz] = ct.dims, M = ct.ijkToRAS;
@@ -121,7 +122,8 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
       // tall rectangle, not a fat circle). Cards ring OUTSIDE it, out to the sides, clamped on-screen.
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (const c of sceneBox) { const p = camera.worldToDisplay(c, w, h); if (p.depth <= 0) continue; minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
-      const extra = Number.isFinite(minX) ? { boundary: { minX: Math.max(minX, 0), minY: Math.max(minY, 0), maxX: Math.min(maxX, w), maxY: Math.min(maxY, h) }, ringGap: 22 * dpr } : undefined;
+      const reserved = hooks.reserved?.();
+      const extra = Number.isFinite(minX) ? { boundary: { minX: Math.max(minX, 0), minY: Math.max(minY, 0), maxX: Math.min(maxX, w), maxY: Math.min(maxY, h) }, reserved, ringGap: 22 * dpr } : (reserved ? { reserved } : undefined);
       overlay.render(view, camera, { w, h, dpr }, dt, undefined, extra);
       return !overlay.settled();
     },

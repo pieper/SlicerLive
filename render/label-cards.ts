@@ -104,7 +104,7 @@ const PREMUL_BLEND: GPUBlendState = {
   alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
 };
 
-export interface LayoutExtra { boundary?: { minX: number; minY: number; maxX: number; maxY: number }; ringGap?: number }
+export interface LayoutExtra { boundary?: { minX: number; minY: number; maxX: number; maxY: number }; reserved?: { x: number; y: number; w: number; h: number }[]; ringGap?: number }
 
 export interface CardStyle {
   scale?: number;   // multiply all px metrics (card + text size) — e.g. 2 for a larger card in a busy 3D cell
@@ -276,7 +276,7 @@ export class CardOverlay {
     const sizes = this.cards.map((c) => this.size(c));
     if (!this.seeded || this.bodies.length !== this.cards.length) { this.bodies = seedCards(anchorsPx, sizes); this.seeded = true; }
     else for (let i = 0; i < this.bodies.length; i++) { this.bodies[i].w = sizes[i].w; this.bodies[i].h = sizes[i].h; }
-    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, { keepOuts, boundary: extra?.boundary, ringGap: extra?.ringGap });
+    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, { keepOuts, boundary: extra?.boundary, reserved: extra?.reserved, ringGap: extra?.ringGap });
     return !this.settled();
   }
   /** Card body (screen centre + size) for index — for the CardField billboard. */
@@ -294,7 +294,7 @@ export class CardOverlay {
     if (!this.seeded || this.bodies.length !== this.cards.length) { this.bodies = seedCards(anchorsPx, sizes); this.seeded = true; }
     else for (let i = 0; i < this.bodies.length; i++) { this.bodies[i].w = sizes[i].w; this.bodies[i].h = sizes[i].h; }
     const _t0 = performance.now();
-    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, { keepOuts, boundary: extra?.boundary, ringGap: extra?.ringGap });
+    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, { keepOuts, boundary: extra?.boundary, reserved: extra?.reserved, ringGap: extra?.ringGap });
     this.perf.layoutMs = performance.now() - _t0;
     let ms = 0; for (const b of this.bodies) ms = Math.max(ms, Math.hypot(b.vx, b.vy)); this.maxSpeed = ms;
     const _t1 = performance.now();
