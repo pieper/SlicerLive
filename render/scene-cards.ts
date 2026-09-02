@@ -52,13 +52,14 @@ export interface SceneCards {
 export function mountSceneCards(gpu: Gpu, camera: VtkCamera, canvas: HTMLCanvasElement, api: SceneApi, hooks: { maxCards?: number } = {}): SceneCards {
   const dev = gpu.device;
   const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
+  const UI = 2;   // cards ~2x bigger in the 3D cell
   let cards: Card[] = [];
   let bodies: CardBody[] = [];
   const threads = new CapsuleField([], { screenSpace: false });   // world-space yarn
   let big: [Vec3, Vec3] = [[-1, -1, -1], [1, 1, 1]];
 
   const bake = (c: Card) => {
-    const b = bakeCardFace(c.content, dpr);
+    const b = bakeCardFace(c.content, dpr * UI);
     c.texW = b.w; c.texH = b.h;
     const tex = uploadCard(dev, b);
     if (c.field) c.field.setTexture(tex); else c.field = new CardField(tex, { aabb: big, glassOpacity: 0.82 });
@@ -106,7 +107,7 @@ export function mountSceneCards(gpu: Gpu, camera: VtkCamera, canvas: HTMLCanvasE
     bodies = [];
   };
 
-  const cardScreenSize = (i: number) => { const c = cards[i]; return { w: c.texW / dpr, h: c.texH / dpr }; };   // css px
+  const cardScreenSize = (i: number) => { const c = cards[i]; return { w: c.texW / dpr, h: c.texH / dpr }; };   // css px (already UI-scaled via the bake)
 
   const update: SceneCards["update"] = (vpW, vpH, dtSec) => {
     if (!cards.length) return false;
@@ -115,30 +116,46 @@ export function mountSceneCards(gpu: Gpu, camera: VtkCamera, canvas: HTMLCanvasE
     const sizes = cards.map((_, i) => cardScreenSize(i));
     if (bodies.length !== cards.length) bodies = seedCards(anchorsPx, sizes);
     else for (let i = 0; i < bodies.length; i++) { bodies[i].w = sizes[i].w; bodies[i].h = sizes[i].h; }
-    // keep-out: per-segment projected circle
-    const keepOuts = cards.map((c, i) => { const cc = anchors[i]; let r = 0; for (const p of c.corners) { const q = camera.worldToDisplay(p, vpW, vpH); if (q.depth > 0) r = Math.max(r, Math.hypot(q.x - cc.x, q.y - cc.y)); } return { x: cc.x, y: cc.y, radius: r }; });
-    layoutStep(bodies, anchorsPx, { w: vpW, h: vpH }, dtSec, { keepOuts });
+    // Form-fitting keep-out around ALL visible data: project the 8 corners of the scene box → a screen-space
+    // AABB (a tall body gives a tall rectangle, not a fat circle). Cards ring OUTSIDE this box, out to the
+    // sides, so the volume rendering never buries them.
+    const ctr = api.center(), rad = api.radius();
+    const scr = camera.worldToDisplay(ctr, vpW, vpH);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1]) {
+      const q = camera.worldToDisplay([ctr[0] + sx * rad, ctr[1] + sy * rad, ctr[2] + sz * rad], vpW, vpH);
+      minX = Math.min(minX, q.x); maxX = Math.max(maxX, q.x);
+      minY = Math.min(minY, q.y); maxY = Math.max(maxY, q.y);
+    }
+    // clamp the box to the viewport so cards ring the VISIBLE data, and can still find room on-screen
+    minX = Math.max(minX, 0); minY = Math.max(minY, 0);
+    maxX = Math.min(maxX, vpW); maxY = Math.min(maxY, vpH);
+    const boundary = { minX, minY, maxX, maxY };
+    const prev = bodies.map((b) => ({ x: b.x, y: b.y }));
+    layoutStep(bodies, anchorsPx, { w: vpW, h: vpH }, dtSec, { boundary, ringGap: 22 * dpr });
 
-    // camera basis for billboards
+    // camera basis for billboards; place cards IN FRONT of the whole volume so they always composite over it
     const n = nrm([camera.position[0] - camera.focalPoint[0], camera.position[1] - camera.focalPoint[1], camera.position[2] - camera.focalPoint[2]]);
     const right = nrm(crs(camera.viewUp as Vec3, n)), up = crs(n, right);
-    const depth = camera.worldToDisplay(api.center(), vpW, vpH).depth;
+    const centerDepth = scr.depth;
+    const cardDepth = Math.max(1, centerDepth - rad - 8);   // nearer than the volume's front face
     const focalPx = (vpH / 2) / Math.tan((camera.viewAngle * Math.PI) / 360);
-    const mmPerPx = depth / Math.max(focalPx, 1);
+    const mmPerPx = cardDepth / Math.max(focalPx, 1);
     const segs: { a: Vec3; b: Vec3; radius: number; color: [number, number, number, number] }[] = [];
     let moving = false;
     for (let i = 0; i < cards.length; i++) {
       const c = cards[i], b = bodies[i], a = anchors[i];
       const vis = a.depth > 0;
       const hu = (b.w / 2) * mmPerPx, hv = (b.h / 2) * mmPerPx;
-      const world = camera.displayToWorldAtDepth(b.x, b.y, depth - (HALF_THICK + 3 + i * 0.6), vpW, vpH) as Vec3;
+      const world = camera.displayToWorldAtDepth(b.x, b.y, cardDepth - i * 0.6, vpW, vpH) as Vec3;
       c.field.setBillboard(world, right, up, n, vis ? hu : 0, vis ? hv : 0, HALF_THICK, 6 * dpr * mmPerPx);
       if (vis) {
         // yarn thread from the card's lower edge toward the segment centroid
         const edge: Vec3 = [world[0] - up[0] * hv, world[1] - up[1] * hv, world[2] - up[2] * hv];
         segs.push({ a: edge, b: c.anchorRAS, radius: Math.max(0.8, mmPerPx * 1.6), color: [0.12, 0.12, 0.14, 1] });
       }
-      if (Math.hypot(b.vx, b.vy) > 1.5) moving = true;
+      const d = Math.hypot(b.x - prev[i].x, b.y - prev[i].y);
+      if (d > 0.08) moving = true; else { b.vx = 0; b.vy = 0; }   // frozen → accumulation stays byte-stable
     }
     threads.setSegments(segs);
     api.sync();

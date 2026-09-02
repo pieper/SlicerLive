@@ -20,11 +20,12 @@ export interface LayoutOpts {
   gap?: number;              // desired clear space between cards (css px)
   standoff?: number;         // preferred distance of the card centre from its anchor (css px) — no keep-out
   keepOuts?: { x: number; y: number; radius: number }[];  // per-segment projected circles: card i hugs OUTSIDE keepOuts[i], and is pushed off ANY it overlaps
+  boundary?: { minX: number; minY: number; maxX: number; maxY: number };  // screen-space AABB of ALL visible data: cards ring OUTSIDE it, toward their anchor (form-fitting, not a circle)
   ringGap?: number;          // small gap so a card HUGS just outside its segment (css px)
   keepOutForce?: number;     // outward push strength when a card intrudes on any segment
 }
 
-const DEFAULTS: Required<Omit<LayoutOpts, "keepOuts">> = {
+const DEFAULTS: Required<Omit<LayoutOpts, "keepOuts" | "boundary">> = {
   anchorSpring: 26, repulsion: 90000, damping: 0.86, maxSpeed: 1600, margin: 8, gap: 10, standoff: 96,
   ringGap: 14, keepOutForce: 40,
 };
@@ -64,9 +65,21 @@ export function layoutStep(
   for (let i = 0; i < n; i++) {
     const a = anchorsPx[i], c = cards[i];
     const halfDiag = 0.5 * Math.hypot(c.w, c.h);            // centre must clear a circle by this much
+    const bnd = o.boundary;
     const own = kos && kos[i];
     let tx: number, ty: number;
-    if (own) {
+    if (bnd) {
+      // ring OUTSIDE the screen-space AABB, in the direction of this card's segment (out to the sides)
+      const bcx = (bnd.minX + bnd.maxX) / 2, bcy = (bnd.minY + bnd.maxY) / 2;
+      const bhx = (bnd.maxX - bnd.minX) / 2, bhy = (bnd.maxY - bnd.minY) / 2;
+      let dirx = a.x - bcx, diry = a.y - bcy; let dl = Math.hypot(dirx, diry);
+      if (dl < 1e-2) { dirx = Math.cos(i * GA); diry = Math.sin(i * GA); dl = 1; }
+      dirx /= dl; diry /= dl;
+      // distance from centre to the box edge along dir
+      const tEdge = Math.min(bhx / Math.max(Math.abs(dirx), 1e-4), bhy / Math.max(Math.abs(diry), 1e-4));
+      const Rr = tEdge + halfDiag + o.ringGap;
+      tx = bcx + dirx * Rr; ty = bcy + diry * Rr;
+    } else if (own) {
       let dirx = own.x - gx, diry = own.y - gy;             // outward: away from the anatomy's overall centre
       let dl = Math.hypot(dirx, diry);
       if (dl < 1e-2) { dirx = Math.cos(i * GA); diry = Math.sin(i * GA); dl = 1; }   // lone/central segment: fan out
@@ -79,6 +92,17 @@ export function layoutStep(
     }
     fx[i] += (tx - c.x) * o.anchorSpring;
     fy[i] += (ty - c.y) * o.anchorSpring;
+    // push OUT of the screen-space AABB (to the nearest edge) so no card sits over any visible data
+    if (o.boundary) {
+      const k = o.boundary;
+      const bcx = (k.minX + k.maxX) / 2, bcy = (k.minY + k.maxY) / 2;
+      const bhx = (k.maxX - k.minX) / 2 + halfDiag, bhy = (k.maxY - k.minY) / 2 + halfDiag;
+      const penx = bhx - Math.abs(c.x - bcx), peny = bhy - Math.abs(c.y - bcy);
+      if (penx > 0 && peny > 0) {   // card centre inside the expanded box → eject along least penetration
+        if (penx < peny) fx[i] += Math.sign(c.x - bcx || 1) * penx * o.keepOutForce;
+        else fy[i] += Math.sign(c.y - bcy || 1) * peny * o.keepOutForce;
+      }
+    }
     // push the card off ANY segment circle it overlaps (don't obscure that rendering)
     if (kos) for (const k of kos) {
       let dx = c.x - k.x, dy = c.y - k.y; let d = Math.hypot(dx, dy);

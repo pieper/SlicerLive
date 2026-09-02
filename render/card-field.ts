@@ -106,10 +106,17 @@ fn sample_field_card${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   let qp = vec2<f32>(abs(pu) - (hu - r), abs(pv) - (hv - r));
   let rd2 = min(max(qp.x, qp.y), 0.0) + length(max(qp, vec2<f32>(0.0))) - r;
   if (rd2 > 0.0) { return vec4<f32>(0.0); }
-  let uv = vec2<f32>(pu / hu * 0.5 + 0.5, 0.5 - pv / hv * 0.5);
+  // Ink is a decal on the FRONT face. Project this sample along the ray to the front plane (pn = ht) so
+  // every sample on one ray maps to the SAME front-face texel — otherwise an oblique ray marching through
+  // the slab's thickness samples the glyph at drifting UVs and smears the text sideways.
+  let ndotr = dot(rd, u_material.card${s}_n.xyz);
+  var uv = vec2<f32>(pu / hu * 0.5 + 0.5, 0.5 - pv / hv * 0.5);
+  if (abs(ndotr) > 1e-3) {
+    let fd = d + rd * ((ht - pn) / ndotr);                     // point where the ray crossed the front face
+    uv = vec2<f32>(dot(fd, u_material.card${s}_u.xyz) / hu * 0.5 + 0.5, 0.5 - dot(fd, u_material.card${s}_v.xyz) / hv * 0.5);
+  }
   let baked = textureSampleLevel(t_card${s}, s_lin, uv, 0.0);   // (rgb, a); a>0.5 = ink (text/swatch/buttons/border)
-  let atFront = pn > (ht - u_material.card${s}_params.y);
-  if (atFront && baked.a > 0.5) {                              // opaque ink on the front face
+  if (baked.a > 0.5) {                                          // opaque ink, painted on the front glass
     return vec4<f32>(srgb2physical(baked.rgb), 1.0);
   }
   // frosted glass body: Beer–Lambert white per step, background shows through the residual alpha
