@@ -342,7 +342,7 @@ export class SegmentField implements Field {
    *  segmentation opacity — the caller does scene.syncUniforms() + redraw to apply. */
   setOpacity(o: number) { this.opacity = Math.max(0, Math.min(1, o)); }
 
-  uniformFloats() { return 28; }        // mat4(16) + color(4) + shade(4) + params(4)
+  uniformFloats() { return 36; }        // mat4(16) + color(4) + shade(4) + params(4) + bmin(4) + bmax(4)
   aabb(): [Vec3, Vec3] { return this.box; }
   sampleStep(): number { return this.stepMm; }
   setTexture(tex: GPUTexture, destroyPrev = true) { if (destroyPrev && this.tex !== tex) this.tex.destroy(); this.tex = tex; }
@@ -356,7 +356,13 @@ export class SegmentField implements Field {
 fn skip_seg${s}(wp : vec3<f32>) -> f32 {
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = t4.xyz;
-  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 1.0e30; }   // outside the SDF grid → nothing here
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) {
+    // OUTSIDE the SDF grid: leap only to the seg's AABB (a contract-valid lower bound), never past it.
+    let cen = (u_material.seg${s}_bmin.xyz + u_material.seg${s}_bmax.xyz) * 0.5;
+    let ext = (u_material.seg${s}_bmax.xyz - u_material.seg${s}_bmin.xyz) * 0.5;
+    let q = abs(transform_point_seg${s}(wp) - cen) - ext;
+    return max(0.0, length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
+  }
   let d = abs(textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a);                  // |distance to surface| (mm)
   return max(0.0, d - u_material.seg${s}_params.x - u_material.seg${s}_params.y);   // leap toward the shell (band + 1 voxel safe)
 }`;
@@ -368,6 +374,8 @@ fn skip_seg${s}(wp : vec3<f32>) -> f32 {
       `  seg${s}_color : vec4<f32>,`,    // rgb, opacity
       `  seg${s}_shade : vec4<f32>,`,    // ka, kd, ks, shininess
       `  seg${s}_params : vec4<f32>,`,   // band_mm, voxel_mm, _, _
+      `  seg${s}_bmin : vec4<f32>,`,     // aabb min (RAS) — for a contract-valid skip outside the texture
+      `  seg${s}_bmax : vec4<f32>,`,
     ].join("\n");
   }
 
@@ -589,6 +597,8 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     out[off + 16] = this.color[0]; out[off + 17] = this.color[1]; out[off + 18] = this.color[2]; out[off + 19] = this.opacity;
     out[off + 20] = this.shade[0]; out[off + 21] = this.shade[1]; out[off + 22] = this.shade[2]; out[off + 23] = this.shade[3];
     out[off + 24] = this.bandMm; out[off + 25] = this.voxelMm;
+    out[off + 28] = this.box[0][0]; out[off + 29] = this.box[0][1]; out[off + 30] = this.box[0][2];
+    out[off + 32] = this.box[1][0]; out[off + 33] = this.box[1][1]; out[off + 34] = this.box[1][2];
   }
 
   bindEntries(_s: number, base: number): GPUBindGroupEntry[] {
