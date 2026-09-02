@@ -82,6 +82,7 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
   compactThreshold?: number; // > this many visible segments → collapse to colour blots (default 10)
   maxCardsCompact?: number;  // mini cards shown in compact mode (default 30)
   reserved?: () => { x: number; y: number; w: number; h: number }[];   // DEVICE-px rects (canvas-relative) cards must avoid: logo, on-screen labels
+  segVisible?: (num: number) => boolean;   // hide a card when its segment is not visible (opacity 0)
 }): SegmentCards {
   const overlay = new CardOverlay(gpu, format, font, hooks.style);
   const dpr = globalThis.devicePixelRatio || 1;
@@ -123,7 +124,9 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (const c of sceneBox) { const p = camera.worldToDisplay(c, w, h); if (p.depth <= 0) continue; minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); }
       const reserved = hooks.reserved?.();
-      const extra = Number.isFinite(minX) ? { boundary: { minX: Math.max(minX, 0), minY: Math.max(minY, 0), maxX: Math.min(maxX, w), maxY: Math.min(maxY, h) }, reserved, ringGap: 22 * dpr } : (reserved ? { reserved } : undefined);
+      const sv = hooks.segVisible;
+      const shown = sv ? geom.map((_, i) => { const id = overlay.spec(i)?.id; return id == null ? true : sv(id); }) : undefined;
+      const extra = Number.isFinite(minX) ? { boundary: { minX: Math.max(minX, 0), minY: Math.max(minY, 0), maxX: Math.min(maxX, w), maxY: Math.min(maxY, h) }, reserved, shown, ringGap: 22 * dpr } : { reserved, shown };
       overlay.render(view, camera, { w, h, dpr }, dt, undefined, extra);
       return !overlay.settled();
     },

@@ -107,9 +107,9 @@ async function main() {
   const segCards = mountSegmentCards(gpu, srgb, cardFont, cv.threeD, camera, {
     apply: (id, action) => {
       if (!rs) return;
-      if (action === "reset") for (const s of rs.segments) rs.setSegmentOpacity(s.num, 1);
+      if (action === "reset") rs.setSegmentOpacities(rs.segments.map((s) => [s.num, 1]));
       else if (action === "hide") rs.setSegmentOpacity(id, 0);
-      else for (const s of rs.segments) rs.setSegmentOpacity(s.num, s.num === id ? 1 : 0.4);
+      else rs.setSegmentOpacities(rs.segments.map((s) => [s.num, s.num === id ? 1 : 0.4]));   // isolate
       redrawSlices(); draw3d();
     },
     redraw: () => draw3d(),
@@ -131,8 +131,10 @@ async function main() {
       }
       return out;
     },
+    segVisible: (num) => rs?.isSegmentVisible(num) ?? true,   // hide a segment's card when it's hidden
   });
   (globalThis as unknown as { __segCards?: unknown }).__segCards = segCards;   // test hook
+  (globalThis as unknown as { __rs?: unknown }).__rs = () => rs;   // test hook (current scene)
   const drawAll = () => { for (const p of planes) drawSlice(p); draw3d(); xhair?.redraw(); };
 
   // SHARED shift-move crosshair pick — same one-call mount every MPR demo uses. Getters keep it

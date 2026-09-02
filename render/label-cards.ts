@@ -104,7 +104,7 @@ const PREMUL_BLEND: GPUBlendState = {
   alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
 };
 
-export interface LayoutExtra { boundary?: { minX: number; minY: number; maxX: number; maxY: number }; reserved?: { x: number; y: number; w: number; h: number }[]; ringGap?: number }
+export interface LayoutExtra { boundary?: { minX: number; minY: number; maxX: number; maxY: number }; reserved?: { x: number; y: number; w: number; h: number }[]; shown?: boolean[]; ringGap?: number }
 
 export interface CardStyle {
   scale?: number;   // multiply all px metrics (card + text size) — e.g. 2 for a larger card in a busy 3D cell
@@ -287,16 +287,23 @@ export class CardOverlay {
 
   render(view: GPUTextureView, camera: VtkCamera, vp: Viewport, dtSec: number, keepOuts?: { x: number; y: number; radius: number }[], extra?: LayoutExtra): void {
     if (!this.cards.length) return;
+    const shown = extra?.shown;
     const anchors = this.cards.map((c) => camera.worldToDisplay(c.spec.anchorRAS, vp.w, vp.h));
-    this.lastVisible = anchors.map((a) => a.depth > 0);
+    // A card is drawn only when its segment is shown AND it's in front of the camera; hidden ones drop out.
+    this.lastVisible = anchors.map((a, i) => a.depth > 0 && (shown ? shown[i] : true));
     const anchorsPx = anchors.map((a) => ({ x: a.x, y: a.y }));
     const sizes = this.cards.map((c) => this.size(c));
     if (!this.seeded || this.bodies.length !== this.cards.length) { this.bodies = seedCards(anchorsPx, sizes); this.seeded = true; }
     else for (let i = 0; i < this.bodies.length; i++) { this.bodies[i].w = sizes[i].w; this.bodies[i].h = sizes[i].h; }
     const _t0 = performance.now();
-    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, { keepOuts, boundary: extra?.boundary, reserved: extra?.reserved, ringGap: extra?.ringGap });
+    // Lay out ONLY the shown cards (reference-mutate their bodies) so hidden segments free their slots.
+    const active: number[] = [];
+    for (let i = 0; i < this.cards.length; i++) if (this.lastVisible[i]) active.push(i);
+    const ab = active.map((i) => this.bodies[i]), aa = active.map((i) => anchorsPx[i]);
+    const ako = keepOuts ? active.map((i) => keepOuts[i]) : undefined;
+    layoutStep(ab, aa, { w: vp.w, h: vp.h }, dtSec, { keepOuts: ako, boundary: extra?.boundary, reserved: extra?.reserved, ringGap: extra?.ringGap });
     this.perf.layoutMs = performance.now() - _t0;
-    let ms = 0; for (const b of this.bodies) ms = Math.max(ms, Math.hypot(b.vx, b.vy)); this.maxSpeed = ms;
+    let ms = 0; for (const b of ab) ms = Math.max(ms, Math.hypot(b.vx, b.vy)); this.maxSpeed = ms;
     const _t1 = performance.now();
 
     const shape: number[] = [], text: number[] = [];

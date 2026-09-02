@@ -86,6 +86,8 @@ export interface SegrouletteScene {
   /** Per-segment opacity (0 = hidden, 0.5 = translucent, 1 = opaque) — 3D SDF shell + slice overlay.
    *  Rebakes the colorized overlay and the SDF attr in place. Caller redraws slices afterwards. */
   setSegmentOpacity(num: number, opacity: number): void;
+  /** Batched opacity set — updates all, then rebakes the overlay + SDF ONCE (Isolate/Reset over N segments). */
+  setSegmentOpacities(entries: [number, number][]): void;
   segmentOpacity(num: number): number;
   /** Binary visibility convenience (opacity 0/1) — kept for tests + callers that only toggle. */
   setSegmentVisible(num: number, visible: boolean): void;
@@ -278,6 +280,17 @@ export function buildSegrouletteScene(
       rebakeColorized();                                   // 2D slice overlay (palette alpha = opacity)
       segLogic?.setLabelOpacity(num, o);                   // 3D: per-segment shell opacity
       segLogic?.refineNow();                               // rebake attr + sdf in place (same field/texture)
+    },
+    setSegmentOpacities(entries) {
+      // Batched: set every opacity, then rebake the colorized overlay + SDF attr ONCE. Isolate/Reset touch
+      // all N segments; calling setSegmentOpacity per segment would rebake the whole volume N times.
+      for (const [num, opacity] of entries) {
+        const o = Math.max(0, Math.min(1, opacity));
+        if (o >= 1) segOpacity.delete(num); else segOpacity.set(num, o);
+        segLogic?.setLabelOpacity(num, o);
+      }
+      rebakeColorized();
+      segLogic?.refineNow();
     },
     segmentOpacity: (num) => opacityOf(num),
     setSegmentVisible(num, visible) { this.setSegmentOpacity(num, visible ? 1 : 0); },
