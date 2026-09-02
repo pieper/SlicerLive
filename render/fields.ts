@@ -305,6 +305,8 @@ export class SegmentField implements Field {
   private mode: "iso" | "surface" | "sdf";
   private colorFromTex: boolean;
   private interfaceMode: boolean;
+  private voxelMm = 1;
+  readonly providesSkip: boolean;
 
   constructor(tex: GPUTexture, dims: Vec3, spacing: Vec3, opts: SegmentFieldOpts) {
     this.tex = tex;
@@ -327,7 +329,9 @@ export class SegmentField implements Field {
     // slicer_wgpu SegmentField.sample_step_mm = max(0.5*voxel, 0.1)
     this.stepMm = opts.sampleStepMm ?? Math.max(0.5 * voxelMm, 0.1);
     this.clippable = opts.clippable ?? true;
+    this.voxelMm = voxelMm;
     this.mode = opts.mode ?? "iso";
+    this.providesSkip = this.mode === "sdf";   // sdf: the texture .a is a true distance-to-surface → sphere-trace
     this.colorFromTex = opts.colorFromTexture ?? false;
     this.interfaceMode = this.mode === "sdf" && (opts.interfaceMode ?? false);
     this.attrTex = this.mode === "sdf" ? opts.attrTexture : undefined;
@@ -343,12 +347,27 @@ export class SegmentField implements Field {
   sampleStep(): number { return this.stepMm; }
   setTexture(tex: GPUTexture, destroyPrev = true) { if (destroyPrev && this.tex !== tex) this.tex.destroy(); this.tex = tex; }
 
+  /** Empty-space skip for "sdf" mode: the texture .a is a TRUE distance-to-surface (mm), so the ray can
+   *  leap |sdf| minus the shell band toward the surface — sphere tracing. A one-voxel safety margin
+   *  absorbs the JFA distance approximation so the leap never overshoots a thin shell (image unchanged,
+   *  just far fewer march steps). Self-contained (no dependency on the sampling fns' emission order). */
+  skipWGSL(s: number): string {
+    return /* wgsl */ `
+fn skip_seg${s}(wp : vec3<f32>) -> f32 {
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = t4.xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 1.0e30; }   // outside the SDF grid → nothing here
+  let d = abs(textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a);                  // |distance to surface| (mm)
+  return max(0.0, d - u_material.seg${s}_params.x - u_material.seg${s}_params.y);   // leap toward the shell (band + 1 voxel safe)
+}`;
+  }
+
   structMembers(s: number): string {
     return [
       `  seg${s}_p2t : mat4x4<f32>,`,
       `  seg${s}_color : vec4<f32>,`,    // rgb, opacity
       `  seg${s}_shade : vec4<f32>,`,    // ka, kd, ks, shininess
-      `  seg${s}_params : vec4<f32>,`,   // band_mm, _, _, _
+      `  seg${s}_params : vec4<f32>,`,   // band_mm, voxel_mm, _, _
     ].join("\n");
   }
 
@@ -569,7 +588,7 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     out.set(this.p2t, off);
     out[off + 16] = this.color[0]; out[off + 17] = this.color[1]; out[off + 18] = this.color[2]; out[off + 19] = this.opacity;
     out[off + 20] = this.shade[0]; out[off + 21] = this.shade[1]; out[off + 22] = this.shade[2]; out[off + 23] = this.shade[3];
-    out[off + 24] = this.bandMm;
+    out[off + 24] = this.bandMm; out[off + 25] = this.voxelMm;
   }
 
   bindEntries(_s: number, base: number): GPUBindGroupEntry[] {
