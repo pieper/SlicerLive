@@ -40,7 +40,8 @@ interface Button extends Rect { part: CardAction; label: TextRun }
 interface PreparedCard {
   spec: CardSpec;
   cw: number; ch: number; ew: number; eh: number;   // collapsed / expanded size
-  bw: number; bh: number;                            // blot size (compact mode: swatch only)
+  mw: number; mh: number;                            // mini card size (compact mode: swatch + name, no terminology)
+  miniHead: { runs: TextRun[]; swatch?: Rect & { color: RGBA } };
   head: { runs: TextRun[]; swatch?: Rect & { color: RGBA } };
   extra: { runs: TextRun[]; buttons: Button[] };
   expanded: boolean;
@@ -123,7 +124,7 @@ export class CardOverlay {
   private font: FontAtlas;
   private st: Required<Omit<CardStyle, "scale">>;
   private dpr = 1;
-  private compact = false;   // many segments → cards collapse to a colour blot, full card on click
+  private compact = false;   // many segments → cards collapse to a mini card (swatch + name), full card on click
 
   private shapeBuf?: GPUBuffer; private shapeCap = 0;
   private textBuf?: GPUBuffer; private textCap = 0;
@@ -180,7 +181,9 @@ export class CardOverlay {
     this.dpr = dpr; this.compact = compact;
     const s = this.st, titlePx = s.titlePx * dpr, bodyPx = s.bodyPx * dpr, pad = s.padPx * dpr, gap = s.gapPx * dpr, maxT = s.maxTextPx * dpr;
     const sw = Math.round(titlePx), btnH = Math.round(bodyPx + 10 * dpr), btnGap = 4 * dpr, btnInnerPad = 8 * dpr;
-    const blot = Math.round(sw + pad);   // compact blot = swatch + a little padding (a small clickable square)
+    // compact mini card: smaller name-only tag (no terminology), tighter padding — used when many segments
+    const miniPx = Math.max(9 * dpr, Math.round(titlePx * 0.72)), miniSw = Math.round(miniPx);
+    const miniPad = Math.round(pad * 0.55), miniGap = Math.round(gap * 0.7);
     const num = (n: number) => n.toLocaleString("en-US");
 
     this.cards = specs.map((spec) => {
@@ -197,6 +200,16 @@ export class CardOverlay {
       };
       if (subL) head.runs.push({ quads: offset(subL.quads, pad, pad + row1H + gap), color: GREY });
       const cw = Math.ceil(headContentW + pad * 2), ch = Math.ceil(headBottom + pad);
+
+      // mini (compact) content: colour swatch + name only, smaller
+      const nameL = layoutText(this.font, spec.title, { pxSize: miniPx, maxWidthPx: maxT });
+      const mRow = Math.max(nameL.height, spec.swatch ? miniSw : 0);
+      const mTitleX = miniPad + (spec.swatch ? miniSw + miniGap : 0);
+      const miniHead: PreparedCard["head"] = {
+        runs: [{ quads: offset(nameL.quads, mTitleX, miniPad + (mRow - nameL.height) / 2), color: BLACK }],
+        swatch: spec.swatch ? { x: miniPad, y: miniPad + (mRow - miniSw) / 2, w: miniSw, h: miniSw, color: [spec.swatch[0], spec.swatch[1], spec.swatch[2], 1] } : undefined,
+      };
+      const mw = Math.ceil(mTitleX + nameL.width + miniPad), mh = Math.ceil(mRow + miniPad * 2);
 
       // extra (revealed on expand): stat lines + stacked buttons, below the head
       const lines: string[] = [];
@@ -219,14 +232,14 @@ export class CardOverlay {
         y += btnH + btnGap;
       }
       const eh = Math.ceil(y - btnGap + pad);
-      return { spec, cw, ch, ew, eh: Math.max(eh, ch), bw: blot, bh: blot, head, extra, expanded: false };
+      return { spec, cw, ch, ew, eh: Math.max(eh, ch), mw, mh, miniHead, head, extra, expanded: false };
     });
     this.seeded = false;
   }
 
   private size(c: PreparedCard): { w: number; h: number } {
     if (c.expanded) return { w: c.ew, h: c.eh };
-    if (this.compact) return { w: c.bw, h: c.bh };
+    if (this.compact) return { w: c.mw, h: c.mh };
     return { w: c.cw, h: c.ch };
   }
 
@@ -310,11 +323,10 @@ export class CardOverlay {
       const edge = boxEdgeToward(b.x, b.y, hw, hh, a.x, a.y);
       line(edge.x, edge.y, a.x, a.y, this.st.leaderPx * this.dpr, this.st.leaderRGBA);
       if (this.compact && !c.expanded) {
-        // BLOT: just the segment colour in a small square (black border) — full card opens on click.
-        const col = c.head.swatch?.color ?? [0.6, 0.6, 0.62, 1];
+        // MINI card: colour swatch + name only (no terminology) — the full card opens on click.
         rect(b.x, b.y, hw, hh, this.st.radiusPx * this.dpr, this.st.borderPx * this.dpr, this.st.glassRGBA, this.st.borderRGBA);
-        const sp = Math.min(hw, hh) - this.st.padPx * this.dpr * 0.4;
-        rect(b.x, b.y, sp, sp, 2 * this.dpr, 1.5 * this.dpr, col, BLACK);
+        if (c.miniHead.swatch) { const w2 = c.miniHead.swatch; rect(ox + w2.x + w2.w / 2, oy + w2.y + w2.h / 2, w2.w / 2, w2.h / 2, 2 * this.dpr, 1.25 * this.dpr, w2.color, BLACK); }
+        glyphs(c.miniHead.runs, ox, oy);
         continue;
       }
       rect(b.x, b.y, hw, hh, this.st.radiusPx * this.dpr, this.st.borderPx * this.dpr, this.st.glassRGBA, this.st.borderRGBA);

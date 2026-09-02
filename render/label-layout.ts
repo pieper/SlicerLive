@@ -62,6 +62,20 @@ export function layoutStep(
   const GA = 2.399963229728653;
   let gx = 0, gy = 0;
   if (kos && kos.length) { for (const k of kos) { gx += k.x; gy += k.y; } gx /= kos.length; gy /= kos.length; }
+
+  // With MANY cards on the boundary, targeting each card's own anchor direction piles clusters of
+  // co-located segments (e.g. the vertebrae, the heart chambers) into one corner where the viewport clamp
+  // pins them overlapping. Instead give each card an EVENLY-SPACED slot around the box perimeter, ordered
+  // by anchor angle — locality is preserved (neighbours keep neighbouring slots) but no two cards ever
+  // target the same point, so they can't stack. Kept for small counts is the direct anchor-direction ring.
+  let slotRank: Int32Array | null = null;
+  if (o.boundary && n > 8) {
+    const bnd = o.boundary, bcx = (bnd.minX + bnd.maxX) / 2, bcy = (bnd.minY + bnd.maxY) / 2;
+    const order = Array.from({ length: n }, (_, i) => i)
+      .sort((i, j) => Math.atan2(anchorsPx[i].y - bcy, anchorsPx[i].x - bcx) - Math.atan2(anchorsPx[j].y - bcy, anchorsPx[j].x - bcx));
+    slotRank = new Int32Array(n);
+    order.forEach((idx, k) => { slotRank![idx] = k; });
+  }
   for (let i = 0; i < n; i++) {
     const a = anchorsPx[i], c = cards[i];
     const halfDiag = 0.5 * Math.hypot(c.w, c.h);            // centre must clear a circle by this much
@@ -69,16 +83,28 @@ export function layoutStep(
     const own = kos && kos[i];
     let tx: number, ty: number;
     if (bnd) {
-      // ring OUTSIDE the screen-space AABB, in the direction of this card's segment (out to the sides)
       const bcx = (bnd.minX + bnd.maxX) / 2, bcy = (bnd.minY + bnd.maxY) / 2;
       const bhx = (bnd.maxX - bnd.minX) / 2, bhy = (bnd.maxY - bnd.minY) / 2;
-      let dirx = a.x - bcx, diry = a.y - bcy; let dl = Math.hypot(dirx, diry);
-      if (dl < 1e-2) { dirx = Math.cos(i * GA); diry = Math.sin(i * GA); dl = 1; }
-      dirx /= dl; diry /= dl;
-      // distance from centre to the box edge along dir
-      const tEdge = Math.min(bhx / Math.max(Math.abs(dirx), 1e-4), bhy / Math.max(Math.abs(diry), 1e-4));
-      const Rr = tEdge + halfDiag + o.ringGap;
-      tx = bcx + dirx * Rr; ty = bcy + diry * Rr;
+      if (slotRank) {
+        // MANY cards: even PERIMETER (arc-length) slots on the ring rectangle just outside the box, ordered
+        // by anchor angle. Uniform LINEAR spacing (angular spacing would bunch on the long vertical sides).
+        const RX = bhx + o.ringGap, RY = bhy + o.ringGap, W = 2 * RX, H = 2 * RY, P = 2 * (W + H);
+        let s = ((slotRank[i] + 0.5) / n) * P;   // arc length clockwise from the top-left corner
+        let rx: number, ry: number, nx: number, ny: number;
+        if (s < W) { rx = -RX + s; ry = -RY; nx = 0; ny = -1; }                       // top
+        else if ((s -= W) < H) { rx = RX; ry = -RY + s; nx = 1; ny = 0; }             // right
+        else if ((s -= H) < W) { rx = RX - s; ry = RY; nx = 0; ny = 1; }              // bottom
+        else { s -= W; rx = -RX; ry = RY - s; nx = -1; ny = 0; }                      // left
+        tx = bcx + rx + nx * halfDiag; ty = bcy + ry + ny * halfDiag;                 // push out so the card clears the box
+      } else {
+        // FEW cards: ring in the card's own anchor direction (keeps the leader short).
+        let dirx = a.x - bcx, diry = a.y - bcy; let dl = Math.hypot(dirx, diry);
+        if (dl < 1e-2) { dirx = Math.cos(i * GA); diry = Math.sin(i * GA); dl = 1; }
+        dirx /= dl; diry /= dl;
+        const tEdge = Math.min(bhx / Math.max(Math.abs(dirx), 1e-4), bhy / Math.max(Math.abs(diry), 1e-4));
+        const Rr = tEdge + halfDiag + o.ringGap;
+        tx = bcx + dirx * Rr; ty = bcy + diry * Rr;
+      }
     } else if (own) {
       let dirx = own.x - gx, diry = own.y - gy;             // outward: away from the anatomy's overall centre
       let dl = Math.hypot(dirx, diry);

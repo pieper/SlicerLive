@@ -80,7 +80,7 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
   style?: CardStyle;
   maxCards?: number;         // full cards shown when few segments (default 12)
   compactThreshold?: number; // > this many visible segments → collapse to colour blots (default 10)
-  maxCardsCompact?: number;  // blots shown in compact mode (default 40)
+  maxCardsCompact?: number;  // mini cards shown in compact mode (default 30)
 }): SegmentCards {
   const overlay = new CardOverlay(gpu, format, font, hooks.style);
   const dpr = globalThis.devicePixelRatio || 1;
@@ -108,7 +108,7 @@ export function mountSegmentCards(gpu: Gpu, format: GPUTextureFormat, font: Font
       segs = segments;
       if (!ct || !seg) { geom = []; sceneBox = []; overlay.setCards([], dpr); return; }
       const compact = segments.length > (hooks.compactThreshold ?? 10);
-      const cap = compact ? (hooks.maxCardsCompact ?? 40) : (hooks.maxCards ?? 12);
+      const cap = compact ? (hooks.maxCardsCompact ?? 18) : (hooks.maxCards ?? 12);
       const r = build(ct, seg, segments, cap);
       geom = r.geom; overlay.setCards(r.specs, dpr, compact);
       const [nx, ny, nz] = ct.dims, M = ct.ijkToRAS;
