@@ -84,6 +84,7 @@ async function main() {
   const dpr3 = Math.min(2, globalThis.devicePixelRatio || 1);
   const cardFont = buildFontAtlas({ sizePx: 44, spread: 6, fontFamily: "Helvetica, \"Helvetica Neue\", Arial, sans-serif" });
   let cardDt = performance.now();
+  let labelsOn = true;   // "Segment labels" toggle in the SlicerLive popup (on by default)
   // Segment label cards over the 3D view — SHARP 2D overlay (stays full-res while the volume moves and
   // temporally settles). Force layout uses the whole-scene screen AABB so cards ring out to the sides,
   // clear of the visible data. (The ray-marched glass-slab CardField path is kept in render/card-field.ts
@@ -97,6 +98,7 @@ async function main() {
     onFrame: () => {
       xhair?.redraw();
       const now = performance.now(), dt = (now - cardDt) / 1000; cardDt = now;
+      if (!labelsOn) return;   // labels toggled off → don't draw them over the freshly-rendered 3D frame
       const moving = segCards.draw(cx.threeD.getCurrentTexture().createView({ format: srgb }), cv.threeD.width, cv.threeD.height, dpr3, dt);
       if (moving) a3d.draw();   // keep the loop alive while the cards are still gliding
     },
@@ -170,6 +172,7 @@ async function main() {
     // so a semi-transparent VR can be composited with the segmentation.
     { label: "Volume render", getOpacity: () => rs?.volumeOpacity() ?? 1, setOpacity: (o) => { rs?.setVolumeOpacity(o); draw3d(); xhair?.redraw(); }, color: [0.75, 0.78, 0.85] },
     { label: "Segmentation", getOpacity: () => rs?.segOpacity() ?? 1, setOpacity: (o) => { rs?.setSegOpacity(o); draw3d(); xhair?.redraw(); }, disabled: () => !(rs?.hasSeg), color: [0.62, 0.9, 1.0] },
+    { label: "Segment labels", get: () => labelsOn, set: (on) => { labelsOn = on; draw3d(); }, disabled: () => !(rs?.hasSeg) },
     { label: "Slice outline", get: () => sliceOutline, set: (on) => { sliceOutline = on; rs?.slice.setOverlayOutline(on); redrawSlices(); }, disabled: () => !(rs?.hasSeg) },
     { label: "Crop volume", get: () => roiEnabled, set: (on) => { roiEnabled = on; if (on && roiFirstEnable) { roiVisible = true; roiFirstEnable = false; } applyRoi(); }, disabled: () => (rs?.volumeOpacity() ?? 0) <= 0 },
     { label: "Show ROI box", get: () => roiVisible, set: (on) => { roiVisible = on; rs?.setRoiVisible(on); draw3d(); xhair?.redraw(); } },
