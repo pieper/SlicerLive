@@ -99,6 +99,8 @@ export interface SegrouletteScene {
   roiVisible(): boolean;
   /** Re-apply the clip planes from the current box (after a handle drag) without a rebuild. */
   reclip(): void;
+  /** Add/replace demo-supplied fields (CardFields, …) that composite in the SAME 3D ray-march. */
+  setExtraFields(fields: Field[]): void;
   /** Free the 3D segmentation GPU resources (call before dropping a scene on Spin). */
   destroy(): void;
 }
@@ -205,11 +207,13 @@ export function buildSegrouletteScene(
   let showVolume = true, showSeg = hasSeg;   // derived: opacity > 0 (field present in the scene build)
   let roiEnabled = false, roiVisible = false;
   const currentSegFields = (): Field[] => segLogic ? [segLogic.field()] : [];
+  let extraFields: Field[] = [];   // demo-supplied fields (e.g. CardFields) composited in the same march
   const rebuild = () => {
     const f: Field[] = [];
     if (showVolume) f.push(volumeField);
     if (showSeg) f.push(...currentSegFields());
     if (roiVisible) { f.push(roi.box, roi.handles); }
+    f.push(...extraFields);
     scene.build(f);                                    // may be empty → blank 3D (a valid state)
     scene.setBackground(0.05, 0.06, 0.09);
     if (roiEnabled) scene.setClipBox(roi.lo(), roi.hi()); else scene.clearClip();
@@ -282,6 +286,7 @@ export function buildSegrouletteScene(
     setRoiVisible(on) { roiVisible = on; rebuild(); },
     roiEnabled: () => roiEnabled,
     roiVisible: () => roiVisible,
+    setExtraFields(fields: Field[]) { extraFields = fields; rebuild(); },
     reclip() { if (roiEnabled) scene.setClipBox(roi.lo(), roi.hi()); else scene.clearClip(); scene.syncUniforms(); },
     destroy() { segLogic?.destroy(); editable?.destroy(); },
   };

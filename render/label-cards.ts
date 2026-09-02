@@ -242,6 +242,25 @@ export class CardOverlay {
     return { x: b.x - sz.w / 2 + bt.x + bt.w / 2, y: b.y - sz.h / 2 + bt.y + bt.h / 2 };
   }
 
+  /** Run the force layout for one frame WITHOUT drawing (the CardField path renders via the ray-march).
+   *  Updates card body positions + visibility. Returns true while still moving. */
+  layout(camera: VtkCamera, vp: Viewport, dtSec: number, keepOuts?: { x: number; y: number; radius: number }[]): boolean {
+    if (!this.cards.length) return false;
+    const anchors = this.cards.map((c) => camera.worldToDisplay(c.spec.anchorRAS, vp.w, vp.h));
+    this.lastVisible = anchors.map((a) => a.depth > 0);
+    const anchorsPx = anchors.map((a) => ({ x: a.x, y: a.y }));
+    const sizes = this.cards.map((c) => this.size(c));
+    if (!this.seeded || this.bodies.length !== this.cards.length) { this.bodies = seedCards(anchorsPx, sizes); this.seeded = true; }
+    else for (let i = 0; i < this.bodies.length; i++) { this.bodies[i].w = sizes[i].w; this.bodies[i].h = sizes[i].h; }
+    layoutStep(this.bodies, anchorsPx, { w: vp.w, h: vp.h }, dtSec, keepOuts ? { keepOuts } : undefined);
+    return !this.settled();
+  }
+  /** Card body (screen centre + size) for index — for the CardField billboard. */
+  body(index: number): { x: number; y: number; w: number; h: number } | null { const b = this.bodies[index]; return b ? { x: b.x, y: b.y, w: b.w, h: b.h } : null; }
+  visible(index: number): boolean { return !!this.lastVisible[index]; }
+  count(): number { return this.cards.length; }
+  expanded(index: number): boolean { return !!this.cards[index]?.expanded; }
+
   render(view: GPUTextureView, camera: VtkCamera, vp: Viewport, dtSec: number, keepOuts?: { x: number; y: number; radius: number }[]): void {
     if (!this.cards.length) return;
     const anchors = this.cards.map((c) => camera.worldToDisplay(c.spec.anchorRAS, vp.w, vp.h));
@@ -313,6 +332,55 @@ export class CardOverlay {
     if (tag === "shape") this.shapeCap = need; else this.textCap = need;
     return nb;
   }
+  /** Current card size (device px) for the given index. */
+  cardSize(index: number): { w: number; h: number } | null { const c = this.cards[index]; return c ? this.size(c) : null; }
+
+  /** Bake ONE card's INK (border + swatch + buttons + text; NO glass fill) into an RGBA texture in
+   *  card-local coordinates, for use as a CardField's front-face content. Glass transparent (a=0). */
+  bakeCard(index: number, ss = 2): { tex: GPUTexture; w: number; h: number } | null {
+    const c = this.cards[index]; if (!c) return null;
+    const sz = this.size(c), w = Math.max(2, Math.ceil(sz.w * ss)), h = Math.max(2, Math.ceil(sz.h * ss));
+    const dpr = this.dpr;
+    const tex = this.dev.createTexture({ size: [w, h], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+
+    const shape: number[] = [], text: number[] = [];
+    const rect = (cx: number, cy: number, hw: number, hh: number, radius: number, border: number, fill: RGBA, brd: RGBA) => {
+      const x0 = cx - hw, x1 = cx + hw, y0 = cy - hh, y1 = cy + hh;
+      for (const [px, py] of [[x0, y0], [x1, y0], [x1, y1], [x0, y0], [x1, y1], [x0, y1]]) shape.push(px, py, cx, cy, hw, hh, radius, border, 0, 0, ...fill, ...brd);
+    };
+    const glyphs = (runs: TextRun[], ox: number, oy: number) => {
+      for (const run of runs) for (const q of run.quads) {
+        const x0 = ox + q.x * ss, x1 = ox + (q.x + q.w) * ss, y0 = oy + q.y * ss, y1 = oy + (q.y + q.h) * ss, co = run.color;
+        for (const [px, py, uu, vv] of [[x0, y0, q.u0, q.v0], [x1, y0, q.u1, q.v0], [x1, y1, q.u1, q.v1], [x0, y0, q.u0, q.v0], [x1, y1, q.u1, q.v1], [x0, y1, q.u0, q.v1]]) text.push(px, py, uu, vv, ...co);
+      }
+    };
+    // border only (fill transparent → interior stays glass); swatch/buttons/text as ink
+    const transparent: RGBA = [0, 0, 0, 0];
+    rect(sz.w / 2 * ss, sz.h / 2 * ss, sz.w / 2 * ss, sz.h / 2 * ss, this.st.radiusPx * dpr * ss, this.st.borderPx * dpr * ss, transparent, this.st.borderRGBA);
+    if (c.head.swatch) { const w2 = c.head.swatch; rect((w2.x + w2.w / 2) * ss, (w2.y + w2.h / 2) * ss, w2.w / 2 * ss, w2.h / 2 * ss, 2 * dpr * ss, 1.5 * dpr * ss, w2.color, BLACK); }
+    glyphs(c.head.runs, 0, 0);
+    if (c.expanded) {
+      for (const bt of c.extra.buttons) rect((bt.x + bt.w / 2) * ss, (bt.y + bt.h / 2) * ss, bt.w / 2 * ss, bt.h / 2 * ss, 4 * dpr * ss, 1 * dpr * ss, this.st.buttonRGBA, BLACK);
+      glyphs(c.extra.runs, 0, 0);
+      glyphs(c.extra.buttons.map((bt) => bt.label), 0, 0);
+    }
+
+    this.dev.queue.writeBuffer(this.vpBuf, 0, new Float32Array([w, h, dpr, 0]));
+    const sArr = new Float32Array(shape), tArr = new Float32Array(text);
+    const sBuf = this.dev.createBuffer({ size: Math.max(64, sArr.byteLength), usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+    const tBuf = this.dev.createBuffer({ size: Math.max(64, tArr.byteLength), usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+    if (sArr.length) this.dev.queue.writeBuffer(sBuf, 0, sArr);
+    if (tArr.length) this.dev.queue.writeBuffer(tBuf, 0, tArr);
+    const enc = this.dev.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: tex.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    if (sArr.length) { pass.setPipeline(this.shapePipe); pass.setBindGroup(0, this.shapeBind); pass.setVertexBuffer(0, sBuf); pass.draw(sArr.length / 18); }
+    if (tArr.length) { pass.setPipeline(this.textPipe); pass.setBindGroup(0, this.textBind); pass.setVertexBuffer(0, tBuf); pass.draw(tArr.length / 8); }
+    pass.end();
+    this.dev.queue.submit([enc.finish()]);
+    sBuf.destroy(); tBuf.destroy();
+    return { tex, w, h };
+  }
+
   dispose(): void { this.atlasTex.destroy(); this.vpBuf.destroy(); this.shapeBuf?.destroy(); this.textBuf?.destroy(); }
 }
 
