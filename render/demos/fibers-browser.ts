@@ -122,7 +122,11 @@ async function main() {
 
   // The attractor (the list's first control point) is the one draggable handle.
   attachWidgetControls(canvas, camera, {
-    getHandles: (): Handle[] => [{ id: 0, world: sc.points[0], pickPx: 18 }],
+    // A COPY: onDrag mutates sc.points[0] in place, and the widget holds the grabbed handle's
+    // `world` as the drag plane for the life of the drag — handing out the live array would move
+    // that plane under the drag, collapsing the attractor toward the camera axis instead of
+    // following the cursor.
+    getHandles: (): Handle[] => [{ id: 0, world: [...sc.points[0]] as Vec3, pickPx: 18 }],
     getSize: () => ({ w: canvas.width, h: canvas.height }),
     onDragStart: () => { hint = "leading the blobs…"; showStatus(); },
     onDrag: (_h, world) => {
