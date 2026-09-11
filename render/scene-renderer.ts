@@ -444,6 +444,11 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
 
   /** Reset temporal accumulation — call when the view changes (camera move, scene edit, resize). */
   resetAccumulation() { this.accumN = 0; }
+  /** ROLLING accumulation for scenes whose content keeps changing (an animation): each frame blends
+   *  in with weight 1/min(n, accumWindow) — an exponential window of ~accumWindow frames instead of
+   *  the running mean — so static content still converges toward jittered temporal AA while moving
+   *  content keeps a short trail rather than smearing. Infinity (default) = the running mean. */
+  accumWindow = Infinity;
   /** Frames accumulated since the last reset (0 before the first accumulated frame). */
   accumCount(): number { return this.accumN; }
 
@@ -480,7 +485,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     // first accumulated frame is byte-identical to renderToView — the property the tests rely on.
     this.dev.queue.writeBuffer(this.camBuf, 76, new Float32Array([n - 1]));
     this.flush();
-    this.dev.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array([this.mat[12], this.mat[13], this.mat[14], 1 / n]));
+    this.dev.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array([this.mat[12], this.mat[13], this.mat[14], 1 / Math.min(n, this.accumWindow)]));
     const prev = this.accumPing, next = 1 - this.accumPing;
     const enc = this.dev.createCommandEncoder();
     const mb = this.meshPass(enc, width, height);
@@ -612,26 +617,32 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
     // per-sample opacity toward 1 over the many samples through a handle. Instead we track the
     // single MAX-opacity sample (the solid core: 0.5 inactive / 1.0 active) and its colour —
     // no accumulation, no compounding — and blend it once at the end.
-    const sampleInto = (nm: string, ghost: boolean) =>
-      ghost
-        ? `let c = sample_field_${nm}(wp, rd); if (c.a > g_op) { g_op = c.a; g_col = c.rgb / max(c.a, 1e-4); }`
-        : `let c = sample_field_${nm}(wp, rd); sum += c;`;
+    // INTERVAL fields (Field.intervalSampling) also get the ray distance since THEIR previous sample,
+    // tracked in last_<nm>. It advances even when the sample is clipped: a clipped interval is
+    // consumed, not carried into the next sample.
+    const args = (p: Placed) => (p.field.intervalSampling ? `wp, rd, s_here - last_${p.field.kind}${p.slot}` : "wp, rd");
+    const advance = (p: Placed) => (p.field.intervalSampling ? ` last_${p.field.kind}${p.slot} = s_here;` : "");
+    const sampleInto = (p: Placed, ghost: boolean) => {
+      const call = `sample_field_${p.field.kind}${p.slot}(${args(p)})`;
+      return ghost
+        ? `let c = ${call}; if (c.a > g_op) { g_op = c.a; g_col = c.rgb / max(c.a, 1e-4); }`
+        : `let c = ${call}; sum += c;`;
+    };
     // A skip-branch: evaluate the (cached) skip horizon; sample only when reached.
     const skipBranch = (p: Placed, clip: boolean, ghost = false): string => {
       const nm = `${p.field.kind}${p.slot}`;
-      const smp = sampleInto(nm, ghost);
+      const smp = sampleInto(p, ghost);
       // Subtract one step: wp is the JITTERED sample position (up to +/-0.5 step off t).
       return `    if (t >= resume_${nm}) {
       let d_${nm} = max(skip_${nm}(wp) - step, 0.0);
       if (d_${nm} > 0.0) { resume_${nm} = t + d_${nm}; }
-      else { ${clip ? clipGuard(p, smp) : smp} }
+      else { ${clip ? clipGuard(p, smp) : smp}${advance(p)} }
     }
     if (t < resume_${nm}) { jump_t = min(jump_t, resume_${nm}); } else { all_defer = false; }`;
     };
     const plainBranch = (p: Placed, clip: boolean, ghost = false): string => {
-      const nm = `${p.field.kind}${p.slot}`;
-      const smp = sampleInto(nm, ghost);
-      return `    { ${clip ? clipGuard(p, smp) : smp} all_defer = false; }`;
+      const smp = sampleInto(p, ghost);
+      return `    { ${clip ? clipGuard(p, smp) : smp}${advance(p)} all_defer = false; }`;
     };
 
     const normalSkippers = normalReceivers.filter((p) => !p.field.transform)
@@ -646,6 +657,9 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
     const fns = [modFns, tpFns, fieldFns, skipFns].filter((s) => s.trim()).join("\n");
     const skipInit = [...normalSkippers, ...ghostSkippers]
       .map((p) => `  var resume_${p.field.kind}${p.slot} : f32 = -1.0e30;`).join("\n");
+    // Each interval field's first interval starts at the slab entry (t_near was pushed one step in).
+    const intervalInit = receivers.filter((p) => p.field.intervalSampling)
+      .map((p) => `  var last_${p.field.kind}${p.slot} : f32 = max(t_near - step, 0.0);`).join("\n");
 
     // CLIPPING (port of slicer_wgpu's clip_planes/clip_count): a ROI box → up to 8 inward
     // planes; a sample on the negative side of ANY active plane is discarded. Applied PER
@@ -660,7 +674,7 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
     // PICK dispatch: sample every NORMAL (non-ghost) receiver at wp and sum, clip-guarded — no
     // skip machinery (a single ray doesn't need it), no ghost handles (widgets aren't pickable).
     const pickDispatch = normalReceivers.map((p) =>
-      `    ${clipGuard(p, `{ let c = sample_field_${p.field.kind}${p.slot}(wp, rd); sum += c; }`)}`
+      `    ${clipGuard(p, `{ let c = sample_field_${p.field.kind}${p.slot}(wp, rd${p.field.intervalSampling ? ", step" : ""}); sum += c; }`)}`
     ).join("\n");
     return /* wgsl */ `
 struct Camera { inv_view_proj : mat4x4<f32>, size : vec4<f32>, eye : vec4<f32> };
@@ -743,6 +757,7 @@ fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
   var g_op = 0.0;          // ghost (handle) surface: max opacity along the ray (0.5 inactive /
   var g_col = vec3<f32>(0.0);  // 1.0 active) and its colour — tracked, never accumulated.
 ${skipInit}
+${intervalInit}
   loop {
     if (t >= t_far || safety >= 5000${hasGhost ? "" : " || integrated.a >= 0.99"}) { break; }
     // Per-(pixel, step, ACCUM FRAME) ray-offset jitter. The frame term (u_cam.size.w, the
@@ -766,7 +781,8 @@ ${skipInit}
       integrated = integrated + (1.0 - integrated.a) * mesh_c;
       mesh_done = true;
     }
-    let wp = ro + rd * (t + js * step);
+    let s_here = t + js * step;   // ray distance of this (jittered) sample
+    let wp = ro + rd * s_here;
     var sum = vec4<f32>(0.0);
     var all_defer = true;        // every field guarantees emptiness here -> we may leap
     var jump_t = 1.0e30;         // nearest field horizon
@@ -922,7 +938,7 @@ ${pickDispatch}
    *  fields (e.g. fiducials/markups only) binding 2 is absent from the layout — supplying it
    *  anyway fails validation and the whole view silently renders nothing. Emit the sampler
    *  declaration and its bind entry under the SAME condition so the two can't drift. */
-  private usesSampler(): boolean { return this.placed.some((p) => p.field.bindingCount > 0); }
+  private usesSampler(): boolean { return this.placed.some((p) => p.field.usesSampler ?? p.field.bindingCount > 0); }
 
   private bindGroupEntries(): GPUBindGroupEntry[] {
     const entries: GPUBindGroupEntry[] = [

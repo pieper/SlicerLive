@@ -56,6 +56,17 @@ export interface Field {
    *  already-accumulated colour so the handle shines through occluders. They are excluded
    *  from the normal sum and the empty-space-skip/leap machinery. */
   readonly ghost?: boolean;
+  /** INTERVAL sampling, for surfaces thinner than the ray step (e.g. FiberField's tubes) that a point
+   *  sample would step over. The sampling fn takes a third argument —
+   *  `sample_field_<kind><slot>(wp, rd, seg)` — the ray distance since THIS field's previous sample,
+   *  and returns everything it crosses on (wp - seg*rd, wp]. Successive intervals partition the ray
+   *  (a clipped sample still consumes its interval), so each surface is counted exactly once whatever
+   *  the step or jitter. After an empty-space skip `seg` spans the skipped stretch, so the field's
+   *  skip bound must also cover any look-back it caps `seg` to. */
+  readonly intervalSampling?: boolean;
+  /** Whether the shader references the shared linear sampler (binding 2). Default bindingCount > 0;
+   *  set false for a field whose bindings are all storage buffers. */
+  readonly usesSampler?: boolean;
   uniformFloats(): number;               // size of this field's uniform block (multiple of 4)
   structMembers(slot: number): string;   // WGSL struct member lines (slot-prefixed)
   declareBindings(slot: number, base: number): string;  // WGSL @binding decls

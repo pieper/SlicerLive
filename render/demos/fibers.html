@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SlicerLive — Fiber Tracts</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  /* The 3D view fills the window (minus the header) so it can be tested at 4K: the canvas is
+     stretched by CSS and its DRAWING BUFFER is resized to match by the page's ResizeObserver. */
+  body { margin: 0; background: #0e0e16; color: #d8d8e0; font-family: -apple-system, system-ui, sans-serif;
+         display: flex; flex-direction: column; overflow: hidden; }
+  header { flex: 0 0 auto; padding: 16px 22px 16px 56px; border-bottom: 1px solid #2a2a3a; }
+  h1 { margin: 0; font-size: 19px; }
+  .sub { opacity: .65; font-size: 13px; margin-top: 5px; max-width: 880px; line-height: 1.5; }
+  .badge { display: inline-block; font-size: 11px; color: #04121c; background: linear-gradient(180deg, #9fe9ff, #54c6f0);
+           font-weight: 700; border-radius: 5px; padding: 1px 7px; vertical-align: middle; margin-left: 6px; }
+  a { color: #7fa8e0; }
+  main { flex: 1 1 auto; position: relative; min-height: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; background: #000; cursor: grab; touch-action: none; }
+  canvas:active { cursor: grabbing; }
+  .bar { position: absolute; left: 14px; bottom: 14px; z-index: 5; display: flex; align-items: center; gap: 14px;
+         padding: 7px 12px; border-radius: 9px; border: 1px solid #232a3b; background: rgba(14, 16, 26, .74);
+         backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+  .bar button { font: 600 13px -apple-system, system-ui, sans-serif; color: #d8e6ff; background: #1c2233; border: 1px solid #34405c;
+                border-radius: 6px; padding: 5px 12px; cursor: pointer; }
+  #play { min-width: 84px; }
+  .bar button:hover { border-color: #4a90d9; }
+  #status { font-size: 12px; color: #9fb3d0; min-height: 1.4em; font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fiber Tracts — capsule tubes + lava lamp <span class="badge">WebGPU</span></h1>
+  <div class="sub">About 1,500 synthetic streamlines shaped like <strong>SlicerDMRI</strong> fiber bundles (a helix, a
+    U-arc, a fan and a diagonal) are drawn as chains of <em>capsules</em>, which makes piecewise-linear tubes. Each tube is hit
+    exactly inside the same ray-march as an animated volume of three breathing glow blobs and the markup fiducials, so
+    everything overlaps in the right depth order. Ported from the SlicerWGPU "lava lamp" field-compositing test. Drag the
+    <span style="color:#ffff66">yellow attractor</span> and the blobs chase it. Drag empty space to rotate. The
+    SlicerLive badge sets each bundle's opacity. &nbsp;·&nbsp;
+    <a href="https://github.com/pieper/SlicerLive" target="_blank">SlicerLive</a></div>
+</header>
+<main>
+  <canvas id="gpu" width="760" height="760"></canvas>
+  <div class="bar"><button id="play">▶ play</button><button id="full" title="Fill the screen">⛶</button><div id="status">loading…</div></div>
+</main>
+<script type="module" src="./fibers.js"></script>
+</body>
+</html>
