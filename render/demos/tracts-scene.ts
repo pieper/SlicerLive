@@ -17,6 +17,7 @@
 // Changing the fraction REBUILDS the FiberField: its capsule grid is baked at construction, so more
 // streamlines means a new field (and the old one's GPU buffers are released).
 import { FiberField, type RGBA, type Strand } from "../fiber-field.ts";
+import { flowFor, orientation } from "./tract-direction.ts";
 import type { Vec3 } from "../mat4.ts";
 
 export interface TractChunkInfo {
@@ -86,6 +87,8 @@ export class TractScene {
   bytesFetched = 0;
   strandCount = 0;
   capsuleCount = 0;
+  /** Streamlines carrying a defensible anatomical direction (the only ones ever animated). */
+  flowStrands = 0;
   private dev: GPUDevice;
   private root: URL;
   private tubeRadius: number;
@@ -150,6 +153,12 @@ export class TractScene {
     for (let bi = 0; bi < this.chunks.length; bi++) {
       for (let ci = need; ci < this.chunks[bi].length; ci++) this.chunks[bi][ci] = undefined;
     }
+    this.flowStrands = 0;
+    for (const perBundle of this.chunks) {
+      for (const chunk of perBundle) {
+        if (chunk) for (const s of chunk) if (s.flow) this.flowStrands++;
+      }
+    }
     this.fraction = need * (this.manifest.chunkFraction || 0.05);
     this.rebuild();
   }
@@ -175,10 +184,39 @@ export class TractScene {
       pts[i * 3 + 1] = q[i * 3 + 1] * scale + origin[1];
       pts[i * 3 + 2] = q[i * 3 + 2] * scale + origin[2];
     }
+    // Direction is PRIOR ANATOMY, never the data: tracts with a textbook dominant direction get each
+    // streamline oriented upstream→downstream by its endpoints (stored point order is an artifact of
+    // the tracking algorithm), and everything else stays undirected and unanimated.
+    const flow = flowFor(b.name);
     const strands: Strand[] = [];
     for (let l = 0; l < lineCount; l++) {
       const a = offsets[l], c = offsets[l + 1];
-      if (c - a >= 2) strands.push({ points: pts.subarray(a * 3, c * 3), bundle: bi + 1 });
+      if (c - a < 2) continue;
+      let line = pts.subarray(a * 3, c * 3);
+      let animate = false;
+      if (flow.mode !== "none") {
+        const np = c - a;
+        const sign = orientation(
+          flow,
+          [line[0], line[1], line[2]],
+          [line[(np - 1) * 3], line[(np - 1) * 3 + 1], line[(np - 1) * 3 + 2]],
+          this.center,
+        );
+        if (sign !== 0) {
+          animate = true;
+          if (sign < 0) {   // reverse so index 0 is the upstream end
+            const rev = new Float32Array(np * 3);
+            for (let k = 0; k < np; k++) {
+              rev[k * 3] = line[(np - 1 - k) * 3];
+              rev[k * 3 + 1] = line[(np - 1 - k) * 3 + 1];
+              rev[k * 3 + 2] = line[(np - 1 - k) * 3 + 2];
+            }
+            line = rev;
+          }
+        }
+      }
+      if (animate) this.flowStrands++;
+      strands.push({ points: line, bundle: bi + 1, flow: animate });
     }
     this.chunks[bi][ci] = strands;
   }

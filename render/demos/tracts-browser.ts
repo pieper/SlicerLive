@@ -11,6 +11,7 @@
 import { initDevice } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { buildTractScene, fractionCapForLimits, type TractScene } from "./tracts-scene.ts";
+import { flowFor } from "./tract-direction.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { mountAdaptive3d } from "./accum-loop.ts";
 import { installChrome } from "./sl-chrome.ts";
@@ -137,7 +138,70 @@ async function main() {
   attachCameraControls(canvas, camera, { onChange: () => { userMoved = true; a3d.draw(); } });
 
   // The Data module's hierarchy: one opacity row per tract group, scaling every bundle under it.
+  // ---- schematic direction: off / static / animated -------------------------------------------
+  // Only tracts with a textbook anatomical direction carry it (see tract-direction.ts). Brightness
+  // only, per-streamline phase, and a persistent on-canvas badge whenever it is on — screenshots
+  // escape the UI, and this data gets looked at pre-surgically. Declared BEFORE installChrome: the
+  // popup reads each control's getter synchronously while it builds, so a later `let` would be in
+  // the temporal dead zone and throw.
+  // Peak brightening. The visualization literature's +12% assumes tubes several pixels wide; these
+  // are ~0.8 px at whole-brain framing and the sub-pixel guard scales the band to 0.4x, which put the
+  // effective brightening near 5% — measurably present (max +18 of 255) but invisible in a still.
+  // 0.3 lands around +12% effective. It stays subtle: it touches ~1.4% of lit pixels, since the comet
+  // occupies a fraction of each wavelength and only the 11 directional tracts carry it at all.
+  const MOTION_AMPLITUDE = 0.3;
+  const reduceMotion = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  let motionMode: "off" | "static" | "animated" = "off";
+  let motionRaf = 0, motionT0 = 0;
+  const badge = document.createElement("div");
+  badge.textContent = "Schematic direction — not measured";
+  badge.style.cssText = "position:absolute;left:14px;top:14px;z-index:6;display:none;padding:5px 10px;" +
+    "border-radius:7px;font:600 11px -apple-system,system-ui,sans-serif;letter-spacing:.2px;color:#ffe9a8;" +
+    "background:rgba(60,44,10,.78);border:1px solid rgba(255,210,90,.45);backdrop-filter:blur(8px);";
+  canvas.parentElement?.appendChild(badge);
+  const motionTick = () => {
+    motionRaf = requestAnimationFrame(motionTick);
+    sc.fibers.setMotion(MOTION_AMPLITUDE, (performance.now() - motionT0) / 1000);
+    scene.syncUniforms();
+    a3d.renderSettled(false);
+  };
+  const setMotionMode = (m: "off" | "static" | "animated") => {
+    motionMode = reduceMotion && m === "animated" ? "static" : m;
+    cancelAnimationFrame(motionRaf);
+    motionRaf = 0;
+    badge.style.display = motionMode === "off" ? "none" : "block";
+    if (motionMode === "off") {
+      sc.fibers.setMotion(0, 0);
+      scene.accumWindow = Infinity;
+      scene.syncUniforms();
+      a3d.renderSettled(true);
+    } else if (motionMode === "static") {
+      sc.fibers.setMotion(MOTION_AMPLITUDE, 0);   // frozen: the comet profile still reads directionally
+      scene.accumWindow = Infinity;
+      scene.syncUniforms();
+      a3d.renderSettled(true);
+    } else {
+      scene.accumWindow = 6;      // rolling: static tubes stay anti-aliased while the bands travel
+      motionT0 = performance.now();
+      scene.resetAccumulation();
+      motionTick();
+    }
+    showStatus();
+  };
+
+  const directional = sc.manifest.bundles.filter((b) => flowFor(b.name).mode !== "none");
   installChrome({
+    selects: [{
+      label: "Direction",
+      section: "Tracts",
+      options: [
+        { value: "off", label: "off" },
+        { value: "static", label: "static" },
+        { value: "animated", label: reduceMotion ? "animated (reduced)" : "animated" },
+      ],
+      get: () => motionMode,
+      set: (v: string) => setMotionMode(v as "off" | "static" | "animated"),
+    }],
     controls: [
       {
         label: "Streamlines",
@@ -163,7 +227,8 @@ async function main() {
     ],
     help: [{ title: "Tractography", rows: [
       ["Left-drag", "Rotate"], ["Right-drag / wheel", "Zoom"], ["Middle / Shift+Left-drag", "Pan"],
-      ["SlicerLive badge", "Streamline % + per-group opacity"],
+      ["SlicerLive badge", "Streamline % + per-group opacity + direction"],
+      ["Direction", `Schematic only — diffusion MRI measures fibre orientation, not the direction of signal travel, and cannot tell afferent from efferent. Shown for the ${directional.length} tracts with a textbook direction (corticospinal, corticostriatal, thalamic radiations, cerebellar peduncles); reciprocal tracts — association, callosal, corona radiata, PLIC, superficial — are never animated.`],
     ] }],
     onChange: () => a3d.draw(),
   });
@@ -192,6 +257,9 @@ async function main() {
     loadMs: () => loadMs,
     bytes: () => sc.bytesFetched,
     fraction: () => sc.fraction,
+    motionMode: () => motionMode,
+    setMotionMode: (m: string) => { setMotionMode(m as "off" | "static" | "animated"); return { mode: motionMode, flowStrands: sc.flowStrands }; },
+    flowStrands: () => sc.flowStrands,
     setFraction: async (p: number) => { target = p; await applyFraction(p); return { streamlines: sc.strandCount, capsules: sc.capsuleCount, bytes: sc.bytesFetched }; },
     canvas: () => { const r = canvas.getBoundingClientRect(); return { w: canvas.width, h: canvas.height, left: r.left, top: r.top, width: r.width, height: r.height }; },
   };
