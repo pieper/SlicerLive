@@ -73,6 +73,12 @@ export interface TractSceneOpts {
   fraction?: number;
   /** Tube radius in mm (default 0.175 — fine strands, close to the streamline density itself). */
   radius?: number;
+  /** Object-space ambient occlusion. On by default here: dense tracts read as a flat coloured mass
+   *  under a headlight alone, and this is what gives the mass depth. */
+  ao?: { strength?: number; radiusMm?: number; densityScale?: number };
+  /** Depth-dependent halos (Everts 2009): dark rims that let a tube occlude what lies behind it, so
+   *  bundles separate into readable layers instead of matting together. */
+  halo?: { strength?: number; widthMm?: number };
   onProgress?: (done: number, total: number, label: string) => void;
 }
 
@@ -94,6 +100,15 @@ export class TractScene {
   private tubeRadius: number;
   private chunks: (Strand[] | undefined)[][] = [];   // [bundle][chunk]
   private opacity: Record<string, number> = {};
+  /** Kept on the scene, not just passed once: changing the streamline fraction rebuilds the field,
+   *  and these have to survive that. AO sits at 0.4 rather than the 0.7 it wants alone, because the
+   *  halos below carry the local separation and stacking both at full strength goes muddy; AO's job
+   *  here is the regional sense of depth into the mass. (Past ~0.025 density it erases thin strands.) */
+  aoSettings = { strength: 0.4, radiusMm: 2, densityScale: 0.012 };
+  /** Same story: the field is rebuilt on every density change, so halo settings live here too. This
+   *  is the strongest of the depth cues — close up, strands separate instead of matting together —
+   *  at ~17% cost when zoomed in and none at whole-brain framing. */
+  haloSettings = { strength: 0.6, widthMm: 0.5 };
 
   private constructor(dev: GPUDevice, root: URL, manifest: TractManifest, tubeRadius: number) {
     this.dev = dev;
@@ -121,6 +136,8 @@ export class TractScene {
   static async create(dev: GPUDevice, base: string, opts: TractSceneOpts = {}): Promise<TractScene> {
     const manifest = await fetchManifest(base);
     const sc = new TractScene(dev, rootUrl(base), manifest, opts.radius ?? 0.175);
+    if (opts.ao) Object.assign(sc.aoSettings, opts.ao);
+    if (opts.halo) Object.assign(sc.haloSettings, opts.halo);
     await sc.setFraction(opts.fraction ?? manifest.defaultFraction ?? 0.1, opts.onProgress);
     return sc;
   }
@@ -236,11 +253,31 @@ export class TractScene {
       const b = this.manifest.bundles[i];
       bundleColors[i + 1] = [b.color[0], b.color[1], b.color[2], b.opacity * (this.opacity[b.group] ?? 1)];
     }
-    const next = new FiberField(this.dev, all, { radius: this.tubeRadius, bundleColors });
+    const next = new FiberField(this.dev, all, {
+      radius: this.tubeRadius,
+      bundleColors,
+      aoStrength: this.aoSettings.strength,
+      aoRadiusMm: this.aoSettings.radiusMm,
+      aoDensityScale: this.aoSettings.densityScale,
+      haloStrength: this.haloSettings.strength,
+      haloWidthMm: this.haloSettings.widthMm,
+    });
     this.fibers?.destroy();
     this.fibers = next;
     this.strandCount = all.length;
     this.capsuleCount = capsules;
+  }
+
+  /** Occlusion strength, live (uniform-resident — no rebuild). Caller does scene.syncUniforms(). */
+  setAO(strength: number): void {
+    this.aoSettings.strength = Math.max(0, Math.min(1, strength));
+    this.fibers.setAO(this.aoSettings.strength, this.aoSettings.radiusMm, this.aoSettings.densityScale);
+  }
+
+  /** Halo strength, live (uniform-resident — no rebuild). Caller does scene.syncUniforms(). */
+  setHalo(strength: number): void {
+    this.haloSettings.strength = Math.max(0, Math.min(1, strength));
+    this.fibers.setHalo(this.haloSettings.strength, this.haloSettings.widthMm);
   }
 
   groupOpacity(group: string): number { return this.opacity[group] ?? 1; }

@@ -217,6 +217,26 @@ async function main() {
           format: (v: number) => `${Math.round(v)}%`,
         },
       },
+      {
+        label: "Halos (depth)",
+        section: "Tracts",
+        slider: {
+          min: 0, max: 1, step: 0.1,
+          get: () => sc.haloSettings.strength,
+          set: (v: number) => { sc.setHalo(v); scene.syncUniforms(); a3d.draw(); },
+          format: (v: number) => (v <= 0.001 ? "off" : `${Math.round(v * 100)}%`),
+        },
+      },
+      {
+        label: "Ambient occlusion",
+        section: "Tracts",
+        slider: {
+          min: 0, max: 1, step: 0.1,
+          get: () => sc.aoSettings.strength,
+          set: (v: number) => { sc.setAO(v); scene.syncUniforms(); a3d.draw(); },
+          format: (v: number) => (v <= 0.001 ? "off" : `${Math.round(v * 100)}%`),
+        },
+      },
       ...sc.groups.map((g) => ({
         label: `${g.name} (${g.bundleIds.length})`,
         section: "Tract groups",

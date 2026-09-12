@@ -71,6 +71,16 @@ export interface FiberFieldOpts {
   motionWavelengthMm?: number;
   /** Band speed (mm/s); default 35, so a band passes a point at ~1.2 Hz. */
   motionSpeedMmPerS?: number;
+  /** DEPTH-DEPENDENT HALOS (Everts et al., IEEE Vis 2009 — the strongest illustrative result for
+   *  dense line data). 0 = off. A ray that misses a tube but passes within `haloWidthMm` of it emits
+   *  black at that tube's depth, so front-to-back compositing lets the halo occlude what lies behind
+   *  it while leaving the tube itself untouched. Tight bundles then fuse into readable surfaces and
+   *  unrelated strands separate out. The paper's own limitation — needing per-segment sorting to
+   *  combine with transparency — does not apply here, because the march already visits hits in depth
+   *  order. */
+  haloStrength?: number;
+  /** Halo band width beyond the tube radius (mm); default 0.5, about three tube radii. */
+  haloWidthMm?: number;
   clippable?: boolean;
 }
 
@@ -139,6 +149,8 @@ export class FiberField implements Field {
   private motionWavelength: number;
   private motionSpeed: number;
   private motionTime = 0;
+  private haloStrength: number;
+  private haloWidth: number;
 
   constructor(dev: GPUDevice, strands: Strand[], opts: FiberFieldOpts = {}) {
     this.dev = dev;
@@ -151,6 +163,8 @@ export class FiberField implements Field {
     this.aoSteps = Math.max(1, Math.round(opts.aoSteps ?? 3));
     this.motionWavelength = opts.motionWavelengthMm ?? 30;
     this.motionSpeed = opts.motionSpeedMmPerS ?? 35;
+    this.haloStrength = Math.max(0, opts.haloStrength ?? 0);
+    this.haloWidth = opts.haloWidthMm ?? 0.5;
     this.clippable = opts.clippable ?? true;
     for (const [id, c] of Object.entries(opts.bundleColors ?? {})) {
       const i = Number(id);
@@ -297,12 +311,18 @@ export class FiberField implements Field {
     this.motionAmp = Math.max(0, amplitude);
     this.motionTime = timeS;
   }
+  /** Depth-dependent halo strength/width, live (uniform-resident — no rebuild). */
+  setHalo(strength: number, widthMm?: number) {
+    this.haloStrength = Math.max(0, Math.min(1, strength));
+    if (widthMm !== undefined) this.haloWidth = widthMm;
+  }
+  get halo(): { strength: number; widthMm: number } { return { strength: this.haloStrength, widthMm: this.haloWidth }; }
   get ao(): { strength: number; radiusMm: number; densityScale: number; dirs: number; steps: number } {
     return { strength: this.aoStrength, radiusMm: this.aoRadiusMm, densityScale: this.aoDensityScale, dirs: this.aoDirs, steps: this.aoSteps };
   }
   destroy() { this.fBuf.destroy(); this.uBuf.destroy(); }
 
-  uniformFloats() { return 24; }        // lo + dims + hi + shade + params + motion, 4 each
+  uniformFloats() { return 28; }        // lo + dims + hi + shade + params + motion + halo, 4 each
   aabb(): [Vec3, Vec3] { return [this.lo, this.hi]; }
   /** Tubes need no fine step (crossings are found per interval), so this only caps how coarse the
    *  march may get before intervals walk many cells. */
@@ -316,6 +336,7 @@ export class FiberField implements Field {
       `  fib${s}_shade : vec4<f32>,`,    // ka, kd, ks, shininess
       `  fib${s}_params : vec4<f32>,`,   // opacity, ao strength, ao radius mm, ao density scale
       `  fib${s}_motion : vec4<f32>,`,   // band amplitude, wavelength mm, speed mm/s, time s
+      `  fib${s}_halo : vec4<f32>,`,     // halo strength, halo width mm, _, _
     ].join("\n");
   }
 
@@ -392,6 +413,22 @@ fn fib_cap${s}(ro : vec3<f32>, rd : vec3<f32>, pa : vec3<f32>, pb : vec3<f32>, r
 fn fib_dseg${s}(p : vec3<f32>, a : vec3<f32>, b : vec3<f32>) -> f32 {
   let ba = b - a;
   return length(p - a - ba * clamp(dot(p - a, ba) / dot(ba, ba), 0.0, 1.0));
+}
+// Closest approach between the ray and a segment: returns (distance, ray distance at that point).
+// This is what the halo band needs — the radial distance where the ray passes NEAREST the tube. (An
+// intersection against an inflated radius cannot answer it: its entry point always sits exactly on
+// the inflated surface, so every halo measured the same distance and cancelled itself out.)
+fn fib_rayseg${s}(ro : vec3<f32>, rd : vec3<f32>, a : vec3<f32>, b : vec3<f32>) -> vec2<f32> {
+  let ba = b - a;
+  let w0 = ro - a;
+  let bb = dot(rd, ba);
+  let cc = dot(ba, ba);
+  let dd = dot(rd, w0);
+  let ee = dot(ba, w0);
+  let u = clamp((ee - bb * dd) / max(cc - bb * bb, 1e-8), 0.0, 1.0);
+  let p = a + ba * u;
+  let t = max(dot(p - ro, rd), 0.0);
+  return vec2<f32>(length(ro + rd * t - p), t);
 }
 // Line density at p, straight from the grid's per-cell capsule count — the occupancy structure the
 // march already needs. No depth buffer, no normals, and occluders off-screen or behind the nearest
@@ -474,7 +511,30 @@ fn sample_field_fib${s}(wp_world : vec3<f32>, rd : vec3<f32>, seg : f32) -> vec4
       let A = fib${s}_f[${PAL}u + 2u * si];
       let B = fib${s}_f[${PAL + 1}u + 2u * si];
       let th = fib_cap${s}(q0, rd, A.xyz, B.xyz, r);
-      if (th <= tc || th > te) { continue; }
+      if (th <= tc || th > te) {
+        // The ray missed this tube here. If halos are on, check whether it passed close enough to sit
+        // in the tube's halo band, measured at the ray's CLOSEST APPROACH to the segment.
+        let hs = u_material.fib${s}_halo.x;
+        if (hs <= 0.0) { continue; }
+        let hw = max(u_material.fib${s}_halo.y, 1e-4);
+        let ca = fib_rayseg${s}(q0, rd, A.xyz, B.xyz);   // (radial distance, ray distance)
+        if (ca.x <= r || ca.x >= r + hw) { continue; }
+        if (ca.y <= tc || ca.y > te) { continue; }
+        let ramp = clamp(1.0 - (ca.x - r) / hw, 0.0, 1.0);   // darkest hugging the tube
+        let ha = clamp(hs * ramp * ramp, 0.0, 1.0);
+        if (ha <= 0.004) { continue; }
+        if (nh == ${MAX_HITS} && ca.y >= ht[${MAX_HITS - 1}]) { continue; }
+        // Black, premultiplied, at the tube's own depth: front-to-back compositing then occludes
+        // whatever lies behind it, which is what separates bundles — and leaves nearer tubes alone.
+        var j = min(nh, ${MAX_HITS - 1});
+        loop {
+          if (j == 0 || ht[j - 1] <= ca.y) { break; }
+          ht[j] = ht[j - 1]; hc[j] = hc[j - 1]; j = j - 1;
+        }
+        ht[j] = ca.y; hc[j] = vec4<f32>(0.0, 0.0, 0.0, ha);
+        nh = min(nh + 1, ${MAX_HITS});
+        continue;
+      }
       if (nh == ${MAX_HITS} && th >= ht[${MAX_HITS - 1}]) { continue; }
       let q = q0 + rd * th;
       let ba = B.xyz - A.xyz;
@@ -550,5 +610,7 @@ fn sample_field_fib${s}(wp_world : vec3<f32>, rd : vec3<f32>, seg : f32) -> vec4
     out[off + 21] = this.motionWavelength;
     out[off + 22] = this.motionSpeed;
     out[off + 23] = this.motionTime;
+    out[off + 24] = this.haloStrength;
+    out[off + 25] = this.haloWidth;
   }
 }
