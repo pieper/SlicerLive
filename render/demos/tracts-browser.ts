@@ -100,8 +100,50 @@ async function main() {
     targetMs: 100,
   });
 
+  // Reset the accumulation and then let the loop CONVERGE on it. renderSettled(true) by itself draws
+  // a single accumulation sample and returns: the loop is not running, so nothing advances it toward
+  // the 24-sample target and the image sits there under-baked — which on tubes this thin reads as
+  // aliasing/scintillation rather than as noise. Kicking afterwards starts the loop, which settles
+  // and then keeps accumulating until converged.
+  const bake = () => { a3d.renderSettled(true); a3d.draw(); };
+
+  // Converge the accumulation ON SCREEN and wait for it, so the viewer sees a clean image at this
+  // density before anything else happens. Used between steps of the startup tune: the loop is stopped
+  // there, so nothing else drives convergence and a bare rebuild would otherwise leave a half
+  // accumulated — visibly blurry — frame up while the next chunk downloads.
+  // Converge OFF-SCREEN, then present once. The intermediate samples of a temporal accumulation are
+  // the jangly part — sample 1 is full-strength noise on sub-pixel tubes and it only quiets down as
+  // 1/n — so during the startup tune we run them into a scratch texture and put only the finished
+  // frame on the canvas. The viewer then sees a sequence of clean images at rising fiber counts
+  // instead of watching each one resolve.
+  let offTex: GPUTexture | undefined;
+  const settleOffscreen = async (samples = 24) => {
+    const w = canvas.width, h = canvas.height;
+    if (!offTex || offTex.width !== w || offTex.height !== h) {
+      offTex?.destroy();
+      offTex = gpu.device.createTexture({
+        size: [w, h], format: srgb,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      });
+    }
+    const off = offTex.createView();
+    // renderAccum resets whenever the camera matrix differs from the last accumulated frame, so the
+    // camera must be set IDENTICALLY for every sample or it resets each time and never converges.
+    const aim = () => scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
+    aim();
+    scene.renderAccum(off, w, h, true);
+    for (let i = 0; i < samples * 2 && scene.accumCount() < samples; i++) {
+      aim();
+      scene.renderAccum(off, w, h, false);
+      await gpu.device.queue.onSubmittedWorkDone();
+    }
+    // One more sample, this time onto the canvas: it carries the whole converged running mean.
+    aim();
+    scene.renderAccum(ctx.getCurrentTexture().createView({ format: srgb }), w, h, false);
+    await gpu.device.queue.onSubmittedWorkDone();
+  };
+
   let tuned: { capPct: number; ms: number } | null = null;
-  let retuning = false, retuneTimer = 0;
   const showStatus = () => status(
     `${sc.manifest.bundles.length} bundles · ${sc.strandCount.toLocaleString()} streamlines (${Math.round(sc.fraction * 100)}%` +
     `${tuned ? ` auto, ${tuned.ms.toFixed(0)} ms probe, fits ${tuned.capPct}%` : ""}) · ` +
@@ -120,7 +162,7 @@ async function main() {
       await sc.setFraction(p / 100, (done, total, name) => status(`loading ${p}% · chunk ${done}/${total} · ${name}`));
       scene.build([sc.fibers]);            // a new field object: rebuild pipeline + bind group
       scene.setBackground(0.05, 0.06, 0.09);
-      a3d.renderSettled(true);
+      bake();
       status(`${sc.strandCount.toLocaleString()} streamlines (${Math.round(sc.fraction * 100)}%) · ` +
         `${sc.capsuleCount.toLocaleString()} capsules · rebuilt in ${((performance.now() - t) / 1000).toFixed(1)}s`);
     } catch (e) {
@@ -152,18 +194,14 @@ async function main() {
     canvas.width = w; canvas.height = h;
     if (!userMoved) frameCamera(w, h);
     showStatus();
-    a3d.renderSettled(true);
-    // The probe budget is per-window (see probeBudgetMs), so a resize changes how much geometry fits:
-    // going fullscreen should shed streamlines, shrinking should pick them back up.
-    clearTimeout(retuneTimer);
-    retuneTimer = setTimeout(() => void retune(), 400);
+    bake();
   };
   globalThis.addEventListener("resize", resize);
   new ResizeObserver(resize).observe(canvas);
   attachCameraControls(canvas, camera, { onChange: () => { userMoved = true; a3d.draw(); } });
 
   // The Data module's hierarchy: one opacity row per tract group, scaling every bundle under it.
-  installChrome({
+  const chromeUi = installChrome({
     controls: [
       {
         label: "Streamlines",
@@ -193,13 +231,9 @@ async function main() {
           get: () => Math.round(1000 / a3d.budget.targetMs),
           // Lower target = more time per frame = a bigger share of the native resolution kept while
           // rotating. The budget loop re-converges within a few frames either way.
-          set: (v: number) => {
-            a3d.budget.targetMs = 1000 / Math.max(1, Math.min(60, v));
-            // Density follows the target: a lower fps target buys per-frame headroom, so re-tune how
-            // many streamlines fit. Debounced, so dragging re-tunes once at the value you land on.
-            clearTimeout(retuneTimer);
-            retuneTimer = setTimeout(() => void retune(), 400);
-          },
+          // Resolution only: this moves how much of the window is traced per frame, never how many
+          // streamlines are loaded. Density is measured once at startup and then left alone.
+          set: (v: number) => { a3d.budget.targetMs = 1000 / Math.max(1, Math.min(60, v)); },
           format: (v: number) => `${Math.round(v)} fps`,
         },
       },
@@ -269,8 +303,7 @@ async function main() {
     canvas: () => { const r = canvas.getBoundingClientRect(); return { w: canvas.width, h: canvas.height, left: r.left, top: r.top, width: r.width, height: r.height }; },
   };
 
-  resize();
-  a3d.renderSettled(true);
+  resize();          // already bakes
   showStatus();
 
   // ADAPTIVE DENSITY. Two limits decide how many streamlines this device gets: what its buffers can
@@ -287,8 +320,8 @@ async function main() {
   // The ms the probe frame must come in under. The probe times a FIXED 640x360 frame, but what
   // actually matters is whether the device can trace the WHOLE window within the frame-time target —
   // that is exactly the point where rotating stops downsampling and the image stays sharp. So scale
-  // the target by the window:probe pixel ratio. This follows the Target fps slider: asking for fewer
-  // fps buys a bigger per-frame budget and therefore more streamlines.
+  // the target by the window:probe pixel ratio. Sampled ONCE, during the startup tune — moving the
+  // Target fps slider afterwards changes the render budget but never reopens this.
   //   (Before, this was a hardcoded 10 ms unrelated to the target — a 15 ms probe at 5% failed the
   //    very first test, so a capable GPU never loaded a single extra chunk.)
   const probeBudgetMs = () =>
@@ -307,45 +340,50 @@ async function main() {
     await gpu.device.queue.onSubmittedWorkDone();
     return performance.now() - t;
   };
-  // Keep loading while the GPU still holds the frame-time target, and give chunks back when it no
-  // longer does — so a phone settles low, a workstation climbs until the memory limit stops it, and
-  // changing the target moves the density either way. A `function` declaration (not a const arrow)
-  // because the Target fps control and resize close over it ABOVE this point: those closures run
-  // later, but only a hoisted declaration is safe to reference from them.
-  async function retune(): Promise<void> {
-    if (fraction !== undefined || retuning || applying) return;   // ?fraction= pins density explicitly
-    retuning = true;
+  // ONE-TIME density tune, at startup only: measure THIS GPU, then keep adding 5% chunks while it
+  // still has headroom, stopping at the memory ceiling. Deliberately never re-run — changing the fps
+  // target or resizing the window moves the frame budget but must NOT move the streamline count, so
+  // what is on screen only changes when the viewer asks for it on the Streamlines slider.
+  async function tuneDensity(): Promise<void> {
+    if (fraction !== undefined) return;                 // ?fraction= pins the density explicitly
+    // Quiesce the render loop FIRST. measureFrame waits on onSubmittedWorkDone, which drains every
+    // outstanding submission — so with the loop running (it is: startup bakes, which kicks it) the
+    // probe times the loop's frames as well as its own and reads far too high, and the ramp never
+    // fires. Stopping is safe and reversible: the bake() below kicks, and kick() restarts run().
+    a3d.loop.stop();
     const rebuild = () => { scene.build([sc.fibers]); scene.setBackground(0.05, 0.06, 0.09); };
     try {
       const cap = fractionCapForLimits(sc.manifest, gpu.adapter.limits);   // memory ceiling is the only cap
       const budget = probeBudgetMs();
+      await settleOffscreen();        // show the starting density cleanly before measuring anything
       let ms = await measureFrame();
-      for (let step = 0; step < 20; step++) {
-        const up = ms < budget && sc.fraction + 0.05 <= cap + 1e-6;
-        const down = ms > budget * 1.35 && sc.fraction > 0.05 + 1e-6;
-        if (!up && !down) break;
-        const next = Math.max(0.05, Math.min(cap, sc.fraction + (up ? 0.05 : -0.05)));
+      // Up-only: the scene starts at the 5% floor, so there is nothing to give back on the way in.
+      for (let step = 0; step < 20 && ms < budget && sc.fraction + 0.05 <= cap + 1e-6; step++) {
+        const next = Math.min(cap, sc.fraction + 0.05);
         if (Math.abs(next - sc.fraction) < 1e-6) break;
         status(`tuning density for this GPU… trying ${Math.round(next * 100)}% ` +
           `(${ms.toFixed(0)} ms probe, ${budget.toFixed(0)} ms budget)`);
         await sc.setFraction(next);
         rebuild();
+        await settleOffscreen();      // resolve this density off-screen, then show it in one step
         ms = await measureFrame();
-        if (up && ms > budget * 1.35) {     // overshot: give the chunk back and stop
+        if (ms > budget * 1.35) {     // overshot: give the chunk back and stop
           await sc.setFraction(Math.max(0.05, sc.fraction - 0.05));
           rebuild();
+          await settleOffscreen();
           ms = await measureFrame();
           break;
         }
       }
       target = Math.round(sc.fraction * 100);
       tuned = { capPct: Math.round(cap * 100), ms };
-      a3d.renderSettled(true);
+      chromeUi.refresh();   // the Streamlines slider still reads the pre-tune value otherwise
+      bake();
       showStatus();
     } catch (e) {
       status(`could not tune density — ${(e as Error).message}`, true);
-    } finally { retuning = false; }
+    }
   }
-  await retune();
+  await tuneDensity();
 }
 main().catch((e) => status("error: " + (e?.message ?? e), true));

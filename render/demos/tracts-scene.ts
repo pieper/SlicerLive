@@ -132,7 +132,9 @@ export async function fetchManifest(base: string): Promise<TractManifest> {
 export interface TractSceneOpts {
   /** Fraction of each bundle's streamlines to load up front (default: the manifest's). */
   fraction?: number;
-  /** Tube radius in mm (default 0.175 — fine strands, close to the streamline density itself). */
+  /** Tube radius in mm (default 0.0875 — hair-fine strands, well under the streamline spacing. At a
+   *  whole-brain view these are sub-pixel, which the interval sampling is built to handle: a tube is
+   *  never stepped over, and temporal accumulation resolves the sub-pixel coverage. */
   radius?: number;
   /** Object-space ambient occlusion. On by default here: dense tracts read as a flat coloured mass
    *  under a headlight alone, and this is what gives the mass depth. */
@@ -168,12 +170,12 @@ export class TractScene {
    *  and these have to survive that. AO sits at 0.4 rather than the 0.7 it wants alone, because the
    *  halos below carry the local separation and stacking both at full strength goes muddy; AO's job
    *  here is the regional sense of depth into the mass. (Past ~0.025 density it erases thin strands.) */
-  aoSettings = { strength: 0.4, radiusMm: 2, densityScale: 0.012 };
+  aoSettings = { strength: 0.7, radiusMm: 2, densityScale: 0.012 };
   /** Same story: the field is rebuilt on every density change, so halo settings live here too. Halos
    *  are the strongest depth cue here — close up, strands separate instead of matting together — but
    *  they work by darkening, so a light touch is enough once the shading is bright and the groups are
    *  colour-coded. Dial it up on the slider to separate a dense region. */
-  haloSettings = { strength: 0.1, widthMm: 0.5 };
+  haloSettings = { strength: 0.4, widthMm: 0.5 };
   /** Brighter than FiberField's own default (0.20/0.65/0.20/96). A brain-sized mass of sub-pixel
    *  tubes under a headlight reads dark and flat: nearly every ray hits a tube at a grazing angle, so
    *  the diffuse term rarely gets near its peak, and the halos and occlusion above take more light
@@ -221,7 +223,7 @@ export class TractScene {
 
   static async create(dev: GPUDevice, base: string, opts: TractSceneOpts = {}): Promise<TractScene> {
     const manifest = await fetchManifest(base);
-    const sc = new TractScene(dev, rootUrl(base), manifest, opts.radius ?? 0.175);
+    const sc = new TractScene(dev, rootUrl(base), manifest, opts.radius ?? 0.0875);
     if (opts.ao) Object.assign(sc.aoSettings, opts.ao);
     if (opts.halo) Object.assign(sc.haloSettings, opts.halo);
     if (opts.shade) sc.shadeSettings = [...opts.shade] as [number, number, number, number];
