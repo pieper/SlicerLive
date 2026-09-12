@@ -107,17 +107,13 @@ async function main() {
   // and then keeps accumulating until converged.
   const bake = () => { a3d.renderSettled(true); a3d.draw(); };
 
-  // Converge the accumulation ON SCREEN and wait for it, so the viewer sees a clean image at this
-  // density before anything else happens. Used between steps of the startup tune: the loop is stopped
-  // there, so nothing else drives convergence and a bare rebuild would otherwise leave a half
-  // accumulated — visibly blurry — frame up while the next chunk downloads.
-  // Converge OFF-SCREEN, then present once. The intermediate samples of a temporal accumulation are
-  // the jangly part — sample 1 is full-strength noise on sub-pixel tubes and it only quiets down as
-  // 1/n — so during the startup tune we run them into a scratch texture and put only the finished
-  // frame on the canvas. The viewer then sees a sequence of clean images at rising fiber counts
-  // instead of watching each one resolve.
+  // NOTHING unconverged reaches the canvas while loading. There are two sources of load-time jangle,
+  // and both render here instead: the early samples of a temporal accumulation (sample 1 is
+  // full-strength noise on sub-pixel tubes, quieting only as 1/n), and the density probe (a 640x360
+  // frame upscaled to the window — visibly soft). The viewer therefore only ever sees finished
+  // frames: a fully baked 5% first, then one clean image per fiber count as the tune walks up.
   let offTex: GPUTexture | undefined;
-  const settleOffscreen = async (samples = 24) => {
+  const offscreenView = () => {
     const w = canvas.width, h = canvas.height;
     if (!offTex || offTex.width !== w || offTex.height !== h) {
       offTex?.destroy();
@@ -126,7 +122,11 @@ async function main() {
         usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
       });
     }
-    const off = offTex.createView();
+    return offTex.createView();
+  };
+  const settleOffscreen = async (samples = 24) => {
+    const w = canvas.width, h = canvas.height;
+    const off = offscreenView();
     // renderAccum resets whenever the camera matrix differs from the last accumulated frame, so the
     // camera must be set IDENTICALLY for every sample or it resets each time and never converges.
     const aim = () => scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h);
@@ -144,6 +144,9 @@ async function main() {
   };
 
   let tuned: { capPct: number; ms: number } | null = null;
+  // True until the startup density tune finishes. While it is set, the boot sequence owns the canvas
+  // and puts only converged frames on it.
+  let booting = true;
   const showStatus = () => status(
     `${sc.manifest.bundles.length} bundles · ${sc.strandCount.toLocaleString()} streamlines (${Math.round(sc.fraction * 100)}%` +
     `${tuned ? ` auto, ${tuned.ms.toFixed(0)} ms probe, fits ${tuned.capPct}%` : ""}) · ` +
@@ -194,7 +197,9 @@ async function main() {
     canvas.width = w; canvas.height = h;
     if (!userMoved) frameCamera(w, h);
     showStatus();
-    bake();
+    // Baking here kicks the loop, which presents its moving frames and then the whole 1→24
+    // convergence — exactly the load-time jangle. During boot the startup sequence renders instead.
+    if (!booting) bake();
   };
   globalThis.addEventListener("resize", resize);
   new ResizeObserver(resize).observe(canvas);
@@ -303,7 +308,16 @@ async function main() {
     canvas: () => { const r = canvas.getBoundingClientRect(); return { w: canvas.width, h: canvas.height, left: r.left, top: r.top, width: r.width, height: r.height }; },
   };
 
-  resize();          // already bakes
+  resize();                   // sizes the canvas; no bake while booting
+  // Show the first render the moment there is geometry, then converge on top of it. Measured on the
+  // shipping build: geometry is ready at ~2.7s, but the converged frame only reaches the screen at
+  // ~3.7s — so waiting for the bake costs a full second of black. Sample 1 is noisier than the final
+  // (gradient energy 15.4 against 10.0), but it is the FIRST thing shown rather than a regression of
+  // something already on screen, and every present after it is a fully converged frame at a higher
+  // fiber count. Quality only ever goes up from here.
+  //   (accumCount is NOT a first-paint signal: settleOffscreen increments it off-screen too.)
+  a3d.renderSettled(true);   // one direct frame; does not kick the loop, so nothing progressive shows
+  await settleOffscreen();
   showStatus();
 
   // ADAPTIVE DENSITY. Two limits decide how many streamlines this device gets: what its buffers can
@@ -329,7 +343,9 @@ async function main() {
   const measureFrame = async () => {
     const vw = canvas.width, vh = canvas.height;
     scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, PROBE_W, PROBE_H);
-    const view = () => ctx.getCurrentTexture().createView({ format: srgb });
+    // Off-screen, NEVER the canvas: this frame is 640x360 upscaled to the window, so presenting it
+    // stamped a soft blurry frame over the baked image once per density step.
+    const view = offscreenView;
     // Warm up FIRST, then time: onSubmittedWorkDone drains everything already queued (the full-res
     // frame that just ran), and the frame after each scene.build() pays WGSL pipeline compilation.
     // Timing the second frame measures the geometry, which is what density should be judged on.
@@ -355,7 +371,7 @@ async function main() {
     try {
       const cap = fractionCapForLimits(sc.manifest, gpu.adapter.limits);   // memory ceiling is the only cap
       const budget = probeBudgetMs();
-      await settleOffscreen();        // show the starting density cleanly before measuring anything
+      // (the boot sequence already presented a baked frame at the starting density)
       let ms = await measureFrame();
       // Up-only: the scene starts at the 5% floor, so there is nothing to give back on the way in.
       for (let step = 0; step < 20 && ms < budget && sc.fraction + 0.05 <= cap + 1e-6; step++) {
@@ -378,12 +394,14 @@ async function main() {
       target = Math.round(sc.fraction * 100);
       tuned = { capPct: Math.round(cap * 100), ms };
       chromeUi.refresh();   // the Streamlines slider still reads the pre-tune value otherwise
-      bake();
+      // Converged, off-screen, presented once. bake() would kick the loop and show its moving frames.
+      await settleOffscreen();
       showStatus();
     } catch (e) {
       status(`could not tune density — ${(e as Error).message}`, true);
     }
   }
   await tuneDensity();
+  booting = false;     // from here on resize and the controls drive the loop normally
 }
 main().catch((e) => status("error: " + (e?.message ?? e), true));
