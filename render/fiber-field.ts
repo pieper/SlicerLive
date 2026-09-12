@@ -311,6 +311,10 @@ export class FiberField implements Field {
     this.motionAmp = Math.max(0, amplitude);
     this.motionTime = timeS;
   }
+  /** Phong constants [ka, kd, ks, shininess], live (uniform-resident — no rebuild), so a demo can
+   *  tune how bright the tubes read without rebuilding the grid. */
+  setShade(shade: [number, number, number, number]) { this.shade = [shade[0], shade[1], shade[2], shade[3]]; }
+  get shading(): [number, number, number, number] { return [this.shade[0], this.shade[1], this.shade[2], this.shade[3]]; }
   /** Depth-dependent halo strength/width, live (uniform-resident — no rebuild). */
   setHalo(strength: number, widthMm?: number) {
     this.haloStrength = Math.max(0, Math.min(1, strength));

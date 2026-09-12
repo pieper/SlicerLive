@@ -49,10 +49,34 @@ export interface TractManifest {
   bundles: TractBundleInfo[];
 }
 
+function meanColor(colors: [number, number, number][]): [number, number, number] {
+  const n = Math.max(1, colors.length);
+  return [0, 1, 2].map((k) => colors.reduce((s, c) => s + c[k], 0) / n) as [number, number, number];
+}
+
 export interface TractGroup {
   name: string;
   color: [number, number, number];   // mean of its bundles' colours, for the popup chip
   bundleIds: number[];               // FiberField palette ids (1-based) of its members
+}
+
+/** Colour per TRACT GROUP, so the five groups read as distinct bodies rather than 42 similar strands.
+ *  These are chosen, not derived: averaging each group's member colours (which is what the popup chips
+ *  used to show) collapses a dozen hues into much the same muddy brown. Bright, well-separated hues on
+ *  a near-black background, and far enough apart to stay distinguishable where bundles overlap.
+ *  Per-bundle Slicer display-node colours are still available via `colorBy: "bundle"`. */
+const GROUP_COLORS: Record<string, [number, number, number]> = {
+  Association: [0.31, 0.76, 0.97],   // cyan-blue
+  Cerebellar: [1.00, 0.72, 0.30],    // amber
+  Commissural: [0.90, 0.45, 0.45],   // coral
+  Projection: [0.51, 0.78, 0.52],    // green
+  Superficial: [0.73, 0.41, 0.78],   // violet
+};
+const FALLBACK_COLORS: [number, number, number][] = [
+  [0.95, 0.85, 0.35], [0.45, 0.85, 0.85], [0.85, 0.55, 0.75], [0.65, 0.85, 0.45], [0.85, 0.65, 0.45],
+];
+function groupColor(name: string, index: number): [number, number, number] {
+  return GROUP_COLORS[name] ?? FALLBACK_COLORS[index % FALLBACK_COLORS.length];
 }
 
 /** Resolve a possibly-relative base ("./" on a page, "file:///tmp/…/" under Deno). `new URL(rel, rel)`
@@ -79,6 +103,11 @@ export interface TractSceneOpts {
   /** Depth-dependent halos (Everts 2009): dark rims that let a tube occlude what lies behind it, so
    *  bundles separate into readable layers instead of matting together. */
   halo?: { strength?: number; widthMm?: number };
+  /** Phong constants [ka, kd, ks, shininess] for the tubes. */
+  shade?: [number, number, number, number];
+  /** "group" (default) paints every bundle with its tract group's colour, so the five groups read as
+   *  distinct; "bundle" keeps each bundle's own Slicer display-node colour. */
+  colorBy?: "group" | "bundle";
   onProgress?: (done: number, total: number, label: string) => void;
 }
 
@@ -105,10 +134,24 @@ export class TractScene {
    *  halos below carry the local separation and stacking both at full strength goes muddy; AO's job
    *  here is the regional sense of depth into the mass. (Past ~0.025 density it erases thin strands.) */
   aoSettings = { strength: 0.4, radiusMm: 2, densityScale: 0.012 };
-  /** Same story: the field is rebuilt on every density change, so halo settings live here too. This
-   *  is the strongest of the depth cues — close up, strands separate instead of matting together —
-   *  at ~17% cost when zoomed in and none at whole-brain framing. */
-  haloSettings = { strength: 0.6, widthMm: 0.5 };
+  /** Same story: the field is rebuilt on every density change, so halo settings live here too. Halos
+   *  are the strongest depth cue here — close up, strands separate instead of matting together — but
+   *  they work by darkening, so a light touch is enough once the shading is bright and the groups are
+   *  colour-coded. Dial it up on the slider to separate a dense region. */
+  haloSettings = { strength: 0.1, widthMm: 0.5 };
+  /** Brighter than FiberField's own default (0.20/0.65/0.20/96). A brain-sized mass of sub-pixel
+   *  tubes under a headlight reads dark and flat: nearly every ray hits a tube at a grazing angle, so
+   *  the diffuse term rarely gets near its peak, and the halos and occlusion above take more light
+   *  out again. Lifting ambient and diffuse roughly doubles the contrast of the lit pixels (spread
+   *  32.5 -> 57.1) while leaving every bundle's colour exactly as its Slicer display node defines it
+   *  — the colours are the bundle identity in the group list, so they are not boosted. */
+  shadeSettings: [number, number, number, number] = [0.45, 1.10, 0.30, 48];
+  colorBy: "group" | "bundle" = "group";
+  /** Starting opacity per group. Superficial U-fibres form the brain's outer shell, so at full
+   *  opacity they hide the commissural and projection tracts from every exterior angle and the whole
+   *  view goes violet. Starting them semi-transparent lets the deep groups read through; the group's
+   *  opacity chip takes it back to 1. */
+  static readonly DEFAULT_GROUP_OPACITY: Record<string, number> = { Superficial: 0.35 };
 
   private constructor(dev: GPUDevice, root: URL, manifest: TractManifest, tubeRadius: number) {
     this.dev = dev;
@@ -126,7 +169,7 @@ export class TractScene {
     for (const g of this.groups) {
       const n = Math.max(1, g.bundleIds.length);
       g.color = [g.color[0] / n, g.color[1] / n, g.color[2] / n];
-      this.opacity[g.name] = 1;
+      this.opacity[g.name] = TractScene.DEFAULT_GROUP_OPACITY[g.name] ?? 1;
     }
     const bb = manifest.boundsRAS;
     this.center = [(bb[0] + bb[1]) / 2, (bb[2] + bb[3]) / 2, (bb[4] + bb[5]) / 2];
@@ -138,6 +181,8 @@ export class TractScene {
     const sc = new TractScene(dev, rootUrl(base), manifest, opts.radius ?? 0.175);
     if (opts.ao) Object.assign(sc.aoSettings, opts.ao);
     if (opts.halo) Object.assign(sc.haloSettings, opts.halo);
+    if (opts.shade) sc.shadeSettings = [...opts.shade] as [number, number, number, number];
+    if (opts.colorBy) sc.colorBy = opts.colorBy;
     await sc.setFraction(opts.fraction ?? manifest.defaultFraction ?? 0.1, opts.onProgress);
     return sc;
   }
@@ -249,9 +294,13 @@ export class TractScene {
       }
     }
     const bundleColors: Record<number, RGBA> = {};
-    for (let i = 0; i < this.manifest.bundles.length; i++) {
-      const b = this.manifest.bundles[i];
-      bundleColors[i + 1] = [b.color[0], b.color[1], b.color[2], b.opacity * (this.opacity[b.group] ?? 1)];
+    for (let i = 0; i < this.manifest.bundles.length; i++) bundleColors[i + 1] = this.colorFor(i);
+    // Keep the popup's group chips showing what is actually drawn.
+    for (let g = 0; g < this.groups.length; g++) {
+      const grp = this.groups[g];
+      grp.color = this.colorBy === "group"
+        ? groupColor(grp.name, g)
+        : meanColor(grp.bundleIds.map((id) => this.manifest.bundles[id - 1].color));
     }
     const next = new FiberField(this.dev, all, {
       radius: this.tubeRadius,
@@ -261,6 +310,7 @@ export class TractScene {
       aoDensityScale: this.aoSettings.densityScale,
       haloStrength: this.haloSettings.strength,
       haloWidthMm: this.haloSettings.widthMm,
+      shade: this.shadeSettings,
     });
     this.fibers?.destroy();
     this.fibers = next;
@@ -274,10 +324,27 @@ export class TractScene {
     this.fibers.setAO(this.aoSettings.strength, this.aoSettings.radiusMm, this.aoSettings.densityScale);
   }
 
+  /** Tube shading, live (uniform-resident — no rebuild). Caller does scene.syncUniforms(). */
+  setShade(shade: [number, number, number, number]): void {
+    this.shadeSettings = [...shade] as [number, number, number, number];
+    this.fibers.setShade(this.shadeSettings);
+  }
+
   /** Halo strength, live (uniform-resident — no rebuild). Caller does scene.syncUniforms(). */
   setHalo(strength: number): void {
     this.haloSettings.strength = Math.max(0, Math.min(1, strength));
     this.fibers.setHalo(this.haloSettings.strength, this.haloSettings.widthMm);
+  }
+
+  /** The colour a bundle is drawn in: its group's colour by default, or its own Slicer colour under
+   *  `colorBy: "bundle"`. Its group's opacity is folded in, so this is the single place both the
+   *  rebuild and the opacity controls take colour from. */
+  private colorFor(i: number): RGBA {
+    const b = this.manifest.bundles[i];
+    const rgb = this.colorBy === "group"
+      ? groupColor(b.group, Math.max(0, this.manifest.groups.indexOf(b.group)))
+      : b.color;
+    return [rgb[0], rgb[1], rgb[2], b.opacity * (this.opacity[b.group] ?? 1)];
   }
 
   groupOpacity(group: string): number { return this.opacity[group] ?? 1; }
@@ -288,10 +355,7 @@ export class TractScene {
     this.opacity[group] = Math.max(0, Math.min(1, o));
     const g = this.groups.find((x) => x.name === group);
     if (!g) return;
-    for (const id of g.bundleIds) {
-      const b = this.manifest.bundles[id - 1];
-      this.fibers.setBundleColor(id, [b.color[0], b.color[1], b.color[2], b.opacity * this.opacity[group]]);
-    }
+    for (const id of g.bundleIds) this.fibers.setBundleColor(id, this.colorFor(id - 1));
   }
 
   destroy(): void { this.fibers?.destroy(); }
