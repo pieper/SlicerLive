@@ -48,6 +48,44 @@ export interface TractManifest {
   bundles: TractBundleInfo[];
 }
 
+/** Tracts with the strongest comparative evidence of EXPANSION or reorganization in the human lineage
+ *  relative to chimpanzee and macaque, around language and executive control. Prior knowledge from the
+ *  literature — nothing here is derived from the scan, and NO tract is unique to humans: every one has
+ *  a primate homologue, so the claim is expansion, not novelty.
+ *
+ *    AF        the flagship case: a temporal-lobe projection found in 10/10 humans, 1/4 chimpanzees
+ *              and 0/3 macaques (Rilling et al., Nat Neurosci 2008), ~6x the proportional frontal
+ *              white-matter volume of macaque (Barrett et al., J Neurosci 2020)
+ *    SLF-II    shifts toward dorsolateral prefrontal cortex in humans where chimpanzee favours IFG
+ *              (Hecht et al. 2015); causal evidence across executive domains
+ *    SLF-III   ~2.5x macaque proportional volume; IFG-supramarginal dorsal stream
+ *    MdLF      the only tract with human-unique expansion at BOTH anterior and posterior temporal
+ *              language hubs (Sierpowska et al., PNAS 2022)
+ *    IOFF      (= IFOF) 9.6% of human frontal white matter against 3.3% in macaque; a major semantic
+ *              pathway. Contested: whether a macaque homologue exists at all is debated
+ *    CPC       prefrontal input to the cortico-ponto-cerebellar system, "relatively minor" in macaque
+ *              (Ramnani et al. 2006) — the best-evidenced cerebellar specialization
+ *    TF, SF    thalamo-frontal and striato-frontal loops, which scaled with the disproportionately
+ *              enlarged human prefrontal white matter (Schoenemann et al. 2005; Liu et al. 2021)
+ *    CR-F      the frontal projection fan (overlaps TF and SF anatomically)
+ *    Sup-F     humans have ~40% more superficial bundles than chimpanzees and far more curved ones,
+ *              with inferior-frontal among the most divergent regions (Chauvel et al. 2024)
+ *
+ *  Deliberately NOT included: the cingulum and uncinate, which some studies call human-expanded and
+ *  others conserved (Barrett 2020 found no species difference for either); the corpus callosum, which
+ *  scales NEGATIVELY with cortical surface, so an expansion argument runs the wrong way; and the motor
+ *  and visual systems (CST, PLIC, corona radiata parietal, optic radiations), whose real human
+ *  specializations are not about language or executive control. */
+const HUMAN_EXPANDED = [
+  "AF", "SLF-II", "SLF-III", "MdLF", "IOFF", "CPC", "TF", "SF", "CR-F", "Sup-F",
+];
+
+/** The abbreviation an ORG tract name ends with: "arcuate fasciculus (AF)" → "AF". */
+export function abbrevOf(bundleName: string): string {
+  const m = /\(([^)]+)\)\s*$/.exec(bundleName.trim());
+  return m ? m[1] : bundleName.trim();
+}
+
 function meanColor(colors: [number, number, number][]): [number, number, number] {
   const n = Math.max(1, colors.length);
   return [0, 1, 2].map((k) => colors.reduce((s, c) => s + c[k], 0) / n) as [number, number, number];
@@ -144,6 +182,14 @@ export class TractScene {
    *  — the colours are the bundle identity in the group list, so they are not boosted. */
   shadeSettings: [number, number, number, number] = [0.45, 1.10, 0.30, 48];
   colorBy: "group" | "bundle" = "group";
+  /** HIGHLIGHT MODE: a named subset of bundles stays opaque while the rest drop to `dimOpacity`,
+   *  keeping their group colours so the context is still readable. Membership is by abbreviation
+   *  (the parenthesised code in each ORG tract name, e.g. "arcuate fasciculus (AF)" → AF). */
+  highlight: { active: boolean; abbrevs: Set<string>; dimOpacity: number } = {
+    active: false,
+    abbrevs: new Set<string>(HUMAN_EXPANDED),
+    dimOpacity: 0.1,
+  };
   /** Starting opacity per group. Superficial U-fibres form the brain's outer shell, so at full
    *  opacity they hide the commissural and projection tracts from every exterior angle and the whole
    *  view goes violet. Starting them semi-transparent lets the deep groups read through; the group's
@@ -306,7 +352,23 @@ export class TractScene {
     const rgb = this.colorBy === "group"
       ? groupColor(b.group, Math.max(0, this.manifest.groups.indexOf(b.group)))
       : b.color;
-    return [rgb[0], rgb[1], rgb[2], b.opacity * (this.opacity[b.group] ?? 1)];
+    // Highlight multiplies on top of the group opacity rather than replacing it, so the group chips
+    // keep working while a subset is emphasised.
+    const emphasis = !this.highlight.active || this.highlight.abbrevs.has(abbrevOf(b.name))
+      ? 1
+      : this.highlight.dimOpacity;
+    return [rgb[0], rgb[1], rgb[2], b.opacity * (this.opacity[b.group] ?? 1) * emphasis];
+  }
+
+  /** Turn the highlight subset on or off. Uniform-resident — caller does scene.syncUniforms(). */
+  setHighlight(active: boolean): void {
+    this.highlight.active = active;
+    for (let i = 0; i < this.manifest.bundles.length; i++) this.fibers.setBundleColor(i + 1, this.colorFor(i));
+  }
+
+  /** Bundles currently in the highlight subset (by full ORG name), for the UI to report. */
+  highlightedBundles(): string[] {
+    return this.manifest.bundles.filter((b) => this.highlight.abbrevs.has(abbrevOf(b.name))).map((b) => b.name);
   }
 
   groupOpacity(group: string): number { return this.opacity[group] ?? 1; }
