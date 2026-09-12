@@ -108,28 +108,60 @@ export function mountAdaptive3d(opts: {
   target?: number;                                // AA convergence target (default 24)
   targetMs?: number;                              // budget frame-time target (default 16)
   movingScaleCap?: number;                        // max resolution scale WHILE MOVING (default 1; <1 for heavy scenes)
+  /** Opt-in (default 1 = off). Once a moving frame is already at NATIVE resolution, spend any
+   *  remaining frame budget on jittered samples of that frame instead of leaving it idle. At a low
+   *  fps target the budget buys resolution first and anti-aliasing second, which is what sub-pixel
+   *  geometry (hair-fine tubes) needs: full resolution alone still aliases badly at one sample.
+   *  Left at 1, behaviour is exactly as before, so demos that don't ask for it are untouched. */
+  maxMovingSamples?: number;
   idleGapMs?: number;                             // stay in cheap MOVING mode this long after the last kick (default 120)
   onFrame?: () => void;                           // after each 3D frame (e.g. redraw a crosshair overlay)
 }): Adaptive3d {
   const budget = new BudgetController({ targetMs: opts.targetMs ?? 16 });
   const DBG = typeof location !== "undefined" && new URLSearchParams(location.search).has("perf");
   let dbgN = 0, dbgMoving = 0, dbgSettled = 0, dbgLast = 0;
-  const dbgTick = (kind: "mov" | "set", ms: number, s: number) => {
+  const dbgTick = (kind: "mov" | "set", ms: number, s: number, k = 1) => {
     if (!DBG) return;
     dbgN++; if (kind === "mov") dbgMoving += ms; else dbgSettled += ms;
     const now = performance.now();
-    if (now - dbgLast > 500) { console.log(`[perf] mov=${dbgMoving.toFixed(0)}ms/${dbgN}f settled=${dbgSettled.toFixed(0)}ms lastScale=${s.toFixed(2)} last=${ms.toFixed(1)}ms`); dbgLast = now; dbgMoving = dbgSettled = dbgN = 0; }
+    if (now - dbgLast > 500) { console.log(`[perf] mov=${dbgMoving.toFixed(0)}ms/${dbgN}f settled=${dbgSettled.toFixed(0)}ms lastScale=${s.toFixed(2)} samples=${k} last=${ms.toFixed(1)}ms`); dbgLast = now; dbgMoving = dbgSettled = dbgN = 0; }
   };
   const movingCap = opts.movingScaleCap ?? 1;
+  const maxMovingSamples = Math.max(1, Math.round(opts.maxMovingSamples ?? 1));
+  let sampleMs = 0;                     // measured cost of ONE moving sample, for sizing k below
   const renderMoving = () => {
     const sc = opts.scene(); if (!sc) return;
     const { w: vw, h: vh } = opts.size(); if (!vw || !vh) return;
     // Cap moving resolution so a heavy DVR is interactive FROM FRAME ONE (no waiting for the budget
     // to adapt down over several frames). Moving frames are transient — the settle snaps to native.
     const s = Math.min(movingCap, budget.scale(vw, vh)), t0 = performance.now();
-    if (s > 0.98) { opts.setCamera(sc, vw, vh); sc.renderToView(opts.view(), vw, vh); }
-    else { const rw = Math.max(16, Math.round(vw * s)), rh = Math.max(16, Math.round(vh * s)); opts.setCamera(sc, rw, rh); sc.renderUpscaled(opts.view(), rw, rh, vw, vh); }
-    opts.gpu.device.queue.onSubmittedWorkDone().then(() => { const ms = performance.now() - t0; budget.update(ms); dbgTick("mov", ms, s); });
+    // Spend LEFTOVER budget on anti-aliasing, but only once resolution is already native: a slow GPU
+    // must still buy pixels before samples. k = how many whole samples fit in the frame target.
+    const k = (maxMovingSamples > 1 && s > 0.98 && sampleMs > 0)
+      ? Math.max(1, Math.min(maxMovingSamples, Math.floor(budget.targetMs / sampleMs)))
+      : 1;
+    if (s > 0.98) {
+      opts.setCamera(sc, vw, vh);
+      if (k > 1) {
+        // One swap-chain texture for the whole frame: getCurrentTexture() returns the same texture
+        // within this task, so these k renders resolve to a SINGLE present — no partial sample is
+        // ever shown. renderAccum only resets when the camera matrix changes, and the camera is
+        // fixed across these k, so they accumulate; the next moving frame (new camera) resets itself.
+        const view = opts.view();
+        sc.renderAccum(view, vw, vh, true);
+        for (let i = 1; i < k; i++) { opts.setCamera(sc, vw, vh); sc.renderAccum(view, vw, vh, false); }
+      } else {
+        sc.renderToView(opts.view(), vw, vh);
+      }
+    } else { const rw = Math.max(16, Math.round(vw * s)), rh = Math.max(16, Math.round(vh * s)); opts.setCamera(sc, rw, rh); sc.renderUpscaled(opts.view(), rw, rh, vw, vh); }
+    opts.gpu.device.queue.onSubmittedWorkDone().then(() => {
+      const ms = performance.now() - t0;
+      sampleMs = ms / k;
+      // Steer the budget on PER-SAMPLE cost. Handing it the whole k-sample duration would read as a
+      // catastrophically slow frame and collapse the resolution — the opposite of the intent.
+      budget.update(sampleMs);
+      dbgTick("mov", ms, s, k);
+    });
     opts.onFrame?.();
   };
   const renderSettled = (reset: boolean) => {

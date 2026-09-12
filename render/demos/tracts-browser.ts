@@ -98,6 +98,12 @@ async function main() {
     // badly while rotating (thin tubes scintillating), and detail matters more here than smoothness.
     // The Target fps slider below moves this at runtime.
     targetMs: 100,
+    // These tubes are sub-pixel, so a single sample aliases badly even at full resolution — measured
+    // mid-drag gradient energy 44.5 against 25.6 settled. Once the budget has bought native
+    // resolution, spend what is left on jittered samples of the same frame: at a 1 fps target that is
+    // ~17 samples, at 60 fps it stays at 1 and nothing changes. Capped so a very low target cannot
+    // queue an unbounded stall on one frame.
+    maxMovingSamples: 16,
   });
 
   // Reset the accumulation and then let the loop CONVERGE on it. renderSettled(true) by itself draws
@@ -299,6 +305,13 @@ async function main() {
     groups: () => sc.groups.map((g) => ({ name: g.name, n: g.bundleIds.length, opacity: sc.groupOpacity(g.name) })),
     setGroupOpacity: (g: string, o: number) => { sc.setGroupOpacity(g, o); scene.syncUniforms(); a3d.renderSettled(true); },
     accumCount: () => scene.accumCount(),
+    // Deterministic hooks for the quality tests. Measuring a MOVING frame by dragging and guessing
+    // when to screenshot is unreliable: one moving frame at a low fps target takes ~1s, and the loop
+    // settles 120ms after the last kick, so a capture easily lands on a settled frame instead. These
+    // render exactly one moving frame on demand and report what the budget is doing.
+    renderMoving: () => a3d.renderMoving(),
+    targetMs: () => a3d.budget.targetMs,
+    budgetPx: () => a3d.budget.budgetPx,
     loadMs: () => loadMs,
     bytes: () => sc.bytesFetched,
     fraction: () => sc.fraction,
