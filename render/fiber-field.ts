@@ -36,11 +36,8 @@ const MAX_GRID_CELLS = 1 << 23;
 
 export type RGBA = [number, number, number, number];
 
-/** One streamline: flat xyz triples (RAS mm) and a bundle id in [1, 255] selecting its palette colour.
- *  `flow` opts this streamline into the schematic direction band (see setMotion) and requires the
- *  points to already run upstream→downstream; streamlines without a defensible anatomical direction
- *  leave it unset and are never animated. */
-export interface Strand { points: ArrayLike<number>; bundle?: number; flow?: boolean }
+/** One streamline: flat xyz triples (RAS mm) and a bundle id in [1, 255] selecting its palette colour. */
+export interface Strand { points: ArrayLike<number>; bundle?: number }
 
 export interface FiberFieldOpts {
   /** Tube radius (mm). Default 0.2, as SlicerWGPU's add_fiber_strands. */
@@ -66,11 +63,6 @@ export interface FiberFieldOpts {
   /** Sample pattern, baked into the WGSL: directions over the hemisphere x steps along each. */
   aoDirections?: number;
   aoSteps?: number;
-  /** Band wavelength (mm) for the schematic flow animation — default 30, about three bands on a
-   *  100 mm tract, and coarse enough that the pattern cannot alias into travelling backwards. */
-  motionWavelengthMm?: number;
-  /** Band speed (mm/s); default 35, so a band passes a point at ~1.2 Hz. */
-  motionSpeedMmPerS?: number;
   /** DEPTH-DEPENDENT HALOS (Everts et al., IEEE Vis 2009 — the strongest illustrative result for
    *  dense line data). 0 = off. A ray that misses a tube but passes within `haloWidthMm` of it emits
    *  black at that tube's depth, so front-to-back compositing lets the halo occlude what lies behind
@@ -145,10 +137,6 @@ export class FiberField implements Field {
   private aoDensityScale: number;
   private readonly aoDirs: number;
   private readonly aoSteps: number;
-  private motionAmp = 0;          // 0 = no band at all (the default, and what every other demo gets)
-  private motionWavelength: number;
-  private motionSpeed: number;
-  private motionTime = 0;
   private haloStrength: number;
   private haloWidth: number;
 
@@ -161,8 +149,6 @@ export class FiberField implements Field {
     this.aoDensityScale = opts.aoDensityScale ?? 0.08;
     this.aoDirs = Math.max(1, Math.round(opts.aoDirections ?? 5));
     this.aoSteps = Math.max(1, Math.round(opts.aoSteps ?? 3));
-    this.motionWavelength = opts.motionWavelengthMm ?? 30;
-    this.motionSpeed = opts.motionSpeedMmPerS ?? 35;
     this.haloStrength = Math.max(0, opts.haloStrength ?? 0);
     this.haloWidth = opts.haloWidthMm ?? 0.5;
     this.clippable = opts.clippable ?? true;
@@ -181,35 +167,23 @@ export class FiberField implements Field {
       if (x < lo[0]) lo[0] = x; if (y < lo[1]) lo[1] = y; if (z < lo[2]) lo[2] = z;
       if (x > hi[0]) hi[0] = x; if (y > hi[1]) hi[1] = y; if (z > hi[2]) hi[2] = z;
     };
-    let n = 0, used = 0, strandIndex = 0;
+    let n = 0, used = 0;
     for (const s of strands) {
       const P = s.points, m = Math.floor(P.length / 3);
-      strandIndex++;
       if (m < 2) continue;
       const bundle = Math.min(PAL - 1, Math.max(1, Math.round(s.bundle ?? 1)));
       const first = n;
-      // Per-streamline PHASE, baked into the stored arclength. Without it every streamline's band
-      // would march in lockstep and common fate — the strongest grouping cue there is — would fuse
-      // the bundle into one pulsing sheet instead of many independent filaments.
-      const animate = s.flow === true;
-      let h = Math.imul(strandIndex ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
-      h ^= h >>> 13;
-      const phase = animate ? (h / 4294967296) * 997 : 0;   // mm, effectively uniform for any band length
-      let arc = 0;
       let ax = P[0], ay = P[1], az = P[2];
       for (let i = 1; i < m; i++) {
         const bx = P[i * 3], by = P[i * 3 + 1], bz = P[i * 3 + 2];
-        const len = Math.hypot(bx - ax, by - ay, bz - az);
-        if (len < 1e-6) continue;   // repeated point
+        if (Math.hypot(bx - ax, by - ay, bz - az) < 1e-6) continue;   // repeated point
         const o = n * 8;
         seg[o] = ax; seg[o + 1] = ay; seg[o + 2] = az;
-        // B.w carries the arclength at A (plus this streamline's phase), or -1 for "never animate".
-        seg[o + 4] = bx; seg[o + 5] = by; seg[o + 6] = bz; seg[o + 7] = animate ? arc + phase : -1;
+        seg[o + 4] = bx; seg[o + 5] = by; seg[o + 6] = bz; seg[o + 7] = bundle;
         grow(ax, ay, az); grow(bx, by, bz);
-        ax = bx; ay = by; az = bz; arc += len; n++;
+        ax = bx; ay = by; az = bz; n++;
       }
-      // A.w packs the bundle id with the neighbour flags, freeing B.w for arclength.
-      for (let j = first; j < n; j++) seg[j * 8 + 3] = bundle * 4 + ((j > first ? 1 : 0) | (j < n - 1 ? 2 : 0));
+      for (let j = first; j < n; j++) seg[j * 8 + 3] = (j > first ? 1 : 0) | (j < n - 1 ? 2 : 0);
       if (n > first) used++;
     }
     if (n === 0) { lo.splice(0, 3, -1, -1, -1); hi.splice(0, 3, 1, 1, 1); }
@@ -302,15 +276,6 @@ export class FiberField implements Field {
     if (radiusMm !== undefined) this.aoRadiusMm = radiusMm;
     if (densityScale !== undefined) this.aoDensityScale = densityScale;
   }
-  /** SCHEMATIC flow band along streamlines built with `flow: true`. `amplitude` is a peak brightening
-   *  (0 = off; ~0.12 reads as motion without competing with the shading that conveys 3D form), and
-   *  `timeS` advances it — hold it fixed for a static directional cue that survives a screenshot.
-   *  Brightness only: modulating opacity would read as travelling changes in fibre density, which is
-   *  a false data impression. */
-  setMotion(amplitude: number, timeS: number) {
-    this.motionAmp = Math.max(0, amplitude);
-    this.motionTime = timeS;
-  }
   /** Phong constants [ka, kd, ks, shininess], live (uniform-resident — no rebuild), so a demo can
    *  tune how bright the tubes read without rebuilding the grid. */
   setShade(shade: [number, number, number, number]) { this.shade = [shade[0], shade[1], shade[2], shade[3]]; }
@@ -326,7 +291,7 @@ export class FiberField implements Field {
   }
   destroy() { this.fBuf.destroy(); this.uBuf.destroy(); }
 
-  uniformFloats() { return 28; }        // lo + dims + hi + shade + params + motion + halo, 4 each
+  uniformFloats() { return 24; }        // lo + dims + hi + shade + params + halo, 4 each
   aabb(): [Vec3, Vec3] { return [this.lo, this.hi]; }
   /** Tubes need no fine step (crossings are found per interval), so this only caps how coarse the
    *  march may get before intervals walk many cells. */
@@ -339,7 +304,6 @@ export class FiberField implements Field {
       `  fib${s}_hi : vec4<f32>,`,       // grid max xyz, tube radius
       `  fib${s}_shade : vec4<f32>,`,    // ka, kd, ks, shininess
       `  fib${s}_params : vec4<f32>,`,   // opacity, ao strength, ao radius mm, ao density scale
-      `  fib${s}_motion : vec4<f32>,`,   // band amplitude, wavelength mm, speed mm/s, time s
       `  fib${s}_halo : vec4<f32>,`,     // halo strength, halo width mm, _, _
     ].join("\n");
   }
@@ -544,14 +508,13 @@ fn sample_field_fib${s}(wp_world : vec3<f32>, rd : vec3<f32>, seg : f32) -> vec4
       let ba = B.xyz - A.xyz;
       let y = dot(q - A.xyz, ba) / dot(ba, ba);
       // Keep only crossings on the strand's capsule-UNION surface (see the header).
-      let packed = u32(A.w + 0.5);
-      let flags = packed & 3u;
+      let flags = u32(A.w + 0.5);
       if ((flags & 2u) != 0u) {
         if (y >= 1.0) { continue; }
         if (fib_dseg${s}(q, B.xyz, fib${s}_f[${PAL + 1}u + 2u * (si + 1u)].xyz) < r * 0.9999) { continue; }
       }
       if ((flags & 1u) != 0u && fib_dseg${s}(q, fib${s}_f[${PAL}u + 2u * (si - 1u)].xyz, A.xyz) < r * 0.9999) { continue; }
-      let pal = fib${s}_f[packed >> 2u];
+      let pal = fib${s}_f[u32(B.w + 0.5)];
       let op = clamp(pal.a * fop, 0.0, 1.0);
       if (op <= 0.0) { continue; }
       // Headlight Phong on the analytic tube normal.
@@ -560,25 +523,7 @@ fn sample_field_fib${s}(wp_world : vec3<f32>, rd : vec3<f32>, seg : f32) -> vec4
       let refl = normalize(2.0 * ldn * nrm + rd);
       let rdv = max(dot(refl, -rd), 0.0);
       let ao = fib_ao${s}(q, nrm, r);
-      // SCHEMATIC flow band: a comet-shaped brightening travelling along the tube's own arclength,
-      // only on streamlines whose tract has a real anatomical direction (B.w >= 0). Asymmetric, so a
-      // still frame still reads directionally. Faded out where the tube is thinner than a pixel — a
-      // moving band on sub-pixel geometry scintillates.
-      var band = 0.0;
-      let amp = u_material.fib${s}_motion.x;
-      if (amp > 0.0 && B.w >= 0.0) {
-        let lam = max(u_material.fib${s}_motion.y, 1e-3);
-        let sAt = B.w + dot(q - A.xyz, ba / max(length(ba), 1e-6));
-        let u = fract((sAt - u_material.fib${s}_motion.z * u_material.fib${s}_motion.w) / lam);
-        let comet = smoothstep(0.0, 0.06, u) * (1.0 - smoothstep(0.06, 0.30, u));
-        // Soften — do not erase — where the tube is thin on screen. These tubes are SUB-PIXEL at
-        // whole-brain framing (0.175 mm at ~570 mm is ~0.8 px wide), so the usual "fade out below a
-        // pixel" guard would switch the band off exactly where the demo lives. Fading to a floor
-        // instead keeps it visible, and the rolling accumulation absorbs the residual scintillation.
-        let widthPx = 2.0 * r * u_cam.size.z / max(length(u_cam.eye.xyz - q), 1e-3);
-        band = comet * amp * mix(0.4, 1.0, smoothstep(0.3, 1.2, widthPx));
-      }
-      let lit = pal.rgb * ((ka + kd * ldn) * ao + band) + vec3<f32>(ks * pow(rdv, sh));
+      let lit = pal.rgb * ((ka + kd * ldn) * ao) + vec3<f32>(ks * pow(rdv, sh));
       let col = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
       var j = min(nh, ${MAX_HITS - 1});       // insertion, nearest first (the farthest drops off)
       loop {
@@ -610,11 +555,7 @@ fn sample_field_fib${s}(wp_world : vec3<f32>, rd : vec3<f32>, seg : f32) -> vec4
     out[off + 17] = this.aoStrength;
     out[off + 18] = this.aoRadiusMm;
     out[off + 19] = this.aoDensityScale;
-    out[off + 20] = this.motionAmp;
-    out[off + 21] = this.motionWavelength;
-    out[off + 22] = this.motionSpeed;
-    out[off + 23] = this.motionTime;
-    out[off + 24] = this.haloStrength;
-    out[off + 25] = this.haloWidth;
+    out[off + 20] = this.haloStrength;
+    out[off + 21] = this.haloWidth;
   }
 }

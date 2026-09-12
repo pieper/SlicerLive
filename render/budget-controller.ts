@@ -15,7 +15,10 @@ export interface BudgetOpts {
 
 export class BudgetController {
   budgetPx: number;
-  readonly targetMs: number;
+  /** Mutable so a demo can expose it: a viewer who would rather have detail than frame rate raises
+   *  the target frame time, and the loop then keeps a bigger fraction of the native resolution while
+   *  interacting instead of downsampling into aliasing. */
+  targetMs: number;
   private minPx: number;
   private maxPx: number;
 

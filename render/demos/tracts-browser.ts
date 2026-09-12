@@ -4,14 +4,14 @@
 //
 // The SlicerLive badge's popup mirrors the Slicer DATA MODULE's grouping: one opacity row per tract
 // group (Association, Cerebellar, Commissural, Projection, Superficial), each scaling every bundle
-// under it, so whole groups can be dialed independently.
+// under it, so whole groups can be dialed independently — alongside the streamline-density, target
+// frame rate, and depth-cue controls.
 //   deno run -A npm:esbuild@0.21.5 render/demos/tracts-browser.ts --bundle --format=esm \
 //     --outfile=/tmp/slicerlive-tracts/tracts.js
 //   cp render/demos/tracts.html /tmp/slicerlive-tracts/tracts.html
 import { initDevice } from "../device.ts";
 import { SceneRenderer } from "../scene-renderer.ts";
 import { buildTractScene, fractionCapForLimits, type TractScene } from "./tracts-scene.ts";
-import { flowFor } from "./tract-direction.ts";
 import { attachCameraControls, framedCamera } from "./camera-control.ts";
 import { mountAdaptive3d } from "./accum-loop.ts";
 import { installChrome } from "./sl-chrome.ts";
@@ -26,7 +26,9 @@ const status = (msg: string, err = false) => {
 async function main() {
   const canvas = document.getElementById("gpu") as HTMLCanvasElement;
   const params = new URLSearchParams(location.search);
-  const base = params.get("base") ?? "./";
+  // The tract chunks live in the public JS2 container alongside the other gallery assets. Override
+  // with ?base=./ to serve them from the same directory as the page (how they are exported locally).
+  const base = params.get("base") ?? "https://js2.jetstream-cloud.org:8001/swift/v1/slicerlive/tracts/";
   const fraction = params.has("fraction") ? parseFloat(params.get("fraction")!) : undefined;
   if (!(navigator as unknown as { gpu?: unknown }).gpu) { status("WebGPU not available — try Chrome/Edge 113+ or Safari 18+.", true); return; }
   status("initializing WebGPU…");
@@ -92,6 +94,10 @@ async function main() {
     size: () => ({ w: canvas.width, h: canvas.height }),
     setCamera: (s, w, h) => s.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, w, h),
     gpu,
+    // 10 fps rather than the usual 60: dense tracts downsampled hard to hold a high frame rate alias
+    // badly while rotating (thin tubes scintillating), and detail matters more here than smoothness.
+    // The Target fps slider below moves this at runtime.
+    targetMs: 100,
   });
 
   let tuned: { capPct: number; ms: number } | null = null;
@@ -138,70 +144,7 @@ async function main() {
   attachCameraControls(canvas, camera, { onChange: () => { userMoved = true; a3d.draw(); } });
 
   // The Data module's hierarchy: one opacity row per tract group, scaling every bundle under it.
-  // ---- schematic direction: off / static / animated -------------------------------------------
-  // Only tracts with a textbook anatomical direction carry it (see tract-direction.ts). Brightness
-  // only, per-streamline phase, and a persistent on-canvas badge whenever it is on — screenshots
-  // escape the UI, and this data gets looked at pre-surgically. Declared BEFORE installChrome: the
-  // popup reads each control's getter synchronously while it builds, so a later `let` would be in
-  // the temporal dead zone and throw.
-  // Peak brightening. The visualization literature's +12% assumes tubes several pixels wide; these
-  // are ~0.8 px at whole-brain framing and the sub-pixel guard scales the band to 0.4x, which put the
-  // effective brightening near 5% — measurably present (max +18 of 255) but invisible in a still.
-  // 0.3 lands around +12% effective. It stays subtle: it touches ~1.4% of lit pixels, since the comet
-  // occupies a fraction of each wavelength and only the 11 directional tracts carry it at all.
-  const MOTION_AMPLITUDE = 0.3;
-  const reduceMotion = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
-  let motionMode: "off" | "static" | "animated" = "off";
-  let motionRaf = 0, motionT0 = 0;
-  const badge = document.createElement("div");
-  badge.textContent = "Schematic direction — not measured";
-  badge.style.cssText = "position:absolute;left:14px;top:14px;z-index:6;display:none;padding:5px 10px;" +
-    "border-radius:7px;font:600 11px -apple-system,system-ui,sans-serif;letter-spacing:.2px;color:#ffe9a8;" +
-    "background:rgba(60,44,10,.78);border:1px solid rgba(255,210,90,.45);backdrop-filter:blur(8px);";
-  canvas.parentElement?.appendChild(badge);
-  const motionTick = () => {
-    motionRaf = requestAnimationFrame(motionTick);
-    sc.fibers.setMotion(MOTION_AMPLITUDE, (performance.now() - motionT0) / 1000);
-    scene.syncUniforms();
-    a3d.renderSettled(false);
-  };
-  const setMotionMode = (m: "off" | "static" | "animated") => {
-    motionMode = reduceMotion && m === "animated" ? "static" : m;
-    cancelAnimationFrame(motionRaf);
-    motionRaf = 0;
-    badge.style.display = motionMode === "off" ? "none" : "block";
-    if (motionMode === "off") {
-      sc.fibers.setMotion(0, 0);
-      scene.accumWindow = Infinity;
-      scene.syncUniforms();
-      a3d.renderSettled(true);
-    } else if (motionMode === "static") {
-      sc.fibers.setMotion(MOTION_AMPLITUDE, 0);   // frozen: the comet profile still reads directionally
-      scene.accumWindow = Infinity;
-      scene.syncUniforms();
-      a3d.renderSettled(true);
-    } else {
-      scene.accumWindow = 6;      // rolling: static tubes stay anti-aliased while the bands travel
-      motionT0 = performance.now();
-      scene.resetAccumulation();
-      motionTick();
-    }
-    showStatus();
-  };
-
-  const directional = sc.manifest.bundles.filter((b) => flowFor(b.name).mode !== "none");
   installChrome({
-    selects: [{
-      label: "Direction",
-      section: "Tracts",
-      options: [
-        { value: "off", label: "off" },
-        { value: "static", label: "static" },
-        { value: "animated", label: reduceMotion ? "animated (reduced)" : "animated" },
-      ],
-      get: () => motionMode,
-      set: (v: string) => setMotionMode(v as "off" | "static" | "animated"),
-    }],
     controls: [
       {
         label: "Streamlines",
@@ -215,6 +158,18 @@ async function main() {
             timer = setTimeout(() => applyFraction(target), 350);
           },
           format: (v: number) => `${Math.round(v)}%`,
+        },
+      },
+      {
+        label: "Target fps",
+        section: "Rendering",
+        slider: {
+          min: 1, max: 60, step: 1,
+          get: () => Math.round(1000 / a3d.budget.targetMs),
+          // Lower target = more time per frame = a bigger share of the native resolution kept while
+          // rotating. The budget loop re-converges within a few frames either way.
+          set: (v: number) => { a3d.budget.targetMs = 1000 / Math.max(1, Math.min(60, v)); },
+          format: (v: number) => `${Math.round(v)} fps`,
         },
       },
       {
@@ -247,8 +202,7 @@ async function main() {
     ],
     help: [{ title: "Tractography", rows: [
       ["Left-drag", "Rotate"], ["Right-drag / wheel", "Zoom"], ["Middle / Shift+Left-drag", "Pan"],
-      ["SlicerLive badge", "Streamline % + per-group opacity + direction"],
-      ["Direction", `Schematic only — diffusion MRI measures fibre orientation, not the direction of signal travel, and cannot tell afferent from efferent. Shown for the ${directional.length} tracts with a textbook direction (corticospinal, corticostriatal, thalamic radiations, cerebellar peduncles); reciprocal tracts — association, callosal, corona radiata, PLIC, superficial — are never animated.`],
+      ["SlicerLive badge", "Streamline % + target fps + depth cues + per-group opacity"],
     ] }],
     onChange: () => a3d.draw(),
   });
@@ -277,9 +231,6 @@ async function main() {
     loadMs: () => loadMs,
     bytes: () => sc.bytesFetched,
     fraction: () => sc.fraction,
-    motionMode: () => motionMode,
-    setMotionMode: (m: string) => { setMotionMode(m as "off" | "static" | "animated"); return { mode: motionMode, flowStrands: sc.flowStrands }; },
-    flowStrands: () => sc.flowStrands,
     setFraction: async (p: number) => { target = p; await applyFraction(p); return { streamlines: sc.strandCount, capsules: sc.capsuleCount, bytes: sc.bytesFetched }; },
     canvas: () => { const r = canvas.getBoundingClientRect(); return { w: canvas.width, h: canvas.height, left: r.left, top: r.top, width: r.width, height: r.height }; },
   };

@@ -52,12 +52,15 @@ report(sc.groups.length === 5 && sc.groups.every((g) => g.bundleIds.length > 0),
 
 // Group opacity: hiding one group must remove pixels, and restoring it must bring them back exactly.
 const before = litFraction(all);
+// Restore to whatever it started at, not to 1: Superficial ships semi-transparent (the outer shell
+// would otherwise hide the deep groups), so "restored" only equals the original at its own default.
+const supWas = sc.groupOpacity("Superficial");
 sc.setGroupOpacity("Superficial", 0);
 scene.syncUniforms();
 const hidden = await scene.renderToRGBA(W, H);
 await Deno.writeFile(`${OUT}/tracts-no-superficial.png`, await encodePNG(hidden, W, H));
 report(litFraction(hidden) < before * 0.95, "group opacity hides", `lit ${(100 * before).toFixed(1)}% → ${(100 * litFraction(hidden)).toFixed(1)}%`);
-sc.setGroupOpacity("Superficial", 1);
+sc.setGroupOpacity("Superficial", supWas);
 scene.syncUniforms();
 const restored = await scene.renderToRGBA(W, H);
 let same = 0;

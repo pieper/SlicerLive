@@ -48,6 +48,12 @@ export interface ChromeOpts {
   onChange?: () => void;                                     // after a toggle (redraw)
   anchor?: HTMLElement;                                      // float the badge over this element's top-right corner (e.g. the 3D cell); falls back to the viewport corner when hidden/absent
   about?: { label?: string; url?: string } | false;         // "About" row at the popup bottom (default: About SlicerLive → repo); false to omit
+  /** Open the popup as soon as the page loads, so people can see the controls exist at all — DEFAULT
+   *  ON, for every demo. It stays up until the pointer enters it and then leaves; a click elsewhere
+   *  or a drag on the scene does NOT dismiss it, or someone who goes straight for the 3D view would
+   *  never notice it. After that first dismissal the badge behaves exactly as it always has for the
+   *  rest of the session. Pass false for a host that needs the view unobstructed on load. */
+  openOnLoad?: boolean;
   container?: HTMLElement;                                   // where to append the fixed badge/popup/help (default document.body). Set to a high-z host overlay so the badge isn't painted under it (SlicerRad's viewer).
 }
 /** refresh() re-reads control state into the popup. destroy() removes all chrome DOM +
@@ -416,18 +422,28 @@ export function installChrome(opts: ChromeOpts): Chrome {
   };
   const hide = () => { pop.style.opacity = "0"; pop.style.pointerEvents = "none"; pop.style.transform = "translateY(-6px)"; };
   let pinned = false;
+  // The opening state (openOnLoad): ends the first time the pointer leaves the popup, and until then
+  // nothing else closes it.
+  let startOpen = false;
   logo.onmouseenter = () => { logo.style.transform = "scale(1.08)"; show(); };
-  logo.onclick = () => { pinned = !pinned; pinned ? show() : hide(); };
-  logo.onmouseleave = () => { logo.style.transform = "scale(1)"; if (!pinned) setTimeout(() => { if (!pop.matches(":hover") && !pinned) hide(); }, 120); };
-  pop.onmouseleave = () => { if (!pinned) hide(); };
+  logo.onclick = () => { startOpen = false; pinned = !pinned; pinned ? show() : hide(); };
+  logo.onmouseleave = () => { logo.style.transform = "scale(1)"; if (!pinned && !startOpen) setTimeout(() => { if (!pop.matches(":hover") && !pinned) hide(); }, 120); };
+  pop.onmouseleave = () => { startOpen = false; if (!pinned) hide(); };
   // A click ANYWHERE outside the badge/popup dismisses it (and unpins). Capture phase + contains()
   // so a control click inside the popup never counts as "outside".
   const onDocDown = (e: Event) => {
     const t = e.target as Node;
     if (logo.contains(t) || pop.contains(t)) return;
+    if (startOpen) return;      // the opening state survives a drag on the scene
     pinned = false; hide();
   };
   document.addEventListener("pointerdown", onDocDown, true);
+
+  if (opts.openOnLoad ?? true) {
+    startOpen = true;
+    // After a frame, so the badge has been laid out and the popup anchors under it.
+    requestAnimationFrame(() => { if (startOpen) show(); });
+  }
 
   const destroy = () => {
     document.removeEventListener("pointerdown", onDocDown, true);
