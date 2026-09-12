@@ -101,6 +101,7 @@ async function main() {
   });
 
   let tuned: { capPct: number; ms: number } | null = null;
+  let retuning = false, retuneTimer = 0;
   const showStatus = () => status(
     `${sc.manifest.bundles.length} bundles · ${sc.strandCount.toLocaleString()} streamlines (${Math.round(sc.fraction * 100)}%` +
     `${tuned ? ` auto, ${tuned.ms.toFixed(0)} ms probe, fits ${tuned.capPct}%` : ""}) · ` +
@@ -130,6 +131,20 @@ async function main() {
     else { queued = -1; setTimeout(showStatus, 1500); }
   };
 
+  // Applying a control change. A uniform/palette edit is invisible to the ALREADY-ACCUMULATED image,
+  // and kicking the loop is not enough on its own: a kick renders a low-res MOVING frame and only
+  // resets accumulation on the moving→settled transition after the 120 ms idle gap, so a toggle could
+  // look like it had not taken (and re-kicks kept pushing that reset further out). So: kick for
+  // immediate cheap feedback, then force a reset+bake once the input stops. Debounced just past the
+  // idle gap so dragging an opacity chip doesn't pay for a full-res settled frame per mouse-move.
+  let bakeTimer = 0;
+  const apply = () => {
+    scene.syncUniforms();
+    a3d.draw();
+    clearTimeout(bakeTimer);
+    bakeTimer = setTimeout(() => a3d.renderSettled(true), 140);
+  };
+
   const resize = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
     const w = Math.max(16, Math.round(canvas.clientWidth * dpr)), h = Math.max(16, Math.round(canvas.clientHeight * dpr));
@@ -138,6 +153,10 @@ async function main() {
     if (!userMoved) frameCamera(w, h);
     showStatus();
     a3d.renderSettled(true);
+    // The probe budget is per-window (see probeBudgetMs), so a resize changes how much geometry fits:
+    // going fullscreen should shed streamlines, shrinking should pick them back up.
+    clearTimeout(retuneTimer);
+    retuneTimer = setTimeout(() => void retune(), 400);
   };
   globalThis.addEventListener("resize", resize);
   new ResizeObserver(resize).observe(canvas);
@@ -164,7 +183,7 @@ async function main() {
         label: "Human-expanded tracts",
         section: "Tracts",
         get: () => sc.highlight.active,
-        set: (on: boolean) => { sc.setHighlight(on); scene.syncUniforms(); a3d.draw(); showStatus(); },
+        set: (on: boolean) => { sc.setHighlight(on); apply(); showStatus(); },
       },
       {
         label: "Target fps",
@@ -174,7 +193,13 @@ async function main() {
           get: () => Math.round(1000 / a3d.budget.targetMs),
           // Lower target = more time per frame = a bigger share of the native resolution kept while
           // rotating. The budget loop re-converges within a few frames either way.
-          set: (v: number) => { a3d.budget.targetMs = 1000 / Math.max(1, Math.min(60, v)); },
+          set: (v: number) => {
+            a3d.budget.targetMs = 1000 / Math.max(1, Math.min(60, v));
+            // Density follows the target: a lower fps target buys per-frame headroom, so re-tune how
+            // many streamlines fit. Debounced, so dragging re-tunes once at the value you land on.
+            clearTimeout(retuneTimer);
+            retuneTimer = setTimeout(() => void retune(), 400);
+          },
           format: (v: number) => `${Math.round(v)} fps`,
         },
       },
@@ -184,7 +209,7 @@ async function main() {
         slider: {
           min: 0, max: 1, step: 0.1,
           get: () => sc.haloSettings.strength,
-          set: (v: number) => { sc.setHalo(v); scene.syncUniforms(); a3d.draw(); },
+          set: (v: number) => { sc.setHalo(v); apply(); },
           format: (v: number) => (v <= 0.001 ? "off" : `${Math.round(v * 100)}%`),
         },
       },
@@ -194,7 +219,7 @@ async function main() {
         slider: {
           min: 0, max: 1, step: 0.1,
           get: () => sc.aoSettings.strength,
-          set: (v: number) => { sc.setAO(v); scene.syncUniforms(); a3d.draw(); },
+          set: (v: number) => { sc.setAO(v); apply(); },
           format: (v: number) => (v <= 0.001 ? "off" : `${Math.round(v * 100)}%`),
         },
       },
@@ -203,7 +228,7 @@ async function main() {
         section: "Tract groups",
         color: g.color,
         getOpacity: () => sc.groupOpacity(g.name),
-        setOpacity: (o: number) => { sc.setGroupOpacity(g.name, o); scene.syncUniforms(); },
+        setOpacity: (o: number) => { sc.setGroupOpacity(g.name, o); apply(); },
       })),
     ],
     help: [{ title: "Tractography", rows: [
@@ -211,7 +236,7 @@ async function main() {
       ["SlicerLive badge", "Streamline % + target fps + depth cues + per-group opacity"],
       ["Human-expanded tracts", "Holds 10 tracts at full opacity and drops the rest to 10%, keeping their group colours as context: the dorsal language stream (arcuate, SLF II/III), the ventral semantic pathways (IOFF/IFOF, MdLF), the frontal projection systems that grew with prefrontal cortex (thalamo-frontal, striato-frontal, frontal corona radiata), the prefrontal arm of the cerebro-cerebellar loop (cortico-ponto-cerebellar), and frontal short-association fibres. This is prior knowledge from the comparative literature, not anything measured in this scan. NO tract is unique to humans — every one has a primate homologue, and the claim is expansion relative to chimpanzee and macaque, clearest for the arcuate's temporal projection (found in 10/10 humans, 1/4 chimpanzees, 0/3 macaques; Rilling 2008). Some inclusions are contested, notably whether macaques have an IFOF at all. Shown bilaterally, though the language evidence is strongest on the left."],
     ] }],
-    onChange: () => a3d.draw(),
+    onChange: () => apply(),
   });
 
   const fullBtn = document.getElementById("full") as HTMLButtonElement | null;
@@ -258,8 +283,16 @@ async function main() {
   // hold more streamlines), and the settled frame is the converging still — interaction already
   // renders scaled down. So time a FIXED-SIZE frame through the same upscale path interaction uses.
   const PROBE_W = 640, PROBE_H = 360;
-  const PROBE_BUDGET_MS = 10;
-  const AUTO_MAX = 0.5;            // past this the viewer asks for it on the slider
+  const PROBE_PX = PROBE_W * PROBE_H;
+  // The ms the probe frame must come in under. The probe times a FIXED 640x360 frame, but what
+  // actually matters is whether the device can trace the WHOLE window within the frame-time target —
+  // that is exactly the point where rotating stops downsampling and the image stays sharp. So scale
+  // the target by the window:probe pixel ratio. This follows the Target fps slider: asking for fewer
+  // fps buys a bigger per-frame budget and therefore more streamlines.
+  //   (Before, this was a hardcoded 10 ms unrelated to the target — a 15 ms probe at 5% failed the
+  //    very first test, so a capable GPU never loaded a single extra chunk.)
+  const probeBudgetMs = () =>
+    a3d.budget.targetMs * PROBE_PX / Math.max(PROBE_PX, canvas.width * canvas.height);
   const measureFrame = async () => {
     const vw = canvas.width, vh = canvas.height;
     scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, PROBE_W, PROBE_H);
@@ -274,28 +307,45 @@ async function main() {
     await gpu.device.queue.onSubmittedWorkDone();
     return performance.now() - t;
   };
-  if (fraction === undefined) {
-    const cap = Math.min(fractionCapForLimits(sc.manifest, gpu.adapter.limits), AUTO_MAX);
-    let ms = await measureFrame();
-    for (let step = 0; step < 8 && sc.fraction + 0.05 <= cap + 1e-6 && ms < PROBE_BUDGET_MS; step++) {
-      const next = Math.round((sc.fraction + 0.05) * 100);
-      status(`tuning density for this GPU… trying ${next}% (${ms.toFixed(0)} ms probe)`);
-      await sc.setFraction(next / 100);
-      scene.build([sc.fibers]);
-      scene.setBackground(0.05, 0.06, 0.09);
-      ms = await measureFrame();
-      if (ms > PROBE_BUDGET_MS * 1.35) {     // overshot: drop back a chunk and stop
-        await sc.setFraction(Math.max(0.05, sc.fraction - 0.05));
-        scene.build([sc.fibers]);
-        scene.setBackground(0.05, 0.06, 0.09);
-        a3d.renderSettled(true);
-        break;
+  // Keep loading while the GPU still holds the frame-time target, and give chunks back when it no
+  // longer does — so a phone settles low, a workstation climbs until the memory limit stops it, and
+  // changing the target moves the density either way. A `function` declaration (not a const arrow)
+  // because the Target fps control and resize close over it ABOVE this point: those closures run
+  // later, but only a hoisted declaration is safe to reference from them.
+  async function retune(): Promise<void> {
+    if (fraction !== undefined || retuning || applying) return;   // ?fraction= pins density explicitly
+    retuning = true;
+    const rebuild = () => { scene.build([sc.fibers]); scene.setBackground(0.05, 0.06, 0.09); };
+    try {
+      const cap = fractionCapForLimits(sc.manifest, gpu.adapter.limits);   // memory ceiling is the only cap
+      const budget = probeBudgetMs();
+      let ms = await measureFrame();
+      for (let step = 0; step < 20; step++) {
+        const up = ms < budget && sc.fraction + 0.05 <= cap + 1e-6;
+        const down = ms > budget * 1.35 && sc.fraction > 0.05 + 1e-6;
+        if (!up && !down) break;
+        const next = Math.max(0.05, Math.min(cap, sc.fraction + (up ? 0.05 : -0.05)));
+        if (Math.abs(next - sc.fraction) < 1e-6) break;
+        status(`tuning density for this GPU… trying ${Math.round(next * 100)}% ` +
+          `(${ms.toFixed(0)} ms probe, ${budget.toFixed(0)} ms budget)`);
+        await sc.setFraction(next);
+        rebuild();
+        ms = await measureFrame();
+        if (up && ms > budget * 1.35) {     // overshot: give the chunk back and stop
+          await sc.setFraction(Math.max(0.05, sc.fraction - 0.05));
+          rebuild();
+          ms = await measureFrame();
+          break;
+        }
       }
-    }
-    target = Math.round(sc.fraction * 100);
-    tuned = { capPct: Math.round(cap * 100), ms };
-    a3d.renderSettled(true);
-    showStatus();
+      target = Math.round(sc.fraction * 100);
+      tuned = { capPct: Math.round(cap * 100), ms };
+      a3d.renderSettled(true);
+      showStatus();
+    } catch (e) {
+      status(`could not tune density — ${(e as Error).message}`, true);
+    } finally { retuning = false; }
   }
+  await retune();
 }
 main().catch((e) => status("error: " + (e?.message ?? e), true));

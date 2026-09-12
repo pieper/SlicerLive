@@ -489,7 +489,13 @@ fn sample_field_fib${s}(wp_world : vec3<f32>, rd : vec3<f32>, seg : f32) -> vec4
         if (ca.x <= r || ca.x >= r + hw) { continue; }
         if (ca.y <= tc || ca.y > te) { continue; }
         let ramp = clamp(1.0 - (ca.x - r) / hw, 0.0, 1.0);   // darkest hugging the tube
-        let ha = clamp(hs * ramp * ramp, 0.0, 1.0);
+        // Scale by the tube's OWN opacity — the same pal.a * fop the lit surface uses below. A halo
+        // is the tube occluding what is behind it, so a group dialled down must darken proportionally
+        // less and a group switched off must not darken at all. (It used to emit full-strength black
+        // regardless, so a hidden group still cast shadows over everything behind it.) Read after the
+        // band rejects above, so a ray that misses the halo never pays for the palette fetch.
+        let hop = clamp(fib${s}_f[u32(B.w + 0.5)].a * fop, 0.0, 1.0);
+        let ha = clamp(hs * ramp * ramp * hop, 0.0, 1.0);
         if (ha <= 0.004) { continue; }
         if (nh == ${MAX_HITS} && ca.y >= ht[${MAX_HITS - 1}]) { continue; }
         // Black, premultiplied, at the tube's own depth: front-to-back compositing then occludes
