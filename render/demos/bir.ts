@@ -89,6 +89,10 @@ export interface BirCfg {
   initialLayout?: "single" | "twoUp" | "fourUp";
   /** Optional extra toolbar buttons (e.g. IDC Share / Download) — appended after Help. */
   extraTools?: { id: string; icon: string; title: string; run: () => void }[];
+  /** Hide the measurement tools (Distance / Angle) and their shortcuts. For deployments with no
+   *  way to persist annotations (e.g. the read-only SlicerRAD-IDC viewer) — everything else in the
+   *  BIR tool set stays. */
+  disableMeasurements?: boolean;
 }
 
 export interface BirApi {
@@ -511,8 +515,10 @@ export function mountBir(cfg: BirCfg): BirApi {
   btn("tool-zoom", "zoom", "Zoom (drag up = out, down = in) — Z", () => setTool("zoom"));
   btn("tool-pan", "pan", "Pan (translate) — T", () => setTool("pan"));
   btn("tool-select", "selectvp", "Select Viewport — V", () => setTool("select"));
-  btn("tool-distance", "distance", "Distance measurement (click start, click end) — D", () => setTool("distance"));
-  btn("tool-angle", "angle", "Angle measurement (two segments, four clicks — Cobb) — A", () => setTool("angle"));
+  if (!cfg.disableMeasurements) {
+    btn("tool-distance", "distance", "Distance measurement (click start, click end) — D", () => setTool("distance"));
+    btn("tool-angle", "angle", "Angle measurement (two segments, four clicks — Cobb) — A", () => setTool("angle"));
+  }
   btn("tool-crosshair", "crosshair", "Cross-hair (click to localize in all viewports) — J", () => setTool("crosshair"));
   sep();
 
@@ -866,7 +872,7 @@ export function mountBir(cfg: BirCfg): BirApi {
           ["W", "Window — drag to adjust window/level"],
           ["Z / T", "Zoom / Pan (translate)"],
           ["V", "Select viewport (click also selects)"],
-          ["D / A", "Distance (2 clicks) / Angle (4 clicks, Cobb) measurements"],
+          ...(cfg.disableMeasurements ? [] : [["D / A", "Distance (2 clicks) / Angle (4 clicks, Cobb) measurements"]]),
           ["J", "Cross-hair — click localizes in all viewports"],
           ["O", "Localizer lines on/off"],
           ["I", "Annotations — full / minimal / off"],
@@ -911,8 +917,7 @@ export function mountBir(cfg: BirCfg): BirApi {
       z: () => setTool("zoom"),
       t: () => setTool("pan"),
       v: () => setTool("select"),
-      d: () => setTool("distance"),
-      a: () => setTool("angle"),
+      ...(cfg.disableMeasurements ? {} : { d: () => setTool("distance"), a: () => setTool("angle") }),
       j: () => setTool("crosshair"),
       o: () => buttons.get("localizer")!.click(),
       i: () => buttons.get("annotation")!.click(),

@@ -455,6 +455,9 @@ async function main() {
     close: () => status("This is the SlicerLive Basic Image Review demo — reload to restart."),
     jumpAll,
     modality: res.ct.modality,
+    // Read-only deployments (SlicerRAD-IDC) turn off the measurement tools — no annotation
+    // persistence yet. Set window.__BIR_NO_MEASURE before the bundle loads, or pass ?measure=off.
+    disableMeasurements: !!(globalThis as Record<string, unknown>).__BIR_NO_MEASURE || P.get("measure") === "off",
     extraTools: [
       {
         id: "idc-share",
