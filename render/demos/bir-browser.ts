@@ -25,8 +25,8 @@ import { attachWidgetControls } from "./widget-control.ts";
 import type { Box, HandleMeta } from "./roi-widget.ts";
 import { createMosaic } from "./mosaic.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
-import { loadSeries } from "../vendor/idc_tools/index.js";
-import { type BirApi, mountBir, type Plane } from "./bir.ts";
+import { loadSeries, loadThumbnail } from "../vendor/idc_tools/index.js";
+import { type BirApi, mountBir, type Plane, type StripItem } from "./bir.ts";
 import { downloadStudyWithDialog, type SeriesRef, shareStudy } from "./idc-share.ts";
 import { CT_VR_PRESETS, presetLUT } from "../ct-vr-presets.ts";
 import { openVrPresetMenu, type VrPresetItem } from "./vr-preset-menu.ts";
@@ -82,8 +82,12 @@ const KITS_DEFAULT: Source = {
 // js2 bucket for the deployed gallery.
 const IDC_INDEX_BASE = ((globalThis as Record<string, unknown>).__IDC_INDEX_BASE as string) ||
   P.get("indexBase") || "https://js2.jetstream-cloud.org:8001/swift/v1/idc-index/";
-const GROUPS_URL = new URL("idc-rad-groups.json", IDC_INDEX_BASE).href;
-const PARQUET_URL = new URL("idc-rad-slim.parquet", IDC_INDEX_BASE).href;
+// v2 = every radiology series of a study (image stacks + SEG + RTSTRUCT/RTDOSE + SR/PR/KO/…;
+// only SM pathology dropped) with SeriesNumber, so the OHIF-style series panel is complete.
+// Versioned filenames so a client with the old (image-only) sidecar cached never pairs it with
+// the new parquet.
+const GROUPS_URL = new URL("idc-rad-v2-groups.json", IDC_INDEX_BASE).href;
+const PARQUET_URL = new URL("idc-rad-v2-slim.parquet", IDC_INDEX_BASE).href;
 const HYPARQUET_ESM = "https://cdn.jsdelivr.net/npm/hyparquet@1.28.2/+esm";
 const splitList = (v: string | null): string[] => (v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 
@@ -113,13 +117,21 @@ async function loadGroupDir(onStatus: (m: string) => void): Promise<GroupDir> {
 
 const SLIM_COLS = [
   "StudyInstanceUID", "SeriesInstanceUID", "crdc_series_uuid", "aws_bucket", "Modality",
-  "instanceCount", "SeriesDescription", "PatientID", "collection_id", "license_short_name", "source_DOI",
+  "instanceCount", "SeriesNumber", "SeriesDescription", "PatientID", "collection_id",
+  "license_short_name", "source_DOI",
 ];
+
+// Memo the per-study rows so building the series panel doesn't re-read a group the resolve
+// already fetched this page load.
+// deno-lint-ignore no-explicit-any
+const _studyRowsCache = new Map<string, any[]>();
 
 /** Range-read every series row of a study from the slim index: find the 1–2 sorted row groups
  *  whose [min,max] span the study and read only those (~0.6 MB), never the whole parquet. */
 // deno-lint-ignore no-explicit-any
 async function readStudyRows(studyUID: string, onStatus: (m: string) => void): Promise<any[]> {
+  const memo = _studyRowsCache.get(studyUID);
+  if (memo) return memo;
   const dir = await loadGroupDir(onStatus);
   const RGS = dir.rowGroupSize;
   const spans: [number, number][] = [];
@@ -145,6 +157,7 @@ async function readStudyRows(studyUID: string, onStatus: (m: string) => void): P
     );
     const rows = parts.flat().filter((r: { StudyInstanceUID: string }) => r.StudyInstanceUID === studyUID);
     if (!rows.length) throw new Error(`StudyInstanceUID not found in the IDC index: ${studyUID}`);
+    _studyRowsCache.set(studyUID, rows);
     return rows;
   } catch (e) {
     if ((e as Error).message.includes("not found")) throw e;
@@ -429,6 +442,88 @@ async function main() {
     }
     : undefined;
 
+  // ---- OHIF-style series panel (left thumbnail strip) -------------------------------------
+  // SlicerRAD-IDC "study-level IDC mode": no patient/study browser to return to, and no
+  // annotation persistence. Driven by window.__SLICERRAD_IDC (SlicerRAD-IDC sets it); the
+  // gallery leaves it off.
+  const IDC_MODE = !!(globalThis as Record<string, unknown>).__SLICERRAD_IDC;
+  const noMeasure = IDC_MODE || !!(globalThis as Record<string, unknown>).__BIR_NO_MEASURE || P.get("measure") === "off";
+
+  // Small-canvas thumbnail rendering + a concurrency gate so N series don't spawn N decode
+  // workers at once.
+  const IMG_MODS = new Set(["CT", "MR", "PT", "PET", "NM", "US", "XA", "CR", "DX", "MG", "RF", "SC", "XC", "OT"]);
+  const THUMB = 128;
+  let active = 0;
+  const waiters: (() => void)[] = [];
+  const acquire = () => active < 3 ? (active++, Promise.resolve()) : new Promise<void>((r) => waiters.push(() => (active++, r())));
+  const release = () => { active--; waiters.shift()?.(); };
+  const sliceToThumb = (t: { vol: Int16Array | Float32Array; dims: [number, number, number]; win: number; lev: number }): Promise<Blob | null> => {
+    const [w, h] = t.dims, lo = t.lev - t.win / 2, inv = 255 / Math.max(1, t.win);
+    const px = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i++) { let g = (t.vol[i] - lo) * inv; g = g < 0 ? 0 : g > 255 ? 255 : g; px[i * 4] = px[i * 4 + 1] = px[i * 4 + 2] = g; px[i * 4 + 3] = 255; }
+    const c0 = document.createElement("canvas"); c0.width = w; c0.height = h;
+    c0.getContext("2d")!.putImageData(new ImageData(px, w, h), 0, 0);
+    const c = document.createElement("canvas"); c.width = THUMB; c.height = THUMB;
+    const cx = c.getContext("2d")!; cx.fillStyle = "#000"; cx.fillRect(0, 0, THUMB, THUMB);
+    const s = Math.min(THUMB / w, THUMB / h); cx.drawImage(c0, (THUMB - w * s) / 2, (THUMB - h * s) / 2, w * s, h * s);
+    return new Promise((res) => c.toBlob(res, "image/png"));
+  };
+  const placeholderThumb = (modality: string): Promise<Blob | null> => {
+    const c = document.createElement("canvas"); c.width = THUMB; c.height = THUMB;
+    const cx = c.getContext("2d")!; cx.fillStyle = "#0b0e16"; cx.fillRect(0, 0, THUMB, THUMB);
+    cx.fillStyle = "#3d5a86"; cx.font = "700 26px -apple-system,system-ui,sans-serif";
+    cx.textAlign = "center"; cx.textBaseline = "middle"; cx.fillText(modality || "?", THUMB / 2, THUMB / 2);
+    return new Promise((res) => c.toBlob(res, "image/png"));
+  };
+  const currentSeriesThumb = (): Promise<Blob | null> => {
+    const { vol, dims, win, lev } = res.ct as { vol: Int16Array | Float32Array; dims: [number, number, number]; win: number; lev: number };
+    const [w, h, d] = dims, z = Math.floor(d / 2);
+    return sliceToThumb({ vol: vol.subarray(z * w * h, (z + 1) * w * h) as typeof vol, dims: [w, h, 1], win, lev });
+  };
+  const navigateToSeries = (seriesUID: string) => {
+    const u = new URL(location.href);
+    u.searchParams.set("StudyInstanceUIDs", source.st);
+    u.searchParams.set("SeriesInstanceUIDs", seriesUID);
+    for (const k of ["series", "seg", "bucket", "segBucket", "modality", "initialSeriesInstanceUID", "seriesUID"]) u.searchParams.delete(k);
+    location.href = u.toString();
+  };
+
+  // Build the strip from the study's every series (image stacks + SEG + SR/PR/…), OHIF-ordered
+  // by SeriesNumber. Free when we arrived by StudyInstanceUID (readStudyRows is memoized); the
+  // default demo pays one small index read.
+  let seriesStrip: StripItem[] | undefined;
+  if (source.st) {
+    try {
+      // deno-lint-ignore no-explicit-any
+      const rows: any[] = await readStudyRows(source.st, setLoad);
+      rows.sort((a, b) => ((parseInt(a.SeriesNumber) || 1e9) - (parseInt(b.SeriesNumber) || 1e9)) || (Number(b.instanceCount) - Number(a.instanceCount)));
+      seriesStrip = rows.map((r) => {
+        const mod = String(r.Modality).toUpperCase();
+        const isCurrent = String(r.crdc_series_uuid) === source.c;
+        const desc = String(r.SeriesDescription ?? "").trim();
+        return {
+          seriesUID: String(r.SeriesInstanceUID),
+          lines: [mod, ...(desc ? [desc] : []), `${Number(r.instanceCount) || 0} img`],
+          current: isCurrent,
+          thumb: async (): Promise<Blob | null> => {
+            if (isCurrent) return currentSeriesThumb();
+            if (!IMG_MODS.has(mod) || !r.crdc_series_uuid) return placeholderThumb(mod);
+            await acquire();
+            try {
+              const t = await loadThumbnail(String(r.crdc_series_uuid), String(r.aws_bucket), mod);
+              return t ? sliceToThumb(t) : placeholderThumb(mod);
+            } catch {
+              return placeholderThumb(mod);
+            } finally {
+              release();
+            }
+          },
+          open: () => navigateToSeries(String(r.SeriesInstanceUID)),
+        };
+      });
+    } catch { /* no study rows → no strip (e.g. direct ?series= with no study) */ }
+  }
+
   bir = mountBir({
     overlay: document.getElementById("viewer")!,
     bar: document.getElementById("bir-bar")!,
@@ -455,9 +550,12 @@ async function main() {
     close: () => status("This is the SlicerLive Basic Image Review demo — reload to restart."),
     jumpAll,
     modality: res.ct.modality,
-    // Read-only deployments (SlicerRAD-IDC) turn off the measurement tools — no annotation
-    // persistence yet. Set window.__BIR_NO_MEASURE before the bundle loads, or pass ?measure=off.
-    disableMeasurements: !!(globalThis as Record<string, unknown>).__BIR_NO_MEASURE || P.get("measure") === "off",
+    strip: seriesStrip,
+    // Study-level IDC deployments (SlicerRAD-IDC) turn off the measurement tools (no annotation
+    // persistence yet) and hide the patient/study browser links (nothing to return to — the
+    // series strip is the navigation). Set window.__SLICERRAD_IDC / __BIR_NO_MEASURE, or ?measure=off.
+    disableMeasurements: noMeasure,
+    hidePatientBrowser: IDC_MODE,
     extraTools: [
       {
         id: "idc-share",

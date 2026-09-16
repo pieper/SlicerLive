@@ -30,31 +30,36 @@ const OUT = args.get("out") ?? ".";
 // idc-index-data mirror (server-side reads are fine — the CORS gap only bites browsers).
 const INDEX_URL = args.get("index") ??
   "https://storage.googleapis.com/idc-index-data-mirror/idc_index-v22.0.2.parquet";
-const VERSION = args.get("version") ?? INDEX_URL.replace(/^.*idc_index-?/, "").replace(/\.parquet$/, "") || "idc";
+const VERSION = args.get("version") ?? (INDEX_URL.replace(/^.*idc_index-?/, "").replace(/\.parquet$/, "") || "idc");
 const ROW_GROUP_SIZE = 2000;
 
-// Modalities this viewer can render (volumes) or overlay (SEG). Everything else — SR, ANN, PR,
-// KO, REG, RTPLAN, SM (pathology, the biggest single drop) — is not shown, so it is excluded.
-const KEEP = new Set(["CT", "MR", "PT", "NM", "US", "XA", "CR", "DX", "MG", "RF", "SEG", "RTSTRUCT", "RTDOSE"]);
+// Keep EVERY series of a radiology study so the OHIF-style series panel is complete (image
+// stacks + SEG + RTSTRUCT/RTDOSE + SR/PR/KO/REG/RTPLAN/ANN …). Only slide-microscopy pathology
+// (SM) is dropped — it's not part of a radiology study and is by far the largest single modality.
+const DROP = new Set(["SM"]);
 
-// Columns the client resolver needs. series_aws_url is replaced by crdc_series_uuid + aws_bucket
-// (the prefix is s3://<aws_bucket>/<crdc_series_uuid>/*), which compresses far better.
+// Columns the client resolver + series panel need. series_aws_url is replaced by
+// crdc_series_uuid + aws_bucket (prefix = s3://<aws_bucket>/<crdc_series_uuid>/*, compresses
+// far better). SeriesNumber drives OHIF-style ordering in the panel.
 const COLS = [
   "StudyInstanceUID", "SeriesInstanceUID", "crdc_series_uuid", "aws_bucket", "Modality",
-  "instanceCount", "SeriesDescription", "PatientID", "collection_id", "license_short_name", "source_DOI",
+  "instanceCount", "SeriesNumber", "SeriesDescription", "PatientID", "collection_id",
+  "license_short_name", "source_DOI",
 ];
 
 console.log(`reading ${INDEX_URL} …`);
 const file = await asyncBufferFromUrl({ url: INDEX_URL });
 // deno-lint-ignore no-explicit-any
 const rows: any[] = await parquetReadObjects({ file, columns: COLS });
-const kept = rows.filter((r) => KEEP.has(String(r.Modality)));
+const kept = rows.filter((r) => !DROP.has(String(r.Modality)));
 kept.sort((a, b) => (a.StudyInstanceUID < b.StudyInstanceUID ? -1 : a.StudyInstanceUID > b.StudyInstanceUID ? 1 : 0));
-console.log(`kept ${kept.length} of ${rows.length} series (radiology only)`);
+console.log(`kept ${kept.length} of ${rows.length} series (all radiology; dropped SM pathology)`);
 
+// Coerce every value to a defined non-null (the writer rejects undefined in a required column,
+// and non-image objects — SR/PR/KO — carry nulls in some columns): numbers default 0, text "".
 const columnData = COLS.map((name) => ({
   name,
-  data: kept.map((r) => (r[name] == null ? null : name === "instanceCount" ? Number(r[name]) : String(r[name]))),
+  data: kept.map((r) => (name === "instanceCount" ? Number(r[name] ?? 0) : String(r[name] ?? ""))),
 }));
 const buf = parquetWriteBuffer({ columnData, rowGroupSize: ROW_GROUP_SIZE, compressed: true, statistics: true });
 await Deno.writeFile(`${OUT}/idc-rad-slim.parquet`, new Uint8Array(buf));

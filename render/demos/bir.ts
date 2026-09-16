@@ -93,6 +93,10 @@ export interface BirCfg {
    *  way to persist annotations (e.g. the read-only SlicerRAD-IDC viewer) — everything else in the
    *  BIR tool set stays. */
   disableMeasurements?: boolean;
+  /** Hide the "Select Patient" toolbar button and the "Browser (patient/study/series)" layout
+   *  option. For study-scoped deployments (SlicerRAD-IDC) that have no patient/study browser to
+   *  return to — the series thumbnail strip is the navigation surface instead. */
+  hidePatientBrowser?: boolean;
 }
 
 export interface BirApi {
@@ -433,7 +437,9 @@ export function mountBir(cfg: BirCfg): BirApi {
   };
 
   // -- navigation (Action Tools) --
-  btn("patient", "patient", "Select Patient — back to the patient/study/series browser", cfg.close);
+  if (!cfg.hidePatientBrowser) {
+    btn("patient", "patient", "Select Patient — back to the patient/study/series browser", cfg.close);
+  }
   btn("prev-study", "prevStudy", "Previous Study", () => cfg.nav?.prevStudy?.(), {
     disabled: !cfg.nav?.prevStudy,
     disabledTip: "Previous Study — none earlier",
@@ -466,7 +472,7 @@ export function mountBir(cfg: BirCfg): BirApi {
       ["fourUp", "Four-Up (MPR + 3D)"],
       ["twoUp", "2 side-by-side"],
       ["single", "Single viewport"],
-      ["browser", "Browser (patient/study/series)"],
+      ...(cfg.hidePatientBrowser ? [] : [["browser", "Browser (patient/study/series)"]]),
     ] as const
   ) layoutSel.add(new Option(label, v));
   layoutSel.addEventListener("change", () => {
@@ -767,10 +773,12 @@ export function mountBir(cfg: BirCfg): BirApi {
     strip = document.createElement("div");
     strip.id = "bir-strip";
     strip.innerHTML = `<div class="head">Series</div>`;
+    let currentItem: HTMLElement | null = null;
     for (const it of cfg.strip) {
       const item = document.createElement("div");
       item.className = "item" + (it.current ? " current" : "");
-      item.title = it.lines.join(" · ") + " — double-click to load";
+      if (it.current) currentItem = item;
+      item.title = it.lines.join(" · ") + " — click to load";
       const img = document.createElement("img");
       img.alt = "";
       it.thumb().then((b) => {
@@ -780,9 +788,12 @@ export function mountBir(cfg: BirCfg): BirApi {
       cap.className = "cap";
       cap.textContent = it.lines.join(" · ");
       item.append(img, cap);
-      item.addEventListener("dblclick", () => it.open());
+      // Single click loads the series (OHIF-style); ignore a click on the already-open one.
+      item.addEventListener("click", () => { if (!it.current) it.open(); });
       strip.appendChild(item);
     }
+    // Keep the open series visible in a long list.
+    requestAnimationFrame(() => currentItem?.scrollIntoView({ block: "nearest" }));
     // Insert as a left column: wrap the grid in a row container.
     const row = document.createElement("div");
     row.id = "bir-row";

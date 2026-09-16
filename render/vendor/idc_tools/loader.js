@@ -76,6 +76,43 @@ export async function loadSeries(entry, handlers = {}, opts) {
     r.entry = entry;
     return r;
 }
+/** Decode ONE representative (middle) slice of a series into a small grayscale preview — for the
+ *  OHIF-style series panel. Uses a PRIVATE, short-lived worker (NOT the shared singleton), so it
+ *  never terminates or is terminated by a main series load, and several can run at once.
+ *  Returns { vol, dims:[w,h,1], win, lev } or null (no DICOM under the prefix / decode failed /
+ *  the object carries no pixel data, e.g. SR/RTSTRUCT). */
+export async function loadThumbnail(prefix, bucket, modality, opts) {
+    const keys = await s3ListKeys(prefix, bucket);
+    if (!keys.length)
+        return null;
+    const mid = keys[Math.floor(keys.length / 2)];
+    const mod = { CT: 'CT', MR: 'MR', PT: 'PET' }[modality] || modality;
+    return new Promise((resolve) => {
+        let w;
+        try {
+            w = new Worker(resolveWorkerURL(opts));
+        }
+        catch {
+            return resolve(null);
+        }
+        let out = null;
+        const done = (v) => { try {
+            w.terminate();
+        }
+        catch { /* ignore */ } resolve(v); };
+        w.onmessage = (e) => {
+            const m = e.data;
+            if (m.t === 'ct')
+                out = { vol: new (m.dtype === 'float32' ? Float32Array : Int16Array)(m.vol), dims: m.dims, win: m.win, lev: m.lev };
+            else if (m.t === 'alldone')
+                done(out);
+            else if (m.t === 'error')
+                done(null);
+        };
+        w.onerror = () => done(null);
+        w.postMessage({ ctKeys: [mid], segKeys: [], ctBucket: bucket, segBucket: bucket, modality: mod });
+    });
+}
 /** Spin a random series from the manifest and load it. `filter` narrows the pool (e.g. CT only). */
 export async function spinRandom(handlers = {}, opts) {
     const manifest = await loadManifest(opts?.manifestUrl);
