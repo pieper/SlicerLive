@@ -435,16 +435,22 @@ export class RemindScene {
   }
 
   // ── linked patient-space navigation ────────────────────────────────────────
-  /** Where a RAS focus point falls in this row's own bbox, as the 0..1 scrub offset. */
-  offset01(row: Row, orient: Orientation, focus: Vec3): number {
-    const a = orient === "axial" ? 2 : orient === "coronal" ? 1 : 0;
-    const lo = row.rasLo![a], hi = row.rasHi![a];
-    return hi === lo ? 0.5 : Math.max(0, Math.min(1, (focus[a] - lo) / (hi - lo)));
-  }
+  // The scrub position of a RAS focus point is each row's own SliceRenderer.offset01Along:
+  // it projects the point on the plane's CURRENT normal, so a row addresses the same slice
+  // whether the basis is anatomical or a volume's oblique frame. (An axis-aligned fraction of
+  // the row's bbox — what this used to be — put rows with different boxes on different oblique
+  // planes the moment a native frame was chosen.)
 
-  /** Point every loaded row's in-plane view at the same patient-space frame. */
-  applyFrame(orient: Orientation, centerRAS: Vec3, fovMm: number) {
-    for (const r of this.readyRows()) r.slice!.setMirrorFrame(orient, centerRAS, fovMm, fovMm);
+  /** Point every loaded row's in-plane view at the same patient-space frame: `fovMm` is the
+   *  span across the canvas HEIGHT (the same vertical convention as the 3D camera's viewAngle)
+   *  and `aspectWH` is that canvas's width/height. The aspect has to go in: setMirrorFrame
+   *  bakes the fitted span at the frame's aspect into a per-row zoom, and the renderer unbakes
+   *  it at the canvas's aspect — for a non-square cell those only cancel when the two aspects
+   *  agree. Passing a square fov into tall cells left every row at a DIFFERENT scale (2x for
+   *  ReMIND-044's 44 x 100 mm sagittal US against a 287 x 217 mm MR), so a pan shared in mm
+   *  moved the ultrasound across the MR with every axial scroll. */
+  applyFrame(orient: Orientation, centerRAS: Vec3, fovMm: number, aspectWH = 1) {
+    for (const r of this.readyRows()) r.slice!.setMirrorFrame(orient, centerRAS, fovMm * aspectWH, fovMm);
   }
 
   private frameBases: Record<Orientation, PlaneBasis> | null = null;

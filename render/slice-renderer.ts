@@ -352,6 +352,15 @@ export class SliceRenderer {
     const { lo, hi } = this.extentAlong(n);
     return Math.max(0, Math.min(1, (dot3(ras, n) - lo) / Math.max(hi - lo, 1e-6)));
   }
+  /** Slide a RAS point along the plane's current normal, only if needed, so that its scrub position
+   *  lies inside the volume — the mm-space form of setPlane's 0..1 clamp, for a caller stepping a
+   *  focus point through the slices of an anatomical OR oblique basis. In-plane coordinates are kept. */
+  clampAlongNormal(orient: Orientation, ras: Vec3): Vec3 {
+    const n = this.basisOf(orient).nDir;
+    const { lo, hi } = this.extentAlong(n);
+    const have = dot3(ras, n), want = Math.max(lo, Math.min(hi, have));
+    return [ras[0] + n[0] * (want - have), ras[1] + n[1] * (want - have), ras[2] + n[2] * (want - have)];
+  }
   basisOf(orient: Orientation): PlaneBasis { return this.basisOverride[orient] ?? BASES[orient]; }
 
   /** Extent of the volume's RAS bounding box projected onto a direction — the generalisation

@@ -428,7 +428,17 @@ async function main() {
   };
   /** Once the user drives the view, stop re-framing under them. */
   const userTookOver = () => { autoFrame = false; };
-  const applyFrames = () => { for (const o of ORIENTS) sc.applyFrame(o, viewCenter, fovMm); };
+  /** Width/height of the canvas an orientation is currently drawn in (all rows share a column
+   *  width, and in max mode only one is visible) — the frame is only pixel-registered across
+   *  rows when it is applied at the aspect it will be drawn at. */
+  const aspectFor = (o: Orientation) => {
+    for (const r of cmpRows) {
+      const c = cv.get(canvasKey(r, o, "b"));
+      if (c && c.clientHeight > 0 && c.clientWidth > 0) return c.clientWidth / c.clientHeight;
+    }
+    return 1;
+  };
+  const applyFrames = () => { for (const o of ORIENTS) sc.applyFrame(o, viewCenter, fovMm, aspectFor(o)); };
 
   // slice ↔ 3D: two expressions of one centre and one span. Orbit is not coupled.
   let link3d = true;
@@ -464,7 +474,7 @@ async function main() {
   const drawSliceTo = (row: Row, o: Orientation, id: string) => {
     const c = cv.get(id);
     if (!c || !c.width || row.state !== "ready" || !shown[o]) return;
-    row.slice!.setPlane(o, sc.offset01(row, o, focus));
+    row.slice!.setPlane(o, row.slice!.offset01Along(o, focus));
     row.slice!.renderToView(cx.get(id)!.getCurrentTexture().createView({ format: srgb }), c.width, c.height);
   };
   const draw3dTo = (row: Row, id: string) => {
@@ -525,7 +535,7 @@ async function main() {
           const s = rasToScreen3D(camera, xhair.ras, w, h);
           if (s) drawCross(o.g, s.x * w, s.y * h);
         } else {
-          const pr = row.slice!.rasToView(k, sc.offset01(row, k, focus), xhair.ras, w / h);
+          const pr = row.slice!.rasToView(k, row.slice!.offset01Along(k, focus), xhair.ras, w / h);
           if (pr.u >= 0 && pr.u <= 1 && pr.v >= 0 && pr.v <= 1) drawCross(o.g, pr.u * w, pr.v * h);
         }
       }
@@ -557,8 +567,8 @@ async function main() {
   const adoptFrame = (row: Row, o: Orientation, canvas: HTMLCanvasElement) => {
     const aspect = aspectOf(canvas);
     userTookOver();
-    viewCenter = row.slice!.viewToRas(o, sc.offset01(row, o, focus), 0.5, 0.5, aspect);
-    fovMm = row.slice!.spanMmFor(o) / Math.max(1e-6, row.slice!.zoom(o));
+    viewCenter = row.slice!.viewToRas(o, row.slice!.offset01Along(o, focus), 0.5, 0.5, aspect);
+    fovMm = row.slice!.mirrorFrame(o, aspect).fovY;      // mm across the canvas height, as drawn
     applyFrames();
     syncCameraToFov();
   };
@@ -574,11 +584,11 @@ async function main() {
         step: (fwd) => {
           const row = leader();
           if (row?.state !== "ready") return;
-          const axis = o === "axial" ? 2 : o === "coronal" ? 1 : 0;
-          const f: Vec3 = [...focus] as Vec3;
-          f[axis] = Math.max(row.rasLo![axis], Math.min(row.rasHi![axis],
-            f[axis] + Math.max(0.2, row.vol!.vox) * (fwd ? 1 : -1)));
-          focus = f;
+          // one voxel along the plane's NORMAL — the anatomical axis in the patient frame, the
+          // chosen volume's own axis in an oblique one — kept inside the leader's volume
+          const n = row.slice!.basisOf(o).nDir;
+          const d = Math.max(0.2, row.vol!.vox) * (fwd ? 1 : -1);
+          focus = row.slice!.clampAlongNormal(o, [focus[0] + n[0] * d, focus[1] + n[1] * d, focus[2] + n[2] * d]);
         },
         redraw: () => {
           const row = leader();
@@ -592,7 +602,7 @@ async function main() {
         if (!isShiftHover(e) || row?.state !== "ready") return;
         if (!xhair.visible) xhair.toggle(true);
         const { u, v, aspect } = uvOf(canvas, e);
-        const ras = row.slice!.viewToRas(o, sc.offset01(row, o, focus), u, v, aspect);
+        const ras = row.slice!.viewToRas(o, row.slice!.offset01Along(o, focus), u, v, aspect);
         xhair.set(ras);
         jumpTo(ras);
       });
@@ -881,6 +891,7 @@ async function main() {
       const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
       if (w && h && (canvas.width !== w || canvas.height !== h)) { canvas.width = w; canvas.height = h; }
     }
+    applyFrames();          // the per-row zoom is aspect-relative: a new cell shape needs a fresh fit
     renderJumps();
     requestDraw();
   };
@@ -978,7 +989,7 @@ async function main() {
     viewCenter: () => [...viewCenter],
     fov: () => fovMm,
     offsets: () => sc.readyRows().map((r) => ({
-      key: r.key, off: Object.fromEntries(ORIENTS.map((o) => [o, sc.offset01(r, o, focus)])),
+      key: r.key, off: Object.fromEntries(ORIENTS.map((o) => [o, r.slice!.offset01Along(o, focus)])),
     })),
     camera: () => ({
       position: [...camera.position], focalPoint: [...camera.focalPoint],
@@ -1007,8 +1018,8 @@ async function main() {
       const r = sc.row(k);
       if (r?.state !== "ready") return null;
       return {
-        fov: r.slice!.spanMmFor(o) / Math.max(1e-6, r.slice!.zoom(o)),
-        center: r.slice!.viewToRas(o, sc.offset01(r, o, focus), 0.5, 0.5, 1),
+        fov: r.slice!.mirrorFrame(o, aspectFor(o)).fovY,
+        center: r.slice!.viewToRas(o, r.slice!.offset01Along(o, focus), 0.5, 0.5, 1),
       };
     },
     link3d: () => link3d,
