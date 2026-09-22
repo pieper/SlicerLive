@@ -3,7 +3,7 @@
 // (top-left) that opens a glass cheat-sheet of the mouse/trackpad/keyboard bindings. Ported from the
 // legacy help-overlay.js so the WebGPU demos feel like the old vtk.js ones. Self-contained DOM — no
 // render deps; each demo calls installChrome({...}) from its entry.
-import { SL_LOGO } from "./sl-logo.ts";
+import { SL_FAVICON, SL_LOGO } from "./sl-logo.ts";
 
 export interface VizControl {
   label: string;
@@ -91,6 +91,18 @@ export function installChrome(opts: ChromeOpts): Chrome {
   const controls = opts.controls ?? [];
   const host = opts.container ?? document.body;
   const help = (opts.help === false ? [] : opts.help) ?? DEFAULT_HELP;
+
+  // Give every SlicerLive demo the SlicerLive favicon (path-independent SVG data URI) unless the
+  // page already declares its own icon — so the browser tab shows the mark on all demos.
+  try {
+    if (typeof document !== "undefined" && document.head && !document.querySelector('link[rel~="icon"]')) {
+      const link = document.createElement("link");
+      link.rel = "icon";
+      link.type = "image/svg+xml";
+      link.href = "data:image/svg+xml," + encodeURIComponent(SL_FAVICON);
+      document.head.appendChild(link);
+    }
+  } catch { /* non-DOM / locked-down env — ignore */ }
 
   // ---- "?" help button (top-left) — omitted when help === false (host supplies its own) ----
   let helpBtn: HTMLButtonElement | null = null;

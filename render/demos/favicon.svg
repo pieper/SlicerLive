@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#141b2c"/>
+      <stop offset="1" stop-color="#070a12"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.46" r="0.62">
+      <stop offset="0" stop-color="#ffd24d" stop-opacity="0.85"/>
+      <stop offset="0.5" stop-color="#ffb020" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#ffb020" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="sphere" cx="0.36" cy="0.30" r="0.85">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="0.62" stop-color="#e9edf4"/>
+      <stop offset="1" stop-color="#b9c2d2"/>
+    </radialGradient>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff6d0"/>
+      <stop offset="1" stop-color="#ffbf2e"/>
+    </linearGradient>
+    <filter id="boltglow" x="-80%" y="-40%" width="260%" height="180%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- dark rounded tile -->
+  <rect x="0" y="0" width="256" height="256" rx="54" fill="url(#bg)"/>
+  <!-- warm lightning glow halo -->
+  <circle cx="128" cy="120" r="120" fill="url(#glow)"/>
+
+  <!-- Slicer sphere -->
+  <circle cx="104" cy="150" r="82" fill="url(#sphere)" stroke="#2b2016" stroke-width="4.5"/>
+  <!-- cutaway: an inner flat corner face revealed by the slice -->
+  <path d="M104 150 L104 74 A82 82 0 0 1 175 110 Z" fill="#f6f8fc" stroke="#2b2016" stroke-width="3.5" stroke-linejoin="round"/>
+  <path d="M104 150 L175 110 L175 150 A82 82 0 0 1 104 190 Z" fill="#cfd6e2" stroke="#2b2016" stroke-width="3.5" stroke-linejoin="round"/>
+
+  <!-- Slicer colored cube staircase, nested in the cut (upper-right) -->
+  <g stroke="#2b2016" stroke-width="3" stroke-linejoin="round">
+    <rect x="140" y="50"  width="34" height="34" rx="3" fill="#f5c21a"/>
+    <rect x="140" y="84"  width="34" height="34" rx="3" fill="#2fa84f"/>
+    <rect x="174" y="84"  width="34" height="34" rx="3" fill="#f07d1a"/>
+    <rect x="140" y="118" width="34" height="34" rx="3" fill="#e34a22"/>
+    <rect x="174" y="118" width="34" height="34" rx="3" fill="#f07d1a"/>
+    <rect x="208" y="118" width="34" height="34" rx="3" fill="#2f7fd1"/>
+  </g>
+
+  <!-- bold lightning bolt with gold glow -->
+  <path filter="url(#boltglow)" d="M120 24 L78 128 L112 128 L88 214 L172 104 L132 104 L162 24 Z"
+        fill="url(#bolt)" stroke="#7a4d00" stroke-width="2.5" stroke-linejoin="round"/>
+</svg>

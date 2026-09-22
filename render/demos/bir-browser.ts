@@ -811,6 +811,9 @@ async function main() {
   ];
   installChrome({
     controls,
+    // The BIR toolbar has its own Help button — suppress sl-chrome's fixed top-left "?" so it
+    // doesn't overlap the toolbar (reported obscuring the Select-Patient / nav icons).
+    help: false,
     anchor: cv.threeD.parentElement ?? undefined,
     segments: {
       list: () => sc.segments.map((s) => ({ num: s.num, name: s.name, color: s.color })),
