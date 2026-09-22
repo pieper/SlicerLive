@@ -98,8 +98,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
     if (typeof document !== "undefined" && document.head && !document.querySelector('link[rel~="icon"]')) {
       const link = document.createElement("link");
       link.rel = "icon";
-      link.type = "image/svg+xml";
-      link.href = "data:image/svg+xml," + encodeURIComponent(SL_FAVICON);
+      link.href = SL_FAVICON; // full data: URI (PNG); browser infers the type
       document.head.appendChild(link);
     }
   } catch { /* non-DOM / locked-down env — ignore */ }
