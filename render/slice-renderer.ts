@@ -309,25 +309,25 @@ export class SliceRenderer {
   /** Colour LUTs over the W/L ramp for the background (row 0) and foreground (row 1): 256 rgba8 entries
    *  each, or null for the grayscale ramp. */
   setLayerLUTs(bg: Uint8Array | null, fg: Uint8Array | null) {
-    if (!bg && !fg) { this.lutTex = undefined; this.u[35] = 0; this.u[58] = 0; if (this.scalarTex) this.rebind(); return; }
+    if (!bg && !fg) { this.lutTex = undefined; this.u[35] = 0; this.u[74] = 0; if (this.scalarTex) this.rebind(); return; }
     if (!this.lutTex) this.lutTex = this.dev.createTexture({ size: [256, 2], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     const gray = new Uint8Array(256 * 4); for (let i = 0; i < 256; i++) { gray[i * 4] = gray[i * 4 + 1] = gray[i * 4 + 2] = i; gray[i * 4 + 3] = 255; }
     this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 0] }, bg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
     this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 1] }, fg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
-    this.u[35] = bg ? 1 : 0; this.u[58] = fg ? 1 : 0;
+    this.u[35] = bg ? 1 : 0; this.u[74] = fg ? 1 : 0;                 // size.w, labelParams.z
     if (this.scalarTex) this.rebind();
   }
   /** Label layer: a label volume (integer values in a float texture) coloured through a colour table
    *  (rgba8 entries, index = label value), blended at `opacity`. Pass null to remove. */
   setLabelLayer(tex: GPUTexture | null, p2t: Mat4 | null, table: Uint8Array | null, opacity: number) {
     this.labelVolTex = tex ?? undefined;
-    if (p2t) this.u.set(p2t, 60);
+    if (p2t) this.u.set(p2t, 56);                                         // p2tLabel [56..71]
     const n = table ? table.length / 4 : 0;
     if (table && n > 0) {
       if (!this.labelLutTex || this.labelLutTex.width !== n) { this.labelLutTex?.destroy(); this.labelLutTex = this.dev.createTexture({ size: [n, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST }); }
       this.dev.queue.writeTexture({ texture: this.labelLutTex }, table, { bytesPerRow: n * 4 }, [n, 1]);
     }
-    this.u[76] = tex && table ? opacity : 0; this.u[77] = n;
+    this.u[72] = tex && table ? opacity : 0; this.u[73] = n;              // labelParams.x, .y
     if (this.scalarTex) this.rebind();
   }
 
