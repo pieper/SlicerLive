@@ -207,7 +207,9 @@ async function resolveFromIndex(
 
   const inStudy = await readStudyRows(studyUID, onStatus);
   const want = new Set(wantSeries);
-  const IMG = new Set(["CT", "MR", "PT", "PET", "NM"]);
+  // US included: ReMIND 3D ultrasound is a single enhanced/multi-frame instance, which the
+  // idc_tools worker now reconstructs into a volume like any other series.
+  const IMG = new Set(["CT", "MR", "PT", "PET", "NM", "US"]);
   const imgs = inStudy.filter((r) => IMG.has(String(r.Modality).toUpperCase()));
   const segs = inStudy.filter((r) => String(r.Modality).toUpperCase() === "SEG");
   // Prefer an explicitly-requested image series; else the largest (primary) one.

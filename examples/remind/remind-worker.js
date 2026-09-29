@@ -57,10 +57,18 @@ async function fetchRetry(url, opts, tries = 6) {
 }
 
 const naturalize = (buf) => dcmjs.data.DicomMetaDictionary.naturalizeDataset(dcmjs.data.DicomMessage.readFile(buf).dict);
-const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-const lps2ras = (v) => [-v[0], -v[1], v[2]];
+// Shared DICOM -> volume core: the SAME file render/vendor/idc_tools/idc-worker.js loads, so
+// ReMINDer and the BIR reader have ONE implementation of the geometry, multi-frame ordering and
+// volume assembly. Deployed side-by-side in the gallery; the second path is the in-repo layout.
+(function loadShared() {
+  if (typeof DicomVolume !== 'undefined') return;
+  for (const p of ['./dicom-volume.js', '../../render/vendor/idc_tools/dicom-volume.js']) {
+    try { importScripts(p); return; } catch (e) { /* try the next layout */ }
+  }
+  throw new Error('dicom-volume.js not found');
+})();
+const DV = self.DicomVolume;
+const { sub, dot, cross, lps2ras, ijkToRASFrom } = DV;
 const num = (v) => Number(Array.isArray(v) ? v[0] : v);
 const fetchBuf = (key) => fetchRetry(BASE + key).then((r) => r.arrayBuffer());
 
@@ -70,14 +78,6 @@ function pixelsOf(ds, pd) {
   if (Number(ds.BitsAllocated) === 8) return new Uint8Array(pd);
   return ds.PixelRepresentation === 1 ? new Int16Array(pd) : new Uint16Array(pd);
 }
-
-/** ijkToRAS (row-major 4x4) from column vectors already in RAS mm. */
-const ijkToRASFrom = (c0, c1, c2, o) => [
-  c0[0], c1[0], c2[0], o[0],
-  c0[1], c1[1], c2[1], o[1],
-  c0[2], c1[2], c2[2], o[2],
-  0, 0, 0, 1,
-];
 
 /** Robust display window from the data itself (2nd–98th percentile over a sampled histogram).
  *  ReMIND US carries no WindowCenter/Width at all, and the MR values are raw scanner units,
@@ -153,17 +153,7 @@ function resampleIso(src, dims, ijkToRAS, maxDim, maxVoxels) {
 async function fetchBulk(key, label) {
   const HEAD = 4 << 20;
   const head = new Uint8Array(await fetchRetry(BASE + key, { headers: { Range: `bytes=0-${HEAD - 1}` } }).then((r) => r.arrayBuffer()));
-  const dv = new DataView(head.buffer, head.byteOffset);
-  let pt = -1;
-  for (let i = 132; i + 12 <= head.length; i += 2) {
-    if (head[i] === 0xE0 && head[i + 1] === 0x7F && head[i + 2] === 0x10 && head[i + 3] === 0x00) {
-      const vr = String.fromCharCode(head[i + 4], head[i + 5]);
-      if (vr === 'OB' || vr === 'OW' || vr === 'UN') { pt = i; break; }
-    }
-  }
-  if (pt < 0) throw new Error('PixelData tag not within the first 4 MB');
-  const valOff = pt + 12, pdLen = dv.getUint32(pt + 8, true);
-  if (!pdLen || pdLen === 0xFFFFFFFF) throw new Error('encapsulated/undefined-length PixelData');
+  const { tagOff: pt, valOff, pdLen } = DV.findPixelData(head);
   const ds = naturalize(head.slice(0, pt).buffer);
   const bytes = new Uint8Array(pdLen);
   const have = Math.max(0, Math.min(HEAD, valOff + pdLen) - valOff);
@@ -188,46 +178,11 @@ async function fetchBulk(key, label) {
 /** One multi-frame instance (ReMIND US) → volume on its native grid. */
 async function buildMultiFrame(key, label) {
   const { ds, bytes } = await fetchBulk(key, label);
-  const nx = Number(ds.Columns), ny = Number(ds.Rows), nf = Number(ds.NumberOfFrames);
-  const bits = Number(ds.BitsAllocated) || 8;
-  const shared = ds.SharedFunctionalGroupsSequence?.[0] || {};
-  const perFrame = ds.PerFrameFunctionalGroupsSequence || [];
-  if (perFrame.length !== nf) throw new Error(`per-frame groups ${perFrame.length} != NumberOfFrames ${nf}`);
-  const iop = (shared.PlaneOrientationSequence?.[0]?.ImageOrientationPatient
-    || perFrame[0]?.PlaneOrientationSequence?.[0]?.ImageOrientationPatient).map(Number);
-  const pm = shared.PixelMeasuresSequence?.[0] || perFrame[0]?.PixelMeasuresSequence?.[0] || {};
-  const ps = (pm.PixelSpacing || [1, 1]).map(Number);
-  const xf = shared.PixelValueTransformationSequence?.[0] || {};
-  const slope = Number(xf.RescaleSlope ?? ds.RescaleSlope ?? 1), inter = Number(xf.RescaleIntercept ?? ds.RescaleIntercept ?? 0);
-
-  const rowDir = iop.slice(0, 3), colDir = iop.slice(3, 6), normal = cross(rowDir, colDir);
-  // Frames are NOT required to be stored in geometric order — sort by position along the
-  // slice normal (the same rule the multi-slice path uses), never by index.
-  const order = perFrame.map((fg, f) => {
-    const ipp = (fg.PlanePositionSequence?.[0]?.ImagePositionPatient || [0, 0, 0]).map(Number);
-    return { f, ipp, proj: dot(ipp, normal) };
-  }).sort((a, b) => a.proj - b.proj);
-  const p0 = order[0].ipp, p1 = order[nf - 1].ipp;
-  const spacing = nf > 1 ? dot(sub(p1, p0), normal) / (nf - 1)
-    : (Number(pm.SpacingBetweenSlices || pm.SliceThickness) || 1);
-
-  const px = bits === 8 ? bytes
-    : (ds.PixelRepresentation === 1 ? new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length >> 1)
-      : new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.length >> 1));
-  const frameLen = nx * ny;
-  const vol = new Float32Array(frameLen * nf);
-  for (let k = 0; k < nf; k++) {
-    const off = order[k].f * frameLen, dst = k * frameLen;
-    for (let p = 0; p < frameLen; p++) vol[dst + p] = px[off + p] * slope + inter;
-    if (k % 32 === 0) prog(`${label} frame ${k}/${nf}`, 0.6 + 0.25 * k / nf);
-  }
-  const ijkToRAS = ijkToRASFrom(
-    lps2ras(rowDir.map((v) => v * ps[1])),
-    lps2ras(colDir.map((v) => v * ps[0])),
-    lps2ras(normal.map((v) => v * spacing)),
-    lps2ras(p0),
-  );
-  return { vol, dims: [nx, ny, nf], ijkToRAS, ds };
+  const v = DV.assembleMultiFrame(ds, bytes, {
+    float: true,
+    onFrame: (k, n) => prog(`${label} frame ${k}/${n}`, 0.6 + 0.25 * k / n),
+  });
+  return { vol: v.vol, dims: v.dims, ijkToRAS: v.ijkToRAS, ds };
 }
 
 /** A conventional one-frame-per-instance series (ReMIND MR) → volume on its native grid. */
@@ -243,29 +198,9 @@ async function buildMultiSlice(keys, label) {
       if (done % 4 === 0) prog(`${label} ${done}/${keys.length}`, 0.05 + 0.75 * done / keys.length);
     }
   }));
-  const s0 = slices[0];
-  const iop = s0.ImageOrientationPatient.map(Number);
-  const rowDir = iop.slice(0, 3), colDir = iop.slice(3, 6), normal = cross(rowDir, colDir);
-  slices.sort((a, b) => dot(a.ImagePositionPatient.map(Number), normal) - dot(b.ImagePositionPatient.map(Number), normal));
-  const nz = slices.length, ny = Number(s0.Rows), nx = Number(s0.Columns);
-  const ps = s0.PixelSpacing.map(Number);
-  const p0 = slices[0].ImagePositionPatient.map(Number), p1 = slices[nz - 1].ImagePositionPatient.map(Number);
-  const spacing = nz > 1 ? dot(sub(p1, p0), normal) / (nz - 1) : (Number(s0.SliceThickness) || 1);
-  const vol = new Float32Array(nx * ny * nz);
-  for (let k = 0; k < nz; k++) {
-    const ds = slices[k];
-    const slope = Number(ds.RescaleSlope ?? 1), inter = Number(ds.RescaleIntercept ?? 0);   // per-slice: some MR rescales vary down the stack
-    const px = pixelsOf(ds, ds.PixelData);
-    const base = k * nx * ny;
-    for (let p = 0; p < nx * ny; p++) vol[base + p] = px[p] * slope + inter;
-  }
-  const ijkToRAS = ijkToRASFrom(
-    lps2ras(rowDir.map((v) => v * ps[1])),
-    lps2ras(colDir.map((v) => v * ps[0])),
-    lps2ras(normal.map((v) => v * spacing)),
-    lps2ras(p0),
-  );
-  return { vol, dims: [nx, ny, nz], ijkToRAS, ds: s0 };
+  // assembleSlices sorts by position along the slice normal and applies per-slice rescale.
+  const v = DV.assembleSlices(slices, { float: true });
+  return { vol: v.vol, dims: v.dims, ijkToRAS: v.ijkToRAS, ds: slices[0] };
 }
 
 function invAffine(m) {

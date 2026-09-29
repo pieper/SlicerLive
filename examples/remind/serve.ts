@@ -63,7 +63,12 @@ Deno.serve({ port, onListen: () => {} }, async (req) => {
   if (path === "/") path = "/reminder.html";
   if (path === "/compare") path = "/remind-compare.html";
   if (path.endsWith("remind-compare.js")) await rebuildIfStale();
-  const file = HERE + path.replace(/^\//, "");
+  // Engine paths resolve from the REPO ROOT: remind-worker.js importScripts the shared
+  // render/vendor/idc_tools/dicom-volume.js (one DICOM->volume core with the idc_tools worker).
+  // In the deployed gallery both workers sit in the same directory, so ./dicom-volume.js wins
+  // there; in this dev layout the worker's ../../render/... fallback lands here.
+  const fromRoot = /^\/(render|algorithms|logic)\//.test(path);
+  const file = (fromRoot ? ROOT : HERE) + path.replace(/^\//, "");
   try {
     const body = await Deno.readFile(file);
     const ext = file.slice(file.lastIndexOf("."));

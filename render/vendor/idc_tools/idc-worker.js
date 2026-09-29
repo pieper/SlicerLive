@@ -50,10 +50,12 @@ function naturalize(buf) {
     const dd = dcmjs.data.DicomMessage.readFile(buf);
     return dcmjs.data.DicomMetaDictionary.naturalizeDataset(dd.dict);
 }
-const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-const lps2ras = (v) => [-v[0], -v[1], v[2]]; // DICOM LPS -> RAS
+// Shared DICOM -> volume core (geometry, windowing, PixelData location, multi-frame assembly):
+// ONE code path with the ReMINDer worker. A host may importScripts its own copy first.
+if (typeof DicomVolume === 'undefined')
+    importScripts('./dicom-volume.js');
+const DV = self.DicomVolume;
+const { sub, dot, cross, lps2ras } = DV;
 async function fetchBuf(key, base) { return (await fetchRetry((base || CT_S3) + key)).arrayBuffer(); }
 function makeThumb(ds) {
     let pd = ds.PixelData;
@@ -79,7 +81,125 @@ function makeThumb(ds) {
     }
     return { w: TW, h: TH, rgba };
 }
-async function buildVolume(ctKeys) {
+/** Range-read one instance's header (and, when the object is small, the whole thing). 4 MB covers
+ *  the PerFrameFunctionalGroupsSequence of a ~200-frame ultrasound. */
+async function fetchHeader(key) {
+    const HEAD = 4 << 20;
+    const head = new Uint8Array(await fetchRetry(CT_S3 + key, { headers: { Range: `bytes=0-${HEAD - 1}` } }).then((r) => r.arrayBuffer()));
+    const loc = DV.findPixelData(head);
+    const ds = naturalize(head.slice(0, loc.tagOff).buffer);
+    return { ds, head, ...loc, complete: loc.valOff + loc.pdLen <= head.length };
+}
+/** PixelData bytes [start, start+len) — reusing whatever the header read already pulled, then
+ *  filling the rest with parallel ranged requests. */
+async function fetchPixelRange(key, h, start, len) {
+    const bytes = new Uint8Array(len);
+    const have = Math.max(0, Math.min(h.head.length, start + len) - start);
+    if (have > 0)
+        bytes.set(h.head.subarray(start, start + have), 0);
+    const rs = start + have, re = start + len - 1;
+    if (rs <= re) {
+        const CH = 8, cs = Math.ceil((re - rs + 1) / CH);
+        let got = have;
+        await Promise.all(Array.from({ length: CH }, (_, c) => {
+            const s = rs + c * cs, e = Math.min(re, s + cs - 1);
+            if (s > e)
+                return null;
+            return fetchRetry(CT_S3 + key, { headers: { Range: `bytes=${s}-${e}` } }).then((r) => r.arrayBuffer()).then((ab) => {
+                bytes.set(new Uint8Array(ab), s - start);
+                got += ab.byteLength;
+                prog(`${MODNAME} ${(got / 1e6) | 0}/${(len / 1e6) | 0} MB`, 0.05 + 0.55 * got / len);
+            });
+        }));
+    }
+    return bytes;
+}
+/** 64px-wide thumbnail of one frame of an already-decoded volume (bit-depth agnostic, unlike
+ *  makeThumb which reads a raw 16-bit instance). */
+function frameThumb(vol, base, nx, ny, lo, sc) {
+    const TW = 64, TH = Math.max(1, Math.round(64 * ny / nx));
+    const rgba = new Uint8ClampedArray(TW * TH * 4);
+    for (let ty = 0; ty < TH; ty++) {
+        const sy = (ty * ny / TH) | 0;
+        for (let tx = 0; tx < TW; tx++) {
+            let g = (vol[base + sy * nx + ((tx * nx / TW) | 0)] - lo) * sc;
+            g = g < 0 ? 0 : g > 255 ? 255 : g;
+            const o = (ty * TW + tx) * 4;
+            rgba[o] = rgba[o + 1] = rgba[o + 2] = g;
+            rgba[o + 3] = 255;
+        }
+    }
+    return { w: TW, h: TH, rgba };
+}
+/** ONE enhanced / multi-frame instance (e.g. every ReMIND 3D ultrasound series) -> volume.
+ *  Geometry + frame ordering + windowing all come from the shared DicomVolume core. */
+async function buildMultiFrame(key, h, nf) {
+    post({ t: 'ctinfo', count: nf });
+    const bytes = h.complete
+        ? h.head.subarray(h.valOff, h.valOff + h.pdLen)
+        : await fetchPixelRange(key, h, h.valOff, h.pdLen);
+    const v = DV.assembleMultiFrame(h.ds, bytes, {
+        onFrame: (k, n) => prog(`${MODNAME} frame ${k}/${n}`, 0.62 + 0.3 * k / n),
+    });
+    const nx = v.dims[0], ny = v.dims[1], frameLen = nx * ny;
+    const lo = v.lev - v.win / 2, sc = 255 / v.win;
+    for (let k = 0; k < nf; k++) {
+        const th = frameThumb(v.vol, k * frameLen, nx, ny, lo, sc);
+        post({ t: 'thumb', n: k + 1, w: th.w, h: th.h, rgba: th.rgba.buffer }, [th.rgba.buffer]);
+    }
+    return { ...v, dtype: 'int16' };
+}
+/** ONE frame of a multi-frame instance, for the series-panel thumbnail — a ~450 KB ranged read
+ *  instead of pulling a ~100 MB ultrasound object just to draw a 64px tile. */
+async function buildMultiFrameThumb(key, h, nf) {
+    const nx = Number(h.ds.Columns), ny = Number(h.ds.Rows);
+    const bits = Number(h.ds.BitsAllocated) || 8;
+    const frameBytes = nx * ny * (bits === 8 ? 1 : 2);
+    const mid = nf >> 1;
+    const bytes = h.complete
+        ? h.head.subarray(h.valOff + mid * frameBytes, h.valOff + (mid + 1) * frameBytes)
+        : await fetchPixelRange(key, h, h.valOff + mid * frameBytes, Math.min(frameBytes, h.pdLen - mid * frameBytes));
+    const gm = DV.multiFrameGeometry(h.ds, nf);
+    const px = DV.pixelsOf(DV.rawBuffer(bytes), bits, h.ds.PixelRepresentation === 1);
+    const vol = new Int16Array(nx * ny);
+    for (let p = 0; p < nx * ny; p++)
+        vol[p] = px[p] * gm.slope + gm.inter;
+    const voi = DV.voiOf(h.ds, gm.shared) || DV.autoWindow(vol, false);
+    // Geometry is irrelevant for a thumbnail; the caller only reads dims/win/lev/vol.
+    return { vol, dims: [nx, ny, 1], ijkToRAS: DV.ijkToRASFrom([1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 0]),
+        win: voi.win, lev: voi.lev, dtype: 'int16' };
+}
+async function buildVolume(ctKeys, thumbOnly) {
+    // A one-object image series is the enhanced / multi-frame case (every ReMIND ultrasound):
+    // all frames live in a single instance with geometry in the functional groups.
+    if (ctKeys.length === 1) {
+        // The ranged header read needs explicit VR (IDC serves plenty of IMPLICIT VR series, where
+        // there is no VR field to find). When it can't be parsed, fall back to the whole object —
+        // correctness first; the ranged fast path is what keeps multi-frame ultrasound cheap.
+        let h = null;
+        try {
+            h = await fetchHeader(ctKeys[0]);
+        }
+        catch (e) { /* implicit VR / encapsulated / tag past the header read */ }
+        const ds0 = h ? h.ds : naturalize(await fetchBuf(ctKeys[0]));
+        const nf = Number(ds0.NumberOfFrames) || 1;
+        if (nf > 1) {
+            if (h)
+                return thumbOnly ? buildMultiFrameThumb(ctKeys[0], h, nf) : buildMultiFrame(ctKeys[0], h, nf);
+            post({ t: 'ctinfo', count: nf });
+            let pd = ds0.PixelData;
+            if (Array.isArray(pd))
+                pd = pd[0];
+            const v = DV.assembleMultiFrame(ds0, new Uint8Array(pd), {
+                onFrame: (k, n) => prog(`${MODNAME} frame ${k}/${n}`, 0.62 + 0.3 * k / n),
+            });
+            return { ...v, dtype: 'int16' };
+        }
+        post({ t: 'ctinfo', count: 1 });
+        const ds = h ? (h.complete ? naturalize(h.head.slice(0, h.valOff + h.pdLen).buffer)
+            : naturalize(await fetchBuf(ctKeys[0]))) : ds0;
+        return volumeFromSlices([ds]);
+    }
     post({ t: 'ctinfo', count: ctKeys.length });
     const slices = [];
     let done = 0;
@@ -99,52 +219,21 @@ async function buildVolume(ctKeys) {
         }
     }
     await Promise.all(Array.from({ length: CONC }, worker));
-    const s0 = slices[0];
-    const iop = s0.ImageOrientationPatient.map(Number);
-    const rowDir = iop.slice(0, 3), colDir = iop.slice(3, 6);
-    const normal = cross(rowDir, colDir);
-    slices.sort((a, b) => dot(a.ImagePositionPatient.map(Number), normal) - dot(b.ImagePositionPatient.map(Number), normal));
-    const nz = slices.length, ny = s0.Rows, nx = s0.Columns;
-    const ps = s0.PixelSpacing.map(Number);
-    const p0 = slices[0].ImagePositionPatient.map(Number);
-    const p1 = slices[nz - 1].ImagePositionPatient.map(Number);
-    const sliceSpacing = nz > 1 ? dot(sub(p1, p0), normal) / (nz - 1) : (Number(s0.SliceThickness) || 1);
-    const c0 = lps2ras(rowDir.map((v) => v * ps[1])), c1 = lps2ras(colDir.map((v) => v * ps[0])), c2 = lps2ras(normal.map((v) => v * sliceSpacing)), o = lps2ras(p0);
-    const ijkToRAS = [c0[0], c1[0], c2[0], o[0], c0[1], c1[1], c2[1], o[1], c0[2], c1[2], c2[2], o[2], 0, 0, 0, 1];
+    return volumeFromSlices(slices);
+}
+/** Assemble a conventional one-frame-per-instance series (shared core), then window it. */
+function volumeFromSlices(slices) {
     const isPET = MODNAME === 'PET';
-    const vol = isPET ? new Float32Array(nx * ny * nz) : new Int16Array(nx * ny * nz);
-    for (let k = 0; k < nz; k++) {
-        const ds = slices[k];
-        // PER-SLICE rescale: PET (and some CT/MR) carry a DIFFERENT RescaleSlope/RescaleIntercept on every
-        // slice — applying only the first slice's values mis-scales the rest of the volume. Read them per k.
-        const slope = Number(ds.RescaleSlope ?? 1), inter = Number(ds.RescaleIntercept ?? 0);
-        let pd = ds.PixelData;
-        if (Array.isArray(pd))
-            pd = pd[0];
-        const px = ds.PixelRepresentation === 1 ? new Int16Array(pd) : new Uint16Array(pd);
-        const off = k * nx * ny;
-        for (let p = 0; p < nx * ny; p++)
-            vol[off + p] = px[p] * slope + inter;
-    }
+    const v = DV.assembleSlices(slices, { float: isPET });
+    const s0 = slices[0];
     let win, lev;
     if (MODNAME === 'CT') {
         win = Number((Array.isArray(s0.WindowWidth) ? s0.WindowWidth[0] : s0.WindowWidth) ?? 400);
         lev = Number((Array.isArray(s0.WindowCenter) ? s0.WindowCenter[0] : s0.WindowCenter) ?? 40);
     }
-    else {
-        const N = vol.length, step = Math.max(1, (N / 200000) | 0), samp = [];
-        for (let i = 0; i < N; i += step) {
-            const v = vol[i];
-            if (!isPET || v > 0)
-                samp.push(v);
-        }
-        samp.sort((a, b) => a - b);
-        const pct = (f) => (samp.length ? samp[Math.min(samp.length - 1, (f * samp.length) | 0)] : 0);
-        const lo = isPET ? 0 : pct(0.01), hi = isPET ? (pct(0.98) || 1) : pct(0.99);
-        lev = (lo + hi) / 2;
-        win = Math.max(1, hi - lo);
-    }
-    return { vol, dims: [nx, ny, nz], ijkToRAS, win, lev, iop, ps, dtype: isPET ? 'float32' : 'int16' };
+    else
+        ({ win, lev } = DV.autoWindow(v.vol, isPET));
+    return { ...v, win, lev, dtype: isPET ? 'float32' : 'int16' };
 }
 function buildLabelmap(ds, bits, ct) {
     const [nx, ny, nz] = ct.dims, frameBytes = (nx * ny) >> 3;
@@ -272,13 +361,13 @@ async function fetchSeg(key) {
     return { ds, bits };
 }
 self.onmessage = async (e) => {
-    const { ctKeys, segKeys, ctBucket, segBucket, modality } = e.data;
+    const { ctKeys, segKeys, ctBucket, segBucket, modality, thumbOnly } = e.data;
     CT_S3 = s3url(ctBucket);
     SEG_S3 = s3url(segBucket);
-    MODNAME = { CT: 'CT', MR: 'MR', PT: 'PET' }[modality] || 'image';
+    MODNAME = { CT: 'CT', MR: 'MR', PT: 'PET' }[modality] || modality || 'image';
     try {
         prog('fetching ' + MODNAME + '…', 0.05);
-        const ct = await buildVolume(ctKeys);
+        const ct = await buildVolume(ctKeys, thumbOnly);
         post({ t: 'ct', vol: ct.vol, dims: ct.dims, ijkToRAS: ct.ijkToRAS, win: ct.win, lev: ct.lev, dtype: ct.dtype }, [ct.vol.buffer]);
         if (segKeys && segKeys.length) {
             prog('fetching SEG…', 0.5);

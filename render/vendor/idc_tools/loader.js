@@ -110,7 +110,9 @@ export async function loadThumbnail(prefix, bucket, modality, opts) {
                 done(null);
         };
         w.onerror = () => done(null);
-        w.postMessage({ ctKeys: [mid], segKeys: [], ctBucket: bucket, segBucket: bucket, modality: mod });
+        // thumbOnly: a multi-frame series (ReMIND 3D ultrasound) decodes ONE middle frame via a
+        // ranged read instead of pulling the whole ~100 MB object just to draw a 64px tile.
+        w.postMessage({ ctKeys: [mid], segKeys: [], ctBucket: bucket, segBucket: bucket, modality: mod, thumbOnly: true });
     });
 }
 /** Spin a random series from the manifest and load it. `filter` narrows the pool (e.g. CT only). */
