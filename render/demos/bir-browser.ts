@@ -49,6 +49,7 @@ interface Source {
   m: string; // modality
   col: string; // collection
   st: string; // StudyInstanceUID
+  sid?: string; // SeriesInstanceUID actually resolved (memo validation + panel highlight)
   sd: string; // patient · series label
   lic: string; // license/attribution
 }
@@ -88,6 +89,9 @@ const IDC_INDEX_BASE = ((globalThis as Record<string, unknown>).__IDC_INDEX_BASE
 // the new parquet.
 const GROUPS_URL = new URL("idc-rad-v2-groups.json", IDC_INDEX_BASE).href;
 const PARQUET_URL = new URL("idc-rad-v2-slim.parquet", IDC_INDEX_BASE).href;
+// Bump when resolveFromIndex's series choice changes — retires every localStorage entry cached
+// by an older resolver.
+const MEMO_V = "idc-rad:v2";
 const HYPARQUET_ESM = "https://cdn.jsdelivr.net/npm/hyparquet@1.28.2/+esm";
 const splitList = (v: string | null): string[] => (v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 
@@ -199,10 +203,24 @@ async function resolveFromIndex(
   wantSeries: string[],
   onStatus: (m: string) => void,
 ): Promise<Source> {
-  const memoKey = `idc-rad:${studyUID}:${wantSeries.join(",")}`;
+  // The memo is VERSIONED: an entry cached by an older resolver encodes that resolver's choices,
+  // so bumping MEMO_V retires them all. (Before US joined the image filter, a US series resolved
+  // to "largest image series" — the MR — and that wrong answer stuck in localStorage, so clicking
+  // the US tile kept loading the MR.) Stale entries from earlier versions are pruned on the way.
+  const memoKey = `${MEMO_V}:${studyUID}:${wantSeries.join(",")}`;
   try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("idc-rad:") && !k.startsWith(`${MEMO_V}:`)) localStorage.removeItem(k);
+    }
     const hit = localStorage.getItem(memoKey);
-    if (hit) return JSON.parse(hit) as Source;
+    if (hit) {
+      const src = JSON.parse(hit) as Source;
+      // Self-healing: if a specific series was asked for and the memo resolved to a DIFFERENT
+      // one, don't trust it — re-resolve. (A requested SEG legitimately resolves to its image,
+      // which just costs one index read.)
+      if (!wantSeries.length || src.sid === wantSeries[0]) return src;
+    }
   } catch { /* private mode / no storage */ }
 
   const inStudy = await readStudyRows(studyUID, onStatus);
@@ -224,6 +242,7 @@ async function resolveFromIndex(
     c: String(chosen.crdc_series_uuid), cb: String(chosen.aws_bucket),
     s: seg ? String(seg.crdc_series_uuid) : undefined, sb: seg ? String(seg.aws_bucket) : undefined,
     m: mod === "PET" ? "PT" : mod, col: String(chosen.collection_id), st: studyUID,
+    sid: String(chosen.SeriesInstanceUID),
     sd: `${chosen.PatientID} · ${chosen.SeriesDescription || mod}`,
     lic: `${chosen.license_short_name || "IDC"} · ${chosen.collection_id}${chosen.source_DOI ? " · doi:" + chosen.source_DOI : ""}`,
   };
