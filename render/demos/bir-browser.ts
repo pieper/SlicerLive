@@ -68,13 +68,13 @@ const KITS_DEFAULT: Source = {
 
 // OHIF/IID UID resolution uses a SLIM, radiology-only IDC index (built offline by
 // build-idc-slim.ts) hosted in a CORS-enabled bucket. Two artifacts sit under IDC_INDEX_BASE:
-//   idc-rad-groups.json  — tiny (~43 KB) directory: full min/max StudyInstanceUID per 2000-row
-//                          group of the parquet, sorted by StudyInstanceUID.
-//   idc-rad-slim.parquet — 617k radiology series (drops pathology/SR/etc.), sorted by study,
-//                          columns trimmed to what resolution needs.
+//   idc-rad-<gen>-groups.json  — tiny (~67 KB) directory: full min/max StudyInstanceUID per
+//                                2000-row group of the parquet, sorted by StudyInstanceUID.
+//   idc-rad-<gen>-slim.parquet — 968k radiology series (drops SM pathology), sorted by study,
+//                                columns trimmed to what resolution + the series panel need.
 // A lookup fetches the sidecar ONCE (Cache Storage, then in-memory), binary-searches it for the
 // 1–2 groups whose [min,max] span the study, and RANGE-reads only those groups (~0.6 MB) — the
-// 51 MB parquet is never fully downloaded. Resolved studies are memoized in localStorage, so a
+// 75 MB parquet is never fully downloaded. Resolved studies are memoized in localStorage, so a
 // repeat launch of the same study skips the index entirely ("hit the penalty once").
 //
 // The public full-index hosts (GCS mirror, GitHub release) send no CORS, so a cross-origin
@@ -279,7 +279,7 @@ async function main() {
     status("WebGPU not available — try Chrome/Edge 113+ or Safari 18+.", true);
     return;
   }
-  status("loading KiTS case from the NCI Imaging Data Commons…");
+  status("loading from the NCI Imaging Data Commons…");   // which study isn't resolved yet
   const gpu = await initDevice();
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
@@ -858,7 +858,8 @@ async function main() {
   if (info) info.textContent = `${source.sd} · ${res.ct.modality} ${sc.dims.join("×")} · ${source.lic}`;
   resize();
   mosaic.done(); // scene is up → fade the download mosaic out
-  status("KiTS abdomen CT — scroll to page slices, pick a tool from the toolbar, drag 3D to orbit");
+  // The loaded case, not a hardcoded one: this reader opens whatever the URL resolves to.
+  status(`${source.sd} — scroll to page slices, pick a tool from the toolbar, drag 3D to orbit`);
 }
 
 main().catch((e) => status("error: " + ((e as Error)?.message ?? e), true));
