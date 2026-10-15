@@ -25,6 +25,8 @@ import { SegmentationLogic } from "../../logic/segmentation-logic.ts";
 // to ray-march. The JFA bake is capped to SDF_MAX_DIM per axis (the labelmap is downsampled for the
 // 3D SDF only; the 2D slice overlay stays full-res) so large IDC volumes don't blow GPU memory.
 const SDF_MAX_DIM = 256;
+// Gaussian σ (voxels) for the 2D slice-overlay colorize bake. MUST stay 0 — see the bake site.
+const SLICE_OVERLAY_SIGMA = 0;
 import type { Vec3 } from "../mat4.ts";
 import type { CTVolume, SegLabelmap } from "../vendor/idc_tools/types.js";
 
@@ -170,7 +172,11 @@ export function buildSegrouletteScene(
   };
 
   // 2D slice overlay: full-res colorized labelmap (crisp per-voxel fill; visPalette() alpha 0 hides).
-  let colorTex = seg ? bakeColorizeRGBA(dev, seg.lab, dims, visPalette(), 1.5) : undefined;
+  // σ=0 is NOT a tuning choice — the colorize bake blurs ALPHA while carrying RGB from the centre
+  // tap, so any σ>0 gives background voxels (RGB black) a nonzero alpha: a dark halo around every
+  // segment, and an outline pass that edge-detects a smeared field into broken/doubled contours.
+  // Slice overlay crisp (σ=0), 3D field smoothed — same split as SegmentationDisplayableManager.
+  let colorTex = seg ? bakeColorizeRGBA(dev, seg.lab, dims, visPalette(), SLICE_OVERLAY_SIGMA) : undefined;
 
   // 3D segmentation = ONE unified colorized signed-distance-field surface (algorithms/ + logic/): the
   // whole labelmap (downsampled to the SDF cap) → JFA-SDF → a single SegmentField. Per-segment colour
@@ -227,7 +233,7 @@ export function buildSegrouletteScene(
   // the MPR overlay. Cheap enough for an occasional toggle.
   const rebakeColorized = () => {
     if (!seg) return;
-    const nt = bakeColorizeRGBA(dev, seg.lab, dims, visPalette(), 1.5);
+    const nt = bakeColorizeRGBA(dev, seg.lab, dims, visPalette(), SLICE_OVERLAY_SIGMA);
     const old = colorTex;
     colorTex = nt;
     slice.setTextures(volumeField.volumeTexture(), colorTex);
