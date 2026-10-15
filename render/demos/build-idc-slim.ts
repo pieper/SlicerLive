@@ -19,18 +19,34 @@
 // Upload BOTH files to a CORS-enabled bucket (the js2 bucket) and point the demo at it via
 // ?indexBase=<url>/ or globalThis.__IDC_INDEX_BASE. Re-run when IDC publishes a new index.
 //
-//   deno run -A render/demos/build-idc-slim.ts [--out DIR] [--index URL]
+//   deno run -A render/demos/build-idc-slim.ts [--out DIR] [--release TAG] [--schema vN] [--file LOCAL.parquet]
 //
-import { asyncBufferFromUrl, parquetReadObjects } from "npm:hyparquet";
+import { asyncBufferFromFile, asyncBufferFromUrl, parquetReadObjects } from "npm:hyparquet";
+// IDC switched the published index to ZSTD page compression (25.0.0); plain hyparquet throws
+// "unsupported compression codec: ZSTD" on it, so the decompressors come from this companion.
+import { compressors } from "npm:hyparquet-compressors";
 import { parquetWriteBuffer } from "npm:hyparquet-writer";
 
 const args = new Map<string, string>();
 for (let i = 0; i < Deno.args.length; i += 2) args.set(Deno.args[i].replace(/^--/, ""), Deno.args[i + 1]);
 const OUT = args.get("out") ?? ".";
-// idc-index-data mirror (server-side reads are fine — the CORS gap only bites browsers).
+// The idc-index-data GitHub RELEASE asset is the authoritative source (server-side reads are
+// fine — the CORS gap only bites browsers). The old GCS mirror
+// (storage.googleapis.com/idc-index-data-mirror) stopped at v22.0.2 and is NOT a current source.
+const IDC_RELEASE = args.get("release") ?? "25.0.0";
 const INDEX_URL = args.get("index") ??
-  "https://storage.googleapis.com/idc-index-data-mirror/idc_index-v22.0.2.parquet";
-const VERSION = args.get("version") ?? (INDEX_URL.replace(/^.*idc_index-?/, "").replace(/\.parquet$/, "") || "idc");
+  `https://github.com/ImagingDataCommons/idc-index-data/releases/download/${IDC_RELEASE}/idc_index.parquet`;
+// Version string recorded in the sidecar: the release tag from a /download/<tag>/ URL, else the
+// old mirror's idc_index-<v>.parquet filename, else "idc".
+const VERSION = args.get("version") ??
+  (INDEX_URL.match(/\/download\/([^/]+)\//)?.[1] ??
+    (INDEX_URL.replace(/^.*idc_index-?/, "").replace(/\.parquet$/, "") || "idc"));
+// SCHEMA/CONTENT generation in the published FILENAMES — bump it on every rebuild or layout
+// change. The client caches the sidecar in Cache Storage keyed by URL and never revalidates it,
+// so overwriting a published name in place would pair a returning visitor's OLD sidecar with the
+// NEW parquet: the row-group offsets no longer agree and every lookup silently misses. New
+// content => new names => old clients keep a self-consistent pair until they load new code.
+const SCHEMA_V = args.get("schema") ?? "v3";
 const ROW_GROUP_SIZE = 2000;
 
 // Keep EVERY series of a radiology study so the OHIF-style series panel is complete (image
@@ -47,10 +63,13 @@ const COLS = [
   "license_short_name", "source_DOI",
 ];
 
-console.log(`reading ${INDEX_URL} …`);
-const file = await asyncBufferFromUrl({ url: INDEX_URL });
+// --file re-runs the build against an already-downloaded release asset (74 MB) instead of
+// range-reading it again.
+const LOCAL = args.get("file");
+console.log(`reading ${LOCAL ?? INDEX_URL} …`);
+const file = LOCAL ? await asyncBufferFromFile(LOCAL) : await asyncBufferFromUrl({ url: INDEX_URL });
 // deno-lint-ignore no-explicit-any
-const rows: any[] = await parquetReadObjects({ file, columns: COLS });
+const rows: any[] = await parquetReadObjects({ file, compressors, columns: COLS });
 const kept = rows.filter((r) => !DROP.has(String(r.Modality)));
 kept.sort((a, b) => (a.StudyInstanceUID < b.StudyInstanceUID ? -1 : a.StudyInstanceUID > b.StudyInstanceUID ? 1 : 0));
 console.log(`kept ${kept.length} of ${rows.length} series (all radiology; dropped SM pathology)`);
@@ -62,7 +81,7 @@ const columnData = COLS.map((name) => ({
   data: kept.map((r) => (name === "instanceCount" ? Number(r[name] ?? 0) : String(r[name] ?? ""))),
 }));
 const buf = parquetWriteBuffer({ columnData, rowGroupSize: ROW_GROUP_SIZE, compressed: true, statistics: true });
-await Deno.writeFile(`${OUT}/idc-rad-slim.parquet`, new Uint8Array(buf));
+await Deno.writeFile(`${OUT}/idc-rad-${SCHEMA_V}-slim.parquet`, new Uint8Array(buf));
 
 const groups: { min: string; max: string }[] = [];
 for (let s = 0; s < kept.length; s += ROW_GROUP_SIZE) {
@@ -70,11 +89,11 @@ for (let s = 0; s < kept.length; s += ROW_GROUP_SIZE) {
   groups.push({ min: kept[s].StudyInstanceUID, max: kept[e - 1].StudyInstanceUID });
 }
 await Deno.writeTextFile(
-  `${OUT}/idc-rad-groups.json`,
+  `${OUT}/idc-rad-${SCHEMA_V}-groups.json`,
   JSON.stringify({ version: `idc-rad-${VERSION}`, rowGroupSize: ROW_GROUP_SIZE, total: kept.length, groups }),
 );
 
 const mb = (n: number) => (n / 1e6).toFixed(1);
-console.log(`wrote ${OUT}/idc-rad-slim.parquet  (${mb(buf.byteLength)} MB, ${groups.length} row groups)`);
-console.log(`wrote ${OUT}/idc-rad-groups.json   (${((await Deno.stat(`${OUT}/idc-rad-groups.json`)).size / 1024).toFixed(0)} KB)`);
+console.log(`wrote ${OUT}/idc-rad-${SCHEMA_V}-slim.parquet  (${mb(buf.byteLength)} MB, ${groups.length} row groups)`);
+console.log(`wrote ${OUT}/idc-rad-${SCHEMA_V}-groups.json   (${((await Deno.stat(`${OUT}/idc-rad-${SCHEMA_V}-groups.json`)).size / 1024).toFixed(0)} KB)`);
 console.log(`\nUpload both to your CORS bucket, then launch with ?indexBase=<bucket-url>/`);

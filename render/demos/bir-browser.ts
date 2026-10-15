@@ -83,15 +83,20 @@ const KITS_DEFAULT: Source = {
 // js2 bucket for the deployed gallery.
 const IDC_INDEX_BASE = ((globalThis as Record<string, unknown>).__IDC_INDEX_BASE as string) ||
   P.get("indexBase") || "https://js2.jetstream-cloud.org:8001/swift/v1/idc-index/";
-// v2 = every radiology series of a study (image stacks + SEG + RTSTRUCT/RTDOSE + SR/PR/KO/…;
-// only SM pathology dropped) with SeriesNumber, so the OHIF-style series panel is complete.
-// Versioned filenames so a client with the old (image-only) sidecar cached never pairs it with
-// the new parquet.
-const GROUPS_URL = new URL("idc-rad-v2-groups.json", IDC_INDEX_BASE).href;
-const PARQUET_URL = new URL("idc-rad-v2-slim.parquet", IDC_INDEX_BASE).href;
-// Bump when resolveFromIndex's series choice changes — retires every localStorage entry cached
-// by an older resolver.
-const MEMO_V = "idc-rad:v2";
+// Every radiology series of a study (image stacks + SEG + RTSTRUCT/RTDOSE + SR/PR/KO/…; only SM
+// pathology dropped) with SeriesNumber, so the OHIF-style series panel is complete.
+// v3 = rebuilt from idc-index-data 25.0.0 (967,891 series). v2 was 22.0.2 and predates whole
+// collections — fdg_pet_ct_lesions studies simply weren't in it, which read as "not found".
+// Each generation gets NEW filenames and the old pair is left published: the sidecar is cached
+// in Cache Storage keyed by URL and never revalidated, so replacing a name in place would pair
+// a returning visitor's old sidecar with the new parquet — the row-group offsets stop agreeing
+// and every lookup silently misses.
+const GROUPS_URL = new URL("idc-rad-v3-groups.json", IDC_INDEX_BASE).href;
+const PARQUET_URL = new URL("idc-rad-v3-slim.parquet", IDC_INDEX_BASE).href;
+// Bump when resolveFromIndex's series choice changes OR the index generation does (a new IDC
+// release can add series to a study, so the old pick may no longer be the right one) — retires
+// every localStorage entry cached by an older resolver.
+const MEMO_V = "idc-rad:v3";
 const HYPARQUET_ESM = "https://cdn.jsdelivr.net/npm/hyparquet@1.28.2/+esm";
 const splitList = (v: string | null): string[] => (v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 

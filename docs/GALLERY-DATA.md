@@ -14,6 +14,7 @@ Base: `https://js2.jetstream-cloud.org:8001/swift/v1/<container>/`
 | `livecodec-demo` | 465 | 4.7 GB | codec race | `CIS230102_IU` |
 | `spine-review` | 1632 | 5.0 GB | SPINEPS vs IDC spine review | `MED250016_IU` |
 | `nnlive-models` | 4 | 225 MB | nnLive interactive segmentation | `MED250016_IU` |
+| `idc-index` | 6 | 197 MB | BIR/SlicerRAD-IDC OHIF-style UID resolution (slim idc-index) | `MED250016_IU` |
 
 Credentials are the application credentials in `~/.config/openstack/clouds.yaml`. **The mapping
 is not obvious and the two projects do not overlap**: `CIS230102_IU` gets 403 on spine-review and
@@ -23,6 +24,13 @@ bulk job against the wrong container will grind through its retries instead of f
 
 `livecodec-demo` has `.r:*` but not `.rlistings`, so anonymous listing 403s while individual
 objects are public. Listing it needs a token.
+
+`idc-index` holds the slim radiology index built by `render/demos/build-idc-slim.ts` (sidecar +
+parquet, one pair per generation: `idc-rad-<gen>-groups.json` + `idc-rad-<gen>-slim.parquet`).
+Every generation is published under NEW names and the old pair is left in place: the client
+caches the sidecar in Cache Storage keyed by URL and never revalidates it, so replacing a name
+in place would pair a returning visitor's old sidecar with the new parquet — the row-group
+offsets stop agreeing and every study lookup silently misses.
 
 ## Cache-Control policy
 
