@@ -66,63 +66,29 @@ const KITS_DEFAULT: Source = {
   lic: "CC BY 3.0 · IDC c4kc_kits · doi:10.7937/tcia.2019.ix49e8nx",
 };
 
-// OHIF/IID UID resolution uses a SLIM, radiology-only IDC index (built offline by
-// build-idc-slim.ts) hosted in a CORS-enabled bucket. Two artifacts sit under IDC_INDEX_BASE:
-//   idc-rad-<gen>-groups.json  — tiny (~67 KB) directory: full min/max StudyInstanceUID per
-//                                2000-row group of the parquet, sorted by StudyInstanceUID.
-//   idc-rad-<gen>-slim.parquet — 968k radiology series (drops SM pathology), sorted by study,
-//                                columns trimmed to what resolution + the series panel need.
-// A lookup fetches the sidecar ONCE (Cache Storage, then in-memory), binary-searches it for the
-// 1–2 groups whose [min,max] span the study, and RANGE-reads only those groups (~0.6 MB) — the
-// 75 MB parquet is never fully downloaded. Resolved studies are memoized in localStorage, so a
-// repeat launch of the same study skips the index entirely ("hit the penalty once").
+// OHIF/IID UID resolution goes through the IDC v3 REST API (api.imaging.datacommons.cancer.gov),
+// which serves the same idc-index this viewer used to carry a copy of. One POST returns every
+// series of a study — 1.4–5 KB, ~200 ms — against the ~0.65 MB of ranged parquet reads plus a
+// 67 KB sidecar and a 60 KB hyparquet import that the self-hosted slim index cost. It also
+// tracks IDC releases on its own, which the hand-built copy did not: it sat at idc-index-data
+// 22.0.2 while IDC shipped 25, and whole collections read as "study not found".
 //
-// The public full-index hosts (GCS mirror, GitHub release) send no CORS, so a cross-origin
-// browser can't read them — hence the slim copy in a CORS bucket. Default base is same-origin
-// ./idc-rad/ (drop the two files next to bir.html); point ?indexBase= / __IDC_INDEX_BASE at the
-// js2 bucket for the deployed gallery.
-const IDC_INDEX_BASE = ((globalThis as Record<string, unknown>).__IDC_INDEX_BASE as string) ||
-  P.get("indexBase") || "https://js2.jetstream-cloud.org:8001/swift/v1/idc-index/";
-// Every radiology series of a study (image stacks + SEG + RTSTRUCT/RTDOSE + SR/PR/KO/…; only SM
-// pathology dropped) with SeriesNumber, so the OHIF-style series panel is complete.
-// v3 = rebuilt from idc-index-data 25.0.0 (967,891 series). v2 was 22.0.2 and predates whole
-// collections — fdg_pet_ct_lesions studies simply weren't in it, which read as "not found".
-// Each generation gets NEW filenames and the old pair is left published: the sidecar is cached
-// in Cache Storage keyed by URL and never revalidated, so replacing a name in place would pair
-// a returning visitor's old sidecar with the new parquet — the row-group offsets stop agreeing
-// and every lookup silently misses.
-const GROUPS_URL = new URL("idc-rad-v3-groups.json", IDC_INDEX_BASE).href;
-const PARQUET_URL = new URL("idc-rad-v3-slim.parquet", IDC_INDEX_BASE).href;
-// Bump when resolveFromIndex's series choice changes OR the index generation does (a new IDC
-// release can add series to a study, so the old pick may no longer be the right one) — retires
-// every localStorage entry cached by an older resolver.
-const MEMO_V = "idc-rad:v3";
-const HYPARQUET_ESM = "https://cdn.jsdelivr.net/npm/hyparquet@1.28.2/+esm";
+// Deliberately NOT the DICOMweb proxy, which could answer the same question: the proxy is the
+// metered part of IDC's infrastructure and its policy reserves it for IDC's own viewers, while
+// the index and the public buckets are free. Everything here stays on the free paths.
+const IDC_API_BASE = ((globalThis as Record<string, unknown>).__IDC_API_BASE as string) ||
+  P.get("apiBase") || "https://api.imaging.datacommons.cancer.gov/v3";
 const splitList = (v: string | null): string[] => (v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 
-interface GroupDir { version: string; rowGroupSize: number; total: number; groups: { min: string; max: string }[] }
-let _dirCache: GroupDir | null = null;
+// A DICOM UID is digits and dots, nothing else (PS3.5 §9.1). Checked before it reaches a
+// statement so it cannot carry a quote, and so a mistyped URL fails here with something
+// readable rather than as a SQL error.
+const UID_RE = /^[0-9.]{1,64}$/;
 
-/** Fetch the slim-index group directory once (Cache Storage → in-memory memo). */
-async function loadGroupDir(onStatus: (m: string) => void): Promise<GroupDir> {
-  if (_dirCache) return _dirCache;
-  onStatus("fetching the IDC index directory…");
-  let resp: Response | undefined;
-  try {
-    // deno-lint-ignore no-explicit-any
-    const cache = (globalThis as any).caches ? await (globalThis as any).caches.open("idc-rad") : null;
-    if (cache) resp = await cache.match(GROUPS_URL);
-    if (!resp) {
-      resp = await fetch(GROUPS_URL);
-      if (resp.ok && cache) await cache.put(GROUPS_URL, resp.clone());
-    }
-  } catch {
-    resp = await fetch(GROUPS_URL);
-  }
-  if (!resp || !resp.ok) throw new Error(`index directory not reachable at ${GROUPS_URL} (HTTP ${resp?.status ?? "?"})`);
-  _dirCache = await resp.json() as GroupDir;
-  return _dirCache;
-}
+// Bump when resolveFromIndex's series choice changes, or when the data behind it does — a newer
+// IDC release can add series to a study, so a memoised pick may no longer be the right one.
+// Retires every localStorage entry cached by an older resolver. v4 = served by the IDC API.
+const MEMO_V = "idc-rad:v4";
 
 const SLIM_COLS = [
   "StudyInstanceUID", "SeriesInstanceUID", "crdc_series_uuid", "aws_bucket", "Modality",
@@ -130,51 +96,78 @@ const SLIM_COLS = [
   "license_short_name", "source_DOI",
 ];
 
-// Memo the per-study rows so building the series panel doesn't re-read a group the resolve
-// already fetched this page load.
+/** Run one read-only query against the IDC API.
+ *
+ *  `values` are substituted for `?` in order, each validated as a DICOM UID first — the
+ *  validation is what makes the substitution safe. The API will take a `params` array and bind
+ *  server-side (ImagingDataCommons/IDC-REST-MCP#64); once that is deployed this becomes
+ *  `body.params = values` with no interpolation at all, and the call sites do not change.
+ */
+// deno-lint-ignore no-explicit-any
+async function idcSql(sql: string, values: string[] = []): Promise<any[]> {
+  let i = 0;
+  const statement = sql.replace(/\?/g, () => {
+    const v = values[i++];
+    if (!UID_RE.test(v ?? "")) throw new Error(`not a DICOM UID: ${v}`);
+    return `'${v}'`;
+  });
+  const resp = await fetch(`${IDC_API_BASE}/sql`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sql: statement }),
+  });
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => "");
+    throw new Error(`IDC API ${resp.status} at ${IDC_API_BASE}/sql — ${detail.slice(0, 300)}`);
+  }
+  return (await resp.json()).rows ?? [];
+}
+
+/** The IDC release the API is serving, for an error message. Best-effort: never throws. */
+async function idcVersion(): Promise<string> {
+  try {
+    const v = await (await fetch(`${IDC_API_BASE}/version`)).json();
+    return `${v.idc_version} / idc-index-data ${v.idc_index_data_version}`;
+  } catch {
+    return "unknown version";
+  }
+}
+
+// Memo the per-study rows so building the series panel doesn't repeat the resolve's query.
 // deno-lint-ignore no-explicit-any
 const _studyRowsCache = new Map<string, any[]>();
 
-/** Range-read every series row of a study from the slim index: find the 1–2 sorted row groups
- *  whose [min,max] span the study and read only those (~0.6 MB), never the whole parquet. */
+/** Every series row of a study, in one API call. */
 // deno-lint-ignore no-explicit-any
 async function readStudyRows(studyUID: string, onStatus: (m: string) => void): Promise<any[]> {
   const memo = _studyRowsCache.get(studyUID);
   if (memo) return memo;
-  const dir = await loadGroupDir(onStatus);
-  const RGS = dir.rowGroupSize;
-  const spans: [number, number][] = [];
-  for (let i = 0; i < dir.groups.length; i++) {
-    const g = dir.groups[i];
-    if (studyUID >= g.min && studyUID <= g.max) spans.push([i * RGS, Math.min((i + 1) * RGS, dir.total)]);
-  }
-  if (!spans.length) {
-    throw new Error(
-      `StudyInstanceUID not found in the slim IDC index (${dir.version}): ${studyUID}. ` +
-        `It may be a non-radiology study, or from a newer index. The direct form always works: ` +
-        `?series=<crdc_series_uuid>&bucket=idc-open-data.`,
-    );
-  }
-  onStatus(`range-reading the IDC index (${spans.length} group${spans.length > 1 ? "s" : ""})…`);
+  onStatus("looking the study up in the IDC index…");
+  let rows: any[]; // deno-lint-ignore-line no-explicit-any
   try {
-    // deno-lint-ignore no-explicit-any
-    const hp: any = await import(HYPARQUET_ESM);
-    const file = await hp.asyncBufferFromUrl({ url: PARQUET_URL });
-    const metadata = await hp.parquetMetadataAsync(file); // footer once, reused per group
-    const parts = await Promise.all(
-      spans.map(([rowStart, rowEnd]) => hp.parquetReadObjects({ file, metadata, columns: SLIM_COLS, rowStart, rowEnd })),
+    // Ordered in the query, not just in the panel: resolveFromIndex picks the first SEG of a
+    // study by row order, and an unordered SELECT would let that pick change between loads.
+    // SeriesNumber is text in idc-index, so it needs the cast — otherwise 16 sorts before 5.
+    rows = await idcSql(
+      `SELECT ${SLIM_COLS.join(", ")} FROM index WHERE StudyInstanceUID = ? ` +
+        `ORDER BY TRY_CAST(SeriesNumber AS INTEGER) NULLS LAST, SeriesInstanceUID`,
+      [studyUID],
     );
-    const rows = parts.flat().filter((r: { StudyInstanceUID: string }) => r.StudyInstanceUID === studyUID);
-    if (!rows.length) throw new Error(`StudyInstanceUID not found in the IDC index: ${studyUID}`);
-    _studyRowsCache.set(studyUID, rows);
-    return rows;
   } catch (e) {
-    if ((e as Error).message.includes("not found")) throw e;
     throw new Error(
-      `couldn't range-read the slim IDC index at ${PARQUET_URL} — check the CORS bucket (?indexBase=). ` +
-        `Meanwhile the direct form works: ?series=<crdc_series_uuid>&bucket=idc-open-data. (${(e as Error).message})`,
+      `couldn't reach the IDC index API at ${IDC_API_BASE} (${(e as Error).message}). ` +
+        `The direct form needs no index: ?series=<crdc_series_uuid>&bucket=idc-open-data.`,
     );
   }
+  if (!rows.length) {
+    throw new Error(
+      `StudyInstanceUID not found in the IDC index (${await idcVersion()}): ${studyUID}. ` +
+        `It may be a non-radiology study, or newer than the release the API serves. ` +
+        `The direct form always works: ?series=<crdc_series_uuid>&bucket=idc-open-data.`,
+    );
+  }
+  _studyRowsCache.set(studyUID, rows);
+  return rows;
 }
 
 /** Decide which series to load from the URL: fast direct-S3, OHIF/IID UID (index lookup), or default. */
