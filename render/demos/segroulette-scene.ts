@@ -69,6 +69,9 @@ export interface SegrouletteScene {
   segments: { num: number; name: string; color: [number, number, number]; voxels: number }[];
   mode: "sdf" | "volume";                  // 3D seg render: unified colorized-SDF surface (or none)
   hasSeg: boolean;                         // whether there's a segmentation layer to toggle
+  /** What the single-label volume could not represent: a DICOM SEG may define overlapping
+   *  segments, and the frame decoded last wins. Null when nothing overlapped. */
+  segOverlap: { voxels: number; pairs: [number, number][] } | null;
   /** Toggle the two independent 3D layers (background modality VR + segmentation). */
   setLayers(showVolume: boolean, showSeg: boolean): void;
   /** Continuous 3D-LAYER opacity (0..1): the background VR (scales its transfer-function alpha) and the
@@ -251,6 +254,7 @@ export function buildSegrouletteScene(
   return {
     scene, slice, center, radius, rasLo, rasHi, ijkToRAS: ct.ijkToRAS, dims, win: ct.win, lev: ct.lev,
     segments, mode, hasSeg, roi,
+    segOverlap: seg?.overlap && seg.overlap.voxels > 0 ? seg.overlap : null,
     setLayers(sv, ss) { this.setVolumeOpacity(sv ? 1 : 0); this.setSegOpacity(ss ? 1 : 0); },
     setVolumeOpacity(o) {
       volumeOpacity = Math.max(0, Math.min(1, o));

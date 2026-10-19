@@ -66,6 +66,9 @@ export interface BirCfg {
   offsetMm: (p: Plane) => number;
   spacing: (p: Plane) => number;
   step: (p: Plane, forward: boolean) => void;
+  /** Slice number and count for a plane, as the corner readout shows them. Drives the slice
+   *  scrollbars; without it they fall back to the plane's span divided by its spacing. */
+  sliceIndex?: (p: Plane) => { index: number; count: number };
   redraw: (p: Plane) => void;
   redrawAll: () => void;
   rasLo: Vec3;
@@ -273,12 +276,79 @@ export function mountBir(cfg: BirCfg): BirApi {
     cell.appendChild(c);
     overlays.set(p, c);
   }
+  // ---- slice scrollbars -------------------------------------------------------------------
+  // Slicer and OHIF both put one on a stack view, and the reader had only the text readout: no
+  // indication of where in the stack you are without reading it, and no way to get somewhere
+  // else without scrolling there. Drag the thumb, or click the track to jump.
+  const scrollbars = new Map<Plane, { bar: HTMLElement; thumb: HTMLElement }>();
+  const planeAxis = (p: Plane) => (p === "axial" ? 2 : p === "coronal" ? 1 : 0);
+  const sliceCount = (p: Plane): number => {
+    const fromHost = cfg.sliceIndex?.(p).count;
+    if (fromHost && fromHost > 1) return fromHost;
+    const a = planeAxis(p), sp = cfg.spacing(p);
+    return sp > 0 ? Math.max(1, Math.round((cfg.rasHi[a] - cfg.rasLo[a]) / sp)) : 1;
+  };
+  for (const p of cfg.planes) {
+    const cell = cfg.cellOf(p);
+    if (!cell) continue;
+    const bar = document.createElement("div");
+    bar.className = "bir-scrollbar";
+    bar.style.cssText = "position:absolute;top:0;right:0;width:11px;height:100%;z-index:3;" +
+      "cursor:ns-resize;touch-action:none;background:linear-gradient(90deg,transparent,rgba(10,14,22,.45));";
+    const thumb = document.createElement("div");
+    thumb.style.cssText = "position:absolute;left:2px;width:7px;border-radius:4px;" +
+      "background:rgba(190,210,240,.55);box-shadow:0 0 0 1px rgba(0,0,0,.35);transition:background 120ms;";
+    bar.appendChild(thumb);
+    cell.appendChild(bar);
+    const toOffset = (clientY: number) => {
+      const r = bar.getBoundingClientRect();
+      const frac = Math.max(0, Math.min(1, (clientY - r.top) / Math.max(1, r.height)));
+      // Top of the bar is the HIGH end of the axis, matching how the views scroll.
+      cfg.setOff01(p, 1 - frac);
+      cfg.redraw(p);
+      drawOverlay(p);
+      syncScrollbar(p);
+    };
+    let dragging = false;
+    bar.addEventListener("pointerdown", (e) => {
+      dragging = true;
+      thumb.style.background = "rgba(220,235,255,.9)";
+      toOffset(e.clientY);                 // scrub FIRST: a capture that can't be taken must
+      try { bar.setPointerCapture(e.pointerId); } catch { /* ignore */ }  // not swallow the click
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    bar.addEventListener("pointermove", (e) => { if (dragging) toOffset(e.clientY); });
+    const end = (e: PointerEvent) => {
+      if (!dragging) return;
+      dragging = false;
+      thumb.style.background = "rgba(190,210,240,.55)";
+      try { bar.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    };
+    bar.addEventListener("pointerup", end);
+    bar.addEventListener("pointercancel", end);
+    scrollbars.set(p, { bar, thumb });
+  }
+  const syncScrollbar = (p: Plane) => {
+    const sb = scrollbars.get(p);
+    if (!sb) return;
+    const n = sliceCount(p);
+    if (n <= 1) { sb.bar.style.display = "none"; return; }   // a single-slice series has nowhere to go
+    sb.bar.style.display = "";
+    const h = sb.bar.clientHeight || 1;
+    const size = Math.max(18, Math.min(h, h / n));
+    const frac = 1 - Math.max(0, Math.min(1, cfg.off01(p)));
+    sb.thumb.style.height = `${size}px`;
+    sb.thumb.style.top = `${frac * (h - size)}px`;
+  };
+
   const resizeOverlays = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
     for (const [, c] of overlays) {
       c.width = Math.max(1, Math.floor(c.clientWidth * dpr));
       c.height = Math.max(1, Math.floor(c.clientHeight * dpr));
     }
+    for (const p of cfg.planes) syncScrollbar(p);
   };
 
   const rasOfClick = (p: Plane, u: number, v: number, w: number, h: number): Vec3 =>
@@ -289,6 +359,7 @@ export function mountBir(cfg: BirCfg): BirApi {
   };
 
   const drawOverlay = (p: Plane) => {
+    syncScrollbar(p);
     const c = overlays.get(p);
     if (!c) return;
     const ctx = c.getContext("2d")!;

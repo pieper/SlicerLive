@@ -31,7 +31,10 @@
   /* Bottom-left so it never covers the (possibly two-row) BIR toolbar. */
   #status { position: fixed; bottom: 6px; left: 10px; z-index: 5; background: rgba(5,6,10,.78);
             padding: 3px 12px; border-radius: 6px; color: #9fb3d0; font-family: ui-monospace, monospace; font-size: 11px;
-            max-width: 70vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+            max-width: 70vw; pointer-events: none;
+            /* Errors carry a UID and a suggestion; nowrap used to cut them off mid-identifier. */
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status.err { white-space: normal; overflow: visible; text-overflow: clip; max-width: min(70vw, 760px); line-height: 1.45; }
 </style>
 </head>
 <body>

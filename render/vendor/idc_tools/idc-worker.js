@@ -57,13 +57,16 @@ if (typeof DicomVolume === 'undefined')
 const DV = self.DicomVolume;
 const { sub, dot, cross, lps2ras } = DV;
 async function fetchBuf(key, base) { return (await fetchRetry((base || CT_S3) + key)).arrayBuffer(); }
-function makeThumb(ds) {
+/** Windowed RGBA of one slice. `width` defaults to the 64px mosaic tile; the first slice of a
+ *  series is also rendered at full width, so the reader can put a real image up while the rest
+ *  of the stack is still downloading instead of only a grid of tiles. */
+function makeThumb(ds, width = 64) {
     let pd = ds.PixelData;
     if (Array.isArray(pd))
         pd = pd[0];
     if (!pd)
         return null;
-    const nx = ds.Columns, ny = ds.Rows, TW = 64, TH = Math.max(1, Math.round(64 * ny / nx));
+    const nx = ds.Columns, ny = ds.Rows, TW = Math.min(width, nx), TH = Math.max(1, Math.round(TW * ny / nx));
     const px = ds.PixelRepresentation === 1 ? new Int16Array(pd) : new Uint16Array(pd);
     const slope = Number(ds.RescaleSlope ?? 1), inter = Number(ds.RescaleIntercept ?? 0);
     const lev = Number((Array.isArray(ds.WindowCenter) ? ds.WindowCenter[0] : ds.WindowCenter) ?? 40);
@@ -210,6 +213,12 @@ async function buildVolume(ctKeys, thumbOnly) {
             const k = ctKeys[idx++];
             const ds = naturalize(await fetchBuf(k));
             slices.push(ds);
+            if (slices.length === 1) {
+                // First slice through: a real image, full size, while the rest streams.
+                const big = makeThumb(ds, 512);
+                if (big)
+                    post({ t: 'preview', w: big.w, h: big.h, rgba: big.rgba.buffer }, [big.rgba.buffer]);
+            }
             const th = makeThumb(ds);
             if (th)
                 post({ t: 'thumb', n: Number(ds.InstanceNumber) || slices.length, w: th.w, h: th.h, rgba: th.rgba.buffer }, [th.rgba.buffer]);
@@ -280,6 +289,11 @@ function buildLabelmap(ds, bits, ct) {
         };
     }
     const seenSeg = new Set();
+    // DICOM SEG allows segments to overlap, a single-label volume cannot represent it, and the
+    // frame written last silently wins. Count what is lost so the viewer can say so rather than
+    // letting a reader believe the topmost segment is the whole story.
+    let overlapVoxels = 0;
+    const overlapPairs = new Set();
     const perFrame = ds.PerFrameFunctionalGroupsSequence || [];
     const ref = (perFrame[0]?.PlanePositionSequence?.[0]?.ImagePositionPatient || [0, 0, 0]).map(Number), o0 = toIJK(ref);
     const diCol = sub(toIJK([ref[0] + colW[0], ref[1] + colW[1], ref[2] + colW[2]]), o0);
@@ -319,14 +333,23 @@ function buildLabelmap(ds, bits, ct) {
                 const k0 = Math.max(0, Math.ceil(z - ext[2] / 2)), k1 = Math.min(nz - 1, Math.floor(z + ext[2] / 2));
                 for (let k = k0; k <= k1; k++)
                     for (let j = j0; j <= j1; j++)
-                        for (let i = i0; i <= i1; i++)
-                            lab[k * nx * ny + j * nx + i] = segNum;
+                        for (let i = i0; i <= i1; i++) {
+                            const o = k * nx * ny + j * nx + i, prev = lab[o];
+                            if (prev && prev !== segNum) {
+                                overlapVoxels++;
+                                overlapPairs.add(prev < segNum ? prev + ':' + segNum : segNum + ':' + prev);
+                            }
+                            lab[o] = segNum;
+                        }
             }
         }
         if (f % 200 === 0)
             prog(`SEG ${f}/${perFrame.length}`, 0.55 + 0.4 * f / perFrame.length);
     }
-    return { lab, colors, names, terminology };
+    return {
+        lab, colors, names, terminology,
+        overlap: { voxels: overlapVoxels, pairs: [...overlapPairs].map((p) => p.split(':').map(Number)) },
+    };
 }
 function invAffine(m) {
     const a = [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]], t = [m[3], m[7], m[11]];
@@ -407,7 +430,7 @@ self.onmessage = async (e) => {
                 parsed = { ds, bits: new Uint8Array(pd) };
             }
             const seg = buildLabelmap(parsed.ds, parsed.bits, ct);
-            post({ t: 'labelmap', lab: seg.lab, colors: seg.colors, names: seg.names, terminology: seg.terminology }, [seg.lab.buffer]);
+            post({ t: 'labelmap', lab: seg.lab, colors: seg.colors, names: seg.names, terminology: seg.terminology, overlap: seg.overlap }, [seg.lab.buffer]);
         }
         post({ t: 'alldone' });
     }

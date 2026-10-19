@@ -29,6 +29,9 @@ function runWorker(ctKeys, segKeys, ctBucket, segBucket, modality, handlers, opt
                 case 'thumb':
                     handlers.onThumb?.(m.n, m.w, m.h, m.rgba);
                     break;
+                case 'preview':
+                    handlers.onPreview?.(m.w, m.h, m.rgba);
+                    break;
                 case 'seg':
                     handlers.onSegName?.(m.name);
                     break;
@@ -42,7 +45,7 @@ function runWorker(ctKeys, segKeys, ctBucket, segBucket, modality, handlers, opt
                     break;
                 }
                 case 'labelmap': {
-                    seg = { lab: new Uint8Array(m.lab), colors: m.colors, names: m.names, terminology: m.terminology };
+                    seg = { lab: new Uint8Array(m.lab), colors: m.colors, names: m.names, terminology: m.terminology, overlap: m.overlap };
                     chain = chain.then(() => handlers.onLabelmap?.(seg)).catch((err) => console.error('[idc_tools] onLabelmap', err));
                     break;
                 }

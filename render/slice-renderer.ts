@@ -127,9 +127,13 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
     let du = u.uvec.xyz / u.size.x * 1.5;   // ~1.5 px right, in RAS
     let dv = u.vvec.xyz / u.size.y * 1.5;   // ~1.5 px up
     let n0 = ov_at(ras + du); let n1 = ov_at(ras - du); let n2 = ov_at(ras + dv); let n3 = ov_at(ras - dv);
-    let e = max(max(distance(n0.rgb, ov.rgb) + abs(n0.a - ov.a), distance(n1.rgb, ov.rgb) + abs(n1.a - ov.a)),
-                max(distance(n2.rgb, ov.rgb) + abs(n2.a - ov.a), distance(n3.rgb, ov.rgb) + abs(n3.a - ov.a)));
-    let edge = clamp((e - 0.03) * 12.0, 0.0, 1.0);   // 0 in the interior, 1 at a colour/label edge
+    // A neighbour is a DIFFERENT segment iff its overlay texel differs at all. The overlay is
+    // sampled NEAREST from a crisp per-voxel bake, so every texel is an exact palette entry and
+    // an exact comparison is the label test: two touching segments whose colours happen to be
+    // close still get a boundary, where a distance threshold used to merge them into one blob.
+    // A hidden segment (palette alpha 0) differs from a visible neighbour, so the visible one
+    // keeps its contour there; and its own voxels have ov.a = 0, so it draws nothing itself.
+    let edge = select(0.0, 1.0, any(n0 != ov) || any(n1 != ov) || any(n2 != ov) || any(n3 != ov));
     outA = clamp(ov.a * u.params.w * edge, 0.0, 1.0);
   }
   col = mix(col, ov.rgb, max(fillA, outA));

@@ -155,15 +155,13 @@ async function readStudyRows(studyUID: string, onStatus: (m: string) => void): P
     );
   } catch (e) {
     throw new Error(
-      `couldn't reach the IDC index API at ${IDC_API_BASE} (${(e as Error).message}). ` +
-        `The direct form needs no index: ?series=<crdc_series_uuid>&bucket=idc-open-data.`,
+      `couldn't reach the IDC index API at ${IDC_API_BASE} (${(e as Error).message}).`,
     );
   }
   if (!rows.length) {
     throw new Error(
       `StudyInstanceUID not found in the IDC index (${await idcVersion()}): ${studyUID}. ` +
-        `It may be a non-radiology study, or newer than the release the API serves. ` +
-        `The direct form always works: ?series=<crdc_series_uuid>&bucket=idc-open-data.`,
+        `It may be a non-radiology study, or newer than the release the API serves.`,
     );
   }
   _studyRowsCache.set(studyUID, rows);
@@ -248,11 +246,16 @@ async function resolveFromIndex(
   return src;
 }
 
+// Set by main() as soon as the overlay exists, so the failure path can turn it into a real
+// error state instead of leaving its last progress message up.
+let _mosaic: { fail(title: string, detail: string, hint?: string): void } | null = null;
+
 const status = (msg: string, err = false) => {
   const el = document.getElementById("status");
   if (el) {
     el.textContent = msg;
     el.style.color = err ? "#ff6b74" : "#9fb3d0";
+    el.classList.toggle("err", err);   // lets the host style wrap an error that carries a UID
   }
 };
 const cvEl = (id: string) => document.getElementById(id) as HTMLCanvasElement;
@@ -269,8 +272,11 @@ const CT_WL_PRESETS = [
 
 async function main() {
   if (!(navigator as unknown as { gpu?: unknown }).gpu) {
-    status("WebGPU not available — try Chrome/Edge 113+ or Safari 18+.", true);
-    return;
+    throw new LoadError(
+      "This browser can't render the images",
+      "The reader draws with WebGPU, which this browser does not expose.",
+      "Chrome or Edge 113+, Safari 18+, or Firefox with WebGPU enabled will work.",
+    );
   }
   status("loading from the NCI Imaging Data Commons…");   // which study isn't resolved yet
   const gpu = await initDevice();
@@ -288,6 +294,7 @@ async function main() {
   // Download-progress mosaic (the SEGRoulette loading visual): the series' slice thumbnails
   // tile in as the DICOM streams from S3 — informative + a little fun instead of a blank wait.
   const mosaic = createMosaic(document.getElementById("viewer")!);
+  _mosaic = mosaic;
   mosaic.status("contacting the NCI Imaging Data Commons…");
 
   // Which case? Resolve the URL — OHIF/IID StudyInstanceUID (via the IDC index), direct S3
@@ -305,6 +312,7 @@ async function main() {
     },
     onSliceCount: (n: number) => mosaic.setCount(n),
     onThumb: (n: number, w: number, h: number, rgba: ArrayBuffer) => mosaic.thumb(n, w, h, rgba),
+    onPreview: (w: number, h: number, rgba: ArrayBuffer) => mosaic.preview(w, h, rgba),
   });
   const sc: SegrouletteScene = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
   // Sampled scalar range of the loaded volume: drives the W/L drag gain (Slicer's
@@ -318,6 +326,15 @@ async function main() {
 
   // SlicerLive display state (toggled from the badge popup, below).
   let sliceOutline = false; // segmentation overlay: fill (default) vs outline
+  /** Both 2D overlay opacities, from the ONE master "Segmentation" opacity and the outline
+   *  switch. The outline has to be gated by the master too: at 0% with the switch on, the
+   *  segmentation was still drawing its contours, so there was no way to turn it off — which
+   *  is the state SlicerRAD-IDC#1 was reported in. */
+  const applySegOverlay = () => {
+    const master = sc.segOpacity();
+    sc.slice.setOverlayOpacity(master * SEG_FILL);
+    sc.slice.setOutlineOpacity(sliceOutline ? master : 0);
+  };
   let roiEnabled = false, roiVisible = false, roiFirstEnable = true; // 3D volume-render crop box
   let annOn = true; // DICOM corner annotations (IHE BIR §4.16.4.2.2.5.8 "official radiology look")
 
@@ -385,13 +402,19 @@ async function main() {
     draw3d();
     xhair?.redraw();
   };
-  const updateReadout = (p: Plane) => {
-    const el = document.getElementById("sr-" + p);
-    if (!el) return;
+  /** Slice number and count for a plane — one definition, used by the corner readout and by
+   *  the slice scrollbars so the two can never disagree. */
+  const sliceIndexOf = (p: Plane) => {
     const [lo, hi] = sliceIx.bounds(p);
     const sp = sliceIx.spacing(p);
     const mm = offset01ToMm(p, off[p], sc.rasLo, sc.rasHi);
-    el.textContent = `${Math.round((mm - lo) / sp + 0.5)}/${Math.round((hi - lo) / sp)} · ${mm.toFixed(1)} mm`;
+    return { index: Math.round((mm - lo) / sp + 0.5), count: Math.round((hi - lo) / sp), mm };
+  };
+  const updateReadout = (p: Plane) => {
+    const el = document.getElementById("sr-" + p);
+    if (!el) return;
+    const { index, count, mm } = sliceIndexOf(p);
+    el.textContent = `${index}/${count} · ${mm.toFixed(1)} mm`;
   };
 
   const resize = () => {
@@ -555,6 +578,7 @@ async function main() {
     setOff01: (p, v) => (off[p] = Math.max(0, Math.min(1, v))),
     offsetMm: (p) => offset01ToMm(p, off[p], sc.rasLo, sc.rasHi),
     spacing: (p) => sliceIx.spacing(p),
+    sliceIndex: (p) => sliceIndexOf(p),
     step: (p, fwd) => (off[p] = sliceIx.wheel(p, off[p], fwd)),
     redraw: (p) => {
       drawSlice(p);
@@ -773,7 +797,7 @@ async function main() {
       getOpacity: () => sc.segOpacity(),
       setOpacity: (o) => {
         sc.setSegOpacity(o); // 3D surface global opacity
-        sc.slice.setOverlayOpacity(o * SEG_FILL); // AND the 2D MPR overlay (fill/outline)
+        applySegOverlay(); // AND the 2D MPR overlay (fill + outline)
         drawAll();
       },
       disabled: () => !sc.hasSeg,
@@ -785,7 +809,7 @@ async function main() {
       get: () => sliceOutline,
       set: (on) => {
         sliceOutline = on;
-        sc.slice.setOverlayOutline(on);
+        applySegOverlay();
         for (const p of PLANES) drawSlice(p);
         xhair?.redraw();
       },
@@ -842,6 +866,17 @@ async function main() {
         drawAll();
       },
       enabled: () => sc.hasSeg,
+      // A DICOM SEG may define overlapping segments; a single-label volume cannot hold them, so
+      // the frame decoded last wins. Say so rather than letting the list read as the whole truth.
+      note: () => {
+        const ov = sc.segOverlap;
+        if (!ov) return null;
+        const nameOf = (n: number) => sc.segments.find((s) => s.num === n)?.name ?? `Segment ${n}`;
+        const pairs = ov.pairs.slice(0, 3).map(([a, b]) => `${nameOf(a)} / ${nameOf(b)}`).join(", ");
+        const more = ov.pairs.length > 3 ? ` and ${ov.pairs.length - 3} more` : "";
+        return `⚠ Segments overlap — showing the topmost. ${ov.voxels.toLocaleString()} voxels ` +
+          `are claimed by two segments (${pairs}${more}).`;
+      },
     },
   });
 
@@ -855,4 +890,45 @@ async function main() {
   status(`${source.sd} — scroll to page slices, pick a tool from the toolbar, drag 3D to orbit`);
 }
 
-main().catch((e) => status("error: " + ((e as Error)?.message ?? e), true));
+/** A failure the reader can describe to the person looking at it. */
+class LoadError extends Error {
+  constructor(readonly title: string, readonly detail: string, readonly hint?: string) {
+    super(`${title} — ${detail}`);
+  }
+}
+
+const DIRECT_FORM =
+  "A series can always be opened without the index: ?series=<crdc_series_uuid>&bucket=idc-open-data";
+
+/** Turn whatever went wrong into something a reader can act on. The thrown message is the
+ *  detail; the title says which stage failed, because "not in the index" and "the index is
+ *  unreachable" need different reactions from the person and we know which one happened. */
+function classify(e: unknown): LoadError {
+  if (e instanceof LoadError) return e;
+  const msg = (e as Error)?.message ?? String(e);
+  if (/not found in the IDC index/i.test(msg)) {
+    return new LoadError("This study isn't in the IDC index", msg, DIRECT_FORM);
+  }
+  if (/couldn't reach the IDC index API|IDC API \d+/i.test(msg)) {
+    return new LoadError("Couldn't reach the IDC index", msg, DIRECT_FORM);
+  }
+  if (/no CT\/MR\/PET\/NM image series/i.test(msg)) {
+    return new LoadError(
+      "Nothing in this study can be displayed",
+      msg,
+      "The study resolved, but it holds no image series this reader can reconstruct — " +
+        "a segmentation or report without its images, for example.",
+    );
+  }
+  if (/idc_tools|worker|DICOM|no DICOM under/i.test(msg)) {
+    return new LoadError("The images didn't decode", msg, "The series resolved and downloaded, but could not be reconstructed.");
+  }
+  return new LoadError("Couldn't open this study", msg);
+}
+
+main().catch((e) => {
+  const err = classify(e);
+  status(`${err.title}: ${err.detail}`, true);
+  _mosaic?.fail(err.title, err.detail, err.hint);
+  console.error(e);
+});

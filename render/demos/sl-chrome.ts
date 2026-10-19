@@ -39,6 +39,9 @@ export interface SegmentControls {
   get: (num: number) => number;       // current opacity 0..1
   set: (num: number, o: number) => void;  // set opacity (continuous; hot-updates while dragging)
   enabled?: () => boolean;            // dim the whole section when there's nothing to toggle
+  /** One line under the list, for something true of the segmentation as a whole rather than of
+   *  one segment — e.g. that segments overlap and only the topmost is shown. null = nothing. */
+  note?: () => string | null;
 }
 export interface ChromeOpts {
   controls?: VizControl[];                                   // viz toggles (empty → branding only)
@@ -381,6 +384,14 @@ export function installChrome(opts: ChromeOpts): Chrome {
       const paint = attachOpacity(box, () => S.get(s.num), (o) => { if (!(S.enabled && !S.enabled())) S.set(s.num, o); }, s.color, () => opts.onChange?.());
       wrap.appendChild(row);
       segRows.push({ num: s.num, box, color: s.color, paint });
+    }
+    const note = S.note?.();
+    if (note) {
+      const n = document.createElement("div");
+      n.textContent = note;
+      n.style.cssText = "margin-top:6px;padding:5px 7px;border-radius:6px;background:rgba(255,196,84,.12);" +
+        "color:#ffc454;font:500 11.5px -apple-system,system-ui,sans-serif;line-height:1.35;";
+      wrap.appendChild(n);
     }
     segHost.appendChild(wrap);
     paintSegments();

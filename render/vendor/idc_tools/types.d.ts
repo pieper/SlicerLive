@@ -22,6 +22,10 @@ export interface SegLabelmap {
     names: Record<number, string>;
     /** per-segment coded terminology (DICOM SEG SegmentedProperty* / AnatomicRegion), keyed by SegmentNumber */
     terminology?: Record<number, SegmentTerminology>;
+    /** What a single-label volume could not represent: DICOM SEG allows segments to overlap,
+     *  and the frame written last wins. `voxels` counts the overwritten voxels, `pairs` names
+     *  the segment numbers that collided. */
+    overlap?: { voxels: number; pairs: [number, number][] };
 }
 export interface CodedEntry { scheme: string; value: string; meaning: string }
 export interface SegmentTerminology {
@@ -66,6 +70,9 @@ export interface LoadHandlers {
     onProgress?: (p: LoadProgress) => void;
     /** streaming slice thumbnail (RGBA) for a progress mosaic, keyed by InstanceNumber */
     onThumb?: (n: number, w: number, h: number, rgba: ArrayBuffer) => void;
+    /** the FIRST decoded slice at full size (RGBA), so a reader can show a real image while
+     *  the rest of the series is still downloading */
+    onPreview?: (w: number, h: number, rgba: ArrayBuffer) => void;
     onSliceCount?: (count: number) => void;
     onSegName?: (name: string) => void;
 }
