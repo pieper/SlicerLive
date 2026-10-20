@@ -363,7 +363,11 @@ export function installChrome(opts: ChromeOpts): Chrome {
     segRows.length = 0; segHost.innerHTML = "";
     if (!S) return;
     const list = S.list();
-    if (!list.length) return;
+    const noteText = S.note?.();
+    // An empty list can still have something to say — a reader that is WITHHOLDING the
+    // segmentation (an irregular series it cannot be registered to) has no rows but owes the
+    // viewer the reason.
+    if (!list.length && !noteText) return;
     const wrap = document.createElement("div");
     wrap.style.cssText = "margin-top:6px;border-top:1px solid rgba(255,255,255,.12);padding-top:6px;" +
       (list.length > 6 ? "max-height:210px;overflow-y:auto;" : "");
@@ -385,10 +389,9 @@ export function installChrome(opts: ChromeOpts): Chrome {
       wrap.appendChild(row);
       segRows.push({ num: s.num, name: s.name, box, color: s.color, paint });
     }
-    const note = S.note?.();
-    if (note) {
+    if (noteText) {
       const n = document.createElement("div");
-      n.textContent = note;
+      n.textContent = noteText;
       n.style.cssText = "margin-top:6px;padding:5px 7px;border-radius:6px;background:rgba(255,196,84,.12);" +
         "color:#ffc454;font:500 11.5px -apple-system,system-ui,sans-serif;line-height:1.35;";
       wrap.appendChild(n);

@@ -43,6 +43,10 @@ function runWorker(ctKeys, segKeys, ctBucket, segBucket, modality, handlers, opt
                 case 'voi':
                     handlers.onVOI?.(m.win, m.lev);
                     break;
+                case 'geomcheck':
+                    // The series' real headers do / do not make one regular volume.
+                    handlers.onGeomCheck?.({ stack: m.stack, reasons: m.reasons, notes: m.notes, kept: m.kept, total: m.total, spacing: m.spacing });
+                    break;
                 case 'ctdone':
                     handlers.onVolumeDone?.(m.placed, m.expected, m.dropped ?? 0, m.outside ?? 0);
                     break;

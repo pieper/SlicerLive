@@ -26,7 +26,7 @@ import type { Box, HandleMeta } from "./roi-widget.ts";
 import { createMosaic } from "./mosaic.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
 import { loadSeries, loadThumbnail } from "../vendor/idc_tools/index.js";
-import type { CTVolume, SegLabelmap, SeriesGeometry } from "../vendor/idc_tools/types.js";
+import type { CTVolume, GeomCheck, SegLabelmap, SeriesGeometry } from "../vendor/idc_tools/types.js";
 import { type BirApi, mountBir, type Plane, type StripItem } from "./bir.ts";
 import { downloadStudyWithDialog, type SeriesRef, shareStudy } from "./idc-share.ts";
 import { CT_VR_PRESETS, presetLUT } from "../ct-vr-presets.ts";
@@ -95,8 +95,8 @@ const UID_RE = /^[0-9a-fA-F.-]{1,64}$/;
 // release can add series to a study, so a memoised pick may no longer be the right one), or when
 // the memoised SHAPE changes — a cached entry from an older resolver is missing whatever was
 // added since, which silently disables the feature that needs it. Retires every localStorage
-// entry cached by an older resolver. v5 = carries the per-series geometry.
-const MEMO_V = "idc-rad:v5";
+// entry cached by an older resolver. v6 = prefers a series the index calls a regular volume.
+const MEMO_V = "idc-rad:v6";
 
 const SLIM_COLS = [
   "StudyInstanceUID", "SeriesInstanceUID", "crdc_series_uuid", "aws_bucket", "Modality",
@@ -304,9 +304,19 @@ async function resolveFromIndex(
   const IMG = new Set(["CT", "MR", "PT", "PET", "NM", "US"]);
   const imgs = inStudy.filter((r) => IMG.has(String(r.Modality).toUpperCase()));
   const segs = inStudy.filter((r) => String(r.Modality).toUpperCase() === "SEG");
-  // Prefer an explicitly-requested image series; else the largest (primary) one.
-  const chosen = imgs.find((r) => want.has(r.SeriesInstanceUID)) ??
-    imgs.slice().sort((a, b) => Number(b.instanceCount) - Number(a.instanceCount))[0];
+  // Prefer an explicitly-requested image series. Failing that, the largest series that the index
+  // says IS a regularly-spaced volume, and only then the largest of what is left.
+  //
+  // Largest-wins alone picks badly in a real study: anti_pd_1_lung ...1624 has a 527-image series
+  // that is two reconstructions interleaved — duplicate slice positions, non-uniform spacing —
+  // next to a clean 127-slice lung volume. Stacking the 527 gives a volume with doubled slices,
+  // and it cannot be streamed either. A viewer whose job is volumes should open the one that is
+  // a volume; every other series is still one click away in the panel.
+  const bySize = (a: { instanceCount: number }, b: { instanceCount: number }) =>
+    Number(b.instanceCount) - Number(a.instanceCount);
+  const regular = imgs.filter((r) => r.g_regular).sort(bySize);
+  const chosen = imgs.find((r) => want.has(r.SeriesInstanceUID)) ?? regular[0] ??
+    imgs.slice().sort(bySize)[0];
   if (!chosen) throw new Error("no CT/MR/PET/NM image series found in this study");
   // If a SEG was explicitly requested, honour it; else pick one whose SEG references the chosen
   // image (best-effort: just take the first SEG in the study).
@@ -379,6 +389,52 @@ function placeholderVolume(
     }
   }
   return { vol, dims: g.dims, ijkToRAS: g.ijkToRAS, win, lev, dtype: "float32", modality };
+}
+
+/** A banner across the top of the reader for what the series' own geometry says — above the
+ *  views, not in the status line, because it changes how what is on screen should be read.
+ *
+ *  Two cases: a STACK (not one regular volume — reformats, 3D and the segmentation overlay are
+ *  withheld), and a volume that simply left some instances out (a scout, a second image size).
+ *  Dismissible, since it is a statement about the data rather than a pending action. */
+function geometryNotice(g: GeomCheck, hadSeg: boolean): void {
+  // Goes directly under the toolbar, as the next child of #viewer's flex column. NOT "before
+  // #grid": once the series strip is up, the grid lives inside a horizontal row with it, and
+  // the banner would land beside the thumbnails.
+  const viewer = document.getElementById("viewer");
+  const bar0 = document.getElementById("bir-bar");
+  if (!viewer || !bar0 || bar0.parentElement !== viewer) return;
+  const bar = document.createElement("div");
+  bar.id = "geom-notice";
+  const warn = g.stack;
+  bar.style.cssText = "flex:0 0 auto;display:flex;align-items:flex-start;gap:10px;padding:7px 12px;" +
+    `background:${warn ? "rgba(255,196,84,.13)" : "rgba(110,160,255,.11)"};` +
+    `border-bottom:1px solid ${warn ? "rgba(255,196,84,.35)" : "rgba(110,160,255,.3)"};` +
+    `color:${warn ? "#ffc454" : "#9fc0ff"};font:500 12px -apple-system,system-ui,sans-serif;line-height:1.45;`;
+  const text = document.createElement("div");
+  text.style.cssText = "flex:1 1 auto;min-width:0;";
+  const why = (warn ? g.reasons : g.notes).map((r) => `<li>${r}</li>`).join("");
+  text.innerHTML = warn
+    ? `<b>${g.kept} images shown as a stack — this series is not a single volume.</b>` +
+      `<ul style="margin:3px 0 0;padding-left:18px">${why}</ul>` +
+      `<div style="margin-top:3px">The images and their in-plane measurements are real; the ` +
+      `reformats, the 3D rendering${hadSeg ? " and the segmentation overlay" : ""} are not shown ` +
+      `because this series has no trustworthy third dimension. Other series in the study may be ` +
+      `volumes — pick one from the series strip.</div>`
+    : `<b>Showing ${g.kept} of ${g.total} instances as the volume.</b>` +
+      `<ul style="margin:3px 0 0;padding-left:18px">${why}</ul>`;
+  const x = document.createElement("button");
+  x.textContent = "\u00d7";
+  x.title = "Dismiss";
+  x.style.cssText = "flex:0 0 auto;background:none;border:0;color:inherit;font:700 16px/1 system-ui;" +
+    "cursor:pointer;opacity:.7;padding:0 2px;";
+  x.addEventListener("click", () => {
+    bar.remove();
+    globalThis.dispatchEvent(new Event("resize"));   // the views just got the space back
+  });
+  bar.appendChild(text);
+  bar.appendChild(x);
+  bar0.insertAdjacentElement("afterend", bar);
 }
 
 /** Window/level to start from, per modality, until the first real slice says otherwise. */
@@ -460,6 +516,9 @@ async function main() {
   let earlySeg: SegLabelmap | null = null;
   let streamStats = { placed: 0, expected: 0, dropped: 0, outside: 0 };
   let filledPlanes: Uint8Array | null = null;
+  /** The assemble-then-show path's verdict on the series' real geometry. Set before onCT, so
+   *  it is known by the time the scene is built. */
+  let geomCheck: GeomCheck | null = null;
 
   const handlers = {
     onProgress: (p: { msg: string; frac?: number }) => setLoad(`${p.msg}${p.frac ? ` — ${Math.round(p.frac * 100)}%` : ""}`),
@@ -477,6 +536,7 @@ async function main() {
     onVolumeDone: (placed: number, expected: number, dropped: number, outside: number) => {
       streamStats = { placed, expected, dropped, outside };
     },
+    onGeomCheck: (g: GeomCheck) => (geomCheck = g),
   };
 
   // Start the load now; in streaming mode the scene is built as soon as the FIRST slice has
@@ -492,7 +552,25 @@ async function main() {
   const res: { ct: CTVolume; seg?: SegLabelmap } = streaming
     ? { ct: placeholderVolume(await geomReady, source.m, firstSlice) }
     : await loadDone;
-  const sc: SegrouletteScene = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
+  // STACK mode: the series' own headers say its instances are not one regular volume (duplicate
+  // slice positions, uneven spacing, cross-plane drift). The images are real and the in-plane
+  // geometry is real; the third dimension is not. So the reader shows the stack — one viewport,
+  // images paged by number — and withholds everything that would be a fabrication: the coronal
+  // and sagittal reformats, the 3D render, and the segmentation, which is drawn on the true
+  // slice positions and so cannot be registered to a stack that has none. The warning says so.
+  const stack = !!geomCheck?.stack;
+  const sc: SegrouletteScene = buildSegrouletteScene(gpu, srgb, res.ct, stack ? undefined : res.seg);
+  // Which viewport IS the stack? The acquired images lie along the volume's k axis, so the
+  // single viewport has to be the view nearest that axis — for a coronal or sagittal
+  // acquisition "axial" would be a reformat, exactly the thing a stack must not show. BIR's
+  // selected (and, in single layout, only) viewport is planes[0].
+  const kAxis = [sc.ijkToRAS[2], sc.ijkToRAS[6], sc.ijkToRAS[10]].map(Math.abs);
+  const stackPlane: Plane = kAxis[2] >= kAxis[1] && kAxis[2] >= kAxis[0]
+    ? "axial"
+    : kAxis[1] >= kAxis[0]
+    ? "coronal"
+    : "sagittal";
+  const planeOrder: Plane[] = stack ? [stackPlane, ...PLANES.filter((p) => p !== stackPlane)] : PLANES;
   // Sampled scalar range: drives the W/L drag gain (Slicer's vtkMRMLWindowLevelWidget scales by
   // the scalar range) and the VR shift-slider span. While streaming it grows with the data.
   let vmin = Infinity, vmax = -Infinity;
@@ -581,7 +659,11 @@ async function main() {
       };
       const pid = (source.sd.split("·")[0] || "").trim() || source.col;
       mk("tl", `${pid}<br>${source.col} · ${res.ct.modality}`);
-      mk("tr", `${res.ct.modality} · ${sc.dims[2]} slices${sc.hasSeg ? " · SEG" : ""}<br>${sc.dims[0]}×${sc.dims[1]}`);
+      mk(
+        "tr",
+        `${res.ct.modality} · ${sc.dims[2]} ${stack ? "images (stack)" : "slices"}` +
+          `${sc.hasSeg ? " · SEG" : ""}<br>${sc.dims[0]}×${sc.dims[1]}`,
+      );
       annEls[p] = { br: mk("br", "") };
     }
     updateAnnWL();
@@ -635,7 +717,9 @@ async function main() {
     const el = document.getElementById("sr-" + p);
     if (!el) return;
     const { index, count, mm } = sliceIndexOf(p);
-    el.textContent = `${index}/${count} · ${mm.toFixed(1)} mm`;
+    // A stack has no true slice position, so it gets the image number alone — printing a
+    // millimetre offset computed from a median spacing would be inventing a coordinate.
+    el.textContent = stack ? `image ${index}/${count}` : `${index}/${count} · ${mm.toFixed(1)} mm`;
   };
 
   const resize = () => {
@@ -798,7 +882,7 @@ async function main() {
     overlay: document.getElementById("viewer")!,
     bar: document.getElementById("bir-bar")!,
     grid: document.getElementById("grid")!,
-    planes: PLANES,
+    planes: planeOrder,
     canvases: cv,
     cellOf: (name) => document.querySelector(`[data-cell="${name}"]`),
     slice: () => sc.slice,
@@ -827,6 +911,9 @@ async function main() {
     // series strip is the navigation). Set window.__SLICERRAD_IDC / __BIR_NO_MEASURE, or ?measure=off.
     disableMeasurements: noMeasure,
     hidePatientBrowser: IDC_MODE,
+    // Not a volume → no reformats and no 3D to lay out: BIR basic, one stack viewport.
+    stackOnly: stack,
+    initialLayout: stack ? "single" : undefined,
     extraTools: [
       {
         id: "idc-share",
@@ -1081,7 +1168,10 @@ async function main() {
     },
   ];
   const chrome = installChrome({
-    controls,
+    // A stack has no 3D view, so the volume-rendering and crop controls would act on nothing:
+    // only the annotation toggle (and the segmentation section, which explains its own absence)
+    // are meaningful.
+    controls: stack ? controls.filter((c) => c.label === "Corner annotations") : controls,
     // The BIR toolbar has its own Help button — suppress sl-chrome's fixed top-left "?" so it
     // doesn't overlap the toolbar (reported obscuring the Select-Patient / nav icons).
     help: false,
@@ -1097,6 +1187,12 @@ async function main() {
       // A DICOM SEG may define overlapping segments; a single-label volume cannot hold them, so
       // the frame decoded last wins. Say so rather than letting the list read as the whole truth.
       note: () => {
+        if (stack) {
+          return res.seg || source.s
+            ? "⚠ Segmentation hidden — this series is a stack of images, not a volume, so a " +
+              "segmentation drawn on the slice positions cannot be registered to it."
+            : null;
+        }
         const ov = sc.segOverlap;
         if (!ov) return null;
         const nameOf = (n: number) => sc.segments.find((s) => s.num === n)?.name ?? `Segment ${n}`;
@@ -1110,12 +1206,18 @@ async function main() {
 
   buildAnnotations();
   applyAnn();
+  // What the headers said about the geometry, before anyone reads the images.
+  if (geomCheck && (geomCheck.stack || geomCheck.notes.length)) {
+    geometryNotice(geomCheck, !!(res.seg || source.s));
+  }
   const info = document.getElementById("info");
   if (info) info.textContent = `${source.sd} · ${res.ct.modality} ${sc.dims.join("×")} · ${source.lic}`;
   resize();
 
   // The loaded case, not a hardcoded one: this reader opens whatever the URL resolves to.
-  const READY = `${source.sd} — scroll to page slices, pick a tool from the toolbar, drag 3D to orbit`;
+  const READY = stack
+    ? `${source.sd} — image stack: scroll to page images, pick a tool from the toolbar`
+    : `${source.sd} — scroll to page slices, pick a tool from the toolbar, drag 3D to orbit`;
   if (!streaming) {
     await mosaic!.done();   // the whole volume was already there when the scene was built
     status(READY);

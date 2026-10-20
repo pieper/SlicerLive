@@ -135,6 +135,105 @@
     return { vol, dims: [nx, ny, nf], ijkToRAS, win: voi.win, lev: voi.lev, iop: gm.iop, ps: gm.ps };
   }
 
+  /** Can these instances be stacked into ONE regular volume, and if not, why not?
+   *
+   *  A DICOM "series" is only a grouping; nothing requires its instances to be slices of one
+   *  evenly-sampled box. Real IDC studies routinely hold series that are two reconstructions
+   *  interleaved (every position appears twice), scouts mixed in with the stack, variable
+   *  spacing, or a tilted gantry (positions step sideways as well as along the normal). About a
+   *  third of IDC CT series are flagged irregular in volume_geometry_index.
+   *
+   *  Resampling any of those onto a regular grid silently invents geometry: the MPR reformats
+   *  comb or shear, the 3D render is a smear, and a segmentation drawn on the real positions
+   *  lands on the wrong anatomy. So the viewer needs to KNOW, and the honest fallback is to show
+   *  the instances as a stack of images and say the reformats are unavailable.
+   *
+   *  Returns { ok, reasons[], keep[], dropped, spacing, duplicates }: `keep` is the largest set
+   *  of instances that at least share an image size + orientation (so they can be stacked at
+   *  all), `spacing` the median positive gap along the normal, and `reasons` plain-language
+   *  descriptions for the viewer to show. `ok` means keep[] IS a regular volume.
+   *
+   *  Tolerances are deliberately loose (0.25 mm or 5% of the spacing): the cost of calling a
+   *  good series irregular is losing MPR on it, while the series this is aimed at are off by a
+   *  whole slice or more. */
+  function diagnoseSlices(slices) {
+    const reasons = [];   // disqualifying: this is not one regular volume
+    const notes = [];     // informational: instances left out of the volume
+    // 1. Stackable at all? Group by image size + orientation + pixel spacing; anything outside
+    //    the largest group cannot share a grid with it (scouts, a different FOV, a second
+    //    orientation). assembleSlices would read them all at the first slice's dimensions.
+    const r3 = (v) => Math.round(Number(v) * 1e3) / 1e3;
+    const groups = new Map();
+    let unusable = 0;
+    for (const ds of slices) {
+      const iop = ds.ImageOrientationPatient, ipp = ds.ImagePositionPatient;
+      if (!iop || iop.length !== 6 || !ipp || !ds.Rows || !ds.Columns || !ds.PixelSpacing) {
+        unusable++;
+        continue;
+      }
+      const sig = `${ds.Rows}x${ds.Columns}|${iop.map(r3).join(",")}|${Array.from(ds.PixelSpacing, r3).join(",")}`;
+      const grp = groups.get(sig) ?? [];
+      if (!grp.length) groups.set(sig, grp);
+      grp.push(ds);
+    }
+    let keep = [];
+    for (const grp of groups.values()) if (grp.length > keep.length) keep = grp;
+    const dropped = slices.length - keep.length;
+    if (!keep.length) {
+      return { ok: false, reasons: ["no instance in the series carries usable image geometry"], notes: [], keep: slices, dropped: 0, spacing: 1, duplicates: 0 };
+    }
+    // Instances left out are a NOTE, not a disqualification: a scout dropped from a 50-slice
+    // chest CT leaves a perfectly good volume, and that is the common case.
+    if (groups.size > 1) {
+      notes.push(`${dropped} of ${slices.length} instances are a different image size or orientation and are not shown`);
+    } else if (unusable) {
+      notes.push(`${unusable} of ${slices.length} instances carry no image geometry and are not shown`);
+    }
+
+    // 2. Is the kept group an evenly-sampled box? Project each position on the plane normal.
+    const iop = keep[0].ImageOrientationPatient.map(Number);
+    const normal = cross(iop.slice(0, 3), iop.slice(3, 6));
+    const pos = keep.map((ds) => ds.ImagePositionPatient.map(Number));
+    const proj = pos.map((p) => dot(p, normal)).sort((a, b) => a - b);
+    const gaps = [];
+    for (let i = 1; i < proj.length; i++) gaps.push(proj[i] - proj[i - 1]);
+    // The median is taken over the NON-zero gaps: in an interleaved two-reconstruction series
+    // half the gaps are 0, and a 0 mm median would call the real spacing "uneven" and leave the
+    // viewer with no usable number for the grid.
+    const real = gaps.filter((g) => g >= 1e-3).sort((a, b) => a - b);
+    const median = real.length ? real[real.length >> 1] : 0;
+    const spacing = median > 1e-4 ? median : (Number(keep[0].SliceThickness) || 1);
+    const tol = Math.max(0.25, 0.05 * Math.abs(spacing));
+    const duplicates = gaps.length - real.length;
+    if (duplicates) {
+      reasons.push(`${duplicates} instances repeat a slice position already in the series ` +
+        `(two reconstructions in one series, or duplicate objects)`);
+    }
+    const uneven = real.filter((g) => Math.abs(g - median) > tol).length;
+    if (uneven) {
+      reasons.push(`slice spacing varies — ${uneven} of ${real.length} gaps differ from the ` +
+        `${median.toFixed(2)} mm median by more than ${tol.toFixed(2)} mm`);
+    }
+    // 3. Do the positions actually march ALONG the normal? If they also drift sideways, the
+    //    stack is sheared relative to the grid a reformat would sample (gantry tilt, table
+    //    motion), and only the axial images themselves are trustworthy.
+    // A sheared stack IS expressible as an affine matrix, but assembleSlices (like the IDC
+    // index) builds k along the plane normal, so the shear would be dropped and the reformats
+    // would be wrong by the drift. Tolerance is a quarter of a slice, so ordinary sub-millimetre
+    // table jitter does not cost a study its MPR.
+    const base = pos[0];
+    let drift = 0;
+    for (const p of pos) {
+      const d = sub(p, base), t = dot(d, normal);
+      drift = Math.max(drift, Math.hypot(d[0] - t * normal[0], d[1] - t * normal[1], d[2] - t * normal[2]));
+    }
+    if (drift > Math.max(1, 0.25 * Math.abs(spacing))) {
+      reasons.push(`slice positions drift ${drift.toFixed(1)} mm across the image plane, not ` +
+        `only along it (gantry tilt or table movement)`);
+    }
+    return { ok: reasons.length === 0, reasons, notes, keep, dropped, spacing, duplicates };
+  }
+
   /** A conventional one-frame-per-instance series -> volume. `slices` are naturalized datasets;
    *  they are sorted here by position along the slice normal. */
   function assembleSlices(slices, opts) {
@@ -142,12 +241,24 @@
     const s0 = slices[0];
     const iop = s0.ImageOrientationPatient.map(Number);
     const rowDir = iop.slice(0, 3), colDir = iop.slice(3, 6), normal = cross(rowDir, colDir);
-    slices.sort((a, b) => dot(a.ImagePositionPatient.map(Number), normal) - dot(b.ImagePositionPatient.map(Number), normal));
+    // STACK mode (opts.stack, set when diagnoseSlices says this is not one regular volume):
+    // order by InstanceNumber, the DICOM display order every PACS pages a stack in, so two
+    // interleaved reconstructions read as one then the other instead of alternating. Position
+    // order would be meaningless here anyway — that is what makes it a stack and not a volume.
+    // The caller's measured spacing (the median gap) keeps the grid from collapsing; the viewer
+    // shows image numbers rather than millimetres, because only the images are trustworthy.
+    if (o.stack) {
+      slices.sort((a, b) => (Number(a.InstanceNumber) || 0) - (Number(b.InstanceNumber) || 0));
+    } else {
+      slices.sort((a, b) => dot(a.ImagePositionPatient.map(Number), normal) - dot(b.ImagePositionPatient.map(Number), normal));
+    }
     const nz = slices.length, ny = Number(s0.Rows), nx = Number(s0.Columns);
     const ps = s0.PixelSpacing.map(Number);
     const p0 = slices[0].ImagePositionPatient.map(Number);
     const p1 = slices[nz - 1].ImagePositionPatient.map(Number);
-    const spacing = nz > 1 ? dot(sub(p1, p0), normal) / (nz - 1) : (Number(s0.SliceThickness) || 1);
+    const spacing = o.stack
+      ? (Number(o.spacing) || Number(s0.SliceThickness) || 1)
+      : nz > 1 ? dot(sub(p1, p0), normal) / (nz - 1) : (Number(s0.SliceThickness) || 1);
     const vol = o.float ? new Float32Array(nx * ny * nz) : new Int16Array(nx * ny * nz);
     for (let k = 0; k < nz; k++) {
       const ds = slices[k];
@@ -172,6 +283,6 @@
   g.DicomVolume = {
     sub, dot, cross, lps2ras, ijkToRASFrom,
     autoWindow, voiOf, pixelsOf, rawBuffer, findPixelData,
-    multiFrameGeometry, assembleMultiFrame, assembleSlices,
+    multiFrameGeometry, assembleMultiFrame, assembleSlices, diagnoseSlices,
   };
 })(self);

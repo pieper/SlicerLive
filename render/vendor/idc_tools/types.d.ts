@@ -84,8 +84,27 @@ export interface LoadHandlers {
     onVOI?: (win: number, lev: number) => void;
     /** every image slice has been posted (`placed` of `expected` instances carried pixels) */
     onVolumeDone?: (placed: number, expected: number, dropped: number, outside: number) => void;
+    /** What the ACTUAL DICOM headers say about the series' geometry: whether its instances make
+     *  one regular volume, and what is wrong when they don't. Fires on the assemble-then-show
+     *  path, before `onCT`, whenever there is something to report. A `stack` series has been
+     *  stacked in InstanceNumber order and has no trustworthy third dimension: show the images,
+     *  not reformats, and no segmentation. */
+    onGeomCheck?: (g: GeomCheck) => void;
     onSegError?: (message: string) => void;
     onSegName?: (name: string) => void;
+}
+/** Verdict on a series' geometry, measured from its own headers (see LoadHandlers.onGeomCheck). */
+export interface GeomCheck {
+    /** true = NOT one regular volume; the volume is a stack of images in InstanceNumber order */
+    stack: boolean;
+    /** why it is not a volume (duplicate positions, uneven spacing, cross-plane drift) */
+    reasons: string[];
+    /** instances left out of the volume (scouts, a second image size) */
+    notes: string[];
+    kept: number;
+    total: number;
+    /** median gap between slice positions, mm */
+    spacing: number;
 }
 export interface LoadResult {
     ct: CTVolume;

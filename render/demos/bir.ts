@@ -96,6 +96,11 @@ export interface BirCfg {
    *  way to persist annotations (e.g. the read-only SlicerRAD-IDC viewer) — everything else in the
    *  BIR tool set stays. */
   disableMeasurements?: boolean;
+  /** The loaded series is a STACK of images, not a volume (its slice positions are duplicated,
+   *  unevenly spaced or drifting), so the MPR reformats and the 3D render would be fabrications.
+   *  Locks the reader to BIR basic — one stack viewport — and disables the layout control and
+   *  the Advanced Mode toggle with a tip that says why. */
+  stackOnly?: boolean;
   /** Hide the "Select Patient" toolbar button and the "Browser (patient/study/series)" layout
    *  option. For study-scoped deployments (SlicerRAD-IDC) that have no patient/study browser to
    *  return to — the series thumbnail strip is the navigation surface instead. */
@@ -542,12 +547,20 @@ export function mountBir(cfg: BirCfg): BirApi {
     "border:1px solid #33507e;border-radius:4px;padding:2px 4px;cursor:pointer;";
   for (
     const [v, label] of [
-      ["fourUp", "Four-Up (MPR + 3D)"],
-      ["twoUp", "2 side-by-side"],
-      ["single", "Single viewport"],
+      // A stack has nothing to lay out: no reformats, no 3D. Offering the multi-viewport
+      // protocols would offer views that would be wrong.
+      ...(cfg.stackOnly ? [["single", "Single stack viewport"]] : [
+        ["fourUp", "Four-Up (MPR + 3D)"],
+        ["twoUp", "2 side-by-side"],
+        ["single", "Single viewport"],
+      ]),
       ...(cfg.hidePatientBrowser ? [] : [["browser", "Browser (patient/study/series)"]]),
     ] as const
   ) layoutSel.add(new Option(label, v));
+  if (cfg.stackOnly) {
+    layoutSel.title = "Layout — this series is an image stack, not a volume: only the stack " +
+      "viewport is available (no reformats or 3D)";
+  }
   layoutSel.addEventListener("change", () => {
     if (layoutSel.value === "browser") cfg.close();
     else setLayout(layoutSel.value as typeof layout);
@@ -810,9 +823,12 @@ export function mountBir(cfg: BirCfg): BirApi {
     disabledTip: "Show Report — no reports available for this patient",
   });
   btn("help", "help", "Help — tool guide and keyboard shortcuts — H / F1", () => showHelp());
-  btn("advanced", "advanced", "Advanced Mode — toggle BIR basic (single stack) vs MPR Four-Up + 3D — F10", () => {
+  btn("advanced", "advanced", "Advanced Mode — toggle BIR basic (single stack) vs MPR Four-Up + 3D — F10", cfg.stackOnly ? undefined : () => {
     setLayout(layout === "single" ? "fourUp" : "single");
-  });
+  }, cfg.stackOnly ? {
+    disabled: true,
+    disabledTip: "Advanced Mode — unavailable: this series is an image stack, not a volume (no MPR or 3D)",
+  } : undefined);
 
   // ---- caller-supplied extra tools (IDC Share / Download) --------------------------------
   if (cfg.extraTools?.length) {
@@ -822,6 +838,9 @@ export function mountBir(cfg: BirCfg): BirApi {
 
   // ---- layouts (hanging protocols) --------------------------------------------------------
   const setLayout = (l: typeof layout) => {
+    // A stack has only the stack viewport, whoever asks (toolbar, F10, the caller's initial
+    // layout, a saved hanging protocol).
+    if (cfg.stackOnly) l = "single";
     layout = l;
     const show: Record<string, boolean> = {};
     const names = [...cfg.planes, "threeD"];

@@ -212,6 +212,17 @@ async function buildVolume(ctKeys, thumbOnly) {
         while (idx < ctKeys.length) {
             const k = ctKeys[idx++];
             const ds = naturalize(await fetchBuf(k));
+            // Same filter as the streaming path: a series prefix can hold a report, a
+            // presentation state or a scout, and none of them is a slice of this volume.
+            // Letting them through used to put a 64x64 localizer into a 512x512 stack.
+            let pd0 = ds.PixelData;
+            if (Array.isArray(pd0))
+                pd0 = pd0[0];
+            if (!pd0 || !ds.ImagePositionPatient || NON_IMAGE_SOP.has(String(ds.SOPClassUID ?? ''))
+                || /LOCALIZER|MIP/i.test([].concat(ds.ImageType ?? []).join('\\'))) {
+                done++;
+                continue;
+            }
             slices.push(ds);
             if (slices.length === 1) {
                 // First slice through: a real image, full size, while the rest streams.
@@ -228,13 +239,29 @@ async function buildVolume(ctKeys, thumbOnly) {
         }
     }
     await Promise.all(Array.from({ length: CONC }, worker));
+    if (!slices.length)
+        throw new Error('this series holds no image slices — its objects are reports, ' +
+            'presentation states, secondary captures or scouts, which this reader cannot display');
     return volumeFromSlices(slices);
 }
 /** Assemble a conventional one-frame-per-instance series (shared core), then window it. */
 function volumeFromSlices(slices) {
     const isPET = MODNAME === 'PET';
-    const v = DV.assembleSlices(slices, { float: isPET });
-    const s0 = slices[0];
+    // Is this series one regular volume at all? Decided from the ACTUAL headers (the only
+    // authority — the index's regularly_spaced_3d_volume flag is a hint and is sometimes wrong
+    // in both directions). When it is not, the instances are stacked in InstanceNumber order
+    // and the viewer is told to show a stack: images only, no reformats, no segmentation.
+    const diag = DV.diagnoseSlices(slices);
+    if (!diag.keep.length || !diag.keep[0].ImageOrientationPatient)
+        throw new Error('this series holds no image slices with usable geometry');
+    const v = DV.assembleSlices(diag.keep, { float: isPET, stack: !diag.ok, spacing: diag.spacing });
+    const s0 = diag.keep[0];
+    if (!diag.ok || diag.notes.length) {
+        post({
+            t: 'geomcheck', stack: !diag.ok, reasons: diag.reasons, notes: diag.notes,
+            kept: diag.keep.length, total: slices.length, spacing: diag.spacing,
+        });
+    }
     let win, lev;
     if (MODNAME === 'CT') {
         win = Number((Array.isArray(s0.WindowWidth) ? s0.WindowWidth[0] : s0.WindowWidth) ?? 400);
@@ -242,7 +269,7 @@ function volumeFromSlices(slices) {
     }
     else
         ({ win, lev } = DV.autoWindow(v.vol, isPET));
-    return { ...v, win, lev, dtype: isPET ? 'float32' : 'int16' };
+    return { ...v, win, lev, dtype: isPET ? 'float32' : 'int16', stack: !diag.ok };
 }
 function buildLabelmap(ds, bits, ct) {
     const [nx, ny, nz] = ct.dims;
@@ -408,6 +435,12 @@ async function fetchSeg(key) {
 }
 // SOP classes that are not image slices but can share a series prefix. Anything here is
 // skipped outright; everything else still has to carry a position and a pixel grid to count.
+//
+// Secondary Capture (…1.1.7) is deliberately NOT here. IDC uses it for both — the fused PET/CT
+// MPR screenshots in acrin_flt_breast carry no position at all, while the TRAM parametric maps
+// in advanced_mri_breast_lesions are ORIGINAL\PRIMARY images with full ImagePositionPatient and
+// orientation. Judging it by its class dropped every instance of the second kind; judging it by
+// whether it carries a position and a pixel grid gets both right.
 const NON_IMAGE_SOP = new Set([
     '1.2.840.10008.5.1.4.1.1.66.4',   // Segmentation
     '1.2.840.10008.5.1.4.1.1.481.3',  // RT Structure Set
@@ -418,7 +451,6 @@ const NON_IMAGE_SOP = new Set([
     '1.2.840.10008.5.1.4.1.1.88.33',  // Comprehensive SR
     '1.2.840.10008.5.1.4.1.1.88.34',  // Comprehensive 3D SR
     '1.2.840.10008.5.1.4.1.1.9.1.1',  // 12-lead ECG
-    '1.2.840.10008.5.1.4.1.1.7',      // Secondary Capture
 ]);
 
 // The handful of attributes needed to place a slice, by tag. Walking for these directly is
@@ -593,7 +625,7 @@ self.onmessage = async (e) => {
         }
         const ct = await buildVolume(ctKeys, thumbOnly);
         post({ t: 'ct', vol: ct.vol, dims: ct.dims, ijkToRAS: ct.ijkToRAS, win: ct.win, lev: ct.lev, dtype: ct.dtype }, [ct.vol.buffer]);
-        if (segKeys && segKeys.length) {
+        if (segKeys && segKeys.length && !ct.stack) {
             prog('fetching SEG…', 0.5);
             await loadSeg(segKeys, ct);
         }
