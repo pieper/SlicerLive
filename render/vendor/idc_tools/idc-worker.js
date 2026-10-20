@@ -279,7 +279,16 @@ function buildLabelmap(ds, bits, ct) {
     // volume's dims reads every frame at the wrong stride and runs off the end of each row.
     const sx = Number(ds.Columns) || nx, sy = Number(ds.Rows) || ny;   // || : malformed SEG -> old behaviour
     const frameBytes = Math.ceil(sx * sy / 8);
-    const lab = new Uint8Array(nx * ny * nz);
+    // DICOM SEG segments may overlap, and one label per voxel cannot hold that: the frame written
+    // last silently wins, and a tumour inside a lung disappears into the lung. So the labelmap is
+    // a STACK of label volumes — segments that overlap go in different layers, and the viewer
+    // composites them (OHIF does the same thing with one representation per layer). Layers are
+    // allocated only as overlap demands, so the ordinary non-overlapping SEG is exactly one.
+    const layers = [new Uint8Array(nx * ny * nz)];
+    const layerAt = (L) => {
+        while (layers.length <= L) layers.push(new Uint8Array(nx * ny * nz));
+        return layers[L];
+    };
     const M = ct.ijkToRAS, inv = invAffine(M);
     const toIJK = (lps) => {
         const r = lps2ras(lps);
@@ -316,6 +325,53 @@ function buildLabelmap(ds, bits, ct) {
         };
     }
     const seenSeg = new Set();
+    const perFrameAll = ds.PerFrameFunctionalGroupsSequence || [];
+    // Which PAIRS of segments overlap? Answered from the frame bitmasks themselves, before any
+    // painting: two segments can only overlap where they both have a frame on the same plane, and
+    // there it is a bitwise AND. That is ~one extra pass over the mask bytes, and it buys a layer
+    // assignment that is PER SEGMENT rather than per voxel — which is what keeps the contours
+    // honest. (Assign per voxel and a segment that is sometimes-overlapped lives in two layers,
+    // so the layer-to-layer transition draws a contour through the middle of it.)
+    const planeFrames = new Map();
+    for (let f = 0; f < perFrameAll.length; f++) {
+        const fg = perFrameAll[f];
+        const sn = Number(fg.SegmentIdentificationSequence?.[0]?.ReferencedSegmentNumber);
+        const ipp = fg.PlanePositionSequence?.[0]?.ImagePositionPatient;
+        if (!sn || !ipp) continue;
+        const key = ipp.map((v) => Number(v).toFixed(3)).join(',');
+        const at = planeFrames.get(key) ?? [];
+        if (!at.length) planeFrames.set(key, at);
+        at.push({ sn, off: f * frameBytes });
+    }
+    const adj = new Map();   // segment -> set of segments it overlaps
+    const link = (a, b) => {
+        if (!adj.has(a)) adj.set(a, new Set());
+        if (!adj.has(b)) adj.set(b, new Set());
+        adj.get(a).add(b); adj.get(b).add(a);
+    };
+    for (const at of planeFrames.values()) {
+        for (let a = 0; a < at.length; a++) {
+            for (let b = a + 1; b < at.length; b++) {
+                if (at[a].sn === at[b].sn) continue;
+                for (let byte = 0; byte < frameBytes; byte++) {
+                    if (bits[at[a].off + byte] & bits[at[b].off + byte]) { link(at[a].sn, at[b].sn); break; }
+                }
+            }
+        }
+    }
+    // Greedy graph colouring: a segment takes the lowest layer none of its overlapping
+    // neighbours already holds. Non-overlapping SEGs colour entirely to layer 0.
+    const MAX_LAYERS = 4;
+    const layerOf = new Map();
+    let crowded = 0;
+    for (const num of Object.keys(names).map(Number).sort((a, b) => a - b)) {
+        const taken = new Set();
+        for (const o of (adj.get(num) ?? [])) if (layerOf.has(o)) taken.add(layerOf.get(o));
+        let L = 0;
+        while (taken.has(L)) L++;
+        if (L >= MAX_LAYERS) { L = MAX_LAYERS - 1; crowded++; }   // more overlap than we draw: topmost wins there
+        layerOf.set(num, L);
+    }
     // DICOM SEG allows segments to overlap, a single-label volume cannot represent it, and the
     // frame written last silently wins. Count what is lost so the viewer can say so rather than
     // letting a reader believe the topmost segment is the whole story.
@@ -348,6 +404,7 @@ function buildLabelmap(ds, bits, ct) {
             post({ t: 'seg', name: names[segNum] || ('Segment ' + segNum) });
         }
         const o = toIJK(ippLps), fb = f * frameBytes;
+        const myLayer = layerOf.get(Number(segNum)) ?? 0;
         for (let row = 0; row < sy; row++) {
             const bi = o[0] + row * diRow[0], bj = o[1] + row * diRow[1], bk = o[2] + row * diRow[2], rb = row * sx;
             for (let col = 0; col < sx; col++) {
@@ -361,12 +418,24 @@ function buildLabelmap(ds, bits, ct) {
                 for (let k = k0; k <= k1; k++)
                     for (let j = j0; j <= j1; j++)
                         for (let i = i0; i <= i1; i++) {
-                            const o = k * nx * ny + j * nx + i, prev = lab[o];
-                            if (prev && prev !== segNum) {
-                                overlapVoxels++;
-                                overlapPairs.add(prev < segNum ? prev + ':' + segNum : segNum + ':' + prev);
+                            const o = k * nx * ny + j * nx + i;
+                            // Count the overlap for the viewer's note, and keep the stack clean:
+                            // this segment's own layer is the normal destination, but if a
+                            // resampling collision put someone else there (possible when the SEG
+                            // grid is coarser than the image grid, where touching SEG voxels can
+                            // land on one image voxel), step up rather than overwrite them.
+                            let covered = false;
+                            for (let L = 0; L < layers.length; L++) {
+                                const prev = layers[L][o];
+                                if (prev && prev !== segNum) {
+                                    if (!covered) overlapVoxels++;
+                                    covered = true;
+                                    overlapPairs.add(prev < segNum ? prev + ':' + segNum : segNum + ':' + prev);
+                                }
                             }
-                            lab[o] = segNum;
+                            let L = myLayer;
+                            while (L < MAX_LAYERS - 1 && layerAt(L)[o] && layerAt(L)[o] !== segNum) L++;
+                            layerAt(L)[o] = segNum;
                         }
             }
         }
@@ -374,8 +443,13 @@ function buildLabelmap(ds, bits, ct) {
             prog(`SEG ${f}/${perFrame.length}`, 0.55 + 0.4 * f / perFrame.length);
     }
     return {
-        lab, colors, names, terminology,
-        overlap: { voxels: overlapVoxels, pairs: [...overlapPairs].map((p) => p.split(':').map(Number)) },
+        lab: layers[0], extra: layers.slice(1), colors, names, terminology,
+        overlap: {
+            voxels: overlapVoxels,
+            pairs: [...overlapPairs].map((p) => p.split(':').map(Number)),
+            layers: layers.length,
+            crowded,
+        },
     };
 }
 function invAffine(m) {
@@ -599,7 +673,10 @@ async function loadSeg(segKeys, ctLike) {
         parsed = { ds, bits: new Uint8Array(pd) };
     }
     const seg = buildLabelmap(parsed.ds, parsed.bits, ctLike);
-    post({ t: 'labelmap', lab: seg.lab, colors: seg.colors, names: seg.names, terminology: seg.terminology, overlap: seg.overlap }, [seg.lab.buffer]);
+    post(
+        { t: 'labelmap', lab: seg.lab, extra: seg.extra, colors: seg.colors, names: seg.names, terminology: seg.terminology, overlap: seg.overlap },
+        [seg.lab.buffer, ...seg.extra.map((e) => e.buffer)],
+    );
 }
 
 self.onmessage = async (e) => {

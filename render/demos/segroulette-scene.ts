@@ -161,6 +161,22 @@ export function buildSegrouletteScene(
     clim, ijkToRAS: ct.ijkToRAS, shade: baseShade,
   });
 
+  /** The label stack: layer 0 plus any overlap layers (one for the ordinary SEG). */
+  const layersOf = (sg: SegLabelmap): Uint8Array[] => [sg.lab, ...(sg.extra ?? [])];
+  /** The stack flattened to one label per voxel, upper layers winning — what the 3D SDF and the
+   *  isotropic resample take, since a distance field holds one material per voxel. The 2D
+   *  overlay does NOT use this: that is the whole point of keeping the layers. */
+  const mergedLabels = (sg: SegLabelmap): Uint8Array => {
+    const stack = layersOf(sg);
+    if (stack.length === 1) return sg.lab;
+    const out = new Uint8Array(sg.lab);
+    for (let l = 1; l < stack.length; l++) {
+      const lay = stack[l];
+      for (let i = 0; i < lay.length; i++) if (lay[i]) out[i] = lay[i];
+    }
+    return out;
+  };
+
   // Pass 1: enumerate renderable segments (skip background/black/whole-grid labels) + build the
   // 256-entry colour palette. No GPU baking yet — we decide iso vs colorized from the count first.
   const segments: { num: number; name: string; color: [number, number, number]; voxels: number }[] = [];
@@ -169,10 +185,13 @@ export function buildSegrouletteScene(
     segments.length = 0;
     palette.fill(0);
     const total = dims[0] * dims[1] * dims[2];
+    const stack = layersOf(sg);
     for (const [num, r, g, b] of sg.colors) {
       if (num === 0 || (r === 0 && g === 0 && b === 0)) continue;   // background / unlabeled
+      // Across the WHOLE stack: an overlapped segment lives in an upper layer, and counting only
+      // layer 0 would call it empty and drop it from the scene entirely.
       let n = 0;
-      for (let i = 0; i < sg.lab.length; i++) if (sg.lab[i] === num) n++;
+      for (const lay of stack) for (let i = 0; i < lay.length; i++) if (lay[i] === num) n++;
       if (!n || n > total * 0.6) continue;                          // empty, or covers most of the grid
       if (num < 256) { palette[num * 4] = r; palette[num * 4 + 1] = g; palette[num * 4 + 2] = b; palette[num * 4 + 3] = 1; }
       segments.push({ num, name: sg.names[num] ?? `Segment ${num}`, color: [r, g, b], voxels: n });
@@ -196,7 +215,63 @@ export function buildSegrouletteScene(
   // tap, so any σ>0 gives background voxels (RGB black) a nonzero alpha: a dark halo around every
   // segment, and an outline pass that edge-detects a smeared field into broken/doubled contours.
   // Slice overlay crisp (σ=0), 3D field smoothed — same split as SegmentationDisplayableManager.
-  let colorTex = seg ? bakeColorizeRGBA(dev, seg.lab, dims, visPalette(), SLICE_OVERLAY_SIGMA) : undefined;
+  //
+  // When the SEG has OVERLAPPING segments it arrives as a stack of label layers instead, and the
+  // overlay switches to the label+palette path: the layers are uploaded stacked along z into one
+  // r8uint texture and the slice shader composites them, so an overlap reads as the blend of its
+  // segments rather than as whichever was decoded last. That path also costs 1 byte per voxel per
+  // layer against the colorized bake's 4, and re-colouring is a 2 KB palette write rather than a
+  // re-bake of the whole volume.
+  let colorTex: GPUTexture | undefined;
+  let labelTex: GPUTexture | undefined;
+  let paletteTex: GPUTexture | undefined;
+  let labelLayers = 0;
+  /** Upload the per-segment colours + opacities the shader reads (palette row 1). */
+  const writePalette = () => {
+    if (!paletteTex) return;
+    const p = visPalette();
+    const row = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      row[i * 4] = Math.round(p[i * 4] * 255);
+      row[i * 4 + 1] = Math.round(p[i * 4 + 1] * 255);
+      row[i * 4 + 2] = Math.round(p[i * 4 + 2] * 255);
+      row[i * 4 + 3] = Math.round(p[i * 4 + 3] * 255);
+    }
+    dev.queue.writeTexture({ texture: paletteTex, origin: [0, 1] }, row, { bytesPerRow: 256 * 4 }, [256, 1]);
+  };
+  /** Build the stacked label texture + palette for a SEG whose segments overlap. */
+  const buildLabelOverlay = (sg: SegLabelmap) => {
+    const stack = layersOf(sg);
+    labelLayers = stack.length;
+    labelTex?.destroy();
+    labelTex = dev.createTexture({
+      size: [dims[0], dims[1], dims[2] * labelLayers], dimension: "3d", format: "r8uint",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    for (let l = 0; l < stack.length; l++) {
+      dev.queue.writeTexture(
+        { texture: labelTex, origin: [0, 0, l * dims[2]] }, stack[l],
+        { bytesPerRow: dims[0], rowsPerImage: dims[1] }, [dims[0], dims[1], dims[2]],
+      );
+    }
+    if (!paletteTex) {
+      paletteTex = dev.createTexture({
+        size: [256, 2], format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+    }
+    writePalette();
+  };
+  /** Point the slice renderer at whichever overlay this SEG needs. */
+  const applyOverlay = () => {
+    slice.setTextures(volumeField.volumeTexture(), colorTex);
+    slice.setLabelOverlay(labelTex ?? null, paletteTex ?? null, labelLayers);
+  };
+  const makeOverlay = (sg: SegLabelmap) => {
+    if ((sg.extra?.length ?? 0) > 0) buildLabelOverlay(sg);
+    else colorTex = bakeColorizeRGBA(dev, sg.lab, dims, visPalette(), SLICE_OVERLAY_SIGMA);
+  };
+  if (seg) makeOverlay(seg);
 
   // 3D segmentation = ONE unified colorized signed-distance-field surface (algorithms/ + logic/): the
   // whole labelmap (downsampled to the SDF cap) → JFA-SDF → a single SegmentField. Per-segment colour
@@ -210,7 +285,7 @@ export function buildSegrouletteScene(
     // isotropic or a near-slice-parallel surface falls between slices and the SDF shell misses it →
     // holes (user report: lung/liver tops vanish when rotated). sdfMaxVoxels caps memory so a weaker
     // device coarsens instead of OOMing; `coarsened` → we surfaced fewer voxels than ideal.
-    const cap = resampleIsotropic(sg.lab, dims, ct.ijkToRAS, opts.sdfMaxDim ?? SDF_MAX_DIM, opts.sdfMaxVoxels);
+    const cap = resampleIsotropic(mergedLabels(sg), dims, ct.ijkToRAS, opts.sdfMaxDim ?? SDF_MAX_DIM, opts.sdfMaxVoxels);
     if (cap.coarsened) console.warn(`SEGRoulette: SDF grid coarsened to fit the device memory budget (${cap.dims.join("×")}, ${cap.vox.toFixed(2)}mm) — a remote render server would allow full resolution.`);
     editable = new EditableSegmentation(dev, cap.dims, { ijkToRAS: cap.ijkToRAS });
     // Real data often has EMBEDDED/adjacent labels (tumor in liver, cyst clusters): auto-pick the
@@ -254,6 +329,7 @@ export function buildSegrouletteScene(
   // the MPR overlay. Cheap enough for an occasional toggle.
   const rebakeColorized = () => {
     if (!seg) return;
+    if (labelTex) { writePalette(); return; }       // label path: re-colouring is a palette write
     const nt = bakeColorizeRGBA(dev, seg.lab, dims, visPalette(), SLICE_OVERLAY_SIGMA);
     const old = colorTex;
     colorTex = nt;
@@ -263,7 +339,7 @@ export function buildSegrouletteScene(
 
   const slice = new SliceRenderer(gpu, format);
   slice.setVolume(volumeField.patientToTexture(), rasLo, rasHi);
-  slice.setTextures(volumeField.volumeTexture(), colorTex);
+  applyOverlay();
   slice.setWindowLevel(ct.win, ct.lev);
   slice.setOverlayOpacity(seg ? 0.5 : 0);
 
@@ -283,8 +359,9 @@ export function buildSegrouletteScene(
       enumerateSegments(sg);
       if (!segments.length) return;             // nothing renderable (empty or whole-grid labels)
       colorTex?.destroy();
-      colorTex = bakeColorizeRGBA(dev, sg.lab, dims, visPalette(), SLICE_OVERLAY_SIGMA);
-      slice.setTextures(volumeField.volumeTexture(), colorTex);
+      colorTex = undefined;
+      makeOverlay(sg);
+      applyOverlay();
       buildSdf(sg);
       hasSeg = !!segLogic;
       showSeg = hasSeg && segLayerOpacity > 0.001;

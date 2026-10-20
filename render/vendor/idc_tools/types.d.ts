@@ -16,7 +16,12 @@ export interface CTVolume {
 }
 /** A segmentation labelmap resampled onto the CT grid (value = DICOM SegmentNumber). */
 export interface SegLabelmap {
+    /** Layer 0 of the label stack (the whole labelmap when nothing overlaps). */
     lab: Uint8Array;
+    /** Layers 1..n of the stack, same grid as `lab`. DICOM SEG segments may overlap and one
+     *  label per voxel cannot hold that, so overlapping segments are decoded into separate
+     *  layers and composited by the renderer. Empty for the ordinary non-overlapping SEG. */
+    extra?: Uint8Array[];
     /** [segmentNumber, r, g, b] with r,g,b in 0..1 */
     colors: [number, number, number, number][];
     names: Record<number, string>;
@@ -25,7 +30,14 @@ export interface SegLabelmap {
     /** What a single-label volume could not represent: DICOM SEG allows segments to overlap,
      *  and the frame written last wins. `voxels` counts the overwritten voxels, `pairs` names
      *  the segment numbers that collided. */
-    overlap?: { voxels: number; pairs: [number, number][] };
+    overlap?: {
+        voxels: number;
+        pairs: [number, number][];
+        /** How many label layers the stack needed (1 = no overlap). */
+        layers?: number;
+        /** Segments that wanted a layer past the cap; where they overlap, the topmost wins. */
+        crowded?: number;
+    };
 }
 export interface CodedEntry { scheme: string; value: string; meaning: string }
 export interface SegmentTerminology {

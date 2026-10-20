@@ -591,6 +591,10 @@ async function main() {
   // the finished UI (a redraw, the segmentation controls) are filled in later.
   /** The real middle slice, kept for the series-panel tile (the placeholder's is a checkerboard). */
   let midSlice: Float32Array | null = null;
+  /** The segmentation the scene is showing — res.seg on the assemble-then-show path, or the one
+   *  that streamed in afterwards. The debug hooks read this, not res.seg, which is empty while
+   *  streaming. */
+  let shownSeg: SegLabelmap | null = res.seg ?? null;
   let scheduleRedraw: () => void = () => {};   // replaced once there are views to redraw
   let segAttached = false;
   let segRefreshUi: () => void = () => {};     // replaced once the chrome/annotations exist
@@ -604,6 +608,7 @@ async function main() {
   };
   const takeSeg = (sg: SegLabelmap) => {
     // Decoded alongside the image slices, so it usually lands before the last one.
+    shownSeg = sg;
     sc.attachSegmentation(sg);
     segAttached = true;
     segRefreshUi();
@@ -954,6 +959,36 @@ async function main() {
       draw3d();
     },
     roiState: () => ({ visible: sc.roiVisible(), handles: sc.roi.handleList().length }),
+    // Segmentation introspection for the harnesses: what decoded, how it was layered, and where
+    // a given segment is (so a test can put a view on it).
+    rawSeg: () => shownSeg,
+    segInfo: () => ({
+      layers: 1 + (shownSeg?.extra?.length ?? 0),
+      overlap: sc.segOverlap,
+      segments: sc.segments.map((x) => ({ num: x.num, name: x.name, voxels: x.voxels })),
+    }),
+    segCentroid: (num: number): Vec3 | null => {
+      const stack = [shownSeg?.lab, ...(shownSeg?.extra ?? [])].filter(Boolean) as Uint8Array[];
+      const [nx, ny] = sc.dims;
+      let n = 0, si = 0, sj = 0, sk = 0;
+      for (const lay of stack) {
+        for (let o = 0; o < lay.length; o++) {
+          if (lay[o] !== num) continue;
+          const k = (o / (nx * ny)) | 0, j = ((o - k * nx * ny) / nx) | 0, i = o - k * nx * ny - j * nx;
+          si += i; sj += j; sk += k; n++;
+        }
+      }
+      if (!n) return null;
+      const M = sc.ijkToRAS, i = si / n, j = sj / n, k = sk / n;
+      return [
+        M[0] * i + M[1] * j + M[2] * k + M[3],
+        M[4] * i + M[5] * j + M[6] * k + M[7],
+        M[8] * i + M[9] * j + M[10] * k + M[11],
+      ];
+    },
+    jumpTo: (ras: Vec3) => jumpAll(ras),
+    rasToAxialView: (ras: Vec3, aspectWH: number) => sc.slice.rasToView("axial", off.axial, ras, aspectWH),
+    ijkToRAS: () => sc.ijkToRAS,
     setSegOpacity: (o: number) => {
       sc.setSegOpacity(o);
       applySegOverlay();
@@ -1214,8 +1249,10 @@ async function main() {
         drawAll();
       },
       enabled: () => sc.hasSeg,
-      // A DICOM SEG may define overlapping segments; a single-label volume cannot hold them, so
-      // the frame decoded last wins. Say so rather than letting the list read as the whole truth.
+      // A DICOM SEG may define overlapping segments. They are decoded into separate label
+      // layers and composited, so the shared region reads as the blend of its segments and
+      // comes out more opaque than either alone — but a reader should still be told that the
+      // region belongs to two segments rather than inferring one odd-coloured one.
       note: () => {
         if (stack) {
           return res.seg || source.s
@@ -1228,8 +1265,12 @@ async function main() {
         const nameOf = (n: number) => sc.segments.find((s) => s.num === n)?.name ?? `Segment ${n}`;
         const pairs = ov.pairs.slice(0, 3).map(([a, b]) => `${nameOf(a)} / ${nameOf(b)}`).join(", ");
         const more = ov.pairs.length > 3 ? ` and ${ov.pairs.length - 3} more` : "";
-        return `⚠ Segments overlap — showing the topmost. ${ov.voxels.toLocaleString()} voxels ` +
-          `are claimed by two segments (${pairs}${more}).`;
+        const crowded = ov.crowded
+          ? ` ${ov.crowded} segment(s) overlap more deeply than the four layers drawn; there the topmost wins.`
+          : "";
+        return `⚠ Segments overlap — the shared regions are blended and drawn more opaque. ` +
+          `${ov.voxels.toLocaleString()} voxels are claimed by more than one segment ` +
+          `(${pairs}${more}).${crowded}`;
       },
     },
   });
