@@ -581,6 +581,7 @@ async function main() {
   if (!streaming) sampleRange(res.ct.vol);
   const dataRange = (): [number, number] => [vmin, vmax];
   sc.setVolumeOpacity(0.5); // 3D volume rendering starts semi-transparent (composites with SEG)
+  sc.setSegOpacity(0.5);    // and the segmentation fill starts at half, so it tints rather than hides
 
   // ---- take delivery of slices IMMEDIATELY ---------------------------------------------------
   // The moment the scene exists its texture can be written, and that is the whole point of the
