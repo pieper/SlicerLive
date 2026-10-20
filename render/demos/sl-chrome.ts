@@ -31,6 +31,17 @@ export interface VizControl {
     set: (v: number) => void;
     format?: (v: number) => string;
   };
+  /** A chip of DISCRETE steps, 0..max, with the same feel as the opacity chip: a click advances
+   *  one step and wraps to 0 past the top, a sideways drag sets it directly. 0 is a real state
+   *  (off), so the control can be clicked or dragged all the way out. For a setting with a few
+   *  meaningful values rather than a continuum — e.g. a contour width in pixels. */
+  steps?: {
+    max: number;
+    get: () => number;
+    set: (v: number) => void;
+    /** Chip label for a value; default is the number. Give 0 a word ("off"), not "0". */
+    format?: (v: number) => string;
+  };
   /** A value pill that opens a demo-supplied dialog (e.g. the VR-preset thumbnail menu). The row
    *  shows text() on the right; clicking runs run(). */
   button?: { text: () => string; run: () => void };
@@ -257,6 +268,59 @@ export function installChrome(opts: ChromeOpts): Chrome {
     box.addEventListener("pointercancel", end);
     return paint;
   };
+  // Discrete-step chip (VizControl.steps): the opacity chip's gesture vocabulary over whole
+  // numbers. The fill tracks v/max so the chip reads at a glance, the label spells the value
+  // out, and 0 is a state you can land on rather than a disabled control.
+  const attachSteps = (
+    box: HTMLElement,
+    max: number,
+    get: () => number,
+    set: (v: number) => void,
+    fmt: (v: number) => string,
+    color: [number, number, number],
+    disabled: () => boolean,
+    onChange: () => void,
+  ) => {
+    box.style.cursor = "ew-resize";
+    box.title = `Click to step up (wraps past ${max}) · Drag sideways to set`;
+    const c = `rgb(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)})`;
+    const paint = () => {
+      const v = Math.max(0, Math.min(max, Math.round(get())));
+      box.style.opacity = v === 0 ? "0.75" : "1";
+      box.innerHTML =
+        `<span style="position:absolute;left:0;top:0;bottom:0;width:${(v / max) * 100}%;background:${c};opacity:.9"></span>` +
+        `<span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;` +
+        `font:700 10px -apple-system,system-ui,sans-serif;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.75)">${fmt(v)}</span>`;
+    };
+    paint();
+    const clamp = (v: number) => Math.max(0, Math.min(max, Math.round(v)));
+    let startX = 0, startV = 0, dragged = false, id = -1;
+    box.addEventListener("pointerdown", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (disabled()) return;
+      startX = e.clientX; startV = get(); dragged = false; id = e.pointerId;
+      try { box.setPointerCapture(id); } catch { /* ignore */ }
+    });
+    box.addEventListener("pointermove", (e) => {
+      if (id < 0) return;
+      const dx = e.clientX - startX;
+      if (Math.abs(dx) > 3) dragged = true;
+      if (dragged) {
+        const v = clamp(startV + dx / (130 / max));   // ~130px sweeps the whole range, as the opacity chip does
+        if (v !== get()) { set(v); onChange(); }
+        paint();
+      }
+    });
+    const end = () => {
+      if (id < 0) return;
+      if (!dragged) { set((clamp(get()) + 1) % (max + 1)); paint(); onChange(); }   // click → step, wrapping to 0
+      try { box.releasePointerCapture(id); } catch { /* ignore */ }
+      id = -1;
+    };
+    box.addEventListener("pointerup", end);
+    box.addEventListener("pointercancel", end);
+    return paint;
+  };
   const OPBOX_CSS = "width:44px;height:18px;border-radius:6px;position:relative;overflow:hidden;flex:0 0 auto;" +
     "background:rgba(255,255,255,.14);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);touch-action:none;";
 
@@ -349,6 +413,19 @@ export function installChrome(opts: ChromeOpts): Chrome {
         row.appendChild(pill);
         pop.appendChild(row);
         rows.push({ c, row, repaint: () => { pill.textContent = c.button!.text(); } });
+        continue;
+      }
+      if (c.steps) {   // discrete-step chip (click steps + wraps, drag sets)
+        const box = document.createElement("span");
+        box.style.cssText = OPBOX_CSS;
+        row.appendChild(box);
+        const paint = attachSteps(
+          box, c.steps.max, c.steps.get, (v) => c.steps!.set(v),
+          c.steps.format ?? ((v) => String(v)), c.color ?? [0.62, 0.9, 1.0],
+          () => c.disabled?.() ?? false, () => opts.onChange?.(),
+        );
+        rows.push({ c, row, repaint: paint });
+        pop.appendChild(row);
         continue;
       }
       if (c.getOpacity && c.setOpacity) {   // unified opacity control (tri-state click + drag slider)

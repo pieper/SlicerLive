@@ -621,21 +621,20 @@ async function main() {
   earlySeg = null;
 
   // SlicerLive display state (toggled from the badge popup, below).
-  // Outline is the DEFAULT 2D segmentation display: a contour hides none of the anatomy it
-  // bounds, which is how a segmentation is read over images. It is a MODE, not a layer on top
-  // of the fill — SlicerRAD-IDC#6 asked for a way to see the outline alone, and with both drawn
-  // at once there was none.
-  let sliceOutline = true;
-  let outlineWidth = 2;     // contour width, screen pixels (1-4)
+  // The 2D segmentation draws as a translucent FILL plus a crisp OUTLINE, and the two are
+  // independent: the "Segmentation" opacity sets the fill (and 0% leaves the contours alone),
+  // while the outline's own control sets its width in pixels with 0 = no contour. That is what
+  // makes every combination reachable — fill only, outline only (SlicerRAD-IDC#6), both, or
+  // neither (SlicerRAD-IDC#1) — from two controls that each have an off state.
+  let outlineWidth = 2;     // contour width, screen pixels; 0 = no outline
   /** Both 2D overlay opacities, from the ONE master "Segmentation" opacity and the outline
    *  switch. The outline has to be gated by the master too: at 0% with the switch on, the
    *  segmentation was still drawing its contours, so there was no way to turn it off — which
    *  is the state SlicerRAD-IDC#1 was reported in. */
   const applySegOverlay = () => {
-    const master = sc.segOpacity();
-    sc.slice.setOverlayOpacity(sliceOutline ? 0 : master * SEG_FILL);
-    sc.slice.setOutlineOpacity(sliceOutline ? master : 0);
-    sc.slice.setOutlineWidth(outlineWidth);
+    sc.slice.setOverlayOpacity(sc.segOpacity() * SEG_FILL);   // fill: the Segmentation opacity
+    sc.slice.setOutlineOpacity(outlineWidth > 0 ? 1 : 0);     // outline: its own control, full strength
+    sc.slice.setOutlineWidth(Math.max(1, outlineWidth));
   };
   let roiEnabled = false, roiVisible = false, roiFirstEnable = true; // 3D volume-render crop box
   let annOn = true; // DICOM corner annotations (IHE BIR §4.16.4.2.2.5.8 "official radiology look")
@@ -1142,35 +1141,23 @@ async function main() {
       disabled: () => !sc.hasSeg,
       color: [0.62, 0.9, 1.0],
     },
-    // How the segmentation draws on the MPR planes: outline (default) or filled regions. Either
-    // way the "Segmentation" opacity above scales it, and 0% is off.
+    // Outline width on the MPR planes, 0-4 px: click the chip to step up (4 wraps back to off),
+    // or drag it sideways. Independent of the Segmentation opacity above, which is the FILL —
+    // so the contours stay crisp over a dialled-down fill, or stand alone at 0%.
     {
       label: "Segmentation outline",
-      get: () => sliceOutline,
-      set: (on) => {
-        sliceOutline = on;
-        applySegOverlay();
-        for (const p of PLANES) drawSlice(p);
-        xhair?.redraw();
-      },
-      disabled: () => !sc.hasSeg,
-    },
-    {
-      label: "Outline width",
-      slider: {
-        min: 1,
+      steps: {
         max: 4,
-        step: 1,
         get: () => outlineWidth,
         set: (v) => {
-          outlineWidth = Math.round(v);
+          outlineWidth = v;
           applySegOverlay();
           for (const p of PLANES) drawSlice(p);
           xhair?.redraw();
         },
-        format: (v) => `${Math.round(v)} px`,
+        format: (v) => (v ? `${v} px` : "off"),
       },
-      disabled: () => !sc.hasSeg || !sliceOutline,
+      disabled: () => !sc.hasSeg,
     },
     // 3D volume-render crop: enabling it reveals the ROI box the first time (Slicer behaviour).
     {
