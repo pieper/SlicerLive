@@ -48,6 +48,11 @@ export interface StripItem {
   seriesUID: string;
   lines: string[]; // decoration: date · modality · description · count (spec 5.3)
   current: boolean;
+  /** Modality, for the badge on the row. Falls back to lines[0]. */
+  modality?: string;
+  /** The series' tile, or null when there is no image to show (a report, a presentation state,
+   *  a segmentation object). A null tile makes the row COMPACT — modality badge + text, no
+   *  picture box — rather than a square of placeholder. */
   thumb: () => Promise<Blob | null>;
   open: () => void | Promise<void>;
 }
@@ -245,8 +250,14 @@ const STYLE = `
 #bir-strip .item:hover { border-color:#33507e; }
 #bir-strip .item.current { border-color:#2b6cb0; box-shadow:0 0 0 1px #2b6cb0; }
 #bir-strip img { width:100%; aspect-ratio:1; object-fit:contain; background:#000; display:block; }
+#bir-strip .item.no-thumb img { display:none; }
 #bir-strip .cap { font:10px -apple-system,system-ui,sans-serif; color:#9fb3d0; padding:3px 6px;
-  line-height:1.35; }
+  line-height:1.35; display:flex; gap:5px; align-items:baseline; }
+#bir-strip .item.no-thumb .cap { padding:5px 6px; }
+#bir-strip .cap .mod { flex:0 0 auto; font-weight:700; color:#cfe0f5; background:#1b2740;
+  border-radius:3px; padding:0 4px; }
+#bir-strip .cap .txt { min-width:0; overflow:hidden; text-overflow:ellipsis;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
 .bir-cell-selected { outline:1px solid #2b6cb0; outline-offset:-1px; }
 .srv-grid.ann-none .srv-orient, .srv-grid.ann-none .srv-slice-readout,
 .srv-grid.ann-min .srv-slice-readout { display:none; }
@@ -876,15 +887,25 @@ export function mountBir(cfg: BirCfg): BirApi {
       item.title = it.lines.join(" · ") + " — click to load";
       const img = document.createElement("img");
       img.alt = "";
+      // A series with no image to show (SR, SEG, RTSTRUCT, presentation state) collapses to a
+      // text row the height of its own caption, the way OHIF lists them — a square of
+      // placeholder for each one pushes the series that DO have pictures off the screen.
       const loadThumb = () =>
         it.thumb().then((b) => {
+          item.classList.toggle("no-thumb", !b);
           if (b) img.src = URL.createObjectURL(b);
-        }).catch(() => {});
+        }).catch(() => item.classList.add("no-thumb"));
       loadThumb();
       if (it.current) refreshCurrentThumb = loadThumb;
       const cap = document.createElement("div");
       cap.className = "cap";
-      cap.textContent = it.lines.join(" · ");
+      const mod = document.createElement("span");
+      mod.className = "mod";
+      mod.textContent = it.modality ?? it.lines[0] ?? "";
+      const txt = document.createElement("span");
+      txt.className = "txt";
+      txt.textContent = (it.modality ? it.lines : it.lines.slice(1)).join(" · ");
+      cap.append(mod, txt);
       item.append(img, cap);
       // Single click loads the series (OHIF-style); ignore a click on the already-open one.
       item.addEventListener("click", () => { if (!it.current) it.open(); });

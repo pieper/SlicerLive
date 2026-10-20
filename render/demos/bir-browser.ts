@@ -834,13 +834,6 @@ async function main() {
     const s = Math.min(THUMB / w, THUMB / h); cx.drawImage(c0, (THUMB - w * s) / 2, (THUMB - h * s) / 2, w * s, h * s);
     return new Promise((res) => c.toBlob(res, "image/png"));
   };
-  const placeholderThumb = (modality: string): Promise<Blob | null> => {
-    const c = document.createElement("canvas"); c.width = THUMB; c.height = THUMB;
-    const cx = c.getContext("2d")!; cx.fillStyle = "#0b0e16"; cx.fillRect(0, 0, THUMB, THUMB);
-    cx.fillStyle = "#3d5a86"; cx.font = "700 26px -apple-system,system-ui,sans-serif";
-    cx.textAlign = "center"; cx.textBaseline = "middle"; cx.fillText(modality || "?", THUMB / 2, THUMB / 2);
-    return new Promise((res) => c.toBlob(res, "image/png"));
-  };
   const currentSeriesThumb = (): Promise<Blob | null> => {
     const { dims, win, lev } = res.ct as { dims: [number, number, number]; win: number; lev: number };
     const [w, h, d] = dims, z = Math.floor(d / 2);
@@ -865,24 +858,33 @@ async function main() {
     try {
       // deno-lint-ignore no-explicit-any
       const rows: any[] = await readStudyRows(source.st, setLoad);
-      rows.sort((a, b) => ((parseInt(a.SeriesNumber) || 1e9) - (parseInt(b.SeriesNumber) || 1e9)) || (Number(b.instanceCount) - Number(a.instanceCount)));
+      // SeriesNumber 0 is a NUMBER, not a missing value: `parseInt("0") || 1e9` sent every
+      // series numbered 0 — which is what IDC's CT in nsclc_radiomics ...27873 is — to the
+      // bottom of the panel, under eleven reports.
+      // deno-lint-ignore no-explicit-any
+      const seriesNo = (r: any) => { const n = parseInt(r.SeriesNumber); return Number.isFinite(n) ? n : 1e9; };
+      rows.sort((a, b) => (seriesNo(a) - seriesNo(b)) || (Number(b.instanceCount) - Number(a.instanceCount)));
       seriesStrip = rows.map((r) => {
         const mod = String(r.Modality).toUpperCase();
         const isCurrent = String(r.crdc_series_uuid) === source.c;
         const desc = String(r.SeriesDescription ?? "").trim();
         return {
           seriesUID: String(r.SeriesInstanceUID),
-          lines: [mod, ...(desc ? [desc] : []), `${Number(r.instanceCount) || 0} img`],
+          modality: mod,
+          lines: [...(desc ? [desc] : []), `${Number(r.instanceCount) || 0} img`],
           current: isCurrent,
+          // null = no picture: the row collapses to its text instead of showing a square that
+          // says "SR". Reports, segmentation objects and presentation states are most of a
+          // study's series list, and squares of placeholder crowd out the images.
           thumb: async (): Promise<Blob | null> => {
             if (isCurrent) return currentSeriesThumb();
-            if (!IMG_MODS.has(mod) || !r.crdc_series_uuid) return placeholderThumb(mod);
+            if (!IMG_MODS.has(mod) || !r.crdc_series_uuid) return null;
             await acquire();
             try {
               const t = await loadThumbnail(String(r.crdc_series_uuid), String(r.aws_bucket), mod);
-              return t ? sliceToThumb(t) : placeholderThumb(mod);
+              return t ? sliceToThumb(t) : null;
             } catch {
-              return placeholderThumb(mod);
+              return null;
             } finally {
               release();
             }
