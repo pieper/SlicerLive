@@ -406,31 +406,196 @@ async function fetchSeg(key) {
     }
     return { ds, bits };
 }
+// SOP classes that are not image slices but can share a series prefix. Anything here is
+// skipped outright; everything else still has to carry a position and a pixel grid to count.
+const NON_IMAGE_SOP = new Set([
+    '1.2.840.10008.5.1.4.1.1.66.4',   // Segmentation
+    '1.2.840.10008.5.1.4.1.1.481.3',  // RT Structure Set
+    '1.2.840.10008.5.1.4.1.1.481.2',  // RT Dose
+    '1.2.840.10008.5.1.4.1.1.11.1',   // Grayscale Softcopy Presentation State
+    '1.2.840.10008.5.1.4.1.1.88.11',  // Basic Text SR
+    '1.2.840.10008.5.1.4.1.1.88.22',  // Enhanced SR
+    '1.2.840.10008.5.1.4.1.1.88.33',  // Comprehensive SR
+    '1.2.840.10008.5.1.4.1.1.88.34',  // Comprehensive 3D SR
+    '1.2.840.10008.5.1.4.1.1.9.1.1',  // 12-lead ECG
+    '1.2.840.10008.5.1.4.1.1.7',      // Secondary Capture
+]);
+
+// The handful of attributes needed to place a slice, by tag. Walking for these directly is
+// ~100x cheaper than naturalizing the header with dcmjs, and the metadata pass does it once per
+// instance — with a full parse the pass is CPU-bound and takes longer than the pixels do.
+/** The 33rd and 66th percentile of a slice, taken over the pixels that are actually VISIBLE in
+ *  the window — the two greys the placeholder checkerboard uses.
+ *
+ *  Over the raw pixels these would both be air on most CT frames: more than half of a 512x512
+ *  abdomen is outside the patient, so the 66th percentile is still -1000 and the checkerboard
+ *  comes out black on black. Restricting the sample to the window is what makes the stand-in
+ *  sit in the same range as what the reader will actually see. */
+function percentiles(px, win, lev) {
+    const stride = Math.max(1, Math.floor(px.length / 20000));
+    const lo = lev - win / 2, hi = lev + win / 2;
+    const samp = [];
+    for (let i = 0; i < px.length; i += stride) {
+        const v = px[i];
+        if (v > lo && v < hi) samp.push(v);
+    }
+    if (samp.length < 64) return [lev - win / 4, lev + win / 4];   // nothing in the window
+    samp.sort((a, b) => a - b);
+    const at = (f) => samp[Math.min(samp.length - 1, Math.floor(f * samp.length))];
+    return [at(0.33), at(0.66)];
+}
+
+/** Decode a conventional series STRAIGHT TO ITS SLICE INDEX, posting each slice as it lands.
+ *
+ *  The caller supplies the volume's geometry (origin, orientation, slice spacing, dims) — which
+ *  it got from the IDC index, so no header pre-pass is needed here. Each instance's own
+ *  ImagePositionPatient then says which k it is, and the slice can go straight out instead of
+ *  being held until the whole series is assembled. The worker never holds the volume at all.
+ */
+async function streamVolume(ctKeys, segKeys, geom) {
+    const [nx, ny, nz] = geom.dims;
+    const rowDir = geom.iop.slice(0, 3), colDir = geom.iop.slice(3, 6);
+    const n = cross(rowDir, colDir);
+    const base = dot(geom.origin, n), sp = geom.spacing || 1;
+    post({ t: 'ctinfo', count: ctKeys.length });
+
+    // The SEG is one object and the geometry is already known, so it decodes ALONGSIDE the
+    // slices rather than after them — usually ready long before the last slice.
+    const segJob = (segKeys && segKeys.length)
+        ? loadSeg(segKeys, { dims: geom.dims, ijkToRAS: geom.ijkToRAS }).catch((err) => post({ t: 'segerror', error: String(err) }))
+        : null;
+
+    let placed = 0, done = 0, dropped = 0, outside = 0, idx = 0, announced = false;
+    let tried = 0, bestSpread = -1, best = { p33: 0, p66: 1, voi: { win: 0, lev: 0 } };
+    const CONC = 8;
+    await Promise.all(Array.from({ length: CONC }, async () => {
+        while (idx < ctKeys.length) {
+            const key = ctKeys[idx++];
+            let ds;
+            try {
+                ds = naturalize(await fetchBuf(key));
+            }
+            catch (err) {
+                done++;
+                continue;                      // one bad instance must not sink the series
+            }
+            let pd = ds.PixelData;
+            if (Array.isArray(pd))
+                pd = pd[0];
+            const ipp = ds.ImagePositionPatient && ds.ImagePositionPatient.map(Number);
+            const sop = String(ds.SOPClassUID ?? '');
+            const localizer = /LOCALIZER|MIP/i.test([].concat(ds.ImageType ?? []).join('\\'));
+            // A series prefix can hold things that are not slices of this volume — a report, a
+            // presentation state, a scout. They are counted in instanceCount but must not be
+            // placed, and must not be mistaken for a slice that failed.
+            if (!pd || !ipp || localizer || NON_IMAGE_SOP.has(sop)) {
+                dropped++;
+                done++;
+                continue;
+            }
+            const z = Math.round((dot(ipp, n) - base) / sp);
+            if (z >= 0 && z < nz) {
+                const src = DV.pixelsOf(pd, Number(ds.BitsAllocated) || 16, ds.PixelRepresentation === 1);
+                const slope = Number(ds.RescaleSlope ?? 1), inter = Number(ds.RescaleIntercept ?? 0);
+                const px = new Float32Array(nx * ny);
+                const len = Math.min(px.length, src.length);
+                for (let i = 0; i < len; i++) px[i] = src[i] * slope + inter;
+                if (!announced) {
+                    // The placeholder's two greys come from a real slice of THIS study, so the
+                    // stand-in sits in the same intensity range as the data. In bucket order the
+                    // first slice to arrive is as likely to be an end slice of nothing but air,
+                    // whose percentiles are both air and whose checkerboard would be black on
+                    // black — so take the first slice that actually has some contrast in it, and
+                    // settle for the best seen so far if a few in a row do not.
+                    const voi = voiOfSlice(ds);
+                    const [p33, p66] = percentiles(px, voi.win || 400, voi.lev || 40);
+                    const spread = p66 - p33;
+                    if (spread > bestSpread) bestSpread = spread, best = { p33, p66, voi };
+                    tried++;
+                    if (spread >= (voi.win || 400) * 0.05 || tried >= 12) {
+                        announced = true;
+                        post({ t: 'geometry', ...geom, ...best.voi, p33: best.p33, p66: best.p66 });
+                    }
+                }
+                post({ t: 'slice', k: z, px: px.buffer }, [px.buffer]);
+                placed++;
+            }
+            else {
+                outside++;                     // the index geometry does not describe this slice
+            }
+            const th = makeThumb(ds);
+            if (th)
+                post({ t: 'thumb', n: Number(ds.InstanceNumber) || done + 1, w: th.w, h: th.h, rgba: th.rgba.buffer }, [th.rgba.buffer]);
+            done++;
+            if (done % 8 === 0)
+                prog(`${MODNAME} ${done}/${ctKeys.length}`, 0.05 + 0.8 * done / ctKeys.length);
+        }
+    }));
+    if (!announced && placed) {                // every slice was flat; build from the best seen
+        announced = true;
+        post({ t: 'geometry', ...geom, ...best.voi, p33: best.p33, p66: best.p66 });
+    }
+    if (!announced) return null;               // nothing placeable: caller falls back
+    if (segJob) {
+        prog('decoding SEG…', 0.92);
+        await segJob;
+    }
+    return { placed, expected: nz, dropped, outside };
+}
+
+/** Window/level a viewer should start from: the slice's own VOI for CT, else let the main
+ *  thread auto-window once it has data. */
+function voiOfSlice(ds) {
+    const w = Array.isArray(ds.WindowWidth) ? ds.WindowWidth[0] : ds.WindowWidth;
+    const l = Array.isArray(ds.WindowCenter) ? ds.WindowCenter[0] : ds.WindowCenter;
+    return { win: Number(w) || 0, lev: Number(l ?? 0) || 0 };
+}
+
+/** Fetch + decode the SEG and post it. Separated so it can run CONCURRENTLY with the image
+ *  slices: the segmentation is one object, so it is often ready long before the last slice. */
+async function loadSeg(segKeys, ctLike) {
+    let parsed;
+    try {
+        parsed = await fetchSeg(segKeys[0]);
+    }
+    catch (err) {
+        const buf = await fetchBuf(segKeys[0], SEG_S3);
+        const ds = naturalize(buf);
+        let pd = ds.PixelData;
+        if (Array.isArray(pd))
+            pd = pd[0];
+        parsed = { ds, bits: new Uint8Array(pd) };
+    }
+    const seg = buildLabelmap(parsed.ds, parsed.bits, ctLike);
+    post({ t: 'labelmap', lab: seg.lab, colors: seg.colors, names: seg.names, terminology: seg.terminology, overlap: seg.overlap }, [seg.lab.buffer]);
+}
+
 self.onmessage = async (e) => {
-    const { ctKeys, segKeys, ctBucket, segBucket, modality, thumbOnly } = e.data;
+    const { ctKeys, segKeys, ctBucket, segBucket, modality, thumbOnly, geometry } = e.data;
     CT_S3 = s3url(ctBucket);
     SEG_S3 = s3url(segBucket);
     MODNAME = { CT: 'CT', MR: 'MR', PT: 'PET' }[modality] || modality || 'image';
     try {
         prog('fetching ' + MODNAME + '…', 0.05);
+        // Streaming path: the caller knows the geometry, so slices go out as they decode and the
+        // SEG is fetched at the same time instead of after the last slice.
+        // Streaming path: the caller knows the geometry (from the IDC index), so each instance's
+        // own ImagePositionPatient says which slice it is and the pixels can go out as they
+        // decode. Objects in the prefix that are not slices of this volume are dropped here.
+        if (geometry && ctKeys.length > 1 && !thumbOnly) {
+            const r = await streamVolume(ctKeys, segKeys, geometry);
+            if (r) {
+                post({ t: 'ctdone', placed: r.placed, expected: r.expected, dropped: r.dropped, outside: r.outside });
+                post({ t: 'alldone' });
+                return;
+            }
+            prog('nothing placeable — rereading the series', 0.05);
+        }
         const ct = await buildVolume(ctKeys, thumbOnly);
         post({ t: 'ct', vol: ct.vol, dims: ct.dims, ijkToRAS: ct.ijkToRAS, win: ct.win, lev: ct.lev, dtype: ct.dtype }, [ct.vol.buffer]);
         if (segKeys && segKeys.length) {
             prog('fetching SEG…', 0.5);
-            let parsed;
-            try {
-                parsed = await fetchSeg(segKeys[0]);
-            }
-            catch (err) {
-                const buf = await fetchBuf(segKeys[0], SEG_S3);
-                const ds = naturalize(buf);
-                let pd = ds.PixelData;
-                if (Array.isArray(pd))
-                    pd = pd[0];
-                parsed = { ds, bits: new Uint8Array(pd) };
-            }
-            const seg = buildLabelmap(parsed.ds, parsed.bits, ct);
-            post({ t: 'labelmap', lab: seg.lab, colors: seg.colors, names: seg.names, terminology: seg.terminology, overlap: seg.overlap }, [seg.lab.buffer]);
+            await loadSeg(segKeys, ct);
         }
         post({ t: 'alldone' });
     }

@@ -109,6 +109,8 @@ export interface BirApi {
   leftMode(): "scroll" | "wl" | "zoom" | "pan";
   hooks(p: Plane): { onLeftGrab: (u: number, v: number, w: number, h: number) => boolean };
   drawOverlay(p: Plane): void;
+  /** Re-render the open series' thumbnail (its pixels may have arrived since it was drawn). */
+  refreshStrip(): void;
   resize(): void;
   selected(): Plane;
   setLayout(l: "single" | "twoUp" | "fourUp"): void;
@@ -840,6 +842,9 @@ export function mountBir(cfg: BirCfg): BirApi {
 
   // ---- thumbnail strip (BIR 5.3 Navigation) ----------------------------------------------
   let strip: HTMLElement | null = null;
+  // Re-asks the open series for its tile. A streaming load draws the first one from the
+  // placeholder volume, so it has to be re-rendered once the real data is in.
+  let refreshCurrentThumb: (() => void) | null = null;
   if (cfg.strip?.length) {
     strip = document.createElement("div");
     strip.id = "bir-strip";
@@ -852,9 +857,12 @@ export function mountBir(cfg: BirCfg): BirApi {
       item.title = it.lines.join(" · ") + " — click to load";
       const img = document.createElement("img");
       img.alt = "";
-      it.thumb().then((b) => {
-        if (b) img.src = URL.createObjectURL(b);
-      }).catch(() => {});
+      const loadThumb = () =>
+        it.thumb().then((b) => {
+          if (b) img.src = URL.createObjectURL(b);
+        }).catch(() => {});
+      loadThumb();
+      if (it.current) refreshCurrentThumb = loadThumb;
       const cap = document.createElement("div");
       cap.className = "cap";
       cap.textContent = it.lines.join(" · ");
@@ -1062,6 +1070,7 @@ export function mountBir(cfg: BirCfg): BirApi {
     leftMode: () => (tool === "wl" || tool === "zoom" || tool === "pan" ? tool : "scroll"),
     hooks,
     drawOverlay,
+    refreshStrip: () => refreshCurrentThumb?.(),
     resize: () => {
       resizeOverlays();
       redrawOverlays();

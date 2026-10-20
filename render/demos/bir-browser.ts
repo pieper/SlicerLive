@@ -26,6 +26,7 @@ import type { Box, HandleMeta } from "./roi-widget.ts";
 import { createMosaic } from "./mosaic.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
 import { loadSeries, loadThumbnail } from "../vendor/idc_tools/index.js";
+import type { CTVolume, SegLabelmap, SeriesGeometry } from "../vendor/idc_tools/types.js";
 import { type BirApi, mountBir, type Plane, type StripItem } from "./bir.ts";
 import { downloadStudyWithDialog, type SeriesRef, shareStudy } from "./idc-share.ts";
 import { CT_VR_PRESETS, presetLUT } from "../ct-vr-presets.ts";
@@ -52,6 +53,10 @@ interface Source {
   sid?: string; // SeriesInstanceUID actually resolved (memo validation + panel highlight)
   sd: string; // patient · series label
   lic: string; // license/attribution
+  /** Geometry from the IDC index, when the index says this is a regularly-spaced volume. Its
+   *  presence is what enables the streaming load: allocate and position the volume now, fill
+   *  it as slices arrive. Absent → the assemble-then-show path. */
+  geom?: SeriesGeometry;
 }
 
 const KITS_DEFAULT: Source = {
@@ -80,15 +85,18 @@ const IDC_API_BASE = ((globalThis as Record<string, unknown>).__IDC_API_BASE as 
   P.get("apiBase") || "https://api.imaging.datacommons.cancer.gov/v3";
 const splitList = (v: string | null): string[] => (v ?? "").split(",").map((x) => x.trim()).filter(Boolean);
 
-// A DICOM UID is digits and dots, nothing else (PS3.5 §9.1). Checked before it reaches a
-// statement so it cannot carry a quote, and so a mistyped URL fails here with something
-// readable rather than as a SQL error.
-const UID_RE = /^[0-9.]{1,64}$/;
+// Identifiers that may come from the page URL: a DICOM UID is digits and dots (PS3.5 §9.1), a
+// crdc_series_uuid is hex and hyphens. Checked before either reaches a statement — they bind as
+// parameters anyway, but a mistyped URL should fail here with something readable rather than as
+// an empty result.
+const UID_RE = /^[0-9a-fA-F.-]{1,64}$/;
 
-// Bump when resolveFromIndex's series choice changes, or when the data behind it does — a newer
-// IDC release can add series to a study, so a memoised pick may no longer be the right one.
-// Retires every localStorage entry cached by an older resolver. v4 = served by the IDC API.
-const MEMO_V = "idc-rad:v4";
+// Bump when resolveFromIndex's series choice changes, when the data behind it does (a newer IDC
+// release can add series to a study, so a memoised pick may no longer be the right one), or when
+// the memoised SHAPE changes — a cached entry from an older resolver is missing whatever was
+// added since, which silently disables the feature that needs it. Retires every localStorage
+// entry cached by an older resolver. v5 = carries the per-series geometry.
+const MEMO_V = "idc-rad:v5";
 
 const SLIM_COLS = [
   "StudyInstanceUID", "SeriesInstanceUID", "crdc_series_uuid", "aws_bucket", "Modality",
@@ -96,25 +104,76 @@ const SLIM_COLS = [
   "license_short_name", "source_DOI",
 ];
 
+// Per-series geometry, in the SAME call as the series list. `Rows`/`Columns` and the in-plane
+// spacing live in the modality indices; the origin, the orientation and the spacing BETWEEN
+// slice planes come from volume_geometry_index, which also says whether the series is a
+// regularly-spaced volume at all. With these the viewer can allocate the volume and put it in
+// patient space before a single pixel arrives — no DICOMweb, no header pre-pass.
+// (ImagingDataCommons/idc-index-data#182, in idc-index-data 25.0.3+.)
+const GEOM_SELECT = `
+  COALESCE(c.Rows, m.Rows, p.Rows) AS g_rows,
+  COALESCE(c.Columns, m.Columns, p.Columns) AS g_cols,
+  COALESCE(c.PixelSpacing_row_mm, m.PixelSpacing_row_mm, p.PixelSpacing_row_mm) AS g_ps_row,
+  COALESCE(c.PixelSpacing_col_mm, m.PixelSpacing_col_mm, p.PixelSpacing_col_mm) AS g_ps_col,
+  v.origin_patient AS g_origin,
+  v.ImageOrientationPatient AS g_iop,
+  v.slice_spacing_mm AS g_slice_mm,
+  v.regularly_spaced_3d_volume AS g_regular`;
+const GEOM_JOINS = `
+  LEFT JOIN ct_index c ON c.SeriesInstanceUID = i.SeriesInstanceUID
+  LEFT JOIN mr_index m ON m.SeriesInstanceUID = i.SeriesInstanceUID
+  LEFT JOIN pt_index p ON p.SeriesInstanceUID = i.SeriesInstanceUID
+  LEFT JOIN volume_geometry_index v ON v.SeriesInstanceUID = i.SeriesInstanceUID`;
+
+/** The index->RAS matrix and the streaming geometry for a series row, or null when the index
+ *  says this series is not a regularly-spaced volume (37% of CT — gantry tilt, variable
+ *  spacing, duplicate positions) or simply has no geometry row. Those fall back to the
+ *  assemble-then-show path, which reads every header itself and is always right. */
+// deno-lint-ignore no-explicit-any
+function geometryOf(row: any): SeriesGeometry | null {
+  if (!row?.g_regular || !row.g_origin || !row.g_iop) return null;
+  const origin = (row.g_origin as unknown[]).map(Number) as [number, number, number];
+  const iop = (row.g_iop as unknown[]).map(Number);
+  const psRow = Number(row.g_ps_row), psCol = Number(row.g_ps_col), sliceMm = Number(row.g_slice_mm);
+  const nx = Number(row.g_cols), ny = Number(row.g_rows), nz = Number(row.instanceCount);
+  if (![psRow, psCol, sliceMm, nx, ny, nz].every((v) => Number.isFinite(v) && v > 0)) return null;
+  if (origin.some((v) => !Number.isFinite(v)) || iop.length !== 6) return null;
+  // Same construction the DICOM path uses (dicom-volume.js assembleSlices): i runs along the
+  // row direction scaled by the column spacing, j along the column direction scaled by the row
+  // spacing, k along the plane normal scaled by the slice spacing, origin at voxel (0,0,0).
+  const rowDir = iop.slice(0, 3), colDir = iop.slice(3, 6);
+  const n = [
+    rowDir[1] * colDir[2] - rowDir[2] * colDir[1],
+    rowDir[2] * colDir[0] - rowDir[0] * colDir[2],
+    rowDir[0] * colDir[1] - rowDir[1] * colDir[0],
+  ];
+  const ras = (v: number[]) => [-v[0], -v[1], v[2]];   // LPS -> RAS
+  const c0 = ras(rowDir.map((x) => x * psCol));
+  const c1 = ras(colDir.map((x) => x * psRow));
+  const c2 = ras(n.map((x) => x * sliceMm));
+  const o = ras(origin);
+  const ijkToRAS = [
+    c0[0], c1[0], c2[0], o[0],
+    c0[1], c1[1], c2[1], o[1],
+    c0[2], c1[2], c2[2], o[2],
+    0, 0, 0, 1,
+  ];
+  return { origin, iop, spacing: sliceMm, dims: [nx, ny, nz], ijkToRAS };
+}
+
 /** Run one read-only query against the IDC API.
  *
- *  `values` are substituted for `?` in order, each validated as a DICOM UID first — the
- *  validation is what makes the substitution safe. The API will take a `params` array and bind
- *  server-side (ImagingDataCommons/IDC-REST-MCP#64); once that is deployed this becomes
- *  `body.params = values` with no interpolation at all, and the call sites do not change.
+ *  `values` bind to the statement's `?` placeholders server-side, so a UID taken from the page
+ *  URL never becomes statement text. The UID shape is still checked first, so a mistyped link
+ *  fails here with something readable rather than as an empty result.
  */
 // deno-lint-ignore no-explicit-any
 async function idcSql(sql: string, values: string[] = []): Promise<any[]> {
-  let i = 0;
-  const statement = sql.replace(/\?/g, () => {
-    const v = values[i++];
-    if (!UID_RE.test(v ?? "")) throw new Error(`not a DICOM UID: ${v}`);
-    return `'${v}'`;
-  });
+  for (const v of values) if (!UID_RE.test(v)) throw new Error(`not a DICOM UID: ${v}`);
   const resp = await fetch(`${IDC_API_BASE}/sql`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sql: statement }),
+    body: JSON.stringify({ sql, params: values }),
   });
   if (!resp.ok) {
     const detail = await resp.text().catch(() => "");
@@ -149,8 +208,9 @@ async function readStudyRows(studyUID: string, onStatus: (m: string) => void): P
     // study by row order, and an unordered SELECT would let that pick change between loads.
     // SeriesNumber is text in idc-index, so it needs the cast — otherwise 16 sorts before 5.
     rows = await idcSql(
-      `SELECT ${SLIM_COLS.join(", ")} FROM index WHERE StudyInstanceUID = ? ` +
-        `ORDER BY TRY_CAST(SeriesNumber AS INTEGER) NULLS LAST, SeriesInstanceUID`,
+      `SELECT ${SLIM_COLS.map((c) => "i." + c).join(", ")},${GEOM_SELECT} ` +
+        `FROM index i${GEOM_JOINS} WHERE i.StudyInstanceUID = ? ` +
+        `ORDER BY TRY_CAST(i.SeriesNumber AS INTEGER) NULLS LAST, i.SeriesInstanceUID`,
       [studyUID],
     );
   } catch (e) {
@@ -168,15 +228,32 @@ async function readStudyRows(studyUID: string, onStatus: (m: string) => void): P
   return rows;
 }
 
+/** Geometry for a series identified only by its crdc_series_uuid — the direct `?series=` form
+ *  and the built-in demo. Without it those sources would fall back to assemble-then-show while
+ *  every other route streams. Best-effort: a failure here just means the slower path. */
+async function geometryForUuid(uuid: string): Promise<SeriesGeometry | undefined> {
+  try {
+    const rows = await idcSql(
+      `SELECT i.instanceCount,${GEOM_SELECT} FROM index i${GEOM_JOINS} WHERE i.crdc_series_uuid = ?`,
+      [uuid],
+    );
+    return (rows.length ? geometryOf(rows[0]) : null) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Decide which series to load from the URL: fast direct-S3, OHIF/IID UID (index lookup), or default. */
 async function resolveSource(onStatus: (m: string) => void): Promise<Source> {
   const series = P.get("series");
-  if (series) { // direct S3 prefix — no index needed
+  if (series) { // direct S3 prefix — the pixels need no index, the geometry still asks for one
+    onStatus("looking the series up in the IDC index…");
     return {
       c: series, cb: P.get("bucket") || "idc-open-data",
       s: P.get("seg") || undefined, sb: P.get("segBucket") || "idc-open-data",
       m: (P.get("modality") || "CT").toUpperCase(), col: P.get("collection") || "IDC", st: "",
       sd: `${P.get("patient") || "IDC"} · ${series.slice(0, 8)}…`, lic: "NCI Imaging Data Commons",
+      geom: await geometryForUuid(series),
     };
   }
   const studyUIDs = [...splitList(P.get("StudyInstanceUIDs")), ...splitList(P.get("studyUID"))];
@@ -188,7 +265,8 @@ async function resolveSource(onStatus: (m: string) => void): Promise<Source> {
     ];
     return await resolveFromIndex(studyUIDs[0], want, onStatus);
   }
-  return KITS_DEFAULT;
+  onStatus("looking the demo case up in the IDC index…");
+  return { ...KITS_DEFAULT, geom: await geometryForUuid(KITS_DEFAULT.c) };
 }
 
 /** Resolve a StudyInstanceUID (+ optional SeriesInstanceUIDs) to an S3 image series (+ SEG)
@@ -235,6 +313,7 @@ async function resolveFromIndex(
   const seg = segs.find((r) => want.has(r.SeriesInstanceUID)) ?? segs[0];
   const mod = String(chosen.Modality).toUpperCase();
   const src: Source = {
+    geom: geometryOf(chosen) ?? undefined,
     c: String(chosen.crdc_series_uuid), cb: String(chosen.aws_bucket),
     s: seg ? String(seg.crdc_series_uuid) : undefined, sb: seg ? String(seg.aws_bucket) : undefined,
     m: mod === "PET" ? "PT" : mod, col: String(chosen.collection_id), st: studyUID,
@@ -261,6 +340,56 @@ const status = (msg: string, err = false) => {
 const cvEl = (id: string) => document.getElementById(id) as HTMLCanvasElement;
 
 const PLANES: Plane[] = ["axial", "coronal", "sagittal"];
+
+/** A volume with the real geometry and stand-in voxels: a 10 cm checkerboard in PATIENT space,
+ *  so it reads as obviously-not-data in every plane and at every zoom, and so the extent and
+ *  orientation of what is coming are visible while it downloads. Each arriving slice overwrites
+ *  its own plane, so the checkerboard recedes as the data lands.
+ *
+ *  The two greys are the middle slice's 33rd and 66th percentile, so the placeholder sits in the
+ *  same intensity range as the data under the same window — it reads as a stand-in for THIS
+ *  study rather than as a bright test pattern. Before any slice has been seen they fall back to
+ *  quarter-window greys for the modality. */
+function placeholderVolume(
+  g: SeriesGeometry,
+  modality: string,
+  voi?: { win: number; lev: number; p33: number; p66: number },
+): CTVolume {
+  const [nx, ny, nz] = g.dims;
+  const vol = new Float32Array(nx * ny * nz);
+  const dflt = DEFAULT_VOI[modality.toUpperCase()] ?? DEFAULT_VOI.CT;
+  const win = voi?.win || dflt[0], lev = voi?.win ? voi.lev : dflt[1];
+  const lo = voi ? voi.p33 : lev - win / 4;
+  const hi = voi ? voi.p66 : lev + win / 4;
+  const M = g.ijkToRAS;
+  const CM = 100;                                     // 10 cm squares, in millimetres
+  // This runs before the first frame, so it is on the critical path: ~100M voxels for a chest
+  // CT. The mapping is affine, so stepping along i is three adds; the +32768 mm bias lets the
+  // cell index be a truncation (|0) instead of Math.floor, which has to handle negatives.
+  const BIAS = 32768, inv = 1 / CM;
+  for (let k = 0; k < nz; k++) {
+    for (let j = 0; j < ny; j++) {
+      let x = M[1] * j + M[2] * k + M[3] + BIAS;
+      let y = M[5] * j + M[6] * k + M[7] + BIAS;
+      let z = M[9] * j + M[10] * k + M[11] + BIAS;
+      let o = (k * ny + j) * nx;
+      for (let i = 0; i < nx; i++, o++, x += M[0], y += M[4], z += M[8]) {
+        vol[o] = (((x * inv) | 0) + ((y * inv) | 0) + ((z * inv) | 0)) & 1 ? hi : lo;
+      }
+    }
+  }
+  return { vol, dims: g.dims, ijkToRAS: g.ijkToRAS, win, lev, dtype: "float32", modality };
+}
+
+/** Window/level to start from, per modality, until the first real slice says otherwise. */
+const DEFAULT_VOI: Record<string, [number, number]> = {
+  CT: [400, 40],
+  MR: [1000, 500],
+  PT: [10, 5],
+  PET: [10, 5],
+  NM: [1000, 500],
+  US: [255, 128],
+};
 const SEG_FILL = 0.5; // 2D MPR segmentation-overlay alpha at 100% (buildSegrouletteScene default)
 const CT_WL_PRESETS = [
   { name: "Soft Tissue", win: 400, lev: 40 },
@@ -293,36 +422,125 @@ async function main() {
 
   // Download-progress mosaic (the SEGRoulette loading visual): the series' slice thumbnails
   // tile in as the DICOM streams from S3 — informative + a little fun instead of a blank wait.
-  const mosaic = createMosaic(document.getElementById("viewer")!);
+  // Which case? Resolve the URL — OHIF/IID StudyInstanceUID (via the IDC index), direct S3
+  // prefix, or the default demo. This is what makes it a drop-in for OHIF on the IDC portal.
+  // deno-lint-ignore prefer-const
+  let mosaic: ReturnType<typeof createMosaic> | undefined;
+  const setLoad = (m: string) => {
+    status(m);
+    mosaic?.status(m);
+  };
+  status("contacting the NCI Imaging Data Commons…");
+  const source = await resolveSource(setLoad);
+
+  // ---- the volume, before its data ---------------------------------------------------------
+  // The index gives the geometry — origin, orientation, spacing, extent — so the volume can be
+  // allocated and placed in patient space before any pixels exist, filled with a placeholder,
+  // and the whole reader built on it. The worker then decodes the series in bucket order and
+  // each instance's own ImagePositionPatient says which plane it is, so slices replace the
+  // placeholder where they land; the MPR planes and the 3D render read the same texture, so
+  // both fill in as the download runs and every control is live throughout. The first slice to
+  // decode also carries the greys and the window the placeholder is built from, so the stand-in
+  // matches this study rather than a modality default.
+  const streaming = !!source.geom;
+  // Streaming: the views are usable from the first frame, so the progress display is PACKED at
+  // the bottom of the layout rather than covering them. Without geometry there is nothing to
+  // look at until the end, so it stays an overlay.
+  mosaic = createMosaic(document.getElementById("viewer")!, { strip: streaming });
   _mosaic = mosaic;
   mosaic.status("contacting the NCI Imaging Data Commons…");
 
-  // Which case? Resolve the URL — OHIF/IID StudyInstanceUID (via the IDC index), direct S3
-  // prefix, or the default demo. This is what makes it a drop-in for OHIF on the IDC portal.
-  const setLoad = (m: string) => {
-    status(m);
-    mosaic.status(m);
-  };
-  const source = await resolveSource(setLoad);
+  // The index geometry, plus what only a real slice can say: the greys for the placeholder and
+  // the window to start at.
+  type GeomMsg = SeriesGeometry & { p33: number; p66: number; win: number; lev: number };
+  let firstSlice: GeomMsg | undefined;
+  let onSliceReady: ((k: number, px: Float32Array) => void) | null = null;
+  const earlySlices: [number, Float32Array][] = [];      // arrive while the scene is being built
+  let onLabelmapReady: ((seg: SegLabelmap) => void) | null = null;
+  let earlySeg: SegLabelmap | null = null;
+  let streamStats = { placed: 0, expected: 0, dropped: 0, outside: 0 };
+  let filledPlanes: Uint8Array | null = null;
 
-  // Load the series straight from S3, reconstruct + build the scene (grayscale MPR + 3D VR).
-  const res = await loadSeries(source, {
-    onProgress: (p: { msg: string; frac?: number }) => {
-      setLoad(`${p.msg}${p.frac ? ` — ${Math.round(p.frac * 100)}%` : ""}`);
+  const handlers = {
+    onProgress: (p: { msg: string; frac?: number }) => setLoad(`${p.msg}${p.frac ? ` — ${Math.round(p.frac * 100)}%` : ""}`),
+    onSliceCount: (n: number) => mosaic!.setCount(n),
+    onThumb: (n: number, w: number, h: number, rgba: ArrayBuffer) => mosaic!.thumb(n, w, h, rgba),
+    onPreview: (w: number, h: number, rgba: ArrayBuffer) => mosaic!.preview(w, h, rgba),
+    onSlice: (k: number, px: Float32Array) => {
+      if (onSliceReady) onSliceReady(k, px);
+      else earlySlices.push([k, px]);
     },
-    onSliceCount: (n: number) => mosaic.setCount(n),
-    onThumb: (n: number, w: number, h: number, rgba: ArrayBuffer) => mosaic.thumb(n, w, h, rgba),
-    onPreview: (w: number, h: number, rgba: ArrayBuffer) => mosaic.preview(w, h, rgba),
-  });
+    onLabelmap: (sg: SegLabelmap) => {
+      if (onLabelmapReady) onLabelmapReady(sg);
+      else earlySeg = sg;
+    },
+    onVolumeDone: (placed: number, expected: number, dropped: number, outside: number) => {
+      streamStats = { placed, expected, dropped, outside };
+    },
+  };
+
+  // Start the load now; in streaming mode the scene is built as soon as the FIRST slice has
+  // decoded — that one slice is what the placeholder's greys and window come from.
+  let geomResolve: (g: GeomMsg) => void = () => {};
+  const geomReady = new Promise<GeomMsg>((r) => (geomResolve = r));
+  const loadDone = streaming
+    ? loadSeries(source, { ...handlers, onGeometry: (g: GeomMsg) => { firstSlice = g; geomResolve(g); } }, {
+      geometry: source.geom,
+    })
+    : loadSeries(source, handlers);
+
+  const res: { ct: CTVolume; seg?: SegLabelmap } = streaming
+    ? { ct: placeholderVolume(await geomReady, source.m, firstSlice) }
+    : await loadDone;
   const sc: SegrouletteScene = buildSegrouletteScene(gpu, srgb, res.ct, res.seg);
-  // Sampled scalar range of the loaded volume: drives the W/L drag gain (Slicer's
-  // vtkMRMLWindowLevelWidget scales by the scalar range) and the VR shift-slider span.
-  const vd = res.ct.vol;
+  // Sampled scalar range: drives the W/L drag gain (Slicer's vtkMRMLWindowLevelWidget scales by
+  // the scalar range) and the VR shift-slider span. While streaming it grows with the data.
   let vmin = Infinity, vmax = -Infinity;
-  const vstride = Math.max(1, Math.floor(vd.length / 2_000_000));
-  for (let i = 0; i < vd.length; i += vstride) { const v = vd[i]; if (v < vmin) vmin = v; if (v > vmax) vmax = v; }
+  const sampleRange = (v: ArrayLike<number>) => {
+    const stride = Math.max(1, Math.floor(v.length / 200_000));
+    for (let i = 0; i < v.length; i += stride) { const x = v[i]; if (x < vmin) vmin = x; if (x > vmax) vmax = x; }
+  };
+  if (!streaming) sampleRange(res.ct.vol);
   const dataRange = (): [number, number] => [vmin, vmax];
   sc.setVolumeOpacity(0.5); // 3D volume rendering starts semi-transparent (composites with SEG)
+
+  // ---- take delivery of slices IMMEDIATELY ---------------------------------------------------
+  // The moment the scene exists its texture can be written, and that is the whole point of the
+  // streaming load. Building the rest of the reader below takes long enough that parking slices
+  // until it is done would mean the views stayed on the placeholder until the download finished
+  // — which is exactly what they used to do. So the handlers go in here, and the parts that need
+  // the finished UI (a redraw, the segmentation controls) are filled in later.
+  /** The real middle slice, kept for the series-panel tile (the placeholder's is a checkerboard). */
+  let midSlice: Float32Array | null = null;
+  let scheduleRedraw: () => void = () => {};   // replaced once there are views to redraw
+  let segAttached = false;
+  let segRefreshUi: () => void = () => {};     // replaced once the chrome/annotations exist
+  if (streaming) filledPlanes = new Uint8Array(sc.dims[2]);
+  const takeSlice = (k: number, px: Float32Array) => {
+    if (k === Math.floor(sc.dims[2] / 2)) midSlice = px.slice();
+    sc.writeSlice(k, px);
+    if (filledPlanes) filledPlanes[k] = 1;
+    sampleRange(px);
+    scheduleRedraw();
+  };
+  const takeSeg = (sg: SegLabelmap) => {
+    // Decoded alongside the image slices, so it usually lands before the last one.
+    sc.attachSegmentation(sg);
+    segAttached = true;
+    segRefreshUi();
+    scheduleRedraw();
+  };
+  // Only in streaming mode: the assemble-then-show path hands the whole volume AND its
+  // segmentation to buildSegrouletteScene above, so taking delivery again here would build the
+  // segmentation's distance field a second time — minutes of work on a large SEG, for nothing.
+  if (streaming) {
+    for (const [k, px] of earlySlices) takeSlice(k, px);
+    onSliceReady = takeSlice;
+    if (earlySeg) takeSeg(earlySeg);
+    onLabelmapReady = takeSeg;
+  }
+  earlySlices.length = 0;
+  earlySeg = null;
 
   // SlicerLive display state (toggled from the badge popup, below).
   let sliceOutline = false; // segmentation overlay: fill (default) vs outline
@@ -348,6 +566,9 @@ async function main() {
     for (const p of PLANES) {
       const cell = document.querySelector(`[data-cell="${p}"]`) as HTMLElement;
       if (!cell) continue;
+      // Rebuilt when the study changes under them (a SEG arriving mid-stream adds "· SEG"), so
+      // clear first — appending a second set just overprints the first.
+      for (const old of cell.querySelectorAll(".ann")) old.remove();
       const mk = (cls: string, html: string) => {
         const e = document.createElement("div");
         e.className = "ann " + cls;
@@ -432,6 +653,9 @@ async function main() {
   const viewGrid = attachViewGrid(document.getElementById("grid")!, [...names], resize);
   attachDoubleClick(cv.threeD, () => viewGrid.toggleMax("threeD"));
 
+  // The streaming load starts from a modality default and adopts the first slice's own VOI when
+  // it arrives — but only while nobody has set a window themselves.
+  let wlUserSet = false;
   const setWL = (win: number, lev: number) => {
     wl.win = win;
     wl.lev = lev;
@@ -450,6 +674,7 @@ async function main() {
     for (const q of CT_WL_PRESETS) presets.add(new Option(`${q.name} (${q.win}/${q.lev})`, q.name));
   };
   presets.addEventListener("change", () => {
+    wlUserSet = true;   // picking a preset is choosing a window
     if (presets.value === "auto") setWL(sc.win, sc.lev);
     else {
       const q = CT_WL_PRESETS.find((x) => x.name === presets.value);
@@ -518,9 +743,12 @@ async function main() {
     return new Promise((res) => c.toBlob(res, "image/png"));
   };
   const currentSeriesThumb = (): Promise<Blob | null> => {
-    const { vol, dims, win, lev } = res.ct as { vol: Int16Array | Float32Array; dims: [number, number, number]; win: number; lev: number };
+    const { dims, win, lev } = res.ct as { dims: [number, number, number]; win: number; lev: number };
     const [w, h, d] = dims, z = Math.floor(d / 2);
-    return sliceToThumb({ vol: vol.subarray(z * w * h, (z + 1) * w * h) as typeof vol, dims: [w, h, 1], win, lev });
+    // Streaming: the placeholder's middle plane is a checkerboard, so the tile uses the real
+    // middle slice once it has arrived (kept aside for exactly this).
+    const mid = midSlice ?? (res.ct.vol as Float32Array).subarray(z * w * h, (z + 1) * w * h);
+    return sliceToThumb({ vol: mid as Float32Array, dims: [w, h, 1], win, lev });
   };
   const navigateToSeries = (seriesUID: string) => {
     const u = new URL(location.href);
@@ -587,7 +815,7 @@ async function main() {
     redrawAll: drawAll,
     rasLo: sc.rasLo,
     rasHi: sc.rasHi,
-    wl: { get: () => [wl.win, wl.lev], set: setWL, auto: [sc.win, sc.lev] },
+    wl: { get: () => [wl.win, wl.lev], set: (w: number, l: number) => { wlUserSet = true; setWL(w, l); }, auto: [sc.win, sc.lev] },
     presetsEl: presets,
     resetViews: () => sliceControls.forEach((c) => c.resetView()),
     close: () => status("This is the SlicerLive Basic Image Review demo — reload to restart."),
@@ -649,7 +877,7 @@ async function main() {
       wl: {
         enabled: () => bir!.tool() === "wl",
         get: () => [wl.win, wl.lev],
-        set: setWL,
+        set: (w: number, l: number) => { wlUserSet = true; setWL(w, l); },
         range: dataRange,
         reset: () => setWL(sc.win, sc.lev),
       },
@@ -852,7 +1080,7 @@ async function main() {
       },
     },
   ];
-  installChrome({
+  const chrome = installChrome({
     controls,
     // The BIR toolbar has its own Help button — suppress sl-chrome's fixed top-left "?" so it
     // doesn't overlap the toolbar (reported obscuring the Select-Patient / nav icons).
@@ -885,9 +1113,69 @@ async function main() {
   const info = document.getElementById("info");
   if (info) info.textContent = `${source.sd} · ${res.ct.modality} ${sc.dims.join("×")} · ${source.lic}`;
   resize();
-  mosaic.done(); // scene is up → fade the download mosaic out
+
   // The loaded case, not a hardcoded one: this reader opens whatever the URL resolves to.
-  status(`${source.sd} — scroll to page slices, pick a tool from the toolbar, drag 3D to orbit`);
+  const READY = `${source.sd} — scroll to page slices, pick a tool from the toolbar, drag 3D to orbit`;
+  if (!streaming) {
+    await mosaic!.done();   // the whole volume was already there when the scene was built
+    status(READY);
+    return;
+  }
+
+  // ---- streaming: the reader is live, now fill the volume underneath it ---------------------
+  // Redraws are coalesced onto one frame: slices land faster than the views can re-render, and
+  // a redraw per slice would spend the whole budget on frames nobody sees.
+  let dirty = false;
+  const redrawSoon = () => {
+    if (dirty) return;
+    dirty = true;
+    requestAnimationFrame(() => { dirty = false; drawAll(); });
+  };
+  // The reader exists now: redraws can happen, and a segmentation that has already attached can
+  // have its controls and annotations caught up.
+  scheduleRedraw = redrawSoon;
+  segRefreshUi = () => {
+    applySegOverlay();
+    chrome.refresh();     // the segmentation controls were disabled while there was no SEG
+    buildAnnotations();   // the corner annotation gains "· SEG"
+    applyAnn();
+  };
+  if (segAttached) segRefreshUi();
+  redrawSoon();
+  if (firstSlice && !wlUserSet && firstSlice.win > 0) {
+    sc.win = firstSlice.win;
+    sc.lev = firstSlice.lev;
+    setWL(firstSlice.win, firstSlice.lev);
+  }
+
+  await loadDone;
+
+  if (!streamStats.placed) throw new Error("no image slices could be placed in the volume");
+  // What the index's instance count promised but the data did not deliver: a series that also
+  // carries a report or a scout is allocated one plane too deep, and that plane would otherwise
+  // keep its checkerboard. Clear whatever never arrived rather than leave a stand-in in a volume
+  // the reader is now treating as real.
+  let unfilled = 0;
+  if (filledPlanes) {
+    const blank = new Float32Array(sc.dims[0] * sc.dims[1]).fill(vmin);
+    for (let k = 0; k < filledPlanes.length; k++) {
+      if (!filledPlanes[k]) { sc.writeSlice(k, blank); unfilled++; }
+    }
+  }
+  if (streamStats.dropped) {
+    console.info(`[bir] ${streamStats.dropped} instance(s) in this series are not image slices and were skipped`);
+  }
+  if (streamStats.outside) {
+    console.warn(`[bir] ${streamStats.outside} slice(s) fell outside the volume the index describes`);
+  }
+  if (unfilled) console.warn(`[bir] ${unfilled} plane(s) of ${sc.dims[2]} never received data`);
+  bir?.refreshStrip();   // the open series' tile was drawn from the placeholder volume
+  // Real range known: re-window the VR transfer function and give the W/L drag its true gain.
+  if (Number.isFinite(vmin) && vmax > vmin) sc.setDataRange(vmin, vmax);
+  drawAll();
+  await mosaic!.done();   // packs the progress strip away, once no gesture is in flight
+  resize();
+  status(READY);
 }
 
 /** A failure the reader can describe to the person looking at it. */

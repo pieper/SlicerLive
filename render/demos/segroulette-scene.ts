@@ -108,6 +108,17 @@ export interface SegrouletteScene {
   reclip(): void;
   /** Add/replace demo-supplied fields (CardFields, …) that composite in the SAME 3D ray-march. */
   setExtraFields(fields: Field[]): void;
+  /** Write one decoded slice into the volume in place, for a scene that was built before its
+   *  data arrived. The MPR planes and the 3D ray-march read the same texture, so both show it
+   *  on the next redraw. */
+  writeSlice(k: number, slice: Float32Array): void;
+  /** Re-window after the real scalar range is known (the placeholder volume's range is not the
+   *  data's). Updates the VR transfer function's clim; the MPR window/level is separate. */
+  setDataRange(lo: number, hi: number): void;
+  /** Attach a segmentation to a scene that was built without one — the streaming load builds
+   *  the scene from the geometry alone, so the SEG arrives later (often while image slices are
+   *  still coming in). Builds the 2D overlay and the 3D SDF, and flips `hasSeg`/`segments`. */
+  attachSegmentation(seg: SegLabelmap): void;
   /** Free the 3D segmentation GPU resources (call before dropping a scene on Spin). */
   destroy(): void;
 }
@@ -132,7 +143,7 @@ export function buildSegrouletteScene(
   // the originals restore it. `volShift` offsets the whole TF along the scalar axis (Slicer's VR
   // "Shift"). scaledVolLut scales the active LUT's alpha for the live opacity control.
   const grayLut = modalityLUT(ct.modality);
-  const grayClim: [number, number] = [clim[0], clim[1]];
+  const grayClim: [number, number] = [clim[0], clim[1]];   // mutable: setDataRange re-windows it
   const grayShade: [number, number, number, number] = [0.25, 0.7, 0.45, 20];
   let baseVolLut = grayLut;
   let baseClim: [number, number] = [clim[0], clim[1]];
@@ -151,17 +162,20 @@ export function buildSegrouletteScene(
   // 256-entry colour palette. No GPU baking yet — we decide iso vs colorized from the count first.
   const segments: { num: number; name: string; color: [number, number, number]; voxels: number }[] = [];
   const palette = new Float32Array(256 * 4);
-  if (seg) {
+  const enumerateSegments = (sg: SegLabelmap) => {
+    segments.length = 0;
+    palette.fill(0);
     const total = dims[0] * dims[1] * dims[2];
-    for (const [num, r, g, b] of seg.colors) {
+    for (const [num, r, g, b] of sg.colors) {
       if (num === 0 || (r === 0 && g === 0 && b === 0)) continue;   // background / unlabeled
       let n = 0;
-      for (let i = 0; i < seg.lab.length; i++) if (seg.lab[i] === num) n++;
+      for (let i = 0; i < sg.lab.length; i++) if (sg.lab[i] === num) n++;
       if (!n || n > total * 0.6) continue;                          // empty, or covers most of the grid
       if (num < 256) { palette[num * 4] = r; palette[num * 4 + 1] = g; palette[num * 4 + 2] = b; palette[num * 4 + 3] = 1; }
-      segments.push({ num, name: seg.names[num] ?? `Segment ${num}`, color: [r, g, b], voxels: n });
+      segments.push({ num, name: sg.names[num] ?? `Segment ${num}`, color: [r, g, b], voxels: n });
     }
-  }
+  };
+  if (seg) enumerateSegments(seg);
 
   // Per-segment opacity (tri-state in the UI: 1 → 0.5 → 0 → 1). Default 1 (opaque); 0 = hidden, 0.5 =
   // translucent surface. Baking uses a palette whose alpha is the per-segment opacity (the colorized
@@ -188,12 +202,12 @@ export function buildSegrouletteScene(
   let mode: "sdf" | "volume" = "volume";
   let segLogic: SegmentationLogic | undefined;
   let editable: EditableSegmentation | undefined;
-  if (seg && segments.length > 0) {
+  const buildSdf = (sg: SegLabelmap) => {
     // ISOTROPIC resample (capacity-gated): thick-slice CTs must upsample the slice axis toward
     // isotropic or a near-slice-parallel surface falls between slices and the SDF shell misses it →
     // holes (user report: lung/liver tops vanish when rotated). sdfMaxVoxels caps memory so a weaker
     // device coarsens instead of OOMing; `coarsened` → we surfaced fewer voxels than ideal.
-    const cap = resampleIsotropic(seg.lab, dims, ct.ijkToRAS, opts.sdfMaxDim ?? SDF_MAX_DIM, opts.sdfMaxVoxels);
+    const cap = resampleIsotropic(sg.lab, dims, ct.ijkToRAS, opts.sdfMaxDim ?? SDF_MAX_DIM, opts.sdfMaxVoxels);
     if (cap.coarsened) console.warn(`SEGRoulette: SDF grid coarsened to fit the device memory budget (${cap.dims.join("×")}, ${cap.vox.toFixed(2)}mm) — a remote render server would allow full resolution.`);
     editable = new EditableSegmentation(dev, cap.dims, { ijkToRAS: cap.ijkToRAS });
     // Real data often has EMBEDDED/adjacent labels (tumor in liver, cyst clusters): auto-pick the
@@ -205,8 +219,9 @@ export function buildSegrouletteScene(
     editable.loadLabelmap(cap.lab);   // fast bake
     segLogic.refineNow();             // static scene → high-quality bake now
     mode = "sdf";
-  }
-  const hasSeg = !!segLogic;
+  };
+  if (seg && segments.length > 0) buildSdf(seg);
+  let hasSeg = !!segLogic;
 
   const scene = new SceneRenderer(gpu, format);
   const [rasLo, rasHi] = volumeField.aabb();
@@ -255,6 +270,27 @@ export function buildSegrouletteScene(
     scene, slice, center, radius, rasLo, rasHi, ijkToRAS: ct.ijkToRAS, dims, win: ct.win, lev: ct.lev,
     segments, mode, hasSeg, roi,
     segOverlap: seg?.overlap && seg.overlap.voxels > 0 ? seg.overlap : null,
+    writeSlice(k, slice) { volumeField.updateSlab(k, slice); },
+    setDataRange(lo, hi) {
+      grayClim[0] = lo; grayClim[1] = hi;
+      if (baseVolLut === grayLut) { baseClim = [lo, hi]; volumeField.setClim(lo, hi); }
+    },
+    attachSegmentation(sg) {
+      seg = sg;
+      enumerateSegments(sg);
+      if (!segments.length) return;             // nothing renderable (empty or whole-grid labels)
+      colorTex?.destroy();
+      colorTex = bakeColorizeRGBA(dev, sg.lab, dims, visPalette(), SLICE_OVERLAY_SIGMA);
+      slice.setTextures(volumeField.volumeTexture(), colorTex);
+      buildSdf(sg);
+      hasSeg = !!segLogic;
+      showSeg = hasSeg && segLayerOpacity > 0.001;
+      this.hasSeg = hasSeg;
+      this.mode = mode;
+      this.segments = segments;
+      this.segOverlap = sg.overlap && sg.overlap.voxels > 0 ? sg.overlap : null;
+      rebuild();
+    },
     setLayers(sv, ss) { this.setVolumeOpacity(sv ? 1 : 0); this.setSegOpacity(ss ? 1 : 0); },
     setVolumeOpacity(o) {
       volumeOpacity = Math.max(0, Math.min(1, o));

@@ -74,6 +74,17 @@ export interface LoadHandlers {
      *  the rest of the series is still downloading */
     onPreview?: (w: number, h: number, rgba: ArrayBuffer) => void;
     onSliceCount?: (count: number) => void;
+    /** The series geometry, plus the FIRST decoded slice's 33rd/66th percentile and its
+     *  window/level — what a placeholder volume needs to match the study. Fires once, just
+     *  before that first slice. */
+    onGeometry?: (g: SeriesGeometry & { p33: number; p66: number; win: number; lev: number }) => void;
+    /** streaming geometry path: one decoded slice, already at its index in the volume */
+    onSlice?: (k: number, px: Float32Array) => void;
+    /** the first slice's window/level, so a scene built before the data can re-window early */
+    onVOI?: (win: number, lev: number) => void;
+    /** every image slice has been posted (`placed` of `expected` instances carried pixels) */
+    onVolumeDone?: (placed: number, expected: number, dropped: number, outside: number) => void;
+    onSegError?: (message: string) => void;
     onSegName?: (name: string) => void;
 }
 export interface LoadResult {
@@ -81,7 +92,21 @@ export interface LoadResult {
     seg?: SegLabelmap;
     entry?: SeriesEntry;
 }
+export interface SeriesGeometry {
+    /** ImagePositionPatient (LPS) of the slice at the minimum slice position = voxel (0,0,0) */
+    origin: [number, number, number];
+    /** ImageOrientationPatient: 6 direction cosines */
+    iop: number[];
+    /** distance between slice planes, mm */
+    spacing: number;
+    dims: [number, number, number];
+    /** index->RAS for the same volume, for the SEG decoder */
+    ijkToRAS: number[];
+}
 export interface LoaderOptions {
     /** override the worker URL (defaults to ./idc-worker.js next to the built loader) */
     workerUrl?: string | URL;
+    /** Known series geometry (from the IDC index). Switches the worker to the streaming path:
+     *  each slice is posted at its own index as it decodes, and the SEG decodes alongside. */
+    geometry?: SeriesGeometry;
 }

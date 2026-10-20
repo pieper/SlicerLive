@@ -357,7 +357,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
   // ---- per-segment opacity (swatch + tri-state box), rebuilt from the current case on each open ----
   const segHost = document.createElement("div");
   pop.appendChild(segHost);
-  const segRows: { num: number; box: HTMLElement; color: [number, number, number]; paint: () => void }[] = [];
+  const segRows: { num: number; name: string; box: HTMLElement; color: [number, number, number]; paint: () => void }[] = [];
   function buildSegments() {
     const S = opts.segments;
     segRows.length = 0; segHost.innerHTML = "";
@@ -383,7 +383,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
       row.appendChild(left); row.appendChild(box);
       const paint = attachOpacity(box, () => S.get(s.num), (o) => { if (!(S.enabled && !S.enabled())) S.set(s.num, o); }, s.color, () => opts.onChange?.());
       wrap.appendChild(row);
-      segRows.push({ num: s.num, box, color: s.color, paint });
+      segRows.push({ num: s.num, name: s.name, box, color: s.color, paint });
     }
     const note = S.note?.();
     if (note) {
@@ -399,6 +399,13 @@ export function installChrome(opts: ChromeOpts): Chrome {
   function paintSegments() {
     const S = opts.segments;
     if (!S) return;
+    // The segmentation can arrive AFTER the popup exists (a streaming load attaches it part-way
+    // through the download), so a repaint has to notice that the list itself changed — the rows
+    // and the overlap note are built, not just painted.
+    const list = S.list();
+    const changed = list.length !== segRows.length ||
+      list.some((s, i) => s.num !== segRows[i].num || s.name !== segRows[i].name);
+    if (changed) { buildSegments(); return; }
     const dis = S.enabled ? !S.enabled() : false;
     segHost.style.opacity = dis ? "0.4" : "1";
     for (const r of segRows) r.paint();

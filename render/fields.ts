@@ -177,6 +177,22 @@ export class ImageField implements Field {
   sampleStep(): number { return this.stepMm; }
   /** The r32float 3D scalar texture (e.g. to share with a SliceRenderer for MPR). */
   volumeTexture(): GPUTexture { return this.volTex; }
+
+  /** Overwrite `depth` z-slices of the volume starting at `z`, in place. The bind group holds a
+   *  stable view of volTex, so a render after this picks the new voxels up with no rebuild —
+   *  which is what lets a volume be allocated first and filled as its slices arrive. `data` is
+   *  one slab in the texture's own dtype (f32 unless the volume was created from a Uint8Array). */
+  updateSlab(z: number, data: Float32Array | Uint8Array, depth = 1) {
+    const [nx, ny, nz] = this.dims;
+    if (z < 0 || z + depth > nz) return;            // out of range: a slice we have no room for
+    const bpe = data instanceof Uint8Array ? 1 : 4;
+    this.dev.queue.writeTexture(
+      { texture: this.volTex, origin: { x: 0, y: 0, z } },
+      data,
+      { offset: 0, bytesPerRow: nx * bpe, rowsPerImage: ny },
+      [nx, ny, depth],
+    );
+  }
   /** r8unorm volumes sample /255, so clim is packed /normScale in the shader; a slice plane sharing this
    *  texture must use the same factor. 1 for f32 volumes. */
   normScaleOf(): number { return this.normScale; }

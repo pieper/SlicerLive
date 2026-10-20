@@ -7,7 +7,7 @@ function resolveWorkerURL(opts) {
         return opts.workerUrl;
     return new URL('./idc-worker.js', import.meta.url); // sits next to the built loader
 }
-function runWorker(ctKeys, segKeys, ctBucket, segBucket, modality, handlers, opts) {
+function runWorker(ctKeys, segKeys, ctBucket, segBucket, modality, handlers, opts, geometry) {
     if (_worker) {
         try {
             _worker.terminate();
@@ -31,6 +31,24 @@ function runWorker(ctKeys, segKeys, ctBucket, segBucket, modality, handlers, opt
                     break;
                 case 'preview':
                     handlers.onPreview?.(m.w, m.h, m.rgba);
+                    break;
+                case 'geometry':
+                    // Geometry + the first slice's greys/window: what the placeholder is built from.
+                    handlers.onGeometry?.(m);
+                    break;
+                case 'slice':
+                    // Streaming geometry path: one decoded slice, already at its k.
+                    handlers.onSlice?.(m.k, new Float32Array(m.px));
+                    break;
+                case 'voi':
+                    handlers.onVOI?.(m.win, m.lev);
+                    break;
+                case 'ctdone':
+                    handlers.onVolumeDone?.(m.placed, m.expected, m.dropped ?? 0, m.outside ?? 0);
+                    break;
+                case 'segerror':
+                    console.warn('[idc_tools] SEG failed:', m.error);
+                    handlers.onSegError?.(m.error);
                     break;
                 case 'seg':
                     handlers.onSegName?.(m.name);
@@ -65,7 +83,7 @@ function runWorker(ctKeys, segKeys, ctBucket, segBucket, modality, handlers, opt
         };
         w.onerror = (e) => { w.terminate(); if (_worker === w)
             _worker = null; reject(new Error('idc_tools worker: ' + (e.message || e))); };
-        w.postMessage({ ctKeys, segKeys, ctBucket, segBucket, modality });
+        w.postMessage({ ctKeys, segKeys, ctBucket, segBucket, modality, geometry });
     });
 }
 /** Load one series (and its SEG, if present) by manifest entry. */
@@ -75,7 +93,10 @@ export async function loadSeries(entry, handlers = {}, opts) {
     if (!ctKeys.length)
         throw new Error('idc_tools: no DICOM under CT prefix ' + entry.c);
     const segKeys = entry.s ? await s3ListKeys(entry.s, entry.sb) : [];
-    const r = await runWorker(ctKeys, segKeys, entry.cb, entry.sb, modality, handlers, opts);
+    // `opts.geometry` (origin / iop / spacing / dims / ijkToRAS, from the IDC index) switches the
+    // worker to the streaming path: slices are posted as they decode instead of after the series
+    // is assembled, and the SEG is fetched alongside them.
+    const r = await runWorker(ctKeys, segKeys, entry.cb, entry.sb, modality, handlers, opts, opts?.geometry);
     r.entry = entry;
     return r;
 }
