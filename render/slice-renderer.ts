@@ -21,7 +21,8 @@ const SHADER = /* wgsl */ `
 struct U {
   p2t : mat4x4<f32>,     // RAS -> texture[0,1] (folds in ijkToRAS: rotation + anisotropy)
   origin : vec4<f32>,    // RAS of the plane center (for the current scrub offset)
-  uvec : vec4<f32>,      // RAS vector spanning the view width  (isotropic mm)
+  uvec : vec4<f32>,      // xyz: RAS vector spanning the view width (isotropic mm); w: segmentation
+                         //      outline width in SCREEN PIXELS (see setOutlineWidth)
   vvec : vec4<f32>,      // RAS vector spanning the view height (isotropic mm)
   params : vec4<f32>,    // win, lev, fillOpacity, outlineOpacity
   size : vec4<f32>,      // sizeX, sizeY, labelOverlayMode, bgLutMode (0 gray, 1 LUT row 0)
@@ -124,16 +125,25 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
   let fillA = clamp(ov.a * u.params.z, 0.0, 1.0);
   var outA = 0.0;
   if (u.params.w > 0.0) {
-    let du = u.uvec.xyz / u.size.x * 1.5;   // ~1.5 px right, in RAS
-    let dv = u.vvec.xyz / u.size.y * 1.5;   // ~1.5 px up
+    // The contour is the band of voxels within w SCREEN pixels of a boundary, so it keeps the
+    // same visual weight at every zoom. Eight neighbours, not four: at four, a boundary running
+    // diagonally is only sampled across its corners and the line thins and breaks up as w grows.
+    let w = max(u.uvec.w, 1.0);
+    let du = u.uvec.xyz / u.size.x * w;     // w px right, in RAS
+    let dv = u.vvec.xyz / u.size.y * w;     // w px up
+    let dd = 0.70710678;                    // diagonals at the same distance
     let n0 = ov_at(ras + du); let n1 = ov_at(ras - du); let n2 = ov_at(ras + dv); let n3 = ov_at(ras - dv);
+    let n4 = ov_at(ras + (du + dv) * dd); let n5 = ov_at(ras + (du - dv) * dd);
+    let n6 = ov_at(ras - (du + dv) * dd); let n7 = ov_at(ras - (du - dv) * dd);
     // A neighbour is a DIFFERENT segment iff its overlay texel differs at all. The overlay is
     // sampled NEAREST from a crisp per-voxel bake, so every texel is an exact palette entry and
     // an exact comparison is the label test: two touching segments whose colours happen to be
     // close still get a boundary, where a distance threshold used to merge them into one blob.
     // A hidden segment (palette alpha 0) differs from a visible neighbour, so the visible one
     // keeps its contour there; and its own voxels have ov.a = 0, so it draws nothing itself.
-    let edge = select(0.0, 1.0, any(n0 != ov) || any(n1 != ov) || any(n2 != ov) || any(n3 != ov));
+    let edge = select(0.0, 1.0,
+      any(n0 != ov) || any(n1 != ov) || any(n2 != ov) || any(n3 != ov) ||
+      any(n4 != ov) || any(n5 != ov) || any(n6 != ov) || any(n7 != ov));
     outA = clamp(ov.a * u.params.w * edge, 0.0, 1.0);
   }
   col = mix(col, ov.rgb, max(fillA, outA));
@@ -444,6 +454,10 @@ export class SliceRenderer {
   setOutlineOpacity(o: number) { this.u[31] = o; }
   /** Convenience toggle: outline on (opacity 1) / off (0). Composites over the fill. */
   setOverlayOutline(on: boolean) { this.u[31] = on ? 1 : 0; }
+  /** Overlay outline width, in SCREEN pixels (constant under zoom). Rides in uvec.w, which the
+   *  per-frame uniform update writes alongside the view vectors. */
+  setOutlineWidth(px: number) { this.outlineWidth = Math.max(1, px); }
+  private outlineWidth = 2;
 
   /** Physical size (mm) of the square view for the current plane (isotropic, letterboxed).
    *  Matches Slicer's FitSliceToBackground: the field of view is exactly the volume's
@@ -627,7 +641,8 @@ export class SliceRenderer {
     this.uSpanMm = uS; this.vSpanMm = vS; this.cX = c;
     this.u.set(this.p2t, 0);                                                                  // p2t   [0..15]
     this.u[16] = c[0]; this.u[17] = c[1]; this.u[18] = c[2]; this.u[19] = 0;                   // origin[16..19]
-    this.u[20] = b.uDir[0] * uS; this.u[21] = b.uDir[1] * uS; this.u[22] = b.uDir[2] * uS; this.u[23] = 0; // uvec [20..23]
+    this.u[20] = b.uDir[0] * uS; this.u[21] = b.uDir[1] * uS; this.u[22] = b.uDir[2] * uS;
+    this.u[23] = this.outlineWidth;                                                            // uvec [20..23]
     this.u[24] = b.vDir[0] * vS; this.u[25] = b.vDir[1] * vS; this.u[26] = b.vDir[2] * vS; this.u[27] = 0; // vvec [24..27]
     // params[28..30] set via setWindowLevel/setOverlayOpacity
     this.u[32] = w; this.u[33] = h;                                                            // size [32..35]
