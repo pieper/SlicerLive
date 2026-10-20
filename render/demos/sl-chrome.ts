@@ -20,7 +20,17 @@ export interface VizControl {
   color?: [number, number, number];   // fill tint for the opacity chip (default cyan)
   /** Plain range slider (e.g. Slicer's VR "Shift") — rendered as a label + native <input range>
    *  + live value, on its own row. Distinct from the tri-state opacity chip. */
-  slider?: { min: number; max: number; step?: number; get: () => number; set: (v: number) => void; format?: (v: number) => string };
+  /** min/max/step may be functions: a range that is only known once the data has arrived (the
+   *  VR shift spans the volume's scalar range, and a streaming load does not have it at build
+   *  time) is re-read on every refresh instead of being frozen at zero slices. */
+  slider?: {
+    min: number | (() => number);
+    max: number | (() => number);
+    step?: number | (() => number);
+    get: () => number;
+    set: (v: number) => void;
+    format?: (v: number) => string;
+  };
   /** A value pill that opens a demo-supplied dialog (e.g. the VR-preset thumbnail menu). The row
    *  shows text() on the right; clicking runs run(). */
   button?: { text: () => string; run: () => void };
@@ -306,7 +316,14 @@ export function installChrome(opts: ChromeOpts): Chrome {
         top.appendChild(lab); top.appendChild(val);
         const inp = document.createElement("input");
         inp.type = "range";
-        inp.min = String(c.slider.min); inp.max = String(c.slider.max); inp.step = String(c.slider.step ?? 1);
+        const num = (v: number | (() => number) | undefined, dflt: number) =>
+          v === undefined ? dflt : typeof v === "function" ? v() : v;
+        const setBounds = () => {
+          inp.min = String(num(c.slider!.min, 0));
+          inp.max = String(num(c.slider!.max, 1));
+          inp.step = String(num(c.slider!.step, 1));
+        };
+        setBounds();
         inp.value = String(c.slider.get());
         inp.style.cssText = "width:100%;accent-color:#54c6f0;cursor:pointer;";
         const fmt = c.slider.format ?? ((v: number) => String(Math.round(v)));
@@ -316,7 +333,7 @@ export function installChrome(opts: ChromeOpts): Chrome {
         paint();
         row.appendChild(top); row.appendChild(inp);
         pop.appendChild(row);
-        rows.push({ c, row, repaint: () => { inp.value = String(c.slider!.get()); paint(); } });
+        rows.push({ c, row, repaint: () => { setBounds(); inp.value = String(c.slider!.get()); paint(); } });
         continue;
       }
       const lab = document.createElement("span"); lab.textContent = c.label;

@@ -744,6 +744,10 @@ async function main() {
     wl.win = win;
     wl.lev = lev;
     sc.slice.setWindowLevel(win, lev);
+    // The grayscale volume rendering maps the SAME window as the slices — so the 3D view reads
+    // like the 2D views do, and a window change (a preset, a W/L drag) carries into it. A VR
+    // preset overrides this with its own transfer function until it is cleared.
+    sc.setVolumeWindow(lev - win / 2, lev + win / 2);
     for (const p of PLANES) drawSlice(p);
     xhair?.redraw();
     syncWl();
@@ -1024,7 +1028,21 @@ async function main() {
   // range (sampled), like Slicer's shift slider spanning the scalar range.
   let vrPreset: string | null = null;
   let vrShift = 0;
-  const shiftRange = Math.max(200, (vmax - vmin) / 2);
+  // Slicer's VR shift spans the volume's scalar range. A streaming load has NO range when the
+  // controls are built — vmin/vmax are still ±Infinity — so this has to be read live, or the
+  // slider is frozen at the ±200 HU floor on every streamed study (which is all of them).
+  const shiftStep = () => {
+    const half = (vmax - vmin) / 2;
+    return Math.max(1, Math.round((Number.isFinite(half) && half > 200 ? half : 200) / 200));
+  };
+  // Snapped to a whole number of steps, so the slider's grid lands exactly on 0 — an <input
+  // type=range> quantizes from its min, and an unaligned span parks "no shift" at 1.5 HU.
+  const shiftRange = () => {
+    const half = (vmax - vmin) / 2;
+    const span = Number.isFinite(half) && half > 200 ? half : 200;
+    const step = shiftStep();
+    return step * Math.round(span / step);
+  };
   const bakeOf = (name: string | null) => name ? presetLUT(CT_VR_PRESETS.find((p) => p.name === name)!) : null;
   const presetLabel = () => vrPreset ? (CT_VR_PRESETS.find((p) => p.name === vrPreset)?.label ?? vrPreset) : "Default (W/L)";
   const applyVrPreset = (name: string | null) => {
@@ -1072,7 +1090,7 @@ async function main() {
     presets: () => CT_VR_PRESETS.map((p) => p.name),
     setPreset: (name: string | null) => applyVrPreset(name),
     setShift: (hu: number) => applyVrShift(hu),
-    vrState: () => ({ preset: vrPreset, shift: vrShift, shiftRange, dataRange: [vmin, vmax] }),
+    vrState: () => ({ preset: vrPreset, shift: vrShift, shiftRange: shiftRange(), dataRange: [vmin, vmax] }),
     thumbCount: () => renderPresetThumbnails().length,
   });
 
@@ -1093,9 +1111,9 @@ async function main() {
     {
       label: "Shift",
       slider: {
-        min: -shiftRange,
-        max: shiftRange,
-        step: Math.max(1, Math.round(shiftRange / 200)),
+        min: () => -shiftRange(),
+        max: () => shiftRange(),
+        step: () => shiftStep(),
         get: () => vrShift,
         set: (v) => applyVrShift(v),
         format: (v) => (v > 0 ? "+" : "") + Math.round(v),
@@ -1272,8 +1290,10 @@ async function main() {
   }
   if (unfilled) console.warn(`[bir] ${unfilled} plane(s) of ${sc.dims[2]} never received data`);
   bir?.refreshStrip();   // the open series' tile was drawn from the placeholder volume
-  // Real range known: re-window the VR transfer function and give the W/L drag its true gain.
-  if (Number.isFinite(vmin) && vmax > vmin) sc.setDataRange(vmin, vmax);
+  // The real scalar range is known now: the W/L drag gain (dataRange) and the VR shift span are
+  // both read from it, so the shift slider has to be rebuilt — it was created over a volume that
+  // had no data in it yet.
+  chrome.refresh();
   drawAll();
   await mosaic!.done();   // packs the progress strip away, once no gesture is in flight
   resize();

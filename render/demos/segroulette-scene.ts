@@ -114,7 +114,10 @@ export interface SegrouletteScene {
   writeSlice(k: number, slice: Float32Array): void;
   /** Re-window after the real scalar range is known (the placeholder volume's range is not the
    *  data's). Updates the VR transfer function's clim; the MPR window/level is separate. */
-  setDataRange(lo: number, hi: number): void;
+  /** The scalar window the GRAYSCALE volume rendering maps (its transfer function's clim) —
+   *  the reader's current window/level, so the 3D render reads like the slices do. A VR preset
+   *  brings its own clim and takes precedence until it is cleared. */
+  setVolumeWindow(lo: number, hi: number): void;
   /** Attach a segmentation to a scene that was built without one — the streaming load builds
    *  the scene from the geometry alone, so the SEG arrives later (often while image slices are
    *  still coming in). Builds the 2D overlay and the 3D SDF, and flips `hasSeg`/`segments`. */
@@ -143,7 +146,7 @@ export function buildSegrouletteScene(
   // the originals restore it. `volShift` offsets the whole TF along the scalar axis (Slicer's VR
   // "Shift"). scaledVolLut scales the active LUT's alpha for the live opacity control.
   const grayLut = modalityLUT(ct.modality);
-  const grayClim: [number, number] = [clim[0], clim[1]];   // mutable: setDataRange re-windows it
+  const grayClim: [number, number] = [clim[0], clim[1]];   // mutable: setVolumeWindow re-windows it
   const grayShade: [number, number, number, number] = [0.25, 0.7, 0.45, 20];
   let baseVolLut = grayLut;
   let baseClim: [number, number] = [clim[0], clim[1]];
@@ -271,7 +274,7 @@ export function buildSegrouletteScene(
     segments, mode, hasSeg, roi,
     segOverlap: seg?.overlap && seg.overlap.voxels > 0 ? seg.overlap : null,
     writeSlice(k, slice) { volumeField.updateSlab(k, slice); },
-    setDataRange(lo, hi) {
+    setVolumeWindow(lo, hi) {
       grayClim[0] = lo; grayClim[1] = hi;
       if (baseVolLut === grayLut) { baseClim = [lo, hi]; volumeField.setClim(lo, hi); }
     },
