@@ -409,6 +409,7 @@ export function buildSegrouletteScene(
     setSegSmoothing(sigmaVoxels) {
       segSigma = Math.max(0, sigmaVoxels);
       segLogic?.setSmoothing(segSigma);
+      scene.syncUniforms();   // σ=0 switches the field to cubes via a uniform
     },
     segSmoothing: () => segSigma,
     setSegmentOpacity(num, opacity) {

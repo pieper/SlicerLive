@@ -214,6 +214,7 @@ export class SegmentationLogic {
         attrTexture: this.sdf ? this.sdf.attrTexture() : undefined,   // per-segment opacity (sdf)
         interfaceMode,
       });
+      this.segField.setVoxelMode(this.renderMode === "sdf" && this.sigma <= 0);   // smoothing may have been set first
     }
     return this.segField;
   }
@@ -232,6 +233,12 @@ export class SegmentationLogic {
   setSmoothing(sigmaVoxels: number) {
     this.sigma = Math.max(0, sigmaVoxels);
     this.sdf?.setSmoothing(this.sigma);
+    // σ=0 means "show me the labelmap", and for a labelmap that is CUBES. Blurring less does not
+    // get there: the iso-surface of a distance field is smooth at any σ, and dropping the blur
+    // only exposes the ridges in its gradient. So the bottom of the range switches the field to
+    // per-voxel rendering instead (SegmentField.setVoxelMode) — same ray-march, same field, read
+    // without interpolation.
+    this.segField?.setVoxelMode(this.renderMode === "sdf" && this.sigma <= 0);
     this.rebake();
     for (const cb of this.redrawCbs) cb();
     this.scheduleRefine();

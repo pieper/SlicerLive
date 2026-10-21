@@ -510,6 +510,10 @@ export async function buildSpineCompareScene(
       segSigma = Math.max(0, sigmaVoxels);
       rowSp.logic.setSmoothing(segSigma);
       rowRef.logic.setSmoothing(segSigma);
+      // σ=0 flips the field to cube rendering, which rides in a UNIFORM — and uniforms only
+      // reach the GPU on syncUniforms(). Without this the re-bake lands but the switch doesn't.
+      rowSp.scene.syncUniforms();
+      rowRef.scene.syncUniforms();
     },
     segSmoothing: () => segSigma,
     destroy() { rowSp.destroy(); rowRef.destroy(); },

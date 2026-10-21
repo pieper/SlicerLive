@@ -379,6 +379,10 @@ export class SegmentField implements Field {
   /** Field-level opacity (multiplies every segment's per-label opacity in the shader). Live global
    *  segmentation opacity — the caller does scene.syncUniforms() + redraw to apply. */
   setOpacity(o: number) { this.opacity = Math.max(0, Math.min(1, o)); }
+  /** Render the sdf field as VOXEL CUBES instead of its smooth iso-surface (sdf mode only).
+   *  What "no smoothing" should mean for a labelmap: one cube per voxel, flat-shaded per face. */
+  setVoxelMode(on: boolean) { this.voxelMode = on; }
+  voxelMode = false;
 
   uniformFloats() { return 36; }        // mat4(16) + color(4) + shade(4) + params(4) + bmin(4) + bmax(4)
   aabb(): [Vec3, Vec3] { return this.box; }
@@ -483,9 +487,120 @@ fn g1_seg${s}(c : f32, wp : vec3<f32>, dir : vec3<f32>, h : f32) -> f32 {
   let dm = c - bdist_seg${s}(wp - dir * h);
   return select(dm, dp, abs(dp) > abs(dm)) / h;
 }` : ""}
+// VOXEL CUBES (params.z): the labelmap AS SEGMENTED, one cube per voxel, flat-shaded per face.
+//
+// This exists because reading the distance field with LINEAR sampling cannot produce it. The zero
+// level set of a Euclidean distance field is a smooth surface, and its gradient — the shading
+// normal — has RIDGES along the medial lines where the distances from neighbouring source voxels
+// meet. Turning the blur off therefore does not reveal voxels; it reveals those ridges, which is
+// what "no smoothing" used to look like.
+//
+// So this path never interpolates: it reads the same texture with textureLoad at the voxel the
+// sample falls in. That voxel is solid iff ITS OWN CENTRE is inside (.a < 0), the surface is the
+// cube faces of the solid voxels, and the normal is the face normal — constant across each face,
+// which is what makes a face read as a face. A face whose neighbour is also solid is interior and
+// draws nothing, so the result is the outside of the voxel set, not a lattice.
+//
+// It is still the same ray-march through the same field: no geometry is built, and the opacity
+// uses the same shell profile as the smooth path, measured to the cube face instead of to the
+// iso-surface, so the opacity controls behave identically at every smoothing setting.
+fn solid_seg${s}(ix : vec3<i32>) -> bool {
+  // "Is this voxel part of the segmentation?" — which channel answers that depends on the field.
+  // The signed (outer) field says it with the sign of the distance; the multi-material INTERFACE
+  // field's distance is UNSIGNED (it measures to the nearest label change, not to the outside),
+  // so there it is the crisp per-voxel presence in the attr texture that knows. Reading the sign
+  // of an unsigned field is how voxel mode first came out completely empty on every nested
+  // segmentation — which is every segmentation with a tumour inside an organ.
+${this.interfaceMode && this.attrTex ? `  return textureLoad(t_attr${s}, ix, 0).a > 0.5;` : `  return textureLoad(t_seg${s}, ix, 0).a < 0.0;`}
+}
+fn voxels_seg${s}(wp : vec3<f32>, rd : vec3<f32>, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = t4.xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
+  let dimsf = vec3<f32>(textureDimensions(t_seg${s}));
+  let ci = floor(t * dimsf - vec3<f32>(0.5) + vec3<f32>(0.5));   // the voxel this sample is in
+  let idx = vec3<i32>(ci);
+  let me = textureLoad(t_seg${s}, idx, 0);
+  if (!solid_seg${s}(idx)) { return vec4<f32>(0.0); }  // this voxel's centre is outside the segmentation
+  // A face perpendicular to texture axis k has texture-space normal e_k; a normal maps from
+  // texture to world by the TRANSPOSE of the world→texture linear part (row k of p2t).
+  let M = u_material.seg${s}_p2t;
+  var rows = array<vec3<f32>, 3>(
+    normalize(vec3<f32>(M[0][0], M[1][0], M[2][0])),
+    normalize(vec3<f32>(M[0][1], M[1][1], M[2][1])),
+    normalize(vec3<f32>(M[0][2], M[1][2], M[2][2])));
+  var offs = array<vec3<i32>, 6>(
+    vec3<i32>(1, 0, 0), vec3<i32>(-1, 0, 0), vec3<i32>(0, 1, 0),
+    vec3<i32>(0, -1, 0), vec3<i32>(0, 0, 1), vec3<i32>(0, 0, -1));
+  // Which faces of this cube are EXPOSED (their neighbour is outside)? Of those, shade the one
+  // the ray meets most squarely. Picking the geometrically nearest face instead leaves the
+  // surface stippled: a ray crossing near a cube's edge is often nearest an INTERIOR face, and
+  // that sample then draws nothing even though the cube is visible there.
+  let lim = vec3<i32>(dimsf) - vec3<i32>(1);
+  var bestDot = -2.0;
+  var n = vec3<f32>(0.0);
+  var exposed = false;
+  var open = array<bool, 6>(false, false, false, false, false, false);
+  for (var f = 0; f < 6; f = f + 1) {
+    if (solid_seg${s}(clamp(idx + offs[f], vec3<i32>(0), lim))) { continue; }   // interior face
+    open[f] = true;
+    exposed = true;
+    let sgn = select(-1.0, 1.0, (f & 1) == 0);
+    let nw = rows[f >> 1] * sgn;
+    let dd = -dot(nw, rd);
+    if (dd > bestDot) { bestDot = dd; n = nw; }
+  }
+  if (!exposed) { return vec4<f32>(0.0); }             // fully buried voxel — the shell is one cube thick
+  // Which face did the ray actually come IN through? That — not the face most square to the
+  // camera — is what makes a cube read as a cube: the step faces catch the light differently
+  // from the faces around them, which is the whole visual signal that this is voxels. Slab
+  // entry test in voxel space; if that face turns out to be interior (possible when the march
+  // steps past a thin feature), fall back to the exposed face the ray meets most squarely.
+  let rv = vec3<f32>(
+    dot(vec3<f32>(M[0][0], M[1][0], M[2][0]), rd),
+    dot(vec3<f32>(M[0][1], M[1][1], M[2][1]), rd),
+    dot(vec3<f32>(M[0][2], M[1][2], M[2][2]), rd)) * dimsf;
+  let r = t * dimsf - vec3<f32>(0.5) - ci;             // position within the voxel, [-0.5, 0.5]
+  var tIn = -1e9;
+  var face = -1;
+  if (abs(rv.x) > 1e-6) { let tk = (-0.5 * sign(rv.x) - r.x) / rv.x; if (tk > tIn) { tIn = tk; face = select(1, 0, rv.x < 0.0); } }
+  if (abs(rv.y) > 1e-6) { let tk = (-0.5 * sign(rv.y) - r.y) / rv.y; if (tk > tIn) { tIn = tk; face = select(3, 2, rv.y < 0.0); } }
+  if (abs(rv.z) > 1e-6) { let tk = (-0.5 * sign(rv.z) - r.z) / rv.z; if (tk > tIn) { tIn = tk; face = select(5, 4, rv.z < 0.0); } }
+  if (face >= 0 && open[face]) {
+    n = rows[face >> 1] * select(-1.0, 1.0, (face & 1) == 0);
+  }
+${this.attrTex ? `  let at = textureLoad(t_attr${s}, idx, 0);
+  let vop = at.r;                                      // per-segment opacity, this voxel's own
+  let vcol = me.rgb / max(vop, 1e-3);                  // un-premultiply` : `  let vop = seg_op;
+  let vcol = me.rgb;`}
+  let T = clamp(op0 * vop, 0.0, 1.0);
+  if (T <= 0.0) { return vec4<f32>(0.0); }
+  // Optical depth calibrated so crossing ONE voxel accumulates exactly T — the cube-sized
+  // equivalent of the shell profile the smooth path uses, so the opacity controls mean the same
+  // thing at every smoothing setting.
+  let vox = max(u_material.seg${s}_params.y, 1e-4);
+  let rate = max(abs(dot(rd, n)), 1e-3);
+  let tau = -log(1.0 - min(T, 0.9999)) * (step * rate) / vox;
+  let op = 1.0 - exp(-tau);
+  if (op <= 0.0004) { return vec4<f32>(0.0); }
+  let ka = u_material.seg${s}_shade.x; let kd = u_material.seg${s}_shade.y;
+  let ldn = max(dot(-rd, n), 0.0);
+  // Faces need to differ in brightness by WHICH WAY THEY FACE, not by how square they are to the
+  // camera. A head-lit cube surface viewed down one of its own axes has every visible face at the
+  // same angle to the light, and with ka+kd ≈ 1 they all clip to the same flat colour — which is
+  // exactly what "voxel mode" looked like before this: a flat silhouette with stepped edges.
+  // A fixed overhead sky term (superior-facing brightest, inferior darkest, sides between) makes
+  // each face of each cube read separately from any viewpoint, which is the whole point of the
+  // mode. No specular: a highlight across flat faces reads as curvature.
+  let sky = 0.55 + 0.45 * clamp(0.5 + 0.5 * n.z, 0.0, 1.0);
+  var lit = vcol * sky * (ka + kd * ldn);
+  lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
+  return vec4<f32>(lit * op, op);
+}
 // Shell (surface) contribution at wp: crisp Phong shell around sdf=0. Weighted by (1-mode) so it
 // morphs smoothly into the volume contribution across a blurred surface↔volume boundary.
 fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
+  if (u_material.seg${s}_params.z > 0.5) { return voxels_seg${s}(wp, rd, band, step, seg_op, op0); }
   let d_mm = abs(sdf);
   if (d_mm > band + step) { return vec4<f32>(0.0); }
   let T = clamp(op0 * seg_op, 0.0, 1.0);      // TARGET surface opacity (per-segment × field)
@@ -635,6 +750,8 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     out[off + 16] = this.color[0]; out[off + 17] = this.color[1]; out[off + 18] = this.color[2]; out[off + 19] = this.opacity;
     out[off + 20] = this.shade[0]; out[off + 21] = this.shade[1]; out[off + 22] = this.shade[2]; out[off + 23] = this.shade[3];
     out[off + 24] = this.bandMm; out[off + 25] = this.voxelMm;
+    out[off + 26] = this.voxelMode ? 1 : 0;   // params.z — cube rendering (sdf mode)
+    out[off + 27] = 0;
     out[off + 28] = this.box[0][0]; out[off + 29] = this.box[0][1]; out[off + 30] = this.box[0][2];
     out[off + 32] = this.box[1][0]; out[off + 33] = this.box[1][1]; out[off + 34] = this.box[1][2];
   }
