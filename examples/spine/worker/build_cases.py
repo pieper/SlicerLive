@@ -64,7 +64,11 @@ for coll, work, files in (("mets", mets_work, mets_files), ("myeloma", mm_work, 
         rec = {
             "pid": pid,
             "collection": coll,
-            "idc_collection_id": "spine_mets_ct_seg" if coll == "mets" else "ct_images_in_multiple_myeloma",
+            # The myeloma cases are IDC's Spinal-Multiple-Myeloma-SEG (doi 10.7937/k4qv-hh78).
+            # "ct_images_in_multiple_myeloma" was wrong — no such collection_id exists in the IDC
+            # index, so anything resolving this field got nothing back. Verified by looking up
+            # every crdc_series_uuid in this file against the index.
+            "idc_collection_id": "spine_mets_ct_seg" if coll == "mets" else "spinal_multiple_myeloma_seg",
             "ct": {"crdc_series_uuid": w["uuid"], "instances": w.get("slices")},
             "ref_seg": {"crdc_series_uuid": w["seg_uuid"], "n_segments": w.get("nseg"),
                         "source": "expert" if coll == "mets" else "nnUNet"},
@@ -98,10 +102,20 @@ for coll, work, files in (("mets", mets_work, mets_files), ("myeloma", mm_work, 
 
 doc = {
     "name": "spine-review",
-    "description": "SPINEPS vertebra segmentations for 121 IDC cases (Spine-Mets-CT-SEG + CT Images in Multiple Myeloma), exported for browser review over IDC CTs. Reference SEGs and CTs are NOT here: fetch from the public idc-open-data bucket by crdc_series_uuid (s3://idc-open-data/<uuid>/*.dcm, also on GCS).",
+    "description": "SPINEPS vertebra segmentations for 121 IDC cases (Spine-Mets-CT-SEG + Spinal-Multiple-Myeloma-SEG), exported for browser review over IDC CTs. Reference SEGs and CTs are NOT here: fetch from the public idc-open-data bucket by crdc_series_uuid (s3://idc-open-data/<uuid>/*.dcm, also on GCS).",
     "generated": "2026-08-08",
     "base_url": "https://js2.jetstream-cloud.org:8001/swift/v1/spine-review/",
     "idc": {
+        # Both collections are CC BY 4.0 and REQUIRE attribution; the formal citations live in
+        # examples/spine/citations.js, which the review and compare pages render.
+        "collections": {
+            "mets": {"collection_id": "spine_mets_ct_seg", "doi": "10.7937/kh36-ds04",
+                     "license": "CC BY 4.0",
+                     "info": "https://portal.imaging.datacommons.cancer.gov/collections/spine_mets_ct_seg/"},
+            "myeloma": {"collection_id": "spinal_multiple_myeloma_seg", "doi": "10.7937/k4qv-hh78",
+                        "license": "CC BY 4.0",
+                        "info": "https://portal.imaging.datacommons.cancer.gov/collections/spinal_multiple_myeloma_seg/"},
+        },
         "bucket": "idc-open-data",
         "s3_http": "https://idc-open-data.s3.amazonaws.com/<crdc_series_uuid>/<instance_uuid>.dcm",
         "gcs_http": "https://storage.googleapis.com/idc-open-data/<crdc_series_uuid>/<instance_uuid>.dcm",

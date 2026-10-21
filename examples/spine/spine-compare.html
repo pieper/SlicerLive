@@ -36,6 +36,19 @@
                opacity: .75; pointer-events: none; color: #9fb3d0; }
   #levels { flex: 0 0 auto; display: flex; gap: 3px; overflow-x: auto; padding: 5px 10px;
             background: #0b0e16; border-top: 1px solid #1b2740; }
+  /* Both source collections are CC BY 4.0, so the attribution travels with the viewer —
+     including when this page is embedded in the dashboard's drill-down iframe. */
+  #credit { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 4px 10px;
+            background: #080b12; border-top: 1px solid #1b2740; color: #7d92b5; font-size: 11px; }
+  #credit a { color: #9fb3d0; }
+  #credit .sp { flex: 1; }
+  #cite-dlg { max-width: min(92vw, 860px); border: 1px solid #33507e; border-radius: 10px;
+              background: #0b0e16; color: #d6e2f2; padding: 18px 20px;
+              font: 12px/1.55 -apple-system, system-ui, sans-serif; }
+  #cite-dlg::backdrop { background: rgba(0,0,0,.6); }
+  #cite-dlg h2 { font-size: 13px; margin: 0 0 10px; }
+  #cite-dlg a { color: #9fe9ff; }
+  #cite-close { margin-top: 14px; }
   #levels button.lvl { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 1px;
             font: 700 11px -apple-system, system-ui, sans-serif; color: #d6e2f2; background: #131a2a;
             border: 1px solid #33507e; border-radius: 5px; padding: 3px 7px; cursor: pointer; }
@@ -119,7 +132,49 @@
       </div>
     </div>
     <div id="levels"></div>
+    <footer id="credit">
+      <span id="credit-text"></span>
+      <span class="sp"></span>
+      <button id="cite-btn" class="chip" title="full data citations">cite</button>
+    </footer>
   </div>
+  <dialog id="cite-dlg">
+    <h2>Data and citations</h2>
+    <div id="cite-body"></div>
+    <button id="cite-close" class="chip">close</button>
+  </dialog>
+  <script type="module">
+    // Independent of the viewer bundle: the credit has to be right even if the scene never
+    // loads, so it reads ?coll= itself. Without that parameter the viewer picks the case (and
+    // therefore the collection), and it announces its choice in the case button as
+    // "<coll>/<pid>" — watching that is what keeps the credit correct without this page and
+    // the bundle having to agree on anything else.
+    import { creditLine, renderCitations } from './citations.js';
+    const KNOWN = ['mets', 'myeloma'];
+    const fromUrl = new URLSearchParams(location.search).get('coll');
+    let coll = KNOWN.includes(fromUrl) ? fromUrl : null;
+    const text = document.getElementById('credit-text');
+    const paint = () => {
+      text.innerHTML = coll
+        ? creditLine(coll)
+        : 'CT and reference segmentations from the ' +
+          '<a href="https://portal.imaging.datacommons.cancer.gov/" target="_blank" rel="noopener">' +
+          'NCI Imaging Data Commons</a> · CC BY 4.0';
+    };
+    paint();
+    const btn = document.getElementById('case-btn');
+    const watch = new MutationObserver(() => {
+      const c = (btn.textContent || '').split('/')[0].trim();
+      if (KNOWN.includes(c) && c !== coll) { coll = c; paint(); }
+    });
+    watch.observe(btn, { childList: true, characterData: true, subtree: true });
+    const dlg = document.getElementById('cite-dlg');
+    document.getElementById('cite-btn').onclick = () => {
+      renderCitations(document.getElementById('cite-body'), coll ? { only: coll } : {});
+      dlg.showModal();
+    };
+    document.getElementById('cite-close').onclick = () => dlg.close();
+  </script>
   <script type="module" src="spine-compare.js?v=20260812a"></script>   <!-- bump per deploy: stale cached bundles caused phantom-behaviour reports -->
 </body>
 </html>

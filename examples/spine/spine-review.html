@@ -101,6 +101,10 @@ tbody tr:hover{background:var(--panel-2)}
 One line per case. Each axis is a vertebral level; the value is <strong>1&nbsp;&minus;&nbsp;Dice</strong> between the
 reference label and the SPINEPS label of the same name — <strong>0 means perfect agreement</strong>, 1 means no overlap.
 Levels absent from the reference are simply not drawn, so a line covers only the vertebrae that were annotated.</p>
+<p class="sub">Images and reference segmentations: <strong>NCI Imaging Data Commons</strong> &mdash;
+<a href="https://portal.imaging.datacommons.cancer.gov/collections/spine_mets_ct_seg/" target="_blank" rel="noopener">Spine-Mets-CT-SEG</a>
+and <a href="https://portal.imaging.datacommons.cancer.gov/collections/spinal_multiple_myeloma_seg/" target="_blank" rel="noopener">Spinal-Multiple-Myeloma-SEG</a>,
+both CC&nbsp;BY&nbsp;4.0. <a href="#data">How to cite &darr;</a></p>
 
 <div class="strip" id="strip"></div>
 
@@ -138,6 +142,11 @@ Drag on any axis to filter; hover a line to preview, click to open the interacti
     </div>
   </div>
 </div>
+
+<section class="card" id="data">
+  <h2>Data and citations</h2>
+  <div id="cites"></div>
+</section>
 </div>
 
 <div id="drill" hidden>
@@ -153,6 +162,9 @@ Drag on any axis to filter; hover a line to preview, click to open the interacti
 
 <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
 <script type="module">
+import { renderCitations } from './citations.js';
+renderCitations(document.getElementById('cites'));
+
 const BUCKET = 'https://js2.jetstream-cloud.org:8001/swift/v1/spine-review/';
 const P = await (await fetch(BUCKET + 'payload.json', {cache: 'no-cache'})).json();
 const ZARR_READY = {};   // pid -> bool, filled lazily

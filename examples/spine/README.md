@@ -33,6 +33,31 @@ JFA-SDF surface shells, `SceneRenderer` clip boxes + GPU picking, the shared
 demo chrome (tri-state opacity controls), the crosshair primitives, and the
 zarr loader (`render/zarr.ts`, streaming progress).
 
+## Data and citations
+
+Every image and every reference segmentation here is public data from the
+**NCI Imaging Data Commons**, loaded straight from its public buckets by
+`crdc_series_uuid`. Only the SPINEPS masks are ours. Both collections are
+CC BY 4.0, so attribution is a licence condition, not a courtesy — the formal
+citations live in `citations.js` and are rendered by both pages (a "Data and
+citations" section on the dashboard; a credit line plus a `cite` dialog in the
+viewer, so the attribution survives being embedded in an iframe).
+
+| demo tag | IDC collection | DOI | used here |
+|---|---|---|---|
+| `mets` | [Spine-Mets-CT-SEG](https://portal.imaging.datacommons.cancer.gov/collections/spine_mets_ct_seg/) | [10.7937/kh36-ds04](https://doi.org/10.7937/kh36-ds04) | 55 subjects, 55 CT + 55 SEG |
+| `myeloma` | [Spinal-Multiple-Myeloma-SEG](https://portal.imaging.datacommons.cancer.gov/collections/spinal_multiple_myeloma_seg/) | [10.7937/k4qv-hh78](https://doi.org/10.7937/k4qv-hh78) | 66 subjects, 66 CT + 66 SEG |
+
+Those counts are not the collections' totals — they were derived by resolving
+the 242 `crdc_series_uuid`s in `cases.json` against the IDC index (v25). The
+myeloma collection was recorded as `ct_images_in_multiple_myeloma` in earlier
+`cases.json` builds, which is not an IDC `collection_id` at all;
+`worker/build_cases.py` is fixed, but **the published `cases.json` still
+carries the old string** until the bucket is regenerated.
+
+Also unrecorded: the SPINEPS version and model used for the run. Worth adding
+to the manifest before anyone tries to reproduce the numbers.
+
 ## Data pipeline (`worker/`)
 
 - `build_cases.py` — merges the pid → IDC `crdc_series_uuid` crosswalks with the
