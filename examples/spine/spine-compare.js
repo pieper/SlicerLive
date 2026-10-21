@@ -3719,12 +3719,12 @@ fn attr_seg${s}(wp : vec3<f32>) -> vec2<f32> {   // per-segment (.x = opacity, .
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec2<f32>(0.0); }
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).rg;
-}` : ""}${this.interfaceMode ? `
-fn bdist_seg${s}(wp : vec3<f32>) -> f32 {   // SMOOTH (seam-blurred) interface distance from attr.b \u2014 for the normal only
+}` : ""}${this.attrTex ? `
+fn bdist_seg${s}(wp : vec3<f32>) -> f32 {   // SMOOTHED distance from attr.b \u2014 shading and erosion only, never growth
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).b;
-}
+}` : ""}${this.interfaceMode ? `
 fn pres_seg${s}(wp : vec3<f32>) -> f32 {   // CRISP in-segment presence (attr.a), linear-sampled for ~1-voxel AA
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = t4.xyz;
@@ -3759,6 +3759,15 @@ fn g1_seg${s}(c : f32, wp : vec3<f32>, dir : vec3<f32>, h : f32) -> f32 {
 // It is still the same ray-march through the same field: no geometry is built, and the opacity
 // uses the same shell profile as the smooth path, measured to the cube face instead of to the
 // iso-surface, so the opacity controls behave identically at every smoothing setting.
+fn solid_seg${s}(ix : vec3<i32>) -> bool {
+  // "Is this voxel part of the segmentation?" \u2014 which channel answers that depends on the field.
+  // The signed (outer) field says it with the sign of the distance; the multi-material INTERFACE
+  // field's distance is UNSIGNED (it measures to the nearest label change, not to the outside),
+  // so there it is the crisp per-voxel presence in the attr texture that knows. Reading the sign
+  // of an unsigned field is how voxel mode first came out completely empty on every nested
+  // segmentation \u2014 which is every segmentation with a tumour inside an organ.
+${this.interfaceMode && this.attrTex ? `  return textureLoad(t_attr${s}, ix, 0).a > 0.5;` : `  return textureLoad(t_seg${s}, ix, 0).a < 0.0;`}
+}
 fn voxels_seg${s}(wp : vec3<f32>, rd : vec3<f32>, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = t4.xyz;
@@ -3767,7 +3776,7 @@ fn voxels_seg${s}(wp : vec3<f32>, rd : vec3<f32>, band : f32, step : f32, seg_op
   let ci = floor(t * dimsf - vec3<f32>(0.5) + vec3<f32>(0.5));   // the voxel this sample is in
   let idx = vec3<i32>(ci);
   let me = textureLoad(t_seg${s}, idx, 0);
-  if (me.a >= 0.0) { return vec4<f32>(0.0); }          // this voxel's centre is outside the segmentation
+  if (!solid_seg${s}(idx)) { return vec4<f32>(0.0); }  // this voxel's centre is outside the segmentation
   // A face perpendicular to texture axis k has texture-space normal e_k; a normal maps from
   // texture to world by the TRANSPOSE of the world\u2192texture linear part (row k of p2t).
   let M = u_material.seg${s}_p2t;
@@ -3788,8 +3797,7 @@ fn voxels_seg${s}(wp : vec3<f32>, rd : vec3<f32>, band : f32, step : f32, seg_op
   var exposed = false;
   var open = array<bool, 6>(false, false, false, false, false, false);
   for (var f = 0; f < 6; f = f + 1) {
-    let nb = textureLoad(t_seg${s}, clamp(idx + offs[f], vec3<i32>(0), lim), 0);
-    if (nb.a < 0.0) { continue; }                      // neighbour solid \u2192 interior face
+    if (solid_seg${s}(clamp(idx + offs[f], vec3<i32>(0), lim))) { continue; }   // interior face
     open[f] = true;
     exposed = true;
     let sgn = select(-1.0, 1.0, (f & 1) == 0);
@@ -3848,7 +3856,14 @@ ${this.attrTex ? `  let at = textureLoad(t_attr${s}, idx, 0);
 // morphs smoothly into the volume contribution across a blurred surface\u2194volume boundary.
 fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
   if (u_material.seg${s}_params.z > 0.5) { return voxels_seg${s}(wp, rd, band, step, seg_op, op0); }
-  let d_mm = abs(sdf);
+${this.attrTex && !this.interfaceMode ? `  // Smoothing may ERODE the surface but never GROW it: d = max(sharp, smoothed), with negative
+  // meaning inside. Where the blur rounds a voxel staircase off, the smoothed value is the larger
+  // (less inside) one and wins, so the silhouette smooths. Where the blur would bridge a gap \u2014
+  // the disc space between two vertebrae, a vessel between two organs \u2014 the smoothed value is the
+  // smaller one and is ignored, so the gap survives at every setting. Smoothing that can close a
+  // gap is not smoothing, it is a different segmentation.
+  let d_use = max(sdf, bdist_seg${s}(wp));
+  let d_mm = abs(d_use);` : `  let d_mm = abs(sdf);`}
   if (d_mm > band + step) { return vec4<f32>(0.0); }
   let T = clamp(op0 * seg_op, 0.0, 1.0);      // TARGET surface opacity (per-segment \xD7 field)
   if (T <= 0.0) { return vec4<f32>(0.0); }
@@ -3858,7 +3873,14 @@ ${this.interfaceMode ? `  let hg = 1.5 * step;
   let g = vec3<f32>(
     g1_seg${s}(dc, wp, vec3<f32>(1,0,0), hg),
     g1_seg${s}(dc, wp, vec3<f32>(0,1,0), hg),
-    g1_seg${s}(dc, wp, vec3<f32>(0,0,1), hg));` : `  let g = vec3<f32>(
+    g1_seg${s}(dc, wp, vec3<f32>(0,0,1), hg));` : this.attrTex ? `  // The NORMAL comes from the smoothed distance (attr.b) \u2014 that is what the smoothing control
+  // actually does now: it shades the surface smoothly without moving it. Central difference: in
+  // this mode the distance is signed, so there is no V-crease to straddle.
+  let hg = max(h, 1.0 * step);
+  let g = vec3<f32>(
+    bdist_seg${s}(wp + vec3<f32>(hg,0,0)) - bdist_seg${s}(wp - vec3<f32>(hg,0,0)),
+    bdist_seg${s}(wp + vec3<f32>(0,hg,0)) - bdist_seg${s}(wp - vec3<f32>(0,hg,0)),
+    bdist_seg${s}(wp + vec3<f32>(0,0,hg)) - bdist_seg${s}(wp - vec3<f32>(0,0,hg))) / (2.0 * hg);` : `  let g = vec3<f32>(
     vgrad_seg${s}(wp + vec3<f32>(h,0,0)) - vgrad_seg${s}(wp - vec3<f32>(h,0,0)),
     vgrad_seg${s}(wp + vec3<f32>(0,h,0)) - vgrad_seg${s}(wp - vec3<f32>(0,h,0)),
     vgrad_seg${s}(wp + vec3<f32>(0,0,h)) - vgrad_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);`}
@@ -3873,7 +3895,7 @@ ${this.interfaceMode ? `  let hg = 1.5 * step;
   // so net opacity = 1-e^(-\u03A3d\u03C4) = T EXACTLY \u2014 independent of band thickness and sample rate, and T\u21921
   // stays crisply opaque. |dot(rd,n)| converts ray-step to shell-normal distance (\u21920 at grazing =
   // built-in silhouette AA).
-  let a = max(1.0 - d_mm / band, 0.0);
+  let a = max(1.0 - d_mm / band, 0.0);   // d_mm is the eroded-but-never-grown distance
   if (a <= 0.0) { return vec4<f32>(0.0); }
   // Convert ray-step to d_mm-distance. Outer: RAW gradient projection |dot(rd,g)| = |d(d_mm)/ds|
   // (includes |grad sdf|, which the distance blur pulls below 1). Interface: the re-signed gradient has
@@ -4904,9 +4926,8 @@ var JfaSdfBaker = class {
     p.dispatchWorkgroups(g[0], g[1], g[2]);
     p.end();
     dev.queue.submit([enc.finish()]);
-    if (this.smoothSigma > 0) this.blurStage(this.blurPipe, this.smoothSigma, this.sdfTex, this.sdfScratch, region);
     this.blurStage(this.colBlurPipe, 1, this.sdfTex, this.sdfScratch, region);
-    this.blurStage(this.fullBlurPipe, 1, this.attrTex, this.attrScratch, region);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch, region);
   }
   /** ATTR-ONLY rebake for palette/opacity changes (per-segment visibility): the distance field
    *  doesn't move, so re-run ONLY the finalize (from the last sweep's seed) with its sdf writes
@@ -4999,9 +5020,8 @@ var JfaSdfBaker = class {
     p.dispatchWorkgroups(gx, gy, gz);
     p.end();
     dev.queue.submit([enc.finish()]);
-    if (distSigma > 0) this.blurStage(this.blurPipe, distSigma, this.sdfTex, this.sdfScratch);
     if (colorSigma > 0) this.blurStage(this.colBlurPipe, colorSigma, this.sdfTex, this.sdfScratch);
-    if (colorSigma > 0) this.blurStage(this.fullBlurPipe, colorSigma, this.attrTex, this.attrScratch);
+    if (distSigma > 0) this.blurStage(this.fullBlurPipe, distSigma, this.attrTex, this.attrScratch);
   }
   /** 3 separable Gaussian passes with the given pipeline (which channels it blurs), tex↔scratch,
    *  ending in scratch → copied back to `tex` so its identity stays stable for the renderer. */

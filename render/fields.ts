@@ -464,12 +464,12 @@ fn attr_seg${s}(wp : vec3<f32>) -> vec2<f32> {   // per-segment (.x = opacity, .
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec2<f32>(0.0); }
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).rg;
-}` : ""}${this.interfaceMode ? `
-fn bdist_seg${s}(wp : vec3<f32>) -> f32 {   // SMOOTH (seam-blurred) interface distance from attr.b — for the normal only
+}` : ""}${this.attrTex ? `
+fn bdist_seg${s}(wp : vec3<f32>) -> f32 {   // SMOOTHED distance from attr.b — shading and erosion only, never growth
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).b;
-}
+}`: ""}${this.interfaceMode ? `
 fn pres_seg${s}(wp : vec3<f32>) -> f32 {   // CRISP in-segment presence (attr.a), linear-sampled for ~1-voxel AA
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = t4.xyz;
@@ -601,7 +601,14 @@ ${this.attrTex ? `  let at = textureLoad(t_attr${s}, idx, 0);
 // morphs smoothly into the volume contribution across a blurred surface↔volume boundary.
 fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
   if (u_material.seg${s}_params.z > 0.5) { return voxels_seg${s}(wp, rd, band, step, seg_op, op0); }
-  let d_mm = abs(sdf);
+${this.attrTex && !this.interfaceMode ? `  // Smoothing may ERODE the surface but never GROW it: d = max(sharp, smoothed), with negative
+  // meaning inside. Where the blur rounds a voxel staircase off, the smoothed value is the larger
+  // (less inside) one and wins, so the silhouette smooths. Where the blur would bridge a gap —
+  // the disc space between two vertebrae, a vessel between two organs — the smoothed value is the
+  // smaller one and is ignored, so the gap survives at every setting. Smoothing that can close a
+  // gap is not smoothing, it is a different segmentation.
+  let d_use = max(sdf, bdist_seg${s}(wp));
+  let d_mm = abs(d_use);` : `  let d_mm = abs(sdf);`}
   if (d_mm > band + step) { return vec4<f32>(0.0); }
   let T = clamp(op0 * seg_op, 0.0, 1.0);      // TARGET surface opacity (per-segment × field)
   if (T <= 0.0) { return vec4<f32>(0.0); }
@@ -612,7 +619,14 @@ ${this.interfaceMode ? `  let hg = 1.5 * step;
     g1_seg${s}(dc, wp, vec3<f32>(1,0,0), hg),
     g1_seg${s}(dc, wp, vec3<f32>(0,1,0), hg),
     g1_seg${s}(dc, wp, vec3<f32>(0,0,1), hg));`
-  : `  let g = vec3<f32>(
+  : this.attrTex ? `  // The NORMAL comes from the smoothed distance (attr.b) — that is what the smoothing control
+  // actually does now: it shades the surface smoothly without moving it. Central difference: in
+  // this mode the distance is signed, so there is no V-crease to straddle.
+  let hg = max(h, 1.0 * step);
+  let g = vec3<f32>(
+    bdist_seg${s}(wp + vec3<f32>(hg,0,0)) - bdist_seg${s}(wp - vec3<f32>(hg,0,0)),
+    bdist_seg${s}(wp + vec3<f32>(0,hg,0)) - bdist_seg${s}(wp - vec3<f32>(0,hg,0)),
+    bdist_seg${s}(wp + vec3<f32>(0,0,hg)) - bdist_seg${s}(wp - vec3<f32>(0,0,hg))) / (2.0 * hg);` : `  let g = vec3<f32>(
     vgrad_seg${s}(wp + vec3<f32>(h,0,0)) - vgrad_seg${s}(wp - vec3<f32>(h,0,0)),
     vgrad_seg${s}(wp + vec3<f32>(0,h,0)) - vgrad_seg${s}(wp - vec3<f32>(0,h,0)),
     vgrad_seg${s}(wp + vec3<f32>(0,0,h)) - vgrad_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);`}
@@ -627,7 +641,7 @@ ${this.interfaceMode ? `  let hg = 1.5 * step;
   // so net opacity = 1-e^(-Σdτ) = T EXACTLY — independent of band thickness and sample rate, and T→1
   // stays crisply opaque. |dot(rd,n)| converts ray-step to shell-normal distance (→0 at grazing =
   // built-in silhouette AA).
-  let a = max(1.0 - d_mm / band, 0.0);
+  let a = max(1.0 - d_mm / band, 0.0);   // d_mm is the eroded-but-never-grown distance
   if (a <= 0.0) { return vec4<f32>(0.0); }
   // Convert ray-step to d_mm-distance. Outer: RAW gradient projection |dot(rd,g)| = |d(d_mm)/ds|
   // (includes |grad sdf|, which the distance blur pulls below 1). Interface: the re-signed gradient has

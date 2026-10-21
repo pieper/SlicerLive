@@ -447,9 +447,8 @@ export class JfaSdfBaker {
     ] });
     const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(g[0], g[1], g[2]); p.end();
     dev.queue.submit([enc.finish()]);
-    if (this.smoothSigma > 0) this.blurStage(this.blurPipe, this.smoothSigma, this.sdfTex, this.sdfScratch, region);
     this.blurStage(this.colBlurPipe, 1.0, this.sdfTex, this.sdfScratch, region);
-    this.blurStage(this.fullBlurPipe, 1.0, this.attrTex, this.attrScratch, region);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch, region);
   }
 
   /** ATTR-ONLY rebake for palette/opacity changes (per-segment visibility): the distance field
@@ -539,9 +538,19 @@ export class JfaSdfBaker {
     // Distance blur (smooths the shading normal; keeps colour crisp), then optional colour-seam blur,
     // then (refine only) the attribute-seam blur so opacity + shading-mode transition as smoothly as
     // the colour — removing the jaggies where an opaque surface segment meets a translucent volume one.
-    if (distSigma > 0) this.blurStage(this.blurPipe, distSigma, this.sdfTex, this.sdfScratch);
+    // The distance smoothing goes to the ATTR texture's .b, NOT to sdfTex.a.
+    //
+    // sdfTex.a is what decides where the surface IS, and blurring a signed distance field moves
+    // its zero crossing — outward, wherever the field is thin. A 2-voxel gap between two
+    // segments is thin: blur it at σ=0.5 and the gap goes negative on both sides and closes, so
+    // smoothing silently FUSED neighbouring structures (two vertebrae with a disc space between
+    // them rendered as one bone). The shader reads attr.b for the normal and sdfTex.a for
+    // membership, so smoothing the shading no longer moves the geometry.
     if (colorSigma > 0) this.blurStage(this.colBlurPipe, colorSigma, this.sdfTex, this.sdfScratch);
-    if (colorSigma > 0) this.blurStage(this.fullBlurPipe, colorSigma, this.attrTex, this.attrScratch);
+    // attr's blur is the SHADING smoothness, so it takes the caller's σ exactly. Flooring it at
+    // the colour-seam σ (1.0) made every setting from 0 to 1 render identically — the control
+    // did nothing over half its range.
+    if (distSigma > 0) this.blurStage(this.fullBlurPipe, distSigma, this.attrTex, this.attrScratch);
   }
 
   /** 3 separable Gaussian passes with the given pipeline (which channels it blurs), tex↔scratch,
