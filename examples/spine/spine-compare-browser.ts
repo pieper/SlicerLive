@@ -375,6 +375,22 @@ async function main() {
     { label: "Reference shell", getOpacity: () => sc.methodOpacity("ref"), setOpacity: (o) => { sc.setMethodOpacity("ref", o); drawAll3d(); }, color: METHOD_COLORS.ref },
     { label: "CT volume (3D)", getOpacity: () => sc.volumeOpacity(), setOpacity: (o) => { sc.setVolumeOpacity(o); drawAll3d(); }, color: [0.75, 0.78, 0.85] },
     { label: "Discs (SPINEPS)", getOpacity: () => sc.discOpacity(), setOpacity: (o) => { sc.setDiscOpacity(o); requestDraw(); }, color: [0.72, 0.72, 0.66] },
+    // Shell smoothing. This is a REVIEW tool, so the bottom of the range matters as much as the
+    // top: at σ=0 the shell follows the labelmap voxel for voxel, which is what you need to see
+    // when judging whether SPINEPS and the reference disagree about actual voxels; smoothing it
+    // up turns the same labels into a modelled surface, which is what you need when several
+    // vertebrae are on screen and the question is which bone is which.
+    {
+      label: "Shell smoothing",
+      slider: {
+        min: 0,
+        max: 2,
+        step: 0.25,
+        get: () => sc.segSmoothing(),
+        set: (v) => { sc.setSegSmoothing(v); drawAll3d(); },
+        format: (v) => (v > 0 ? `σ ${v.toFixed(2)} vox` : "voxels"),
+      },
+    },
   ];
   installChrome({ controls, anchor: cv["c-ref-threeD"].parentElement ?? undefined });
 

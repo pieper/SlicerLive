@@ -208,6 +208,11 @@ export interface SpineCompareScene {
   /** The muted intervertebral-disc layer (SPINEPS's 100+n labels): 0 hides, 1 full muted colour. */
   setDiscOpacity(o: number): void;
   discOpacity(): number;
+  /** 3D shell smoothing, σ in voxels of the SDF grid. 0 = the labelmap as segmented (every voxel
+   *  face visible, which is what a review of the algorithm's actual output needs); higher = a
+   *  modelled surface. Applies to both method rows. */
+  setSegSmoothing(sigmaVoxels: number): void;
+  segSmoothing(): number;
   destroy(): void;
 }
 
@@ -296,6 +301,9 @@ export async function buildSpineCompareScene(
   /** applyShellVisibility: after per-label opacity updates, re-derive the outer-mode SDF if the
    *  visible-label SET changed (region-limited when a bbox is given). Returns true when it rebaked
    *  (attr included) — the caller then skips the attr-only refreshOpacity. */
+  // Shell smoothing (σ, SDF-grid voxels), shared by both method rows so they stay comparable —
+  // the whole point of the view is that the two surfaces are rendered identically.
+  let segSigma = 1.0;
   type RowState = MethodRow & {
     lab: Uint8Array; shown: Map<number, number>; rebuild(): void;
     applyShellVisibility(regionRAS: { lo: Vec3; hi: Vec3 } | null): boolean;
@@ -314,6 +322,7 @@ export async function buildSpineCompareScene(
     const outerShell = (shellOpts?.shell ?? "outer") === "outer";
     const logic = new SegmentationLogic(dev, editable, {
       renderMode: "sdf", boundaryMode: outerShell ? "outer" : "all", opacity: 1, clippable: true,
+      sigmaVoxels: segSigma,
       bandMm: shellOpts?.bandVox !== undefined ? shellOpts.bandVox * cap.vox : undefined,
     });
     const levels = levelGeometry(lab, medDims, medRAS);   // centroids/bboxes stay med-exact
@@ -497,6 +506,12 @@ export async function buildSpineCompareScene(
       this.setExtent(extentState.label, extentState.count);   // re-applies 3D label opacities
     },
     discOpacity: () => discOp,
+    setSegSmoothing(sigmaVoxels) {
+      segSigma = Math.max(0, sigmaVoxels);
+      rowSp.logic.setSmoothing(segSigma);
+      rowRef.logic.setSmoothing(segSigma);
+    },
+    segSmoothing: () => segSigma,
     destroy() { rowSp.destroy(); rowRef.destroy(); },
   };
 

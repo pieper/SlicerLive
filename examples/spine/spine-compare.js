@@ -2,15 +2,9 @@
 async function initDevice() {
   const gpu = navigator.gpu;
   if (!gpu) throw new Error("WebGPU not available (need Chrome/Edge/Safari or Deno --unstable-webgpu)");
-  const adapter = await gpu.requestAdapter({
-    powerPreference: "high-performance"
-  });
+  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("no WebGPU adapter");
-  const want = [
-    "float32-filterable",
-    "timestamp-query",
-    "shader-f16"
-  ].filter((f) => adapter.features.has(f));
+  const want = ["float32-filterable", "timestamp-query", "shader-f16"].filter((f) => adapter.features.has(f));
   const lim = adapter.limits;
   const requiredLimits = {};
   const raise = (k) => {
@@ -20,15 +14,8 @@ async function initDevice() {
   raise("maxBufferSize");
   raise("maxStorageBufferBindingSize");
   raise("maxTextureDimension3D");
-  const device = await adapter.requestDevice({
-    requiredFeatures: want,
-    requiredLimits
-  });
-  return {
-    adapter,
-    device,
-    features: new Set(want)
-  };
+  const device = await adapter.requestDevice({ requiredFeatures: want, requiredLimits });
+  return { adapter, device, features: new Set(want) };
 }
 
 // render/mat4.ts
@@ -55,6 +42,21 @@ function perspectiveZO(fovy, aspect, near, far) {
   m[5] = f;
   m[11] = -1;
   m[10] = far / (near - far);
+  m[14] = far * near / (near - far);
+  return m;
+}
+function perspectiveZOTile(fovy, viewW, viewH, x, y, w, h, near, far) {
+  const t = near * Math.tan(fovy / 2), b = -t;
+  const r = t * (viewW / viewH), l = -r;
+  const l2 = l + (r - l) * x / viewW, r2 = l + (r - l) * (x + w) / viewW;
+  const t2 = t - (t - b) * y / viewH, b2 = t - (t - b) * (y + h) / viewH;
+  const m = new Float32Array(16);
+  m[0] = 2 * near / (r2 - l2);
+  m[5] = 2 * near / (t2 - b2);
+  m[8] = (r2 + l2) / (r2 - l2);
+  m[9] = (t2 + b2) / (t2 - b2);
+  m[10] = far / (near - far);
+  m[11] = -1;
   m[14] = far * near / (near - far);
   return m;
 }
@@ -116,11 +118,7 @@ function invert(a) {
   o[15] = (m[8] * b03 - m[9] * b01 + m[10] * b00) * det;
   return o;
 }
-function patientToTexture(dims, spacing, center = [
-  0,
-  0,
-  0
-]) {
+function patientToTexture(dims, spacing, center = [0, 0, 0]) {
   const m = new Float32Array(16);
   for (let a = 0; a < 3; a++) {
     const s = 1 / (spacing[a] * dims[a]);
@@ -130,27 +128,11 @@ function patientToTexture(dims, spacing, center = [
   m[15] = 1;
   return m;
 }
-function volumeAABB(dims, spacing, center = [
-  0,
-  0,
-  0
-]) {
-  const ext = [
-    dims[0] * spacing[0] / 2,
-    dims[1] * spacing[1] / 2,
-    dims[2] * spacing[2] / 2
-  ];
+function volumeAABB(dims, spacing, center = [0, 0, 0]) {
+  const ext = [dims[0] * spacing[0] / 2, dims[1] * spacing[1] / 2, dims[2] * spacing[2] / 2];
   return [
-    [
-      center[0] - ext[0],
-      center[1] - ext[1],
-      center[2] - ext[2]
-    ],
-    [
-      center[0] + ext[0],
-      center[1] + ext[1],
-      center[2] + ext[2]
-    ]
+    [center[0] - ext[0], center[1] - ext[1], center[2] - ext[2]],
+    [center[0] + ext[0], center[1] + ext[1], center[2] + ext[2]]
   ];
 }
 function transpose4(m) {
@@ -173,15 +155,7 @@ function texToRASFromIjkToRAS(ijkToRAS, dims) {
 }
 function volumeAABBFromIjkToRAS(ijkToRAS, dims) {
   const t2r = texToRASFromIjkToRAS(ijkToRAS, dims);
-  const lo = [
-    Infinity,
-    Infinity,
-    Infinity
-  ], hi = [
-    -Infinity,
-    -Infinity,
-    -Infinity
-  ];
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
   for (let c = 0; c < 8; c++) {
     const u = c & 1, v = c >> 1 & 1, w = c >> 2 & 1;
     for (let r = 0; r < 3; r++) {
@@ -190,29 +164,18 @@ function volumeAABBFromIjkToRAS(ijkToRAS, dims) {
       if (p > hi[r]) hi[r] = p;
     }
   }
-  return [
-    lo,
-    hi
-  ];
+  return [lo, hi];
 }
 function applyMat4(m, p) {
   const x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
   const y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
   const z = m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14];
   const w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15] || 1;
-  return [
-    x / w,
-    y / w,
-    z / w
-  ];
+  return [x / w, y / w, z / w];
 }
 function spacingFromIjkToRAS(ijkToRAS) {
   const col = (c) => Math.hypot(ijkToRAS[c], ijkToRAS[4 + c], ijkToRAS[8 + c]);
-  return [
-    col(0),
-    col(1),
-    col(2)
-  ];
+  return [col(0), col(1), col(2)];
 }
 
 // render/slice-renderer.ts
@@ -223,16 +186,33 @@ var SHADER = (
 struct U {
   p2t : mat4x4<f32>,     // RAS -> texture[0,1] (folds in ijkToRAS: rotation + anisotropy)
   origin : vec4<f32>,    // RAS of the plane center (for the current scrub offset)
-  uvec : vec4<f32>,      // RAS vector spanning the view width  (isotropic mm)
+  uvec : vec4<f32>,      // xyz: RAS vector spanning the view width (isotropic mm); w: segmentation
+                         //      outline width in SCREEN PIXELS (see setOutlineWidth)
   vvec : vec4<f32>,      // RAS vector spanning the view height (isotropic mm)
   params : vec4<f32>,    // win, lev, fillOpacity, outlineOpacity
-  size : vec4<f32>,      // sizeX, sizeY, _, _
+  size : vec4<f32>,      // sizeX, sizeY, labelOverlayMode, bgLutMode (0 gray, 1 LUT row 0)
+  // \u2500\u2500 Slicer slice-composite layers (vtkMRMLSliceCompositeNode): a FOREGROUND volume blended over the
+  //    background with its own geometry, W/L and LUT, and a LABEL volume coloured through a colour table.
+  p2tFg : mat4x4<f32>,   // RAS -> foreground texture[0,1]
+  fgParams : vec4<f32>,  // win, lev, opacity (0 = no foreground), compositing (0 alpha,1 reverse alpha,2 add,3 subtract)
+  p2tLabel : mat4x4<f32>,// RAS -> label texture[0,1]
+  labelParams : vec4<f32>, // opacity (0 = no label layer), lutEntries, fgLutMode (0 gray, 1 LUT row 1), _
 };
 @group(0) @binding(0) var<uniform> u : U;
 @group(0) @binding(1) var s_lin : sampler;
 @group(0) @binding(2) var t_scalar : texture_3d<f32>;
 @group(0) @binding(3) var t_overlay : texture_3d<f32>;
 @group(0) @binding(4) var s_nn : sampler;   // NEAREST \u2014 labelmap overlay is per-voxel crisp (matches Slicer)
+// Label-overlay mode (size.z > 0.5): instead of a pre-coloured rgba volume, take the segment
+// number from a u8 label volume and its colour+opacity from the same 256x2 palette the
+// ColorizeField uses. A coloured overlay of a 509x365x299 CT would be 222 MB; label + palette
+// is 55 MB and, because it shares the palette, hiding an organ group in 3D hides it here too.
+@group(0) @binding(5) var t_labels : texture_3d<u32>;
+@group(0) @binding(6) var t_palette : texture_2d<f32>;
+@group(0) @binding(7) var t_fg : texture_3d<f32>;       // foreground scalar volume
+@group(0) @binding(8) var t_lut : texture_2d<f32>;      // 256x2 colour LUTs: row 0 background, row 1 foreground (sampled over the W/L ramp)
+@group(0) @binding(9) var t_labelVol : texture_3d<f32>; // label volume (integer values stored as float)
+@group(0) @binding(10) var t_labelLut : texture_2d<f32>;// Nx1 colour table indexed by label value
 
 struct V { @builtin(position) position : vec4<f32> };
 @vertex
@@ -245,10 +225,30 @@ fn srgb2physical(c : vec3<f32>) -> vec3<f32> {
   let lo = c / 12.92; let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
   return select(lo, hi, c > vec3<f32>(0.04045));
 }
-fn ov_at(ras : vec3<f32>) -> vec4<f32> {   // overlay at a RAS point (0 outside the volume)
+/** The overlay colour of ONE label layer at a texture coordinate.
+ *
+ *  size.z is the number of label layers (0 = the pre-coloured rgba overlay, which is one layer by
+ *  definition). The layers are stacked along z in a single label texture \u2014 depth = nz * layers \u2014
+ *  because DICOM SEG segments may overlap and one label per voxel cannot hold that: segments that
+ *  overlap are decoded into different layers and composited here, the way OHIF composites one
+ *  representation per layer. */
+fn ov_layer(t : vec3<f32>, layer : i32) -> vec4<f32> {
+  if (u.size.z > 0.5) {
+    let full = vec3<f32>(textureDimensions(t_labels));
+    let nz = full.z / max(u.size.z, 1.0);                    // depth of ONE layer
+    let d = vec3<f32>(full.x, full.y, nz);
+    let vi = vec3<i32>(clamp(floor(t * d), vec3<f32>(0.0), d - vec3<f32>(1.0)));
+    let lab = i32(textureLoad(t_labels, vec3<i32>(vi.x, vi.y, vi.z + layer * i32(nz)), 0).r);
+    if (lab == 0) { return vec4<f32>(0.0); }
+    return textureLoad(t_palette, vec2<i32>(lab, 1), 0);
+  }
+  if (layer > 0) { return vec4<f32>(0.0); }
+  return textureSampleLevel(t_overlay, s_nn, t, 0.0);
+}
+fn ov_at(ras : vec3<f32>, layer : i32) -> vec4<f32> {   // overlay at a RAS point (0 outside the volume)
   let t = (u.p2t * vec4<f32>(ras, 1.0)).xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
-  return textureSampleLevel(t_overlay, s_nn, t, 0.0);
+  return ov_layer(t, layer);
 }
 @fragment
 fn fs_main(v : V) -> @location(0) vec4<f32> {
@@ -261,74 +261,96 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
   let win = max(u.params.x, 1e-6);
   let g = clamp((val - (u.params.y - win * 0.5)) / win, 0.0, 1.0);
   var col = vec3<f32>(g);
-  let ov = textureSampleLevel(t_overlay, s_nn, tex, 0.0);
+  if (u.size.w > 0.5) { col = textureLoad(t_lut, vec2<i32>(i32(g * 255.0), 0), 0).rgb; }
+  // \u2500\u2500 foreground layer (Slicer's vtkImageBlend semantics per compositing mode) \u2500\u2500
+  if (u.fgParams.z > 0.0) {
+    let tf = (u.p2tFg * vec4<f32>(ras, 1.0)).xyz;
+    if (all(tf >= vec3<f32>(0.0)) && all(tf <= vec3<f32>(1.0))) {
+      let fv = textureSampleLevel(t_fg, s_lin, tf, 0.0).r;
+      let fwin = max(u.fgParams.x, 1e-6);
+      let fg = clamp((fv - (u.fgParams.y - fwin * 0.5)) / fwin, 0.0, 1.0);
+      var fcol = vec3<f32>(fg);
+      if (u.labelParams.z > 0.5) { fcol = textureLoad(t_lut, vec2<i32>(i32(fg * 255.0), 1), 0).rgb; }
+      let a = u.fgParams.z;
+      let mode = i32(u.fgParams.w + 0.5);
+      if (mode == 0) { col = mix(col, fcol, a); }                       // alpha: fg over bg
+      else if (mode == 1) { col = mix(fcol, col, a); }                  // reverse alpha: bg over fg
+      else if (mode == 2) { col = clamp(col + fcol * a, vec3<f32>(0.0), vec3<f32>(1.0)); }   // add
+      else { col = clamp(col - fcol * a, vec3<f32>(0.0), vec3<f32>(1.0)); }                   // subtract
+    }
+  }
+  // \u2500\u2500 label layer: integer label -> colour table entry, blended at labelOpacity (label 0 = transparent) \u2500\u2500
+  if (u.labelParams.x > 0.0) {
+    let tl = (u.p2tLabel * vec4<f32>(ras, 1.0)).xyz;
+    if (all(tl >= vec3<f32>(0.0)) && all(tl <= vec3<f32>(1.0))) {
+      let lv = i32(textureSampleLevel(t_labelVol, s_nn, tl, 0.0).r + 0.5);
+      let nEntries = i32(u.labelParams.y);
+      if (lv > 0 && lv < nEntries) {
+        let lc = textureLoad(t_labelLut, vec2<i32>(lv, 0), 0);
+        col = mix(col, lc.rgb, clamp(lc.a * u.labelParams.x, 0.0, 1.0));
+      }
+    }
+  }
   // Slicer-style 2D segmentation: a semi-transparent per-voxel FILL plus a brighter boundary
   // OUTLINE, with independent opacities (params.z = fill, params.w = outline). The outline is
   // screen-space (constant pixel width under zoom), drawn in the segment's own colour along its
   // inner edge \u2014 at both label\u2194label and label\u2194background boundaries.
-  let fillA = clamp(ov.a * u.params.z, 0.0, 1.0);
-  var outA = 0.0;
-  if (u.params.w > 0.0) {
-    let du = u.uvec.xyz / u.size.x * 1.5;   // ~1.5 px right, in RAS
-    let dv = u.vvec.xyz / u.size.y * 1.5;   // ~1.5 px up
-    let n0 = ov_at(ras + du); let n1 = ov_at(ras - du); let n2 = ov_at(ras + dv); let n3 = ov_at(ras - dv);
-    let e = max(max(distance(n0.rgb, ov.rgb) + abs(n0.a - ov.a), distance(n1.rgb, ov.rgb) + abs(n1.a - ov.a)),
-                max(distance(n2.rgb, ov.rgb) + abs(n2.a - ov.a), distance(n3.rgb, ov.rgb) + abs(n3.a - ov.a)));
-    let edge = clamp((e - 0.03) * 12.0, 0.0, 1.0);   // 0 in the interior, 1 at a colour/label edge
-    outA = clamp(ov.a * u.params.w * edge, 0.0, 1.0);
+  //
+  // Each label layer composites over the one below, so a voxel claimed by two segments comes out
+  // MORE OPAQUE than either alone (1-(1-a1)(1-a2)) and in the blend of their colours \u2014 which is
+  // how an overlap reads as an overlap rather than as whichever segment was decoded last. Each
+  // layer is also edge-tested on its OWN labels, so every segment keeps its own contour through
+  // the region it shares; the contours blend only where they coincide.
+  let nL = max(i32(u.size.z), 1);
+  let w = max(u.uvec.w, 1.0);
+  let du = u.uvec.xyz / u.size.x * w;     // w px right, in RAS
+  let dv = u.vvec.xyz / u.size.y * w;     // w px up
+  let dd = 0.70710678;                    // diagonals at the same distance
+  var fillC = vec3<f32>(0.0); var fillA = 0.0;   // premultiplied
+  var edgeC = vec3<f32>(0.0); var edgeA = 0.0;
+  for (var l = 0; l < nL; l = l + 1) {
+    let ov = ov_layer(tex, l);
+    if (ov.a <= 0.0) { continue; }                 // segment hidden, or no label in this layer
+    // The display alpha is folded in PER LAYER, before compositing \u2014 that is what makes an
+    // overlap more opaque: one layer gives exactly a, two give 1-(1-a)^2.
+    let fa = clamp(ov.a * u.params.z, 0.0, 1.0);
+    fillC = ov.rgb * fa + fillC * (1.0 - fa);
+    fillA = fa + fillA * (1.0 - fa);
+    if (u.params.w <= 0.0) { continue; }
+    // The contour is the band of voxels within w SCREEN pixels of a boundary, so it keeps the
+    // same visual weight at every zoom. Eight neighbours, not four: at four, a boundary running
+    // diagonally is only sampled across its corners and the line thins and breaks up as w grows.
+    // A neighbour is a DIFFERENT segment iff its overlay texel differs at all. The overlay is
+    // sampled NEAREST from a crisp per-voxel bake, so every texel is an exact palette entry and
+    // an exact comparison is the label test: two touching segments whose colours happen to be
+    // close still get a boundary, where a distance threshold used to merge them into one blob.
+    // A hidden segment (palette alpha 0) differs from a visible neighbour, so the visible one
+    // keeps its contour there; and its own voxels have ov.a = 0, so it draws nothing itself.
+    let n0 = ov_at(ras + du, l); let n1 = ov_at(ras - du, l);
+    let n2 = ov_at(ras + dv, l); let n3 = ov_at(ras - dv, l);
+    let n4 = ov_at(ras + (du + dv) * dd, l); let n5 = ov_at(ras + (du - dv) * dd, l);
+    let n6 = ov_at(ras - (du + dv) * dd, l); let n7 = ov_at(ras - (du - dv) * dd, l);
+    if (any(n0 != ov) || any(n1 != ov) || any(n2 != ov) || any(n3 != ov) ||
+        any(n4 != ov) || any(n5 != ov) || any(n6 != ov) || any(n7 != ov)) {
+      let ea = clamp(ov.a * u.params.w, 0.0, 1.0);
+      edgeC = ov.rgb * ea + edgeC * (1.0 - ea);
+      edgeA = ea + edgeA * (1.0 - ea);
+    }
   }
-  col = mix(col, ov.rgb, max(fillA, outA));
+  // Fill first, then the contours over it (the contour of a segment reads over its own fill and
+  // over anything it overlaps).
+  if (fillA > 0.0) { col = mix(col, fillC / fillA, fillA); }
+  if (edgeA > 0.0) { col = mix(col, edgeC / edgeA, edgeA); }
   return vec4<f32>(srgb2physical(col), 1.0);
 }
 `
 );
 var BASES = {
-  axial: {
-    uDir: [
-      -1,
-      0,
-      0
-    ],
-    vDir: [
-      0,
-      1,
-      0
-    ],
-    uAxis: 0,
-    vAxis: 1,
-    nAxis: 2
-  },
-  coronal: {
-    uDir: [
-      -1,
-      0,
-      0
-    ],
-    vDir: [
-      0,
-      0,
-      1
-    ],
-    uAxis: 0,
-    vAxis: 2,
-    nAxis: 1
-  },
-  sagittal: {
-    uDir: [
-      0,
-      -1,
-      0
-    ],
-    vDir: [
-      0,
-      0,
-      1
-    ],
-    uAxis: 1,
-    vAxis: 2,
-    nAxis: 0
-  }
+  axial: { uDir: [-1, 0, 0], vDir: [0, 1, 0], nDir: [0, 0, 1] },
+  coronal: { uDir: [-1, 0, 0], vDir: [0, 0, 1], nDir: [0, 1, 0] },
+  sagittal: { uDir: [0, -1, 0], vDir: [0, 0, 1], nDir: [1, 0, 0] }
 };
+var dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 function ijkAxisForRasAxis(ijkToRAS, rasAxis) {
   let best = 0, bestMag = -1;
   for (let c = 0; c < 3; c++) {
@@ -342,14 +364,11 @@ function ijkAxisForRasAxis(ijkToRAS, rasAxis) {
 }
 function slicerDefaultOffset01(orient, dims, ijkToRAS, rasLo, rasHi) {
   const b = BASES[orient];
-  const n = b.nAxis;
+  const nAbs = b.nDir.map(Math.abs);
+  const n = nAbs[0] >= nAbs[1] && nAbs[0] >= nAbs[2] ? 0 : nAbs[1] >= nAbs[2] ? 1 : 2;
   const a = ijkAxisForRasAxis(ijkToRAS, n);
   const m = Math.floor((dims[a] - 1) / 2);
-  const ijk = [
-    (dims[0] - 1) / 2,
-    (dims[1] - 1) / 2,
-    (dims[2] - 1) / 2
-  ];
+  const ijk = [(dims[0] - 1) / 2, (dims[1] - 1) / 2, (dims[2] - 1) / 2];
   ijk[a] = m;
   const ras = ijkToRAS[n * 4 + 0] * ijk[0] + ijkToRAS[n * 4 + 1] * ijk[1] + ijkToRAS[n * 4 + 2] * ijk[2] + ijkToRAS[n * 4 + 3];
   const span = rasHi[n] - rasLo[n];
@@ -362,123 +381,199 @@ var SliceRenderer = class {
   sampler;
   nnSampler;
   ubuf;
-  u = new Float32Array(36);
+  u = new Float32Array(80);
+  // p2t(16) origin(4) uvec(4) vvec(4) params(4) size(4) | p2tFg(16) fgParams(4) p2tLabel(16) labelParams(4)
   bind;
+  // Adaptive downsample (moving frames): render the reslice into a low-res target, then bilinear-blit
+  // it up to the view — the 2D analogue of SceneRenderer.renderUpscaled. Lets a slice cell degrade
+  // resolution under load to keep interactive latency low, snapping back to native when settled.
+  blitPipeline;
+  lowTex;
+  lowView;
+  lowW = 0;
+  lowH = 0;
+  blitBind;
   overlay;
+  labels;
+  palette;
+  scalarTex;
+  fgTex;
+  lutTex;
+  // 256x2 rgba8: row 0 bg LUT, row 1 fg LUT
+  labelVolTex;
+  labelLutTex;
   // actual in-plane extents (mm) spanned by the LAST rendered viewport, aspect-corrected so
   // pixels stay isotropic on a non-square view (0 until first render → fall back to the square span).
   uSpanMm = 0;
   vSpanMm = 0;
   // volume geometry + current plane
   p2t = new Float32Array(16);
-  rasLo = [
-    -1,
-    -1,
-    -1
-  ];
-  rasHi = [
-    1,
-    1,
-    1
-  ];
+  rasLo = [-1, -1, -1];
+  rasHi = [1, 1, 1];
   orient = "axial";
   offset01 = 0.5;
   // Per-orientation pan (mm along the plane's uDir/vDir) + zoom (1 = fitted). Slicer-style
   // slice navigation: pan translates the in-plane view centre, zoom scales the field of view.
   viewState = {
-    axial: {
-      panU: 0,
-      panV: 0,
-      zoom: 1
-    },
-    coronal: {
-      panU: 0,
-      panV: 0,
-      zoom: 1
-    },
-    sagittal: {
-      panU: 0,
-      panV: 0,
-      zoom: 1
-    }
+    axial: { panU: 0, panV: 0, zoom: 1 },
+    coronal: { panU: 0, panV: 0, zoom: 1 },
+    sagittal: { panU: 0, panV: 0, zoom: 1 }
   };
-  cX = [
-    0,
-    0,
-    0
-  ];
+  cX = [0, 0, 0];
+  // in-plane centre of the LAST rendered frame (for viewToTex picking)
+  // Optional per-orientation basis override (reslice along a volume's own axes). null = the
+  // anatomical preset.
+  basisOverride = {};
   constructor(gpu, format = DEFAULT_FORMAT) {
     this.dev = gpu.device;
     this.format = format;
-    const m = this.dev.createShaderModule({
-      code: SHADER
-    });
+    const m = this.dev.createShaderModule({ code: SHADER });
     this.pipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: {
-        module: m,
-        entryPoint: "vs_main"
-      },
-      fragment: {
-        module: m,
-        entryPoint: "fs_main",
-        targets: [
-          {
-            format
-          }
-        ]
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none"
-      }
+      vertex: { module: m, entryPoint: "vs_main" },
+      fragment: { module: m, entryPoint: "fs_main", targets: [{ format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
     });
-    this.sampler = this.dev.createSampler({
-      magFilter: "linear",
-      minFilter: "linear",
-      addressModeU: "clamp-to-edge",
-      addressModeV: "clamp-to-edge",
-      addressModeW: "clamp-to-edge"
-    });
-    this.nnSampler = this.dev.createSampler({
-      magFilter: "nearest",
-      minFilter: "nearest",
-      addressModeU: "clamp-to-edge",
-      addressModeV: "clamp-to-edge",
-      addressModeW: "clamp-to-edge"
-    });
-    this.ubuf = this.dev.createBuffer({
-      size: this.u.byteLength,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
+    this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
+    this.nnSampler = this.dev.createSampler({ magFilter: "nearest", minFilter: "nearest", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
+    this.ubuf = this.dev.createBuffer({ size: this.u.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setWindowLevel(255, 127);
     this.setOverlayOpacity(0.55);
+  }
+  /** 1x1x1 stand-ins so the label-overlay bindings always exist. The pipeline layout is fixed,
+   *  so every caller must bind them even when it only wants a plain MPR. */
+  emptyLabels;
+  emptyPalette;
+  noLabels() {
+    if (!this.emptyLabels) {
+      this.emptyLabels = this.dev.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      this.dev.queue.writeTexture({ texture: this.emptyLabels }, new Uint8Array(1), { bytesPerRow: 1, rowsPerImage: 1 }, [1, 1, 1]);
+    }
+    return this.emptyLabels;
+  }
+  noPalette() {
+    if (!this.emptyPalette) {
+      this.emptyPalette = this.dev.createTexture({ size: [256, 2], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      this.dev.queue.writeTexture({ texture: this.emptyPalette }, new Uint8Array(256 * 2 * 4), { bytesPerRow: 256 * 4 }, [256, 2]);
+    }
+    return this.emptyPalette;
+  }
+  emptyScalar;
+  noScalar() {
+    if (!this.emptyScalar) {
+      this.emptyScalar = this.dev.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      this.dev.queue.writeTexture({ texture: this.emptyScalar }, new Float32Array(1), { bytesPerRow: 4, rowsPerImage: 1 }, [1, 1, 1]);
+    }
+    return this.emptyScalar;
+  }
+  emptyLut;
+  noLut() {
+    if (!this.emptyLut) {
+      this.emptyLut = this.dev.createTexture({ size: [256, 2], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      this.dev.queue.writeTexture({ texture: this.emptyLut }, new Uint8Array(256 * 2 * 4), { bytesPerRow: 256 * 4 }, [256, 2]);
+    }
+    return this.emptyLut;
+  }
+  /** Foreground layer: a second scalar volume with its own RAS->texture mapping, W/L, opacity and
+   *  compositing mode (Slicer's slice composite node). Pass null to remove. */
+  setForeground(tex, p2t, win, lev, opacity, compositing = 0) {
+    this.fgTex = tex ?? void 0;
+    if (p2t) this.u.set(p2t, 36);
+    this.u[52] = win;
+    this.u[53] = lev;
+    this.u[54] = tex ? opacity : 0;
+    this.u[55] = compositing;
+    if (this.scalarTex) this.rebind();
+  }
+  /** Colour LUTs over the W/L ramp for the background (row 0) and foreground (row 1): 256 rgba8 entries
+   *  each, or null for the grayscale ramp. */
+  setLayerLUTs(bg, fg) {
+    if (!bg && !fg) {
+      this.lutTex = void 0;
+      this.u[35] = 0;
+      this.u[58] = 0;
+      if (this.scalarTex) this.rebind();
+      return;
+    }
+    if (!this.lutTex) this.lutTex = this.dev.createTexture({ size: [256, 2], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    const gray = new Uint8Array(256 * 4);
+    for (let i = 0; i < 256; i++) {
+      gray[i * 4] = gray[i * 4 + 1] = gray[i * 4 + 2] = i;
+      gray[i * 4 + 3] = 255;
+    }
+    this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 0] }, bg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
+    this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 1] }, fg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
+    this.u[35] = bg ? 1 : 0;
+    this.u[58] = fg ? 1 : 0;
+    if (this.scalarTex) this.rebind();
+  }
+  /** Label layer: a label volume (integer values in a float texture) coloured through a colour table
+   *  (rgba8 entries, index = label value), blended at `opacity`. Pass null to remove. */
+  setLabelLayer(tex, p2t, table, opacity) {
+    this.labelVolTex = tex ?? void 0;
+    if (p2t) this.u.set(p2t, 60);
+    const n = table ? table.length / 4 : 0;
+    if (table && n > 0) {
+      if (!this.labelLutTex || this.labelLutTex.width !== n) {
+        this.labelLutTex?.destroy();
+        this.labelLutTex = this.dev.createTexture({ size: [n, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      }
+      this.dev.queue.writeTexture({ texture: this.labelLutTex }, table, { bytesPerRow: n * 4 }, [n, 1]);
+    }
+    this.u[76] = tex && table ? opacity : 0;
+    this.u[77] = n;
+    if (this.scalarTex) this.rebind();
   }
   emptyOverlay;
   transparentOverlay() {
     if (!this.emptyOverlay) {
-      this.emptyOverlay = this.dev.createTexture({
-        size: [
-          1,
-          1,
-          1
-        ],
-        dimension: "3d",
-        format: "rgba16float",
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
-      });
-      this.dev.queue.writeTexture({
-        texture: this.emptyOverlay
-      }, new Uint16Array(4), {
-        bytesPerRow: 8,
-        rowsPerImage: 1
-      }, [
-        1,
-        1,
-        1
-      ]);
+      this.emptyOverlay = this.dev.createTexture({ size: [1, 1, 1], dimension: "3d", format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      this.dev.queue.writeTexture({ texture: this.emptyOverlay }, new Uint16Array(4), { bytesPerRow: 8, rowsPerImage: 1 }, [1, 1, 1]);
     }
     return this.emptyOverlay;
+  }
+  /** Reslice this orientation along an arbitrary RAS basis instead of the anatomical preset.
+   *  Pass null to restore. The vectors should be unit length and mutually orthogonal; they are
+   *  used verbatim, so the caller owns the display convention for a non-anatomical frame. */
+  setBasis(orient, basis) {
+    this.basisOverride[orient] = basis;
+  }
+  /** offset01 (the setPlane scrub coordinate) for a RAS point, along the plane's current normal — the
+   *  inverse of what setPlane does internally, so a caller holding a position in mm (a slice node's
+   *  centre, a crosshair) can address the same slice for anatomical AND oblique bases. */
+  offset01Along(orient, ras) {
+    const n = this.basisOf(orient).nDir;
+    const { lo, hi } = this.extentAlong(n);
+    return Math.max(0, Math.min(1, (dot3(ras, n) - lo) / Math.max(hi - lo, 1e-6)));
+  }
+  /** Slide a RAS point along the plane's current normal, only if needed, so that its scrub position
+   *  lies inside the volume — the mm-space form of setPlane's 0..1 clamp, for a caller stepping a
+   *  focus point through the slices of an anatomical OR oblique basis. In-plane coordinates are kept. */
+  clampAlongNormal(orient, ras) {
+    const n = this.basisOf(orient).nDir;
+    const { lo, hi } = this.extentAlong(n);
+    const have = dot3(ras, n), want = Math.max(lo, Math.min(hi, have));
+    return [ras[0] + n[0] * (want - have), ras[1] + n[1] * (want - have), ras[2] + n[2] * (want - have)];
+  }
+  basisOf(orient) {
+    return this.basisOverride[orient] ?? BASES[orient];
+  }
+  /** Extent of the volume's RAS bounding box projected onto a direction — the generalisation
+   *  of "rasHi[axis] - rasLo[axis]" to an oblique axis. Reduces to exactly that for the
+   *  anatomical bases, since projecting an axis-aligned box on its own axis is the axis span. */
+  extentAlong(d) {
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < 8; i++) {
+      const c = [
+        i & 1 ? this.rasHi[0] : this.rasLo[0],
+        i & 2 ? this.rasHi[1] : this.rasLo[1],
+        i & 4 ? this.rasHi[2] : this.rasLo[2]
+      ];
+      const t = dot3(c, d);
+      if (t < lo) lo = t;
+      if (t > hi) hi = t;
+    }
+    return { lo, hi };
   }
   /** Volume geometry: patientToTexture (RAS->tex[0,1], encodes ijkToRAS) + the RAS
    *  bounding box (for plane extents/scrub range). Get both from the ImageField. */
@@ -493,31 +588,34 @@ var SliceRenderer = class {
    *  same RAS->tex mapping addresses both. Omit overlay for a plain MPR. */
   setTextures(scalar, overlay) {
     this.overlay = overlay ?? this.transparentOverlay();
+    this.scalarTex = scalar;
+    this.rebind();
+  }
+  /** Colour the overlay from a u8 label volume + the 256x2 palette (row 1 = colour/opacity),
+   *  instead of a pre-coloured rgba volume. Same geometry requirement as setTextures. Pass
+   *  nulls to go back to the rgba overlay. */
+  setLabelOverlay(labels, palette, layers = 1) {
+    this.labels = labels ?? void 0;
+    this.palette = palette ?? void 0;
+    this.u[34] = labels && palette ? Math.max(1, layers) : 0;
+    if (this.scalarTex) this.rebind();
+  }
+  rebind() {
+    if (!this.scalarTex) return;
     this.bind = this.dev.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
-        {
-          binding: 0,
-          resource: {
-            buffer: this.ubuf
-          }
-        },
-        {
-          binding: 1,
-          resource: this.sampler
-        },
-        {
-          binding: 2,
-          resource: scalar.createView()
-        },
-        {
-          binding: 3,
-          resource: this.overlay.createView()
-        },
-        {
-          binding: 4,
-          resource: this.nnSampler
-        }
+        { binding: 0, resource: { buffer: this.ubuf } },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: this.scalarTex.createView() },
+        { binding: 3, resource: (this.overlay ?? this.transparentOverlay()).createView() },
+        { binding: 4, resource: this.nnSampler },
+        { binding: 5, resource: (this.labels ?? this.noLabels()).createView() },
+        { binding: 6, resource: (this.palette ?? this.noPalette()).createView() },
+        { binding: 7, resource: (this.fgTex ?? this.noScalar()).createView() },
+        { binding: 8, resource: (this.lutTex ?? this.noLut()).createView() },
+        { binding: 9, resource: (this.labelVolTex ?? this.noScalar()).createView() },
+        { binding: 10, resource: (this.labelLutTex ?? this.noPalette()).createView() }
       ]
     });
   }
@@ -543,16 +641,21 @@ var SliceRenderer = class {
   setOverlayOutline(on) {
     this.u[31] = on ? 1 : 0;
   }
+  /** Overlay outline width, in SCREEN pixels (constant under zoom). Rides in uvec.w, which the
+   *  per-frame uniform update writes alongside the view vectors. */
+  setOutlineWidth(px) {
+    this.outlineWidth = Math.max(1, px);
+  }
+  outlineWidth = 2;
   /** Physical size (mm) of the square view for the current plane (isotropic, letterboxed).
    *  Matches Slicer's FitSliceToBackground: the field of view is exactly the volume's
    *  extent along the limiting in-plane axis — NO extra margin. (Verified against
    *  Slicer: Red FOV=[891.78,256] at viewport 634x182 -> vertical FOV == the 256mm
    *  A-extent, horizontal follows viewport aspect.) */
   viewSpanMm() {
-    const b = BASES[this.orient];
-    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
-    const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
-    return Math.max(uExt, vExt);
+    const b = this.basisOf(this.orient);
+    const u = this.extentAlong(b.uDir), v = this.extentAlong(b.vDir);
+    return Math.max(u.hi - u.lo, v.hi - v.lo);
   }
   /** The fitted in-plane extent (mm) used for a given orientation — the value directly
    *  comparable to a Slicer slice node's fitted fieldOfView. */
@@ -563,10 +666,17 @@ var SliceRenderer = class {
     this.orient = prev;
     return s;
   }
-  /** Fitted (zoom=1) in-plane extent for an orientation. */
-  baseSpan(orient) {
-    const b = BASES[orient];
-    return Math.max(this.rasHi[b.uAxis] - this.rasLo[b.uAxis], this.rasHi[b.vAxis] - this.rasLo[b.vAxis]);
+  /** Letterbox fit at zoom=1 (Slicer's FitSliceToVolume): the in-plane FOV (uS0×vS0) that
+   *  exactly contains the slice's bounding box in a viewport of the given aspect — the whole
+   *  slice is visible and the LIMITING axis touches the window edge (so the largest fitting
+   *  axis fills the window, no needless margin). Replaces the old max(uExt,vExt) span, which
+   *  under-zoomed whenever the larger extent wasn't on the viewport's limiting axis. */
+  fitUV(orient, aspectWH) {
+    const b = this.basisOf(orient);
+    const u = this.extentAlong(b.uDir), v = this.extentAlong(b.vDir);
+    const uExt = u.hi - u.lo, vExt = v.hi - v.lo;
+    const uS0 = Math.max(uExt, vExt * aspectWH);
+    return { uS0, vS0: uS0 / aspectWH };
   }
   /** The complete in-plane view frame for an orientation at a given viewport aspect, folding
    *  in pan (mm along uDir/vDir) + zoom. Single source of truth shared by drawInto, rasToView,
@@ -574,25 +684,21 @@ var SliceRenderer = class {
    *  pan/zoom. Returns the plane centre `c` (RAS, incl. scrub offset + pan) and the half-... no:
    *  uS/vS are the FULL in-plane extents mapped across the viewport width/height. */
   frameFor(orient, offset01, aspectWH) {
-    const b = BASES[orient];
+    const b = this.basisOf(orient);
     const vs = this.viewState[orient];
-    const span = this.baseSpan(orient) / vs.zoom;
-    const uS = span * Math.max(1, aspectWH), vS = span * Math.max(1, 1 / aspectWH);
-    const c = [
-      (this.rasLo[0] + this.rasHi[0]) / 2,
-      (this.rasLo[1] + this.rasHi[1]) / 2,
-      (this.rasLo[2] + this.rasHi[2]) / 2
-    ];
-    c[b.nAxis] = this.rasLo[b.nAxis] + Math.max(0, Math.min(1, offset01)) * (this.rasHi[b.nAxis] - this.rasLo[b.nAxis]);
+    const { uS0, vS0 } = this.fitUV(orient, aspectWH);
+    const uS = uS0 / vs.zoom, vS = vS0 / vs.zoom;
+    const c = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    const nx = this.extentAlong(b.nDir);
+    const want = nx.lo + Math.max(0, Math.min(1, offset01)) * (nx.hi - nx.lo);
+    const have = dot3(c, b.nDir);
+    c[0] += b.nDir[0] * (want - have);
+    c[1] += b.nDir[1] * (want - have);
+    c[2] += b.nDir[2] * (want - have);
     c[0] += b.uDir[0] * vs.panU + b.vDir[0] * vs.panV;
     c[1] += b.uDir[1] * vs.panU + b.vDir[1] * vs.panV;
     c[2] += b.uDir[2] * vs.panU + b.vDir[2] * vs.panV;
-    return {
-      b,
-      c,
-      uS,
-      vS
-    };
+    return { b, c, uS, vS };
   }
   /** Zoom factor for an orientation (1 = fitted). */
   zoom(orient) {
@@ -600,30 +706,24 @@ var SliceRenderer = class {
   }
   /** Pan the in-plane view by a pixel delta (drag): the anatomy under the cursor follows it. */
   panByPixels(orient, dxPx, dyPx, w, h) {
-    const span = this.baseSpan(orient) / this.viewState[orient].zoom;
-    const uS = span * Math.max(1, w / h), vS = span * Math.max(1, h / w);
+    const z = this.viewState[orient].zoom;
+    const { uS0, vS0 } = this.fitUV(orient, w / h);
+    const uS = uS0 / z, vS = vS0 / z;
     this.viewState[orient].panU -= dxPx / w * uS;
     this.viewState[orient].panV += dyPx / h * vS;
   }
   /** Zoom by `factor` (>1 zooms in) about a pivot (u,v in [0,1]); the pivot point stays fixed. */
   zoomAbout(orient, factor, pu, pv, w, h) {
     const vs = this.viewState[orient];
-    const base = this.baseSpan(orient);
-    const spanOld = base / vs.zoom;
+    const { uS0, vS0 } = this.fitUV(orient, w / h);
     const z = Math.max(0.2, Math.min(50, vs.zoom * factor));
-    const spanNew = base / z;
-    const au = Math.max(1, w / h), av = Math.max(1, h / w);
-    vs.panU += (pu - 0.5) * (spanOld - spanNew) * au;
-    vs.panV += (0.5 - pv) * (spanOld - spanNew) * av;
+    vs.panU += (pu - 0.5) * (uS0 / vs.zoom - uS0 / z);
+    vs.panV += (0.5 - pv) * (vS0 / vs.zoom - vS0 / z);
     vs.zoom = z;
   }
   /** Reset pan/zoom for an orientation to the fitted view. */
   resetView(orient) {
-    this.viewState[orient] = {
-      panU: 0,
-      panV: 0,
-      zoom: 1
-    };
+    this.viewState[orient] = { panU: 0, panV: 0, zoom: 1 };
   }
   /** Snapshot per-orientation pan+zoom (e.g. to persist a view across reloads). */
   getViewState() {
@@ -633,9 +733,7 @@ var SliceRenderer = class {
   setViewState(vs) {
     for (const k of Object.keys(vs)) {
       const v = vs[k];
-      if (v && Number.isFinite(v.zoom) && v.zoom > 0) this.viewState[k] = {
-        ...v
-      };
+      if (v && Number.isFinite(v.zoom) && v.zoom > 0) this.viewState[k] = { ...v };
     }
   }
   /** Mirror Slicer's in-plane navigation for an orientation: drive pan + zoom from the slice
@@ -644,33 +742,37 @@ var SliceRenderer = class {
    *  zoom proportionally; pan is the centre's offset from the volume centre projected onto the
    *  plane's in-plane axes. The out-of-plane offset is applied separately via setPlane. */
   setMirrorFrame(orient, centerRAS, fovX, fovY) {
-    const b = BASES[orient];
-    const uExt = this.rasHi[b.uAxis] - this.rasLo[b.uAxis];
-    const vExt = this.rasHi[b.vAxis] - this.rasLo[b.vAxis];
-    const zoom = Math.max(uExt / Math.max(fovX, 1e-6), vExt / Math.max(fovY, 1e-6));
-    const volC = [
-      (this.rasLo[0] + this.rasHi[0]) / 2,
-      (this.rasLo[1] + this.rasHi[1]) / 2,
-      (this.rasLo[2] + this.rasHi[2]) / 2
-    ];
-    const d = [
-      centerRAS[0] - volC[0],
-      centerRAS[1] - volC[1],
-      centerRAS[2] - volC[2]
-    ];
+    const b = this.basisOf(orient);
+    const aspect = fovX / Math.max(fovY, 1e-6);
+    const { uS0 } = this.fitUV(orient, aspect);
+    const zoom = Math.max(1e-3, uS0 / Math.max(fovX, 1e-6));
+    const volC = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    const d = [centerRAS[0] - volC[0], centerRAS[1] - volC[1], centerRAS[2] - volC[2]];
     const panU = d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2];
     const panV = d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2];
-    this.viewState[orient] = {
-      panU,
-      panV,
-      zoom: Math.max(1e-3, zoom)
-    };
+    this.viewState[orient] = { panU, panV, zoom };
+  }
+  /** The current pan/zoom of a plane expressed the way Slicer's slice node stores it: in-plane centre
+   *  (RAS, without the out-of-plane offset which the caller owns) + field of view (mm) — the inverse
+   *  of setMirrorFrame, so a local pan/zoom can be written back to the app as a slice frame. */
+  mirrorFrame(orient, aspectWH) {
+    const b = this.basisOf(orient);
+    const st = this.viewState[orient];
+    const { uS0, vS0 } = this.fitUV(orient, aspectWH);
+    const fovX = uS0 / st.zoom, fovY = vS0 / st.zoom;
+    const volC = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    const centerRAS = [
+      volC[0] + b.uDir[0] * st.panU + b.vDir[0] * st.panV,
+      volC[1] + b.uDir[1] * st.panU + b.vDir[1] * st.panV,
+      volC[2] + b.uDir[2] * st.panU + b.vDir[2] * st.panV
+    ];
+    return { centerRAS, fovX, fovY };
   }
   /** Map a view (u,v) in [0,1] (y down) to normalized texture coords for the current
    *  plane — for click picking. Returns the tex coord; the caller converts to IJK via
    *  ijk = tex*dims - 0.5. Anisotropy/rotation are handled by the same p2t the shader uses. */
   viewToTex(u, v) {
-    const b = BASES[this.orient];
+    const b = this.basisOf(this.orient);
     const uS = this.uSpanMm || this.viewSpanMm();
     const vS = this.vSpanMm || this.viewSpanMm();
     const c = this.cX;
@@ -687,18 +789,10 @@ var SliceRenderer = class {
    *  glyphs and hit-test clicks on them. */
   rasToView(orient, offset01, ras, aspectWH) {
     const { b, c, uS, vS } = this.frameFor(orient, offset01, aspectWH);
-    const d = [
-      ras[0] - c[0],
-      ras[1] - c[1],
-      ras[2] - c[2]
-    ];
+    const d = [ras[0] - c[0], ras[1] - c[1], ras[2] - c[2]];
     const u = 0.5 + (d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2]) / uS;
     const v = 0.5 - (d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2]) / vS;
-    return {
-      u,
-      v,
-      distMm: d[b.nAxis]
-    };
+    return { u, v, distMm: dot3(d, b.nDir) };
   }
   /** Map a view (u,v in [0,1], y down) on a plane back to a RAS point ON that plane —
    *  the exact inverse of rasToView (same pan/zoom/aspect). Used to drag a 2D markup:
@@ -725,7 +819,7 @@ var SliceRenderer = class {
     this.u[20] = b.uDir[0] * uS;
     this.u[21] = b.uDir[1] * uS;
     this.u[22] = b.uDir[2] * uS;
-    this.u[23] = 0;
+    this.u[23] = this.outlineWidth;
     this.u[24] = b.vDir[0] * vS;
     this.u[25] = b.vDir[1] * vS;
     this.u[26] = b.vDir[2] * vS;
@@ -734,61 +828,80 @@ var SliceRenderer = class {
     this.u[33] = h;
     this.dev.queue.writeBuffer(this.ubuf, 0, this.u);
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({
-      colorAttachments: [
-        {
-          view,
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 1
-          }
-        }
-      ]
-    });
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bind);
     pass.draw(3);
     pass.end();
-    this.dev.queue.submit([
-      enc.finish()
-    ]);
+    this.dev.queue.submit([enc.finish()]);
   }
   renderToView(view, w, h) {
     this.drawInto(view, w, h);
   }
-  async renderToRGBA(w, h) {
-    const target = this.dev.createTexture({
-      size: [
-        w,
-        h
-      ],
-      format: this.format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+  /** Bilinear-blit pipeline (fullscreen triangle) that upsamples the low-res reslice to the view. */
+  ensureBlit() {
+    if (this.blitPipeline) return;
+    const m = this.dev.createShaderModule({
+      code: (
+        /* wgsl */
+        `
+struct VO { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VO {
+  var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+  var o: VO; o.pos = vec4<f32>(p[i], 0.0, 1.0);
+  o.uv = vec2<f32>((p[i].x + 1.0) * 0.5, (1.0 - p[i].y) * 0.5); return o;
+}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@fragment fn fs(in: VO) -> @location(0) vec4<f32> { return textureSample(src, samp, in.uv); }`
+      )
     });
+    this.blitPipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: m, entryPoint: "vs" },
+      fragment: { module: m, entryPoint: "fs", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
+    });
+  }
+  ensureLow(w, h) {
+    this.ensureBlit();
+    if (this.lowTex && this.lowW === w && this.lowH === h) return;
+    this.lowTex?.destroy();
+    this.lowTex = this.dev.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    this.lowView = this.lowTex.createView();
+    this.lowW = w;
+    this.lowH = h;
+    this.blitBind = this.dev.createBindGroup({
+      layout: this.blitPipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: this.lowView }, { binding: 1, resource: this.sampler }]
+    });
+  }
+  /** Adaptive (moving-frame) render: reslice at `rw×rh` into an off-screen target, then bilinear-blit
+   *  up to the `vw×vh` view. Single frame, no accumulation — use while interacting; call renderToView
+   *  (native) when the view settles. At rw==vw/rh==vh this is a native render plus a pass-through blit. */
+  renderUpscaled(view, rw, rh, vw, vh) {
+    if (rw >= vw && rh >= vh) {
+      this.drawInto(view, vw, vh);
+      return;
+    }
+    this.ensureLow(rw, rh);
+    this.drawInto(this.lowView, rw, rh);
+    const enc = this.dev.createCommandEncoder();
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    pass.setPipeline(this.blitPipeline);
+    pass.setBindGroup(0, this.blitBind);
+    pass.draw(3);
+    pass.end();
+    this.dev.queue.submit([enc.finish()]);
+  }
+  async renderToRGBA(w, h) {
+    const target = this.dev.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     this.drawInto(target.createView(), w, h);
     const bpr = Math.ceil(w * 4 / 256) * 256;
-    const buf = this.dev.createBuffer({
-      size: bpr * h,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
+    const buf = this.dev.createBuffer({ size: bpr * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = this.dev.createCommandEncoder();
-    enc.copyTextureToBuffer({
-      texture: target
-    }, {
-      buffer: buf,
-      bytesPerRow: bpr,
-      rowsPerImage: h
-    }, [
-      w,
-      h
-    ]);
-    this.dev.queue.submit([
-      enc.finish()
-    ]);
+    enc.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: h }, [w, h]);
+    this.dev.queue.submit([enc.finish()]);
     await buf.mapAsync(GPUMapMode.READ);
     const padded = new Uint8Array(buf.getMappedRange());
     const out = new Uint8Array(w * h * 4);
@@ -802,18 +915,12 @@ var SliceRenderer = class {
 
 // render/slice-interactor.ts
 var NORMAL = {
-  axial: {
-    axis: 2,
-    sign: 1
-  },
-  coronal: {
-    axis: 1,
-    sign: 1
-  },
-  sagittal: {
-    axis: 0,
-    sign: -1
-  }
+  axial: { axis: 2, sign: 1 },
+  // sliceToRAS col2 = +S
+  coronal: { axis: 1, sign: 1 },
+  // sliceToRAS col2 = +A
+  sagittal: { axis: 0, sign: -1 }
+  // sliceToRAS col2 = -R
 };
 function ijkAxisForRasAxis2(ijkToRAS, rasAxis) {
   let best = 0, bestMag = -1;
@@ -833,13 +940,7 @@ function sliceSpacingFor(orient, ijkToRAS) {
 }
 function sliceBoundsFor(orient, rasLo, rasHi) {
   const { axis, sign } = NORMAL[orient];
-  return sign > 0 ? [
-    rasLo[axis],
-    rasHi[axis]
-  ] : [
-    -rasHi[axis],
-    -rasLo[axis]
-  ];
+  return sign > 0 ? [rasLo[axis], rasHi[axis]] : [-rasHi[axis], -rasLo[axis]];
 }
 function offset01ToMm(orient, offset01, rasLo, rasHi) {
   const { axis, sign } = NORMAL[orient];
@@ -852,7 +953,6 @@ function mmToOffset01(orient, mm, rasLo, rasHi) {
   return span === 0 ? 0.5 : (ras - rasLo[axis]) / span;
 }
 var SliceInteractor = class {
-  geom;
   constructor(geom) {
     this.geom = geom;
   }
@@ -905,16 +1005,7 @@ var SliceInteractor = class {
   }
   /** True if this key is one Slicer's slice view consumes for stepping. */
   static isStepKey(key) {
-    return [
-      "f",
-      "F",
-      "b",
-      "B",
-      "ArrowRight",
-      "ArrowLeft",
-      "ArrowUp",
-      "ArrowDown"
-    ].includes(key);
+    return ["f", "F", "b", "B", "ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"].includes(key);
   }
 };
 
@@ -924,17 +1015,13 @@ function attachSliceControls(canvas, cfg) {
   const h = cfg.hooks ?? {};
   const uv = (e) => {
     const r = canvas.getBoundingClientRect();
-    return {
-      u: (e.clientX - r.left) / r.width,
-      v: (e.clientY - r.top) / r.height,
-      w: r.width,
-      h: r.height
-    };
+    return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height, w: r.width, h: r.height };
   };
   let lastDown = 0, lastX = 0, lastY = 0;
   let view = null;
   let scroll = null;
   let grabbed = null;
+  let wlDrag = null;
   const onContext = (e) => e.preventDefault();
   const onWheel = (e) => {
     e.preventDefault();
@@ -955,6 +1042,12 @@ function attachSliceControls(canvas, cfg) {
       lastDown = dbl ? 0 : now;
       lastX = e.clientX;
       lastY = e.clientY;
+      if (dbl && (e.ctrlKey || e.metaKey) && cfg.wl?.enabled() && cfg.wl.reset) {
+        e.preventDefault();
+        cfg.wl.reset();
+        cfg.redraw();
+        return;
+      }
       if (dbl && h.onDoubleClick?.()) {
         e.preventDefault();
         return;
@@ -965,13 +1058,7 @@ function attachSliceControls(canvas, cfg) {
     if (wantPan || wantZoom) {
       e.preventDefault();
       const { u: u2, v: v2 } = uv(e);
-      view = {
-        mode: wantZoom ? "zoom" : "pan",
-        x: e.clientX,
-        y: e.clientY,
-        pu: u2,
-        pv: v2
-      };
+      view = { mode: wantZoom ? "zoom" : "pan", x: e.clientX, y: e.clientY, pu: u2, pv: v2 };
       canvas.style.cursor = wantZoom ? "ns-resize" : "grabbing";
       canvas.setPointerCapture(e.pointerId);
       return;
@@ -979,15 +1066,17 @@ function attachSliceControls(canvas, cfg) {
     if (e.button !== 0) return;
     e.preventDefault();
     const { u, v, w, h: hh } = uv(e);
+    const mode = cfg.leftMode?.() ?? (cfg.wl?.enabled() ? "wl" : "scroll");
     if (h.onLeftGrab?.(u, v, w, hh)) {
-      grabbed = {
-        moved: 0
-      };
-    } else scroll = {
-      x: e.clientX,
-      y: e.clientY,
-      acc: 0
-    };
+      grabbed = { moved: 0 };
+    } else if (mode === "wl" && cfg.wl) {
+      const [win, lev] = cfg.wl.get();
+      wlDrag = { x: e.clientX, y: e.clientY, win, lev };
+      canvas.style.cursor = "crosshair";
+    } else if (mode === "zoom" || mode === "pan") {
+      view = { mode, x: e.clientX, y: e.clientY, pu: u, pv: v };
+      canvas.style.cursor = mode === "zoom" ? "ns-resize" : "grabbing";
+    } else scroll = { x: e.clientX, y: e.clientY, acc: 0 };
     canvas.setPointerCapture(e.pointerId);
   };
   const onMove = (e) => {
@@ -995,7 +1084,7 @@ function attachSliceControls(canvas, cfg) {
       const dx = e.clientX - view.x, dy = e.clientY - view.y;
       const r = canvas.getBoundingClientRect();
       if (view.mode === "pan") cfg.getSlice().panByPixels(cfg.orient, dx, dy, r.width, r.height);
-      else cfg.getSlice().zoomAbout(cfg.orient, Math.exp(dy * 6e-3), view.pu, view.pv, r.width, r.height);
+      else cfg.getSlice().zoomAbout(cfg.orient, Math.exp(dy * 6e-3), 0.5, 0.5, r.width, r.height);
       view.x = e.clientX;
       view.y = e.clientY;
       cfg.redraw();
@@ -1005,6 +1094,20 @@ function attachSliceControls(canvas, cfg) {
       grabbed.moved += Math.abs(e.movementX) + Math.abs(e.movementY);
       const { u, v, w, h: hh } = uv(e);
       h.onLeftDrag?.(u, v, w, hh);
+      return;
+    }
+    if (wlDrag && cfg.wl) {
+      const [lo, hi] = cfg.wl.range();
+      const r = canvas.getBoundingClientRect();
+      const gain = (hi - lo) / Math.max(1, Math.min(r.width, r.height));
+      let win = wlDrag.win + gain * (e.clientX - wlDrag.x);
+      if (win < 0) win = 0;
+      let lev = wlDrag.lev + gain * (wlDrag.y - e.clientY);
+      if (lev < lo - win / 2) lev = lo - win / 2;
+      if (lev > hi + win / 2) lev = hi + win / 2;
+      cfg.wl.set(win, lev);
+      wlDrag = { x: e.clientX, y: e.clientY, win, lev };
+      cfg.redraw();
       return;
     }
     if (scroll) {
@@ -1040,12 +1143,15 @@ function attachSliceControls(canvas, cfg) {
       h.onLeftDrop?.(m);
       return;
     }
+    if (wlDrag) {
+      wlDrag = null;
+      canvas.style.cursor = "default";
+      return;
+    }
     scroll = null;
   };
   canvas.addEventListener("contextmenu", onContext);
-  canvas.addEventListener("wheel", onWheel, {
-    passive: false
-  });
+  canvas.addEventListener("wheel", onWheel, { passive: false });
   canvas.addEventListener("pointerdown", onDown);
   canvas.addEventListener("pointermove", onMove);
   canvas.addEventListener("pointerup", onUp);
@@ -1067,21 +1173,9 @@ function attachSliceControls(canvas, cfg) {
 }
 
 // render/vtk-camera.ts
-var sub = (a, b) => [
-  a[0] - b[0],
-  a[1] - b[1],
-  a[2] - b[2]
-];
-var add = (a, b) => [
-  a[0] + b[0],
-  a[1] + b[1],
-  a[2] + b[2]
-];
-var scale = (a, s) => [
-  a[0] * s,
-  a[1] * s,
-  a[2] * s
-];
+var sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+var add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+var scale = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
 var cross = (a, b) => [
   a[1] * b[2] - a[2] * b[1],
   a[2] * b[0] - a[0] * b[2],
@@ -1091,11 +1185,7 @@ var dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 var norm = (a) => Math.hypot(a[0], a[1], a[2]);
 var normalize = (a) => {
   const n = norm(a) || 1;
-  return [
-    a[0] / n,
-    a[1] / n,
-    a[2] / n
-  ];
+  return [a[0] / n, a[1] / n, a[2] / n];
 };
 function rotateAboutAxis(v, axis, deg) {
   const k = normalize(axis);
@@ -1114,47 +1204,18 @@ var VtkCamera = class _VtkCamera {
   focalPoint;
   viewUp;
   viewAngle;
+  // degrees (vtkCamera default 30)
   parallelProjection = false;
   parallelScale = 1;
-  constructor(position = [
-    0,
-    0,
-    1
-  ], focalPoint = [
-    0,
-    0,
-    0
-  ], viewUp = [
-    0,
-    1,
-    0
-  ], viewAngle = 30) {
-    this.position = [
-      ...position
-    ];
-    this.focalPoint = [
-      ...focalPoint
-    ];
-    this.viewUp = [
-      ...viewUp
-    ];
+  constructor(position = [0, 0, 1], focalPoint = [0, 0, 0], viewUp = [0, 1, 0], viewAngle = 30) {
+    this.position = [...position];
+    this.focalPoint = [...focalPoint];
+    this.viewUp = [...viewUp];
     this.viewAngle = viewAngle;
   }
   /** Slicer's default 3D camera (vtkMRMLCameraNode): (0,500,0) -> origin, +S up, 30 deg. */
   static slicerDefault() {
-    return new _VtkCamera([
-      0,
-      500,
-      0
-    ], [
-      0,
-      0,
-      0
-    ], [
-      0,
-      0,
-      1
-    ], 30);
+    return new _VtkCamera([0, 500, 0], [0, 0, 0], [0, 0, 1], 30);
   }
   clone() {
     const c = new _VtkCamera(this.position, this.focalPoint, this.viewUp, this.viewAngle);
@@ -1174,11 +1235,7 @@ var VtkCamera = class _VtkCamera {
     const back = normalize(sub(this.position, this.focalPoint));
     const right = normalize(cross(viewUp, back));
     const up = cross(back, right);
-    return {
-      right,
-      up,
-      back
-    };
+    return { right, up, back };
   }
   /** vtkCamera::Azimuth — rotate position about viewUp through the focal point. */
   azimuth(deg) {
@@ -1243,11 +1300,7 @@ var VtkCamera = class _VtkCamera {
     const aspect = w / h;
     const ndcx = dot(rel, right) / (halfH * aspect);
     const ndcy = dot(rel, up) / halfH;
-    return {
-      x: (ndcx * 0.5 + 0.5) * w,
-      y: (0.5 - ndcy * 0.5) * h,
-      depth
-    };
+    return { x: (ndcx * 0.5 + 0.5) * w, y: (0.5 - ndcy * 0.5) * h, depth };
   }
   /** Inverse of worldToDisplay at a FIXED view-depth: the world point under display pixel (x,y)
    *  lying in the plane perpendicular to the view at `depth`. Dragging a 3D handle in this plane
@@ -1265,15 +1318,9 @@ var VtkCamera = class _VtkCamera {
   /** vtkCamera-comparable snapshot for the harness. */
   state() {
     return {
-      position: [
-        ...this.position
-      ],
-      focalPoint: [
-        ...this.focalPoint
-      ],
-      viewUp: [
-        ...this.viewUp
-      ],
+      position: [...this.position],
+      focalPoint: [...this.focalPoint],
+      viewUp: [...this.viewUp],
       viewAngle: this.viewAngle,
       distance: this.distance
     };
@@ -1299,6 +1346,7 @@ var CameraInteractor = class _CameraInteractor {
   camera;
   action = "none";
   prev = null;
+  // previous position, VTK display coords
   onChange;
   constructor(camera, onChange) {
     this.camera = camera;
@@ -1306,10 +1354,7 @@ var CameraInteractor = class _CameraInteractor {
   }
   /** Convert browser (cssX, cssY within the view) to VTK display coords (y up). */
   static toDisplay(cssX, cssY, height) {
-    return [
-      cssX,
-      height - cssY
-    ];
+    return [cssX, height - cssY];
   }
   start(button, cssX, cssY, height, m = {}) {
     this.action = actionForButton(button, m);
@@ -1340,10 +1385,7 @@ var CameraInteractor = class _CameraInteractor {
         this.spin(x, y, this.prev[0], this.prev[1], width, height);
         break;
     }
-    this.prev = [
-      x,
-      y
-    ];
+    this.prev = [x, y];
     this.onChange?.();
   }
   /** vtkMRMLCameraWidget::ProcessRotate */
@@ -1376,11 +1418,7 @@ var CameraInteractor = class _CameraInteractor {
     const t = deg * Math.PI / 180, c = Math.cos(t), s = Math.sin(t);
     const v = cam.viewUp;
     const k = axis;
-    const kv = [
-      k[1] * v[2] - k[2] * v[1],
-      k[2] * v[0] - k[0] * v[2],
-      k[0] * v[1] - k[1] * v[0]
-    ];
+    const kv = [k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0]];
     const kd = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
     cam.viewUp = [
       v[0] * c + kv[0] * s + k[0] * kd * (1 - c),
@@ -1403,70 +1441,64 @@ function attachCameraControls(canvas, camera, opts = {}) {
   const interactor = new CameraInteractor(camera, opts.onChange);
   const local = (e) => {
     const r = canvas.getBoundingClientRect();
-    return {
-      x: e.clientX - r.left,
-      y: e.clientY - r.top
-    };
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
   canvas.style.touchAction = "none";
   const docEl = (canvas.ownerDocument ?? document).documentElement;
   if (docEl) docEl.style.overscrollBehavior = "none";
-  canvas.addEventListener("touchmove", (e) => e.preventDefault(), {
-    passive: false
-  });
+  canvas.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
   const pointers = /* @__PURE__ */ new Map();
   let pinch = null;
-  const pinchState = () => {
-    const [a, b] = [
-      ...pointers.values()
-    ];
-    return {
-      dist: Math.hypot(b.x - a.x, b.y - a.y),
-      mx: (a.x + b.x) / 2,
-      my: (a.y + b.y) / 2
-    };
+  let triple = null;
+  const centroid = () => {
+    let mx = 0, my = 0;
+    for (const p of pointers.values()) {
+      mx += p.x;
+      my += p.y;
+    }
+    const n = pointers.size || 1;
+    return { mx: mx / n, my: my / n };
   };
+  const pinchState = () => {
+    const [a, b] = [...pointers.values()];
+    return { dist: Math.hypot(b.x - a.x, b.y - a.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+  };
+  const on = () => opts.enabled?.() ?? true;
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointerdown", (e) => {
+    if (!on()) return;
     const { x, y } = local(e);
-    pointers.set(e.pointerId, {
-      x,
-      y
-    });
+    pointers.set(e.pointerId, { x, y });
     canvas.setPointerCapture(e.pointerId);
     if (pointers.size === 1) {
-      interactor.start(e.button, x, y, canvas.clientHeight, {
-        shift: e.shiftKey,
-        ctrl: e.ctrlKey || e.metaKey,
-        alt: e.altKey
-      });
-      opts.onLog?.("cameraStart", {
-        action: interactor.action,
-        x,
-        y,
-        button: e.button,
-        shift: e.shiftKey,
-        ctrl: e.ctrlKey,
-        alt: e.altKey
-      });
+      interactor.start(e.button, x, y, canvas.clientHeight, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
+      opts.onLog?.("cameraStart", { action: interactor.action, x, y, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
     } else if (pointers.size === 2) {
       interactor.end();
       pinch = pinchState();
+    } else if (pointers.size === 3) {
+      pinch = null;
+      const c = centroid();
+      triple = { mx: c.mx, my: c.my };
+      opts.onVolumeDragStart?.();
     }
   });
   const endPointer = (e) => {
     if (!pointers.delete(e.pointerId)) return;
+    if (!on()) {
+      interactor.end();
+      pinch = null;
+      return;
+    }
     canvas.releasePointerCapture?.(e.pointerId);
     if (pointers.size < 2) pinch = null;
+    if (pointers.size < 3 && triple) {
+      triple = null;
+      opts.onVolumeDragEnd?.();
+    }
     if (pointers.size === 1) {
-      const p = [
-        ...pointers.values()
-      ][0];
-      interactor.start(0, p.x, p.y, canvas.clientHeight, {
-        shift: false,
-        ctrl: false,
-        alt: false
-      });
+      const p = [...pointers.values()][0];
+      interactor.start(0, p.x, p.y, canvas.clientHeight, { shift: false, ctrl: false, alt: false });
     } else if (pointers.size === 0) {
       interactor.end();
     }
@@ -1474,13 +1506,16 @@ function attachCameraControls(canvas, camera, opts = {}) {
   canvas.addEventListener("pointerup", endPointer);
   canvas.addEventListener("pointercancel", endPointer);
   canvas.addEventListener("pointermove", (e) => {
+    if (!on()) return;
     if (!pointers.has(e.pointerId)) return;
     const { x, y } = local(e);
-    pointers.set(e.pointerId, {
-      x,
-      y
-    });
-    if (pointers.size >= 2) {
+    pointers.set(e.pointerId, { x, y });
+    if (pointers.size >= 3) {
+      const c = centroid();
+      if (triple) opts.onVolumeDrag?.(c.mx - triple.mx, c.my - triple.my);
+      return;
+    }
+    if (pointers.size === 2) {
       const p = pinchState();
       if (pinch) {
         if (p.dist > 0 && pinch.dist > 0) camera.dolly(p.dist / pinch.dist);
@@ -1493,29 +1528,20 @@ function attachCameraControls(canvas, camera, opts = {}) {
     }
   });
   canvas.addEventListener("wheel", (e) => {
+    if (!on()) return;
     e.preventDefault();
     interactor.wheel(e.deltaY < 0);
-    opts.onLog?.("cameraWheel", {
-      deltaY: e.deltaY,
-      distance: camera.distance
-    });
-  }, {
-    passive: false
-  });
+    opts.onLog?.("cameraWheel", { deltaY: e.deltaY, distance: camera.distance });
+  }, { passive: false });
   return interactor;
 }
 function framedCamera(center, radius, distMul = 2.6) {
-  return new VtkCamera([
-    center[0],
-    center[1] + radius * distMul,
-    center[2]
-  ], [
-    ...center
-  ], [
-    0,
-    0,
-    1
-  ], 30);
+  return new VtkCamera(
+    [center[0], center[1] + radius * distMul, center[2]],
+    [...center],
+    [0, 0, 1],
+    30
+  );
 }
 
 // render/demos/view-grid.ts
@@ -1588,81 +1614,65 @@ function rasToScreen3D(cam, ras, w, h) {
 
 // render/demos/sl-logo.ts
 var SL_LOGO = "data:image/png;base64,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";
+var SL_FAVICON = "data:image/png;base64,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";
 
 // render/demos/sl-chrome.ts
 var DEFAULT_HELP = [
-  {
-    title: "3D view",
-    rows: [
-      [
-        "Left-drag",
-        "Rotate"
-      ],
-      [
-        "Right-drag",
-        "Zoom"
-      ],
-      [
-        "Middle / Shift+Left-drag",
-        "Pan"
-      ],
-      [
-        "Wheel / two-finger",
-        "Zoom (dolly)"
-      ],
-      [
-        "Double-click",
-        "Maximize / restore"
-      ],
-      [
-        "Shift + move",
-        "Pick \u2192 jump slices to the point"
-      ]
-    ]
-  },
-  {
-    title: "Slice views",
-    rows: [
-      [
-        "Wheel / Left-drag",
-        "Scroll through slices"
-      ],
-      [
-        "Right-drag / \u2318-wheel",
-        "Zoom this slice"
-      ],
-      [
-        "Middle / Shift+Left-drag",
-        "Pan"
-      ],
-      [
-        "Double-click",
-        "Maximize / restore"
-      ],
-      [
-        "R",
-        "Reset pan/zoom"
-      ],
-      [
-        "Shift + move",
-        "Jump the other views to the point under the cursor"
-      ]
-    ]
-  }
+  { title: "3D view", rows: [
+    ["Left-drag", "Rotate"],
+    ["Right-drag", "Zoom"],
+    ["Middle / Shift+Left-drag", "Pan"],
+    ["Wheel / two-finger", "Zoom (dolly)"],
+    ["Double-click", "Maximize / restore"],
+    ["Shift + move", "Pick \u2192 jump slices to the point"]
+  ] },
+  { title: "Endovascular flight (fly-inside / endo demo)", rows: [
+    ["Up / Down", "Move in / out along the view axis"],
+    ["Left / Right", "Yaw"],
+    ["Shift + Left/Right", "Pitch"],
+    ["Ctrl + Left/Right", "Roll"],
+    ["Space", "Toggle forward cruise"],
+    ["Shift + Space", "Toggle reverse cruise"],
+    ["Escape", "Stop"],
+    ["Left-drag", "Look around"],
+    ["Shift + click", "Autopilot target"],
+    ["Speed slider", "Travel speed in mm/s (live, applies mid-flight)"]
+  ] },
+  { title: "Slice views", rows: [
+    ["Wheel / Left-drag", "Scroll through slices"],
+    ["Right-drag / \u2318-wheel", "Zoom this slice"],
+    ["Middle / Shift+Left-drag", "Pan"],
+    ["Double-click", "Maximize / restore"],
+    ["R", "Reset pan/zoom"],
+    ["Shift + move", "Jump the other views to the point under the cursor"]
+  ] }
 ];
 function glass(el2, extra = "") {
   el2.style.cssText += ";background:linear-gradient(135deg,rgba(58,64,88,.55),rgba(20,24,38,.66));backdrop-filter:blur(20px) saturate(1.6);-webkit-backdrop-filter:blur(20px) saturate(1.6);border:1px solid rgba(255,255,255,.2);box-shadow:0 18px 50px rgba(0,0,0,.55);" + extra;
 }
 function installChrome(opts) {
   const controls = opts.controls ?? [];
-  const help = opts.help ?? DEFAULT_HELP;
-  const helpBtn = document.createElement("button");
-  helpBtn.textContent = "?";
-  helpBtn.title = "Controls & key bindings";
-  helpBtn.style.cssText = "position:fixed;top:12px;left:12px;z-index:74;width:32px;height:32px;padding:0;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:#cfe6ff;font:700 15px -apple-system,system-ui,sans-serif;";
-  glass(helpBtn);
-  helpBtn.onclick = openHelp;
-  document.body.appendChild(helpBtn);
+  const host = opts.container ?? document.body;
+  const help = (opts.help === false ? [] : opts.help) ?? DEFAULT_HELP;
+  try {
+    if (typeof document !== "undefined" && document.head && !document.querySelector('link[rel~="icon"]')) {
+      const link = document.createElement("link");
+      link.rel = "icon";
+      link.href = SL_FAVICON;
+      document.head.appendChild(link);
+    }
+  } catch {
+  }
+  let helpBtn = null;
+  if (opts.help !== false) {
+    helpBtn = document.createElement("button");
+    helpBtn.textContent = "?";
+    helpBtn.title = "Controls & key bindings";
+    helpBtn.style.cssText = "position:fixed;top:12px;left:12px;z-index:74;width:32px;height:32px;padding:0;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;border-radius:50%;color:#cfe6ff;font:700 15px -apple-system,system-ui,sans-serif;";
+    glass(helpBtn);
+    helpBtn.onclick = openHelp;
+    host.appendChild(helpBtn);
+  }
   let helpEl = null;
   function openHelp() {
     if (helpEl) return;
@@ -1681,7 +1691,7 @@ function installChrome(opts) {
     }
     panel.innerHTML += `<div style="margin-top:16px;font-size:12px;color:rgba(232,238,255,.55)">Press <b style="color:#fff5d6">esc</b> or click outside to dismiss.</div>`;
     helpEl.appendChild(panel);
-    document.body.appendChild(helpEl);
+    host.appendChild(helpEl);
     document.addEventListener("keydown", escClose, true);
   }
   function escClose(e) {
@@ -1695,6 +1705,7 @@ function installChrome(opts) {
     }
   }
   const logo = document.createElement("div");
+  logo.id = "sl-badge";
   logo.title = "SlicerLive \u2014 visualization";
   logo.style.cssText = "position:fixed;z-index:74;cursor:pointer;user-select:none;display:flex;flex-direction:column;align-items:center;gap:4px;padding:7px 12px 6px;border-radius:14px;background:#121826;border:1px solid rgba(255,255,255,.12);box-shadow:0 10px 30px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.06);transition:transform 120ms ease-out;";
   const mark = document.createElement("img");
@@ -1706,13 +1717,13 @@ function installChrome(opts) {
   word.style.cssText = "font:800 12px/1 -apple-system,system-ui,sans-serif;letter-spacing:.5px;color:#eef7ff;text-shadow:0 0 14px rgba(255,210,90,.4);";
   logo.appendChild(mark);
   logo.appendChild(word);
-  document.body.appendChild(logo);
+  host.appendChild(logo);
   const place = () => {
     const a = opts.anchor;
     const r = a && a.getClientRects().length ? a.getBoundingClientRect() : null;
     if (r && r.width > 2 && r.height > 2) {
       logo.style.top = Math.round(r.top + 8) + "px";
-      logo.style.right = Math.round(window.innerWidth - r.right + 8) + "px";
+      logo.style.right = Math.round(globalThis.innerWidth - r.right + 8) + "px";
     } else {
       logo.style.top = "10px";
       logo.style.right = "12px";
@@ -1721,11 +1732,13 @@ function installChrome(opts) {
   place();
   requestAnimationFrame(place);
   globalThis.addEventListener("resize", place);
-  if (opts.anchor && "ResizeObserver" in globalThis) new ResizeObserver(place).observe(opts.anchor);
+  const anchorRO = opts.anchor && "ResizeObserver" in globalThis ? new ResizeObserver(place) : null;
+  anchorRO?.observe(opts.anchor);
   const pop = document.createElement("div");
+  pop.id = "sl-popup";
   pop.style.cssText = "position:fixed;z-index:73;min-width:210px;max-width:300px;max-height:84vh;overflow-y:auto;padding:10px 12px;border-radius:12px;color:#eaf0ff;font:13px -apple-system,system-ui,sans-serif;opacity:0;pointer-events:none;transform:translateY(-6px);transition:opacity 120ms ease-out,transform 120ms ease-out;";
   glass(pop);
-  document.body.appendChild(pop);
+  host.appendChild(pop);
   const paintSw = (sw, on) => {
     sw.style.background = on ? "linear-gradient(180deg,#9fe9ff,#54c6f0)" : "rgba(255,255,255,.18)";
     sw.innerHTML = `<span style="position:absolute;top:2px;left:${on ? 17 : 2}px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left 120ms;box-shadow:0 1px 3px rgba(0,0,0,.4)"></span>`;
@@ -1783,33 +1796,200 @@ function installChrome(opts) {
     box.addEventListener("pointercancel", end);
     return paint;
   };
+  const attachSteps = (box, max, get, set, fmt, color, disabled, onChange) => {
+    box.style.cursor = "ew-resize";
+    box.title = `Click to step up (wraps past ${max}) \xB7 Drag sideways to set`;
+    const c = `rgb(${Math.round(color[0] * 255)},${Math.round(color[1] * 255)},${Math.round(color[2] * 255)})`;
+    const paint = () => {
+      const v = Math.max(0, Math.min(max, Math.round(get())));
+      box.style.opacity = v === 0 ? "0.75" : "1";
+      box.innerHTML = `<span style="position:absolute;left:0;top:0;bottom:0;width:${v / max * 100}%;background:${c};opacity:.9"></span><span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:700 10px -apple-system,system-ui,sans-serif;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.75)">${fmt(v)}</span>`;
+    };
+    paint();
+    const clamp = (v) => Math.max(0, Math.min(max, Math.round(v)));
+    let startX = 0, startV = 0, dragged = false, id = -1;
+    box.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (disabled()) return;
+      startX = e.clientX;
+      startV = get();
+      dragged = false;
+      id = e.pointerId;
+      try {
+        box.setPointerCapture(id);
+      } catch {
+      }
+    });
+    box.addEventListener("pointermove", (e) => {
+      if (id < 0) return;
+      const dx = e.clientX - startX;
+      if (Math.abs(dx) > 3) dragged = true;
+      if (dragged) {
+        const v = clamp(startV + dx / (130 / max));
+        if (v !== get()) {
+          set(v);
+          onChange();
+        }
+        paint();
+      }
+    });
+    const end = () => {
+      if (id < 0) return;
+      if (!dragged) {
+        set((clamp(get()) + 1) % (max + 1));
+        paint();
+        onChange();
+      }
+      try {
+        box.releasePointerCapture(id);
+      } catch {
+      }
+      id = -1;
+    };
+    box.addEventListener("pointerup", end);
+    box.addEventListener("pointercancel", end);
+    return paint;
+  };
   const OPBOX_CSS = "width:44px;height:18px;border-radius:6px;position:relative;overflow:hidden;flex:0 0 auto;background:rgba(255,255,255,.14);box-shadow:inset 0 0 0 1px rgba(255,255,255,.18);touch-action:none;";
+  const heading = (text, first) => {
+    const h = document.createElement("div");
+    h.textContent = text;
+    h.style.cssText = "font:700 10px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#9fe9ff;margin:" + (first ? "0 0 8px" : "12px 0 6px") + ";" + (first ? "" : "border-top:1px solid rgba(255,255,255,.12);padding-top:10px;");
+    pop.appendChild(h);
+  };
+  const selects = opts.selects ?? [];
+  const selEls = [];
+  let sectionSeen = null;
+  let firstHead = true;
+  for (const c of selects) {
+    const sec = c.section ?? "Visualization";
+    if (sec !== sectionSeen) {
+      heading(sec, firstHead);
+      sectionSeen = sec;
+      firstHead = false;
+    }
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;padding:5px 0;";
+    const lab = document.createElement("span");
+    lab.textContent = c.label;
+    const sel = document.createElement("select");
+    sel.style.cssText = "flex:1 1 auto;max-width:60%;border-radius:7px;padding:4px 6px;cursor:pointer;font:500 12px -apple-system,system-ui,sans-serif;color:#e8eeff;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.20);";
+    for (const o of c.options) {
+      const op = document.createElement("option");
+      op.value = o.value;
+      op.textContent = o.label;
+      op.style.cssText = "background:#1b2030;color:#e8eeff;";
+      sel.appendChild(op);
+    }
+    sel.value = c.get();
+    sel.onclick = (e) => e.stopPropagation();
+    sel.onchange = () => {
+      c.set(sel.value);
+      opts.onChange?.();
+      refresh();
+    };
+    row.appendChild(lab);
+    row.appendChild(sel);
+    pop.appendChild(row);
+    selEls.push({ c, el: sel });
+  }
   const rows = [];
   if (controls.length) {
-    const head = document.createElement("div");
-    head.textContent = "Visualization";
-    head.style.cssText = "font:700 10px -apple-system,system-ui,sans-serif;letter-spacing:1.1px;text-transform:uppercase;color:#9fe9ff;margin:0 0 8px;";
-    pop.appendChild(head);
     for (const c of controls) {
+      const sec = c.section ?? "Visualization";
+      if (sec !== sectionSeen) {
+        heading(sec, firstHead);
+        sectionSeen = sec;
+        firstHead = false;
+      }
       const row = document.createElement("div");
       row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:14px;padding:5px 0;";
+      if (c.slider) {
+        row.style.cssText = "display:flex;flex-direction:column;gap:4px;padding:6px 0;";
+        const top = document.createElement("div");
+        top.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;";
+        const lab2 = document.createElement("span");
+        lab2.textContent = c.label;
+        const val = document.createElement("span");
+        val.style.cssText = "font:600 11px ui-monospace,Menlo,monospace;color:#9fe9ff;font-variant-numeric:tabular-nums;";
+        top.appendChild(lab2);
+        top.appendChild(val);
+        const inp = document.createElement("input");
+        inp.type = "range";
+        const num = (v, dflt) => v === void 0 ? dflt : typeof v === "function" ? v() : v;
+        const setBounds = () => {
+          inp.min = String(num(c.slider.min, 0));
+          inp.max = String(num(c.slider.max, 1));
+          inp.step = String(num(c.slider.step, 1));
+        };
+        setBounds();
+        inp.value = String(c.slider.get());
+        inp.style.cssText = "width:100%;accent-color:#54c6f0;cursor:pointer;";
+        const fmt = c.slider.format ?? ((v) => String(Math.round(v)));
+        const paint = () => {
+          val.textContent = fmt(c.slider.get());
+        };
+        inp.oninput = () => {
+          c.slider.set(parseFloat(inp.value));
+          paint();
+          opts.onChange?.();
+        };
+        inp.onpointerdown = (e) => e.stopPropagation();
+        paint();
+        row.appendChild(top);
+        row.appendChild(inp);
+        pop.appendChild(row);
+        rows.push({ c, row, repaint: () => {
+          setBounds();
+          inp.value = String(c.slider.get());
+          paint();
+        } });
+        continue;
+      }
       const lab = document.createElement("span");
       lab.textContent = c.label;
       row.appendChild(lab);
+      if (c.button) {
+        const pill = document.createElement("span");
+        pill.style.cssText = "max-width:60%;border-radius:7px;padding:4px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:600 12px -apple-system,system-ui,sans-serif;color:#eaf0ff;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.20);";
+        pill.textContent = c.button.text();
+        pill.onclick = (e) => {
+          e.stopPropagation();
+          c.button.run();
+        };
+        pill.onpointerdown = (e) => e.stopPropagation();
+        row.appendChild(pill);
+        pop.appendChild(row);
+        rows.push({ c, row, repaint: () => {
+          pill.textContent = c.button.text();
+        } });
+        continue;
+      }
+      if (c.steps) {
+        const box = document.createElement("span");
+        box.style.cssText = OPBOX_CSS;
+        row.appendChild(box);
+        const paint = attachSteps(
+          box,
+          c.steps.max,
+          c.steps.get,
+          (v) => c.steps.set(v),
+          c.steps.format ?? ((v) => String(v)),
+          c.color ?? [0.62, 0.9, 1],
+          () => c.disabled?.() ?? false,
+          () => opts.onChange?.()
+        );
+        rows.push({ c, row, repaint: paint });
+        pop.appendChild(row);
+        continue;
+      }
       if (c.getOpacity && c.setOpacity) {
         const box = document.createElement("span");
         box.style.cssText = OPBOX_CSS;
         row.appendChild(box);
-        const paint = attachOpacity(box, c.getOpacity, (o) => c.setOpacity(o), c.color ?? [
-          0.62,
-          0.9,
-          1
-        ], () => opts.onChange?.());
-        rows.push({
-          c,
-          row,
-          repaint: paint
-        });
+        const paint = attachOpacity(box, c.getOpacity, (o) => c.setOpacity(o), c.color ?? [0.62, 0.9, 1], () => opts.onChange?.());
+        rows.push({ c, row, repaint: paint });
       } else {
         row.style.cursor = "pointer";
         const sw = document.createElement("span");
@@ -1825,15 +2005,11 @@ function installChrome(opts) {
             refresh();
           });
         };
-        rows.push({
-          c,
-          row,
-          sw
-        });
+        rows.push({ c, row, sw });
       }
       pop.appendChild(row);
     }
-  } else if (opts.about === false && !opts.segments) {
+  } else if (opts.about === false && !opts.segments && !selects.length) {
     pop.textContent = "SlicerLive \u2014 WebGPU renderer";
   }
   const segHost = document.createElement("div");
@@ -1845,7 +2021,8 @@ function installChrome(opts) {
     segHost.innerHTML = "";
     if (!S) return;
     const list = S.list();
-    if (!list.length) return;
+    const noteText = S.note?.();
+    if (!list.length && !noteText) return;
     const wrap = document.createElement("div");
     wrap.style.cssText = "margin-top:6px;border-top:1px solid rgba(255,255,255,.12);padding-top:6px;" + (list.length > 6 ? "max-height:210px;overflow-y:auto;" : "");
     for (const s of list) {
@@ -1868,12 +2045,13 @@ function installChrome(opts) {
         if (!(S.enabled && !S.enabled())) S.set(s.num, o);
       }, s.color, () => opts.onChange?.());
       wrap.appendChild(row);
-      segRows.push({
-        num: s.num,
-        box,
-        color: s.color,
-        paint
-      });
+      segRows.push({ num: s.num, name: s.name, box, color: s.color, paint });
+    }
+    if (noteText) {
+      const n = document.createElement("div");
+      n.textContent = noteText;
+      n.style.cssText = "margin-top:6px;padding:5px 7px;border-radius:6px;background:rgba(255,196,84,.12);color:#ffc454;font:500 11.5px -apple-system,system-ui,sans-serif;line-height:1.35;";
+      wrap.appendChild(n);
     }
     segHost.appendChild(wrap);
     paintSegments();
@@ -1881,6 +2059,12 @@ function installChrome(opts) {
   function paintSegments() {
     const S = opts.segments;
     if (!S) return;
+    const list = S.list();
+    const changed = list.length !== segRows.length || list.some((s, i) => s.num !== segRows[i].num || s.name !== segRows[i].name);
+    if (changed) {
+      buildSegments();
+      return;
+    }
     const dis = S.enabled ? !S.enabled() : false;
     segHost.style.opacity = dis ? "0.4" : "1";
     for (const r of segRows) r.paint();
@@ -1904,6 +2088,10 @@ function installChrome(opts) {
     pop.appendChild(about);
   }
   function refresh() {
+    for (const { c, el: el2 } of selEls) {
+      const v = c.get();
+      if (el2.value !== v) el2.value = v;
+    }
     for (const { c, row, sw, repaint } of rows) {
       const dis = c.disabled?.() ?? false;
       row.style.opacity = dis ? "0.4" : "1";
@@ -1924,7 +2112,7 @@ function installChrome(opts) {
     refresh();
     const b = logo.getBoundingClientRect();
     pop.style.top = Math.round(b.bottom + 6) + "px";
-    pop.style.right = Math.round(window.innerWidth - b.right) + "px";
+    pop.style.right = Math.round(globalThis.innerWidth - b.right) + "px";
     pop.style.opacity = "1";
     pop.style.pointerEvents = "auto";
     pop.style.transform = "translateY(0)";
@@ -1935,33 +2123,172 @@ function installChrome(opts) {
     pop.style.transform = "translateY(-6px)";
   };
   let pinned = false;
+  let startOpen = false;
   logo.onmouseenter = () => {
     logo.style.transform = "scale(1.08)";
     show();
   };
   logo.onclick = () => {
+    startOpen = false;
     pinned = !pinned;
     pinned ? show() : hide();
   };
   logo.onmouseleave = () => {
     logo.style.transform = "scale(1)";
-    if (!pinned) setTimeout(() => {
+    if (!pinned && !startOpen) setTimeout(() => {
       if (!pop.matches(":hover") && !pinned) hide();
     }, 120);
   };
   pop.onmouseleave = () => {
+    startOpen = false;
     if (!pinned) hide();
   };
-  return {
-    refresh
+  const onDocDown = (e) => {
+    const t = e.target;
+    if (logo.contains(t) || pop.contains(t)) return;
+    if (startOpen) return;
+    pinned = false;
+    hide();
   };
+  document.addEventListener("pointerdown", onDocDown, true);
+  if (opts.openOnLoad ?? true) {
+    startOpen = true;
+    requestAnimationFrame(() => {
+      if (startOpen) show();
+    });
+  }
+  const destroy = () => {
+    document.removeEventListener("pointerdown", onDocDown, true);
+    globalThis.removeEventListener("resize", place);
+    anchorRO?.disconnect();
+    document.removeEventListener("keydown", escClose, true);
+    helpBtn?.remove();
+    helpEl?.remove();
+    logo.remove();
+    pop.remove();
+  };
+  return { refresh, destroy };
 }
 
 // render/scene-renderer.ts
 var DEFAULT_FORMAT2 = "rgba8unorm-srgb";
 var SCENE_FLOATS = 16;
 var CLIP_FLOATS = 36;
+var MESH_WGSL = (
+  /* wgsl */
+  `
+struct MU { view_proj : mat4x4<f32>, eye : vec4<f32>, color : vec4<f32> };
+@group(0) @binding(0) var<uniform> mu : MU;
+struct VO { @builtin(position) pos : vec4<f32>, @location(0) wp : vec3<f32> };
+@vertex fn vs_mesh(@location(0) p : vec3<f32>) -> VO { var o : VO; o.pos = mu.view_proj * vec4<f32>(p, 1.0); o.wp = p; return o; }
+struct FO { @location(0) col : vec4<f32>, @location(1) depth : vec4<f32> };
+@fragment fn fs_mesh(i : VO) -> FO {
+  let n = normalize(cross(dpdx(i.wp), dpdy(i.wp)));       // flat face normal (no normals on the wire)
+  let l = normalize(mu.eye.xyz - i.wp);                   // headlight
+  let lam = 0.25 + 0.75 * abs(dot(n, l));
+  let a = mu.color.a;
+  var o : FO;
+  o.col = vec4<f32>(mu.color.rgb * lam * a, a);           // premultiplied
+  o.depth = vec4<f32>(distance(mu.eye.xyz, i.wp), 0.0, 0.0, 1.0);
+  return o;
+}`
+);
 var SceneRenderer = class _SceneRenderer {
+  // ── surface meshes (models): rasterised before each trace into colour+depth targets the march composites ──
+  meshPipeline;
+  gpuMeshes = [];
+  meshTargetsBySize = /* @__PURE__ */ new Map();
+  viewProj = new Float32Array(16);
+  eyePos = [0, 0, 0];
+  /** Replace the surface meshes (world/RAS float32 xyz + uint32 triangles, colour, opacity). */
+  setMeshes(meshes) {
+    for (const m of this.gpuMeshes) {
+      m.vbuf.destroy();
+      m.ibuf.destroy();
+      m.ubuf.destroy();
+    }
+    this.gpuMeshes = meshes.filter((m) => m.indices.length >= 3).map((m) => {
+      const vbuf = this.dev.createBuffer({ size: Math.ceil(m.positions.byteLength / 4) * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+      this.dev.queue.writeBuffer(vbuf, 0, m.positions);
+      const ibuf = this.dev.createBuffer({ size: Math.ceil(m.indices.byteLength / 4) * 4, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+      this.dev.queue.writeBuffer(ibuf, 0, m.indices);
+      const ubuf = this.dev.createBuffer({ size: 24 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      return { vbuf, ibuf, count: m.indices.length, ubuf, color: m.color, opacity: m.opacity };
+    });
+  }
+  hasMeshes() {
+    return this.gpuMeshes.length > 0;
+  }
+  ensureMeshPipeline() {
+    if (this.meshPipeline) return;
+    const mod = this.dev.createShaderModule({ code: MESH_WGSL });
+    this.meshPipeline = this.dev.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: mod, entryPoint: "vs_mesh", buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] }] },
+      fragment: { module: mod, entryPoint: "fs_mesh", targets: [{ format: "rgba16float" }, { format: "r32float" }] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
+    });
+  }
+  /** Colour/depth targets (+ the group-1 bind group of the trace pipeline) for a given trace size. */
+  meshTargets(w, h) {
+    const key = w + "x" + h;
+    let t = this.meshTargetsBySize.get(key);
+    if (!t) {
+      if (this.meshTargetsBySize.size > 4) {
+        for (const old of this.meshTargetsBySize.values()) {
+          old.col.destroy();
+          old.depth.destroy();
+          old.z.destroy();
+        }
+        this.meshTargetsBySize.clear();
+      }
+      t = {
+        w,
+        h,
+        col: this.dev.createTexture({ size: [w, h], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }),
+        depth: this.dev.createTexture({ size: [w, h], format: "r32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }),
+        z: this.dev.createTexture({ size: [w, h], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT })
+      };
+      this.meshTargetsBySize.set(key, t);
+    }
+    if (!t.bind) t.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(1), entries: [{ binding: 0, resource: t.col.createView() }, { binding: 1, resource: t.depth.createView() }] });
+    return t;
+  }
+  /** Rasterise the meshes for this frame's trace size; returns the bind group the trace pass needs. */
+  meshPass(enc, w, h) {
+    const t = this.meshTargets(w, h);
+    const pass = enc.beginRenderPass({
+      colorAttachments: [
+        { view: t.col.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } },
+        { view: t.depth.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 1e30, g: 0, b: 0, a: 1 } }
+      ],
+      depthStencilAttachment: { view: t.z.createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" }
+    });
+    if (this.gpuMeshes.length) {
+      this.ensureMeshPipeline();
+      pass.setPipeline(this.meshPipeline);
+      for (const m of this.gpuMeshes) {
+        const u = new Float32Array(24);
+        u.set(this.viewProj, 0);
+        u[16] = this.eyePos[0];
+        u[17] = this.eyePos[1];
+        u[18] = this.eyePos[2];
+        u[19] = 1;
+        u[20] = m.color[0];
+        u[21] = m.color[1];
+        u[22] = m.color[2];
+        u[23] = m.opacity;
+        this.dev.queue.writeBuffer(m.ubuf, 0, u);
+        pass.setBindGroup(0, this.dev.createBindGroup({ layout: this.meshPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: m.ubuf } }] }));
+        pass.setVertexBuffer(0, m.vbuf);
+        pass.setIndexBuffer(m.ibuf, "uint32");
+        pass.drawIndexed(m.count);
+      }
+    }
+    pass.end();
+    return t.bind;
+  }
   dev;
   format;
   placed = [];
@@ -1976,7 +2303,9 @@ var SceneRenderer = class _SceneRenderer {
   pickPipeline;
   pickBind;
   pickOff = 0;
+  // mat[] offset of the pick_cursor uniform (NDC)
   pickTarget;
+  // 1x1 rgba32float (wp.xyz, hit)
   pickReadBuf;
   // PRODUCER→RECONSTRUCTOR seam (docs/UNIFIED-RENDERING-PLAN.md M1). The ray-march writes the
   // premultiplied composited sample into `traceTex` (rgba32float, lossless); `resolvePipeline`
@@ -1994,33 +2323,33 @@ var SceneRenderer = class _SceneRenderer {
   // is untouched, so a non-jittered frame is byte-identical) and the Reconstructor folds it into a
   // running mean, converging to a supersampled, time-averaged-AA image. Ping-pong accum + running n.
   baseInvVP = new Float32Array(16);
+  // last setCamera invVP (unjittered)
   focalPx = 1;
+  // last setCamera focal (view→pixels); used to keep screen-space handles view-sized under low-res trace
   accumPipeline;
-  accumBind = [
-    void 0,
-    void 0
-  ];
+  // MRT: trace + prev-accum -> new-accum + presented view
+  accumBind = [void 0, void 0];
   accumUniformBuf;
-  accumTex = [
-    void 0,
-    void 0
-  ];
-  accumView = [
-    void 0,
-    void 0
-  ];
+  // (bg.rgb, blend)
+  accumTex = [void 0, void 0];
+  accumView = [void 0, void 0];
   accumPing = 0;
   accumN = 0;
   lastAccumCam = new Float32Array(16);
+  // camera (invVP) of the last accumulated frame
   lastAccumValid = false;
+  // false forces a reset (after a rebuild / first frame)
   streamPipeline;
+  // trace -> rgba8unorm, for compact sample readback (remote)
   streamBind;
+  // its OWN bind group (auto-layout differs from this.pipeline's)
   // RESOLUTION-SCALED reconstruction (M2b): while interacting, trace at a fraction of the view
   // (BudgetController) and Catmull-Rom UPSAMPLE the low-res trace to the view — the client-superres
   // ported from the Python spike. A settled view renders native + accumulates instead.
   superresPipeline;
   superresBind;
   superresBuf;
+  // (traceW, traceH, viewW, viewH)
   // The moving/upscale path traces into its OWN low-res target so it never resizes/destroys the
   // full-size traceTex the accumulation bind groups reference (that sharing caused destroyed-texture
   // submits + MRT attachment-size mismatches → 3D flicker/blank during interaction).
@@ -2054,100 +2383,31 @@ var SceneRenderer = class _SceneRenderer {
     this.dev = gpu.device;
     this.format = format;
     this.canTime = gpu.features.has("timestamp-query");
-    this.sampler = this.dev.createSampler({
-      magFilter: "linear",
-      minFilter: "linear",
-      addressModeU: "clamp-to-edge",
-      addressModeV: "clamp-to-edge",
-      addressModeW: "clamp-to-edge"
-    });
-    this.camBuf = this.dev.createBuffer({
-      size: 96,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    this.resolveBgBuf = this.dev.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    const rmod = this.dev.createShaderModule({
-      code: this.resolveWgsl()
-    });
+    this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
+    this.camBuf = this.dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.resolveBgBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const rmod = this.dev.createShaderModule({ code: this.resolveWgsl() });
     this.resolvePipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: {
-        module: rmod,
-        entryPoint: "vs_resolve"
-      },
-      fragment: {
-        module: rmod,
-        entryPoint: "fs_resolve",
-        targets: [
-          {
-            format: this.format
-          }
-        ]
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none"
-      }
+      vertex: { module: rmod, entryPoint: "vs_resolve" },
+      fragment: { module: rmod, entryPoint: "fs_resolve", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
     });
-    this.accumUniformBuf = this.dev.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    const amod = this.dev.createShaderModule({
-      code: this.accumWgsl()
-    });
+    this.accumUniformBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const amod = this.dev.createShaderModule({ code: this.accumWgsl() });
     this.accumPipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: {
-        module: amod,
-        entryPoint: "vs_resolve"
-      },
-      fragment: {
-        module: amod,
-        entryPoint: "fs_accum",
-        targets: [
-          {
-            format: "rgba32float"
-          },
-          {
-            format: this.format
-          }
-        ]
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none"
-      }
+      vertex: { module: amod, entryPoint: "vs_resolve" },
+      fragment: { module: amod, entryPoint: "fs_accum", targets: [{ format: "rgba32float" }, { format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
     });
-    this.superresBuf = this.dev.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    const smod = this.dev.createShaderModule({
-      code: this.superresWgsl()
-    });
+    this.superresBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const smod = this.dev.createShaderModule({ code: this.superresWgsl() });
     this.superresPipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: {
-        module: smod,
-        entryPoint: "vs_resolve"
-      },
-      fragment: {
-        module: smod,
-        entryPoint: "fs_superres",
-        targets: [
-          {
-            format: this.format
-          }
-        ]
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none"
-      }
+      vertex: { module: smod, entryPoint: "vs_resolve" },
+      fragment: { module: smod, entryPoint: "fs_superres", targets: [{ format: this.format }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
     });
   }
   /** RECONSTRUCTOR (upsampling): Catmull-Rom (bicubic, 9 bilinear taps) reconstruction of the
@@ -2284,10 +2544,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     if (this.traceTex && this.traceW === width && this.traceH === height) return;
     this.traceTex?.destroy();
     this.traceTex = this.dev.createTexture({
-      size: [
-        width,
-        height
-      ],
+      size: [width, height],
       format: "rgba32float",
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
     });
@@ -2296,18 +2553,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     this.traceH = height;
     this.resolveBind = this.dev.createBindGroup({
       layout: this.resolvePipeline.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: this.traceView
-        },
-        {
-          binding: 1,
-          resource: {
-            buffer: this.resolveBgBuf
-          }
-        }
-      ]
+      entries: [{ binding: 0, resource: this.traceView }, { binding: 1, resource: { buffer: this.resolveBgBuf } }]
     });
   }
   /** (Re)allocate the low-res trace target + superres bind group when the moving render size changes.
@@ -2315,40 +2561,17 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
   ensureLow(width, height) {
     if (this.lowTex && this.lowW === width && this.lowH === height) return;
     this.lowTex?.destroy();
-    this.lowTex = this.dev.createTexture({
-      size: [
-        width,
-        height
-      ],
-      format: "rgba32float",
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
-    });
+    this.lowTex = this.dev.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     this.lowView = this.lowTex.createView();
     this.lowW = width;
     this.lowH = height;
     this.superresBind = this.dev.createBindGroup({
       layout: this.superresPipeline.getBindGroupLayout(0),
       entries: [
-        {
-          binding: 0,
-          resource: this.lowView
-        },
-        {
-          binding: 1,
-          resource: this.sampler
-        },
-        {
-          binding: 2,
-          resource: {
-            buffer: this.superresBuf
-          }
-        },
-        {
-          binding: 3,
-          resource: {
-            buffer: this.resolveBgBuf
-          }
-        }
+        { binding: 0, resource: this.lowView },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: { buffer: this.superresBuf } },
+        { binding: 3, resource: { buffer: this.resolveBgBuf } }
       ]
     });
   }
@@ -2359,95 +2582,34 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
   renderUpscaled(view, renderW, renderH, viewW, viewH) {
     this.ensureLow(renderW, renderH);
     this.flush();
-    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([
-      this.focalPx * (viewH / renderH)
-    ]));
-    this.dev.queue.writeBuffer(this.superresBuf, 0, new Float32Array([
-      renderW,
-      renderH,
-      viewW,
-      viewH
-    ]));
+    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([this.focalPx * (viewH / renderH)]));
+    this.dev.queue.writeBuffer(this.superresBuf, 0, new Float32Array([renderW, renderH, viewW, viewH]));
     this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
     const enc = this.dev.createCommandEncoder();
-    const tp = enc.beginRenderPass({
-      colorAttachments: [
-        {
-          view: this.lowView,
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 0
-          }
-        }
-      ]
-    });
+    const mb = this.meshPass(enc, renderW, renderH);
+    const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.lowView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
     tp.setPipeline(this.pipeline);
     tp.setBindGroup(0, this.bind);
+    tp.setBindGroup(1, mb);
     tp.draw(3);
     tp.end();
-    const sp = enc.beginRenderPass({
-      colorAttachments: [
-        {
-          view,
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 1
-          }
-        }
-      ]
-    });
+    const sp = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
     sp.setPipeline(this.superresPipeline);
     sp.setBindGroup(0, this.superresBind);
     sp.draw(3);
     sp.end();
-    this.dev.queue.submit([
-      enc.finish()
-    ]);
+    this.dev.queue.submit([enc.finish()]);
   }
   /** Encode trace (producer) + resolve (reconstructor) into `enc`, output to `outView`. */
   encodeFrame(enc, outView) {
-    const tp = enc.beginRenderPass({
-      colorAttachments: [
-        {
-          view: this.traceView,
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 0
-          }
-        }
-      ]
-    });
+    const mb = this.meshPass(enc, this.traceW, this.traceH);
+    const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.traceView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
     tp.setPipeline(this.pipeline);
     tp.setBindGroup(0, this.bind);
+    tp.setBindGroup(1, mb);
     tp.draw(3);
     tp.end();
-    const rp = enc.beginRenderPass({
-      colorAttachments: [
-        {
-          view: outView,
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 1
-          }
-        }
-      ]
-    });
+    const rp = enc.beginRenderPass({ colorAttachments: [{ view: outView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
     rp.setPipeline(this.resolvePipeline);
     rp.setBindGroup(0, this.resolveBind);
     rp.draw(3);
@@ -2462,34 +2624,16 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     this.accumH = height;
     for (let k = 0; k < 2; k++) {
       this.accumTex[k]?.destroy();
-      this.accumTex[k] = this.dev.createTexture({
-        size: [
-          width,
-          height
-        ],
-        format: "rgba32float",
-        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
-      });
+      this.accumTex[k] = this.dev.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
       this.accumView[k] = this.accumTex[k].createView();
     }
     for (let k = 0; k < 2; k++) {
       this.accumBind[k] = this.dev.createBindGroup({
         layout: this.accumPipeline.getBindGroupLayout(0),
         entries: [
-          {
-            binding: 0,
-            resource: this.traceView
-          },
-          {
-            binding: 1,
-            resource: this.accumView[k]
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: this.accumUniformBuf
-            }
-          }
+          { binding: 0, resource: this.traceView },
+          { binding: 1, resource: this.accumView[k] },
+          { binding: 2, resource: { buffer: this.accumUniformBuf } }
         ]
       });
     }
@@ -2500,6 +2644,11 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
   resetAccumulation() {
     this.accumN = 0;
   }
+  /** ROLLING accumulation for scenes whose content keeps changing (an animation): each frame blends
+   *  in with weight 1/min(n, accumWindow) — an exponential window of ~accumWindow frames instead of
+   *  the running mean — so static content still converges toward jittered temporal AA while moving
+   *  content keeps a short trail rather than smearing. Infinity (default) = the running mean. */
+  accumWindow = Infinity;
   /** Frames accumulated since the last reset (0 before the first accumulated frame). */
   accumCount() {
     return this.accumN;
@@ -2530,67 +2679,27 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     } else {
       this.dev.queue.writeBuffer(this.camBuf, 0, this.baseInvVP);
     }
+    this.dev.queue.writeBuffer(this.camBuf, 76, new Float32Array([n - 1]));
     this.flush();
-    this.dev.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array([
-      this.mat[12],
-      this.mat[13],
-      this.mat[14],
-      1 / n
-    ]));
+    this.dev.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array([this.mat[12], this.mat[13], this.mat[14], 1 / Math.min(n, this.accumWindow)]));
     const prev = this.accumPing, next = 1 - this.accumPing;
     const enc = this.dev.createCommandEncoder();
-    const tp = enc.beginRenderPass({
-      colorAttachments: [
-        {
-          view: this.traceView,
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 0
-          }
-        }
-      ]
-    });
+    const mb = this.meshPass(enc, width, height);
+    const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.traceView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
     tp.setPipeline(this.pipeline);
     tp.setBindGroup(0, this.bind);
+    tp.setBindGroup(1, mb);
     tp.draw(3);
     tp.end();
-    const ap = enc.beginRenderPass({
-      colorAttachments: [
-        {
-          view: this.accumView[next],
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 0
-          }
-        },
-        {
-          view,
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 1
-          }
-        }
-      ]
-    });
+    const ap = enc.beginRenderPass({ colorAttachments: [
+      { view: this.accumView[next], loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } },
+      { view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }
+    ] });
     ap.setPipeline(this.accumPipeline);
     ap.setBindGroup(0, this.accumBind[prev]);
     ap.draw(3);
     ap.end();
-    this.dev.queue.submit([
-      enc.finish()
-    ]);
+    this.dev.queue.submit([enc.finish()]);
     this.accumPing = next;
   }
   /** (Re)build the pipeline for a set of fields. */
@@ -2600,98 +2709,38 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     this.placed = fields.map((field) => {
       const slot = kindCount[field.kind] ?? 0;
       kindCount[field.kind] = slot + 1;
-      const p = {
-        field,
-        slot,
-        uoff,
-        bbase
-      };
+      const p = { field, slot, uoff, bbase };
       uoff += field.uniformFloats();
       bbase += field.bindingCount;
       return p;
     });
     this.clipOff = uoff;
     this.pickOff = uoff + CLIP_FLOATS;
-    this.mat = new Float32Array(uoff + CLIP_FLOATS + 4);
-    this.matBuf = this.dev.createBuffer({
-      size: (uoff + CLIP_FLOATS + 4) * 4,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    const module = this.dev.createShaderModule({
-      code: this.wgsl()
-    });
+    this.mat = new Float32Array(uoff + CLIP_FLOATS + 12);
+    this.matBuf = this.dev.createBuffer({ size: (uoff + CLIP_FLOATS + 12) * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    for (const t of this.meshTargetsBySize.values()) t.bind = void 0;
+    const module = this.dev.createShaderModule({ code: this.wgsl() });
     this.pipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: {
-        module,
-        entryPoint: "vs_main"
-      },
-      fragment: {
-        module,
-        entryPoint: "fs_trace",
-        targets: [
-          {
-            format: "rgba32float"
-          }
-        ]
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none"
-      }
+      vertex: { module, entryPoint: "vs_main" },
+      fragment: { module, entryPoint: "fs_trace", targets: [{ format: "rgba32float" }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
     });
     this.pickPipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: {
-        module,
-        entryPoint: "vs_main"
-      },
-      fragment: {
-        module,
-        entryPoint: "fs_pick",
-        targets: [
-          {
-            format: "rgba32float"
-          }
-        ]
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none"
-      }
+      vertex: { module, entryPoint: "vs_main" },
+      fragment: { module, entryPoint: "fs_pick", targets: [{ format: "rgba32float" }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
     });
     this.streamPipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: {
-        module,
-        entryPoint: "vs_main"
-      },
-      fragment: {
-        module,
-        entryPoint: "fs_trace",
-        targets: [
-          {
-            format: "rgba8unorm"
-          }
-        ]
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none"
-      }
+      vertex: { module, entryPoint: "vs_main" },
+      fragment: { module, entryPoint: "fs_trace", targets: [{ format: "rgba8unorm" }] },
+      primitive: { topology: "triangle-list", cullMode: "none" }
     });
-    this.bind = this.dev.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: this.bindGroupEntries()
-    });
-    this.streamBind = this.dev.createBindGroup({
-      layout: this.streamPipeline.getBindGroupLayout(0),
-      entries: this.bindGroupEntries()
-    });
-    if (this.pickPipeline) this.pickBind = this.dev.createBindGroup({
-      layout: this.pickPipeline.getBindGroupLayout(0),
-      entries: this.bindGroupEntries()
-    });
+    this.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
+    this.streamBind = this.dev.createBindGroup({ layout: this.streamPipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
+    if (this.pickPipeline) this.pickBind = this.dev.createBindGroup({ layout: this.pickPipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
     this.setBackground(0.07, 0.08, 0.12);
     const step = this.placed.length ? Math.min(...this.placed.map((p) => p.field.sampleStep())) : 1;
     this.setSampleStep(step * 0.7);
@@ -2706,10 +2755,7 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     const modifiers = this.placed.filter((p) => p.field.modifier);
     const receivers = this.placed.filter((p) => !p.field.modifier);
     const modFns = modifiers.map((p) => p.field.samplingWGSL(p.slot)).join("\n");
-    const slotOf = new Map(this.placed.map((p) => [
-      p.field,
-      p.slot
-    ]));
+    const slotOf = new Map(this.placed.map((p) => [p.field, p.slot]));
     const tpFns = receivers.map((p) => {
       const tf = p.field.transform;
       const tfSlot = tf && tf.modifier ? slotOf.get(tf) : void 0;
@@ -2732,21 +2778,25 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
     const ghostFields = receivers.filter((p) => p.field.ghost);
     const normalReceivers = receivers.filter((p) => !p.field.ghost);
     const clipGuard = (p, expr) => p.field.clippable === false ? expr : `if (!clipped) { ${expr} }`;
-    const sampleInto = (nm, ghost) => ghost ? `let c = sample_field_${nm}(wp, rd); if (c.a > g_op) { g_op = c.a; g_col = c.rgb / max(c.a, 1e-4); }` : `let c = sample_field_${nm}(wp, rd); sum += c;`;
+    const args = (p) => p.field.intervalSampling ? `wp, rd, s_here - last_${p.field.kind}${p.slot}` : "wp, rd";
+    const advance = (p) => p.field.intervalSampling ? ` last_${p.field.kind}${p.slot} = s_here;` : "";
+    const sampleInto = (p, ghost) => {
+      const call = `sample_field_${p.field.kind}${p.slot}(${args(p)})`;
+      return ghost ? `let c = ${call}; if (c.a > g_op) { g_op = c.a; g_col = c.rgb / max(c.a, 1e-4); }` : `let c = ${call}; sum += c;`;
+    };
     const skipBranch = (p, clip, ghost = false) => {
       const nm = `${p.field.kind}${p.slot}`;
-      const smp = sampleInto(nm, ghost);
+      const smp = sampleInto(p, ghost);
       return `    if (t >= resume_${nm}) {
       let d_${nm} = max(skip_${nm}(wp) - step, 0.0);
       if (d_${nm} > 0.0) { resume_${nm} = t + d_${nm}; }
-      else { ${clip ? clipGuard(p, smp) : smp} }
+      else { ${clip ? clipGuard(p, smp) : smp}${advance(p)} }
     }
     if (t < resume_${nm}) { jump_t = min(jump_t, resume_${nm}); } else { all_defer = false; }`;
     };
     const plainBranch = (p, clip, ghost = false) => {
-      const nm = `${p.field.kind}${p.slot}`;
-      const smp = sampleInto(nm, ghost);
-      return `    { ${clip ? clipGuard(p, smp) : smp} all_defer = false; }`;
+      const smp = sampleInto(p, ghost);
+      return `    { ${clip ? clipGuard(p, smp) : smp}${advance(p)} all_defer = false; }`;
     };
     const normalSkippers = normalReceivers.filter((p) => !p.field.transform).filter((p) => _SceneRenderer.boxSkip || p.field.providesSkip && p.field.skipWGSL);
     const ghostSkippers = ghostFields.filter((p) => p.field.providesSkip && p.field.skipWGSL);
@@ -2756,20 +2806,19 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
       ...normalSkippers.map((p) => p.field.providesSkip && p.field.skipWGSL ? p.field.skipWGSL(p.slot) : boxSkipWGSL(p)),
       ...ghostSkippers.map((p) => p.field.skipWGSL(p.slot))
     ].join("\n");
-    const fns = [
-      modFns,
-      tpFns,
-      fieldFns,
-      skipFns
-    ].filter((s) => s.trim()).join("\n");
-    const skipInit = [
-      ...normalSkippers,
-      ...ghostSkippers
-    ].map((p) => `  var resume_${p.field.kind}${p.slot} : f32 = -1.0e30;`).join("\n");
-    const dispatch = normalReceivers.map((p) => canSkip.has(p.field) ? skipBranch(p, true) : plainBranch(p, true)).join("\n");
-    const ghostDispatch = ghostFields.map((p) => ghostCanSkip.has(p.field) ? skipBranch(p, false, true) : plainBranch(p, false, true)).join("\n");
+    const fns = [modFns, tpFns, fieldFns, skipFns].filter((s) => s.trim()).join("\n");
+    const skipInit = [...normalSkippers, ...ghostSkippers].map((p) => `  var resume_${p.field.kind}${p.slot} : f32 = -1.0e30;`).join("\n");
+    const intervalInit = receivers.filter((p) => p.field.intervalSampling).map((p) => `  var last_${p.field.kind}${p.slot} : f32 = max(t_near - step, 0.0);`).join("\n");
+    const dispatch = normalReceivers.map(
+      (p) => canSkip.has(p.field) ? skipBranch(p, true) : plainBranch(p, true)
+    ).join("\n");
+    const ghostDispatch = ghostFields.map(
+      (p) => ghostCanSkip.has(p.field) ? skipBranch(p, false, true) : plainBranch(p, false, true)
+    ).join("\n");
     const hasGhost = ghostFields.length > 0;
-    const pickDispatch = normalReceivers.map((p) => `    ${clipGuard(p, `{ let c = sample_field_${p.field.kind}${p.slot}(wp, rd); sum += c; }`)}`).join("\n");
+    const pickDispatch = normalReceivers.map(
+      (p) => `    ${clipGuard(p, `{ let c = sample_field_${p.field.kind}${p.slot}(wp, rd${p.field.intervalSampling ? ", step" : ""}); sum += c; }`)}`
+    ).join("\n");
     return (
       /* wgsl */
       `
@@ -2783,9 +2832,16 @@ ${members}
   clip_planes : array<vec4<f32>, 8>,   // (nx, ny, nz, offset) inward; tail so field offsets are stable
   clip_count : vec4<f32>,              // (count, _, _, _)
   pick_cursor : vec4<f32>,             // (ndc_x, ndc_y, _, _) \u2014 the ray for fs_pick
+  probe_origin : vec4<f32>,            // explicit-ray probe: world origin
+  probe_dir : vec4<f32>,               // (dx, dy, dz, enabled) \u2014 w>0 uses this ray instead of the cursor
 };
 @group(0) @binding(0) var<uniform> u_cam : Camera;
 @group(0) @binding(1) var<uniform> u_material : Material;
+// Rasterised surface meshes (models): nearest-surface colour (premultiplied) + its distance along the
+// ray, produced by the mesh pass before each trace. The march composites the surface at that depth,
+// so volumes in front occlude it and it occludes what is behind \u2014 the depth-composite seam.
+@group(1) @binding(0) var t_mesh_col : texture_2d<f32>;
+@group(1) @binding(1) var t_mesh_depth : texture_2d<f32>;
 ${this.usesSampler() ? "@group(0) @binding(2) var s_lin : sampler;" : ""}
 ${decls}
 
@@ -2819,18 +2875,23 @@ fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
   let ro = ndc_to_world(vec4<f32>(ndc_x, ndc_y, 0.0, 1.0));
   let rd = normalize(ndc_to_world(vec4<f32>(ndc_x, ndc_y, 1.0, 1.0)) - ro);
 
+  let mpix = vec2<i32>(v.position.xy);
+  let mesh_c = textureLoad(t_mesh_col, mpix, 0);          // premultiplied surface colour (0 = no mesh)
+  let mesh_t = textureLoad(t_mesh_depth, mpix, 0).r;      // distance along the ray (1e30 = none)
+  var mesh_done = mesh_c.a <= 0.0;
+
   let inv = vec3<f32>(1.0) / rd;
   let tb = (u_material.bmin.xyz - ro) * inv;
   let tt = (u_material.bmax.xyz - ro) * inv;
   let tmn = min(tt, tb); let tmx = max(tt, tb);
   var t_near = max(max(tmn.x, tmn.y), tmn.z);
   var t_far  = min(min(tmx.x, tmx.y), tmx.z);
-  if (t_far <= t_near || t_far <= 0.0) { return vec4<f32>(0.0); }
+  if (t_far <= t_near || t_far <= 0.0) { return mesh_c; }
 
   let step = max(u_material.scene.x, 1e-3);
   t_near = max(t_near + step, 0.0);
   t_far  = t_far - step;
-  if (t_far <= t_near) { return vec4<f32>(0.0); }
+  if (t_far <= t_near) { return mesh_c; }
   let seed = ign(v.position.xy);
   var t = t_near;
   var integrated = vec4<f32>(0.0);
@@ -2841,10 +2902,32 @@ fn fs_trace(v : Varyings) -> @location(0) vec4<f32> {
   var g_op = 0.0;          // ghost (handle) surface: max opacity along the ray (0.5 inactive /
   var g_col = vec3<f32>(0.0);  // 1.0 active) and its colour \u2014 tracked, never accumulated.
 ${skipInit}
+${intervalInit}
   loop {
     if (t >= t_far || safety >= 5000${hasGhost ? "" : " || integrated.a >= 0.99"}) { break; }
-    let js = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453) - 0.5; // per-(pixel,sample) jitter \u2014 frame-invariant; temporal AA rides on the sub-pixel NDC jitter (frame.xy), which is exact identity at 0
-    let wp = ro + rd * (t + js * step);
+    // Per-(pixel, step, ACCUM FRAME) ray-offset jitter. The frame term (u_cam.size.w, the
+    // accumulation index) is what makes temporal AA actually converge: with a frame-invariant
+    // offset the jitter turns banding into FIXED-PATTERN noise that averaging can never remove
+    // (measured: 32 samples was as grainy as 1). Varying it per frame decorrelates the samples
+    // so the mean approaches the true integral \u2014 no banding AND no noise. size.w is 0 for every
+    // non-accumulating path, so frame 1 stays byte-identical to a plain renderToView.
+    // Base offset: decorrelated per (pixel, step) so a single frame shows noise, not banding.
+    let jbase = fract(sin(dot(v.position.xy + vec2<f32>(f32(safety) * 0.7548, f32(safety) * 0.5698), vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    // Advance it across accumulation frames by the golden-ratio additive recurrence
+    // (Cranley-Patterson rotation). MEASURED: this converges at the same 1/sqrt(n) rate as an
+    // independent random offset per frame (high-freq energy 1.36 vs 1.31 at n=64) \u2014 the low-
+    // discrepancy walk is NOT faster here, because the variance is dominated by the step size
+    // against a sharp transfer function, not by the sequence. Kept because it is deterministic
+    // and costs nothing; reduce sampleStep if you need less residual speckle.
+    // At size.w = 0 this is exactly jbase, so the first accumulated frame stays byte-identical
+    // to a plain renderToView \u2014 the property render/test baselines depend on.
+    let js = fract(jbase + u_cam.size.w * 0.6180339887) - 0.5;
+    if (!mesh_done && t + 0.5 * step >= mesh_t) {         // the ray reaches the surface: composite it here
+      integrated = integrated + (1.0 - integrated.a) * mesh_c;
+      mesh_done = true;
+    }
+    let s_here = t + js * step;   // ray distance of this (jittered) sample
+    let wp = ro + rd * s_here;
     var sum = vec4<f32>(0.0);
     var all_defer = true;        // every field guarantees emptiness here -> we may leap
     var jump_t = 1.0e30;         // nearest field horizon
@@ -2865,6 +2948,7 @@ ${ghostDispatch}
     if (all_defer && jump_t > t + step) { t = jump_t; } else { t = t + step; }
     safety = safety + 1;
   }
+  if (!mesh_done) { integrated = integrated + (1.0 - integrated.a) * mesh_c; }   // surface beyond the slab
   // GHOST x-ray, applied ONCE (never compounding): the volume IN FRONT of a handle is shown
   // at residual = 1 - handle_opacity (50% for an inactive handle at opacity 0.5, 0% for an
   // active/hovered handle at opacity 1.0), then the handle (colour g_col at opacity g_op)
@@ -2883,8 +2967,16 @@ ${ghostDispatch}
 // Output: (wp.x, wp.y, wp.z, hit). hit=0 means the ray never reached 50% (empty/miss).
 @fragment
 fn fs_pick() -> @location(0) vec4<f32> {
-  let ro = ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 0.0, 1.0));
-  let rd = normalize(ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 1.0, 1.0)) - ro);
+  // Two ray sources: the screen cursor (pick) or an explicit world ray (probe). The explicit
+  // form exists because the cursor ray can only ever probe what is ON SCREEN \u2014 useless for
+  // "how much room is BEHIND me?", which endovascular navigation needs for reverse and for
+  // lateral clearance.
+  var ro = ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 0.0, 1.0));
+  var rd = normalize(ndc_to_world(vec4<f32>(u_material.pick_cursor.x, u_material.pick_cursor.y, 1.0, 1.0)) - ro);
+  if (u_material.probe_dir.w > 0.5) {
+    ro = u_material.probe_origin.xyz;
+    rd = normalize(u_material.probe_dir.xyz);
+  }
   let inv = vec3<f32>(1.0) / rd;
   let tb = (u_material.bmin.xyz - ro) * inv;
   let tt = (u_material.bmax.xyz - ro) * inv;
@@ -2952,56 +3044,19 @@ ${pickDispatch}
   /** Axis-aligned RAS crop box [lo,hi] → 6 inward planes. offset = -dot(faceOrigin, n). */
   setClipBox(lo, hi) {
     this.setClipPlanes([
-      [
-        1,
-        0,
-        0,
-        -lo[0]
-      ],
-      [
-        -1,
-        0,
-        0,
-        hi[0]
-      ],
-      [
-        0,
-        1,
-        0,
-        -lo[1]
-      ],
-      [
-        0,
-        -1,
-        0,
-        hi[1]
-      ],
-      [
-        0,
-        0,
-        1,
-        -lo[2]
-      ],
-      [
-        0,
-        0,
-        -1,
-        hi[2]
-      ]
+      [1, 0, 0, -lo[0]],
+      [-1, 0, 0, hi[0]],
+      // keep lo.x <= x <= hi.x
+      [0, 1, 0, -lo[1]],
+      [0, -1, 0, hi[1]],
+      [0, 0, 1, -lo[2]],
+      [0, 0, -1, hi[2]]
     ]);
   }
   /** Scene AABB = union of field AABBs; also picks a default sample step from the smallest field extent. */
   recomputeBounds() {
     if (!this.placed.length) return;
-    let mn = [
-      Infinity,
-      Infinity,
-      Infinity
-    ], mx = [
-      -Infinity,
-      -Infinity,
-      -Infinity
-    ];
+    let mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
     for (const p of this.placed) {
       const [a, b] = p.field.aabb();
       for (let i = 0; i < 3; i++) {
@@ -3037,18 +3092,9 @@ ${pickDispatch}
   /** Rebuild the bind group from the fields' current resources (e.g. after a field
    *  swapped a texture) without recompiling the pipeline. Field set/structure must be unchanged. */
   refreshBindings() {
-    this.bind = this.dev.createBindGroup({
-      layout: this.pipeline.getBindGroupLayout(0),
-      entries: this.bindGroupEntries()
-    });
-    this.streamBind = this.dev.createBindGroup({
-      layout: this.streamPipeline.getBindGroupLayout(0),
-      entries: this.bindGroupEntries()
-    });
-    if (this.pickPipeline) this.pickBind = this.dev.createBindGroup({
-      layout: this.pickPipeline.getBindGroupLayout(0),
-      entries: this.bindGroupEntries()
-    });
+    this.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
+    this.streamBind = this.dev.createBindGroup({ layout: this.streamPipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
+    if (this.pickPipeline) this.pickBind = this.dev.createBindGroup({ layout: this.pickPipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
   }
   /** Only fields with texture bindings use the shared sampler. `layout: "auto"` derives the
    *  layout from what the shader ACTUALLY references, so in a scene of purely procedural
@@ -3056,27 +3102,14 @@ ${pickDispatch}
    *  anyway fails validation and the whole view silently renders nothing. Emit the sampler
    *  declaration and its bind entry under the SAME condition so the two can't drift. */
   usesSampler() {
-    return this.placed.some((p) => p.field.bindingCount > 0);
+    return this.placed.some((p) => p.field.usesSampler ?? p.field.bindingCount > 0);
   }
   bindGroupEntries() {
     const entries = [
-      {
-        binding: 0,
-        resource: {
-          buffer: this.camBuf
-        }
-      },
-      {
-        binding: 1,
-        resource: {
-          buffer: this.matBuf
-        }
-      }
+      { binding: 0, resource: { buffer: this.camBuf } },
+      { binding: 1, resource: { buffer: this.matBuf } }
     ];
-    if (this.usesSampler()) entries.push({
-      binding: 2,
-      resource: this.sampler
-    });
+    if (this.usesSampler()) entries.push({ binding: 2, resource: this.sampler });
     for (const p of this.placed) entries.push(...p.field.bindEntries(p.slot, p.bbase));
     return entries;
   }
@@ -3085,12 +3118,38 @@ ${pickDispatch}
     const proj = perspectiveZO(fovyDeg * Math.PI / 180, width / height, 1, 1e5);
     const invVP = invert(multiply(proj, view));
     this.baseInvVP = invVP;
+    this.viewProj = multiply(proj, view);
+    this.eyePos = eye;
     const cam = new Float32Array(24);
     cam.set(invVP, 0);
     this.focalPx = height / 2 / Math.tan(fovyDeg * Math.PI / 360);
     cam[16] = width;
     cam[17] = height;
     cam[18] = height / 2 / Math.tan(fovyDeg * Math.PI / 360);
+    cam[19] = 0;
+    cam[20] = eye[0];
+    cam[21] = eye[1];
+    cam[22] = eye[2];
+    this.dev.queue.writeBuffer(this.camBuf, 0, cam);
+  }
+  /** Camera for ONE TILE of the view: the same rays the full frame would cast for `rect`, into a
+   *  rect.w×rect.h target. Screen-space glyph sizing stays keyed to the FULL view height, so a
+   *  patch of the gizmo is drawn at exactly the size the full frame drew it. Pair with
+   *  traceSamples(rect.w, rect.h) — its focal rewrite is then a no-op. */
+  setCameraTile(eye, center, up, fovyDeg, viewW, viewH, rect) {
+    const view = lookAt(eye, center, up);
+    const proj = perspectiveZOTile(fovyDeg * Math.PI / 180, viewW, viewH, rect.x, rect.y, rect.w, rect.h, 1, 1e5);
+    const invVP = invert(multiply(proj, view));
+    this.baseInvVP = invVP;
+    this.viewProj = multiply(proj, view);
+    this.eyePos = eye;
+    const cam = new Float32Array(24);
+    cam.set(invVP, 0);
+    this.focalPx = viewH / 2 / Math.tan(fovyDeg * Math.PI / 360);
+    cam[16] = rect.w;
+    cam[17] = rect.h;
+    cam[18] = this.focalPx;
+    cam[19] = 0;
     cam[20] = eye[0];
     cam[21] = eye[1];
     cam[22] = eye[2];
@@ -3105,64 +3164,66 @@ ${pickDispatch}
    *  Uses the camera set by the last setCamera(); returns null if the ray never reaches 50%. */
   async pick(u, v) {
     if (!this.pickPipeline || !this.pickBind || !this.placed.length) return null;
-    this.mat[this.pickOff] = u * 2 - 1;
-    this.mat[this.pickOff + 1] = 1 - v * 2;
-    this.flush();
+    return this.serialise(async () => {
+      this.mat[this.pickOff] = u * 2 - 1;
+      this.mat[this.pickOff + 1] = 1 - v * 2;
+      this.mat[this.pickOff + 11] = 0;
+      this.flush();
+      return await this.tracePick();
+    });
+  }
+  /** Trace an EXPLICIT world ray and return the distance (mm) to the first point where
+   *  front-to-back opacity reaches 50%, or Infinity if it never does. Unlike pick(), the ray
+   *  is independent of the camera, so it can look backwards and sideways — which is what makes
+   *  collision "rails" possible in a first-person flythrough. */
+  async probe(origin, dir) {
+    if (!this.pickPipeline || !this.pickBind || !this.placed.length) return Infinity;
+    const l = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+    return this.serialise(async () => {
+      this.mat[this.pickOff + 4] = origin[0];
+      this.mat[this.pickOff + 5] = origin[1];
+      this.mat[this.pickOff + 6] = origin[2];
+      this.mat[this.pickOff + 8] = dir[0] / l;
+      this.mat[this.pickOff + 9] = dir[1] / l;
+      this.mat[this.pickOff + 10] = dir[2] / l;
+      this.mat[this.pickOff + 11] = 1;
+      this.flush();
+      const hit = await this.tracePick();
+      this.mat[this.pickOff + 11] = 0;
+      this.flush();
+      if (!hit) return Infinity;
+      return Math.hypot(hit[0] - origin[0], hit[1] - origin[1], hit[2] - origin[2]);
+    });
+  }
+  /** Serialises pick/probe. They share ONE uniform buffer and ONE readback buffer, so
+   *  concurrent calls would overwrite each other's ray and double-map the buffer — a
+   *  Promise.all of probes silently returns garbage. Callers may fire as many as they like;
+   *  they queue here. */
+  pickChain = Promise.resolve();
+  serialise(fn) {
+    const next = this.pickChain.then(fn, fn);
+    this.pickChain = next.catch(() => {
+    });
+    return next;
+  }
+  /** The shared 1x1 render + readback behind pick() and probe(). */
+  async tracePick() {
     if (!this.pickTarget) {
-      this.pickTarget = this.dev.createTexture({
-        size: [
-          1,
-          1
-        ],
-        format: "rgba32float",
-        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
-      });
-      this.pickReadBuf = this.dev.createBuffer({
-        size: 256,
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-      });
+      this.pickTarget = this.dev.createTexture({ size: [1, 1], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+      this.pickReadBuf = this.dev.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     }
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({
-      colorAttachments: [
-        {
-          view: this.pickTarget.createView(),
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 0
-          }
-        }
-      ]
-    });
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: this.pickTarget.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
     pass.setPipeline(this.pickPipeline);
     pass.setBindGroup(0, this.pickBind);
     pass.draw(3);
     pass.end();
-    enc.copyTextureToBuffer({
-      texture: this.pickTarget
-    }, {
-      buffer: this.pickReadBuf,
-      bytesPerRow: 256,
-      rowsPerImage: 1
-    }, [
-      1,
-      1
-    ]);
-    this.dev.queue.submit([
-      enc.finish()
-    ]);
+    enc.copyTextureToBuffer({ texture: this.pickTarget }, { buffer: this.pickReadBuf, bytesPerRow: 256, rowsPerImage: 1 }, [1, 1]);
+    this.dev.queue.submit([enc.finish()]);
     await this.pickReadBuf.mapAsync(GPUMapMode.READ);
     const r = new Float32Array(this.pickReadBuf.getMappedRange().slice(0, 16));
     this.pickReadBuf.unmap();
-    return r[3] > 0.5 ? [
-      r[0],
-      r[1],
-      r[2]
-    ] : null;
+    return r[3] > 0.5 ? [r[0], r[1], r[2]] : null;
   }
   renderToView(view, width, height) {
     this.ensureTrace(width, height);
@@ -3170,9 +3231,7 @@ ${pickDispatch}
     this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
     const enc = this.dev.createCommandEncoder();
     this.encodeFrame(enc, view);
-    this.dev.queue.submit([
-      enc.finish()
-    ]);
+    this.dev.queue.submit([enc.finish()]);
   }
   /** Exact GPU time of the ray-march pass (median ms over `iters`), via timestamp-query.
    *  Times ONLY the render pass — no texture copy/readback — so it reflects shader cost.
@@ -3181,59 +3240,27 @@ ${pickDispatch}
   async timePass(width, height, iters = 40) {
     if (!this.canTime) return NaN;
     this.flush();
-    const target = this.dev.createTexture({
-      size: [
-        width,
-        height
-      ],
-      format: "rgba32float",
-      usage: GPUTextureUsage.RENDER_ATTACHMENT
-    });
+    const target = this.dev.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT });
     const view = target.createView();
-    const qs = this.dev.createQuerySet({
-      type: "timestamp",
-      count: 2
-    });
-    const resolve = this.dev.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC
-    });
-    const read = this.dev.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
+    const qs = this.dev.createQuerySet({ type: "timestamp", count: 2 });
+    const resolve = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+    const read = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const samples = [];
     for (let i = 0; i < iters; i++) {
       const enc = this.dev.createCommandEncoder();
+      const mb = this.meshPass(enc, width, height);
       const pass = enc.beginRenderPass({
-        colorAttachments: [
-          {
-            view,
-            loadOp: "clear",
-            storeOp: "store",
-            clearValue: {
-              r: 0,
-              g: 0,
-              b: 0,
-              a: 1
-            }
-          }
-        ],
-        timestampWrites: {
-          querySet: qs,
-          beginningOfPassWriteIndex: 0,
-          endOfPassWriteIndex: 1
-        }
+        colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+        timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 }
       });
       pass.setPipeline(this.pipeline);
       pass.setBindGroup(0, this.bind);
+      pass.setBindGroup(1, mb);
       pass.draw(3);
       pass.end();
       enc.resolveQuerySet(qs, 0, 2, resolve, 0);
       enc.copyBufferToBuffer(resolve, 0, read, 0, 16);
-      this.dev.queue.submit([
-        enc.finish()
-      ]);
+      this.dev.queue.submit([enc.finish()]);
       await read.mapAsync(GPUMapMode.READ);
       const t = new BigUint64Array(read.getMappedRange());
       const ms = Number(t[1] - t[0]) / 1e6;
@@ -3252,34 +3279,13 @@ ${pickDispatch}
     this.ensureTrace(width, height);
     this.flush();
     this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
-    const target = this.dev.createTexture({
-      size: [
-        width,
-        height
-      ],
-      format: this.format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
-    });
+    const target = this.dev.createTexture({ size: [width, height], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     const enc = this.dev.createCommandEncoder();
     this.encodeFrame(enc, target.createView());
     const bpr = Math.ceil(width * 4 / 256) * 256;
-    const buf = this.dev.createBuffer({
-      size: bpr * height,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
-    enc.copyTextureToBuffer({
-      texture: target
-    }, {
-      buffer: buf,
-      bytesPerRow: bpr,
-      rowsPerImage: height
-    }, [
-      width,
-      height
-    ]);
-    this.dev.queue.submit([
-      enc.finish()
-    ]);
+    const buf = this.dev.createBuffer({ size: bpr * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    enc.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: height }, [width, height]);
+    this.dev.queue.submit([enc.finish()]);
     await buf.mapAsync(GPUMapMode.READ);
     const padded = new Uint8Array(buf.getMappedRange());
     const out = new Uint8Array(width * height * 4);
@@ -3293,54 +3299,25 @@ ${pickDispatch}
    *  background) as tightly-packed rgba8 — the bytes streamed to the remote client, which runs the
    *  same reconstruction (upsample + background composite) the local resolve does. The caller sets
    *  the camera to width×height first (like renderUpscaled). Returns width*height*4 bytes. */
-  async traceSamples(width, height) {
+  async traceSamples(width, height, viewH = height) {
     this.flush();
-    const target = this.dev.createTexture({
-      size: [
-        width,
-        height
-      ],
-      format: "rgba8unorm",
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
-    });
+    this.dev.queue.writeBuffer(this.camBuf, 64, new Float32Array([width, height]));
+    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([this.focalPx * (viewH / height)]));
+    const target = this.dev.createTexture({ size: [width, height], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
     const enc = this.dev.createCommandEncoder();
-    const tp = enc.beginRenderPass({
-      colorAttachments: [
-        {
-          view: target.createView(),
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 0
-          }
-        }
-      ]
-    });
+    this.meshPass(enc, width, height);
+    const smt = this.meshTargets(width, height);
+    const streamMb = this.dev.createBindGroup({ layout: this.streamPipeline.getBindGroupLayout(1), entries: [{ binding: 0, resource: smt.col.createView() }, { binding: 1, resource: smt.depth.createView() }] });
+    const tp = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
     tp.setPipeline(this.streamPipeline);
     tp.setBindGroup(0, this.streamBind);
+    tp.setBindGroup(1, streamMb);
     tp.draw(3);
     tp.end();
     const bpr = Math.ceil(width * 4 / 256) * 256;
-    const buf = this.dev.createBuffer({
-      size: bpr * height,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
-    enc.copyTextureToBuffer({
-      texture: target
-    }, {
-      buffer: buf,
-      bytesPerRow: bpr,
-      rowsPerImage: height
-    }, [
-      width,
-      height
-    ]);
-    this.dev.queue.submit([
-      enc.finish()
-    ]);
+    const buf = this.dev.createBuffer({ size: bpr * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    enc.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: height }, [width, height]);
+    this.dev.queue.submit([enc.finish()]);
     await buf.mapAsync(GPUMapMode.READ);
     const padded = new Uint8Array(buf.getMappedRange());
     const out = new Uint8Array(width * height * 4);
@@ -3354,34 +3331,20 @@ ${pickDispatch}
 
 // render/fields.ts
 function transformedAABB(m, lo, hi) {
-  const mn = [
-    Infinity,
-    Infinity,
-    Infinity
-  ], mx = [
-    -Infinity,
-    -Infinity,
-    -Infinity
-  ];
+  const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < 8; i++) {
-    const c = applyMat4(m, [
-      i & 1 ? hi[0] : lo[0],
-      i & 2 ? hi[1] : lo[1],
-      i & 4 ? hi[2] : lo[2]
-    ]);
+    const c = applyMat4(m, [i & 1 ? hi[0] : lo[0], i & 2 ? hi[1] : lo[1], i & 4 ? hi[2] : lo[2]]);
     for (let a = 0; a < 3; a++) {
       mn[a] = Math.min(mn[a], c[a]);
       mx[a] = Math.max(mx[a], c[a]);
     }
   }
-  return [
-    mn,
-    mx
-  ];
+  return [mn, mx];
 }
 var ImageField = class {
   kind = "img";
   bindingCount = 2;
+  // volume (3d) + lut (2d)
   volTex;
   lutTex;
   dev;
@@ -3391,40 +3354,43 @@ var ImageField = class {
   unit;
   stepMm;
   box;
+  normScale = 1;
+  // r8unorm samples return raw/255; clim is packed /normScale so shader math is unchanged
+  dims;
   constructor(dev, data, dims, spacing, lut, opts) {
-    const center = opts.center ?? [
-      0,
-      0,
-      0
-    ];
-    this.volTex = dev.createTexture({
-      size: dims,
-      dimension: "3d",
-      format: "r32float",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
-    });
-    dev.queue.writeTexture({
-      texture: this.volTex
-    }, data, {
-      bytesPerRow: dims[0] * 4,
-      rowsPerImage: dims[1]
-    }, dims);
-    this.lutTex = dev.createTexture({
-      size: [
-        256,
-        1
-      ],
-      format: "rgba8unorm",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
-    });
-    dev.queue.writeTexture({
-      texture: this.lutTex
-    }, lut, {
-      bytesPerRow: 256 * 4
-    }, [
-      256,
-      1
-    ]);
+    this.dims = dims;
+    const center = opts.center ?? [0, 0, 0];
+    let src = data, fmt = "r32float", bpe = 4;
+    this.normScale = 1;
+    if (data instanceof Uint8Array) {
+      fmt = "r8unorm";
+      bpe = 1;
+      this.normScale = 255;
+    } else if (data instanceof Uint16Array) {
+      src = Float32Array.from(data);
+      fmt = "r32float";
+      bpe = 4;
+    }
+    this.volTex = dev.createTexture({ size: dims, dimension: "3d", format: fmt, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    {
+      const bytesPerRow = dims[0] * bpe, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
+      const CHUNK = 256 * 1024 * 1024;
+      const slab = Math.max(1, Math.min(dims[2], Math.floor(CHUNK / Math.max(1, sliceBytes))));
+      const u8 = new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
+      for (let z = 0; z < dims[2]; z += slab) {
+        const depth = Math.min(slab, dims[2] - z);
+        const slabBytes = depth * sliceBytes;
+        const slabData = u8.slice(z * sliceBytes, z * sliceBytes + slabBytes);
+        dev.queue.writeTexture(
+          { texture: this.volTex, origin: { x: 0, y: 0, z } },
+          slabData,
+          { offset: 0, bytesPerRow, rowsPerImage },
+          [dims[0], dims[1], depth]
+        );
+      }
+    }
+    this.lutTex = dev.createTexture({ size: [256, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
     if (opts.ijkToRAS) {
       this.p2t = patientToTextureFromIjkToRAS(opts.ijkToRAS, dims);
       this.box = volumeAABBFromIjkToRAS(opts.ijkToRAS, dims);
@@ -3435,32 +3401,35 @@ var ImageField = class {
       this.stepMm = Math.min(...spacing);
     }
     this.clim = opts.clim;
-    this.shade = opts.shade ?? [
-      0.35,
-      0.75,
-      0.35,
-      20
-    ];
+    this.shade = opts.shade ?? [0.35, 0.75, 0.35, 20];
     this.unit = opts.opacityUnitDistance ?? this.stepMm;
     this.dev = dev;
   }
   /** Replace the 256-entry rgba8 color/opacity LUT in place (no texture/bind-group churn).
    *  The bind group holds a stable view of lutTex, so the next render uses the new LUT. */
   setLUT(lut) {
-    this.dev.queue.writeTexture({
-      texture: this.lutTex
-    }, lut, {
-      bytesPerRow: 256 * 4
-    }, [
-      256,
-      1
-    ]);
+    this.dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
+  }
+  /** The scalar range the LUT spans — window/level for the volume rendering. Re-packed into
+   *  the material uniform on the next syncUniforms()/render, so no pipeline rebuild. */
+  setClim(lo, hi) {
+    this.clim = [lo, hi];
+  }
+  getClim() {
+    return [this.clim[0], this.clim[1]];
+  }
+  /** Phong shading tuple [ka, kd, ks, shininess] — re-packed into the material uniform next
+   *  render (VR presets carry their own lighting). [1,0,0,1] = flat emission (no shading). */
+  setShade(shade) {
+    this.shade = [shade[0], shade[1], shade[2], shade[3]];
   }
   origP2t;
+  // sampling matrix + box at identity, for setWorldTransform
   origBox;
   uniformFloats() {
     return 28;
   }
+  // mat4(16) + clim(4) + shade(4) + params(4)
   aabb() {
     return this.box;
   }
@@ -3471,14 +3440,36 @@ var ImageField = class {
   volumeTexture() {
     return this.volTex;
   }
+  /** Overwrite `depth` z-slices of the volume starting at `z`, in place. The bind group holds a
+   *  stable view of volTex, so a render after this picks the new voxels up with no rebuild —
+   *  which is what lets a volume be allocated first and filled as its slices arrive. `data` is
+   *  one slab in the texture's own dtype (f32 unless the volume was created from a Uint8Array). */
+  updateSlab(z, data, depth = 1) {
+    const [nx, ny, nz] = this.dims;
+    if (z < 0 || z + depth > nz) return;
+    const bpe = data instanceof Uint8Array ? 1 : 4;
+    this.dev.queue.writeTexture(
+      { texture: this.volTex, origin: { x: 0, y: 0, z } },
+      data,
+      { offset: 0, bytesPerRow: nx * bpe, rowsPerImage: ny },
+      [nx, ny, depth]
+    );
+  }
+  /** r8unorm volumes sample /255, so clim is packed /normScale in the shader; a slice plane sharing this
+   *  texture must use the same factor. 1 for f32 volumes. */
+  normScaleOf() {
+    return this.normScale;
+  }
+  /** Free this field's GPU textures (call when replacing it, e.g. a low-res proxy upgraded to full,
+   *  or an LRU-evicted specimen) so VRAM isn't leaked across a menu of large volumes. */
+  destroy() {
+    this.volTex.destroy();
+    this.lutTex.destroy();
+  }
   /** Centre of the volume in world (RAS) at identity — a natural pivot for a transform widget. */
   worldCenter() {
     const [lo, hi] = this.origBox ?? this.box;
-    return [
-      (lo[0] + hi[0]) / 2,
-      (lo[1] + hi[1]) / 2,
-      (lo[2] + hi[2]) / 2
-    ];
+    return [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
   }
   /** Place the volume in the world by a rigid transform M (worldFromLocal): the ray samples
    *  at p2t·M⁻¹·wp, so the volume appears moved/rotated. A Tier-A interactive update — caller
@@ -3495,12 +3486,21 @@ var ImageField = class {
   patientToTexture() {
     return this.p2t;
   }
+  /** Re-place the volume in RAS without re-uploading voxels (a parent transform moved it). */
+  setIjkToRAS(ijkToRAS) {
+    this.p2t = patientToTextureFromIjkToRAS(ijkToRAS, this.dims);
+    this.box = volumeAABBFromIjkToRAS(ijkToRAS, this.dims);
+    this.stepMm = Math.min(...spacingFromIjkToRAS(ijkToRAS));
+  }
   structMembers(s) {
     return [
       `  img${s}_p2t : mat4x4<f32>,`,
       `  img${s}_clim : vec4<f32>,`,
+      // lo, hi, _, _
       `  img${s}_shade : vec4<f32>,`,
+      // ka, kd, ks, shininess
       `  img${s}_params : vec4<f32>,`
+      // opacity_unit_distance, _, _, _
     ].join("\n");
   }
   declareBindings(s, base) {
@@ -3555,8 +3555,8 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   }
   fillUniforms(out, off) {
     out.set(this.p2t, off);
-    out[off + 16] = this.clim[0];
-    out[off + 17] = this.clim[1];
+    out[off + 16] = this.clim[0] / this.normScale;
+    out[off + 17] = this.clim[1] / this.normScale;
     out[off + 20] = this.shade[0];
     out[off + 21] = this.shade[1];
     out[off + 22] = this.shade[2];
@@ -3565,23 +3565,19 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   }
   bindEntries(_s, base) {
     return [
-      {
-        binding: base,
-        resource: this.volTex.createView()
-      },
-      {
-        binding: base + 1,
-        resource: this.lutTex.createView()
-      }
+      { binding: base, resource: this.volTex.createView() },
+      { binding: base + 1, resource: this.lutTex.createView() }
     ];
   }
 };
 var SegmentField = class {
   kind = "seg";
   bindingCount;
+  // 1 (value texture) + 1 when an sdf attr (opacity) texture is bound
   clippable;
   tex;
   attrTex;
+  // sdf per-voxel attributes (.r = opacity)
   p2t;
   box;
   color;
@@ -3592,13 +3588,11 @@ var SegmentField = class {
   mode;
   colorFromTex;
   interfaceMode;
+  voxelMm = 1;
+  providesSkip;
   constructor(tex, dims, spacing, opts) {
     this.tex = tex;
-    const center = opts.center ?? [
-      0,
-      0,
-      0
-    ];
+    const center = opts.center ?? [0, 0, 0];
     let voxelMm;
     if (opts.ijkToRAS) {
       this.p2t = patientToTextureFromIjkToRAS(opts.ijkToRAS, dims);
@@ -3611,16 +3605,13 @@ var SegmentField = class {
     }
     this.color = opts.color;
     this.opacity = opts.opacity ?? 1;
-    this.shade = opts.shade ?? [
-      0.2,
-      0.85,
-      0.3,
-      32
-    ];
+    this.shade = opts.shade ?? [0.2, 0.85, 0.3, 32];
     this.bandMm = opts.bandMm ?? voxelMm;
     this.stepMm = opts.sampleStepMm ?? Math.max(0.5 * voxelMm, 0.1);
     this.clippable = opts.clippable ?? true;
+    this.voxelMm = voxelMm;
     this.mode = opts.mode ?? "iso";
+    this.providesSkip = this.mode === "sdf";
     this.colorFromTex = opts.colorFromTexture ?? false;
     this.interfaceMode = this.mode === "sdf" && (opts.interfaceMode ?? false);
     this.attrTex = this.mode === "sdf" ? opts.attrTexture : void 0;
@@ -3632,8 +3623,9 @@ var SegmentField = class {
     this.opacity = Math.max(0, Math.min(1, o));
   }
   uniformFloats() {
-    return 28;
+    return 36;
   }
+  // mat4(16) + color(4) + shade(4) + params(4) + bmin(4) + bmax(4)
   aabb() {
     return this.box;
   }
@@ -3644,12 +3636,41 @@ var SegmentField = class {
     if (destroyPrev && this.tex !== tex) this.tex.destroy();
     this.tex = tex;
   }
+  /** Empty-space skip for "sdf" mode: the texture .a is a TRUE distance-to-surface (mm), so the ray can
+   *  leap |sdf| minus the shell band toward the surface — sphere tracing. A one-voxel safety margin
+   *  absorbs the JFA distance approximation so the leap never overshoots a thin shell (image unchanged,
+   *  just far fewer march steps). Self-contained (no dependency on the sampling fns' emission order). */
+  skipWGSL(s) {
+    return (
+      /* wgsl */
+      `
+fn skip_seg${s}(wp : vec3<f32>) -> f32 {
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = t4.xyz;
+  if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) {
+    // OUTSIDE the SDF grid: leap only to the seg's AABB (a contract-valid lower bound), never past it.
+    let cen = (u_material.seg${s}_bmin.xyz + u_material.seg${s}_bmax.xyz) * 0.5;
+    let ext = (u_material.seg${s}_bmax.xyz - u_material.seg${s}_bmin.xyz) * 0.5;
+    let q = abs(transform_point_seg${s}(wp) - cen) - ext;
+    return max(0.0, length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
+  }
+  let d = abs(textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a);                  // |distance to surface| (mm)
+  return max(0.0, d - u_material.seg${s}_params.x - u_material.seg${s}_params.y);   // leap toward the shell (band + 1 voxel safe)
+}`
+    );
+  }
   structMembers(s) {
     return [
       `  seg${s}_p2t : mat4x4<f32>,`,
       `  seg${s}_color : vec4<f32>,`,
+      // rgb, opacity
       `  seg${s}_shade : vec4<f32>,`,
-      `  seg${s}_params : vec4<f32>,`
+      // ka, kd, ks, shininess
+      `  seg${s}_params : vec4<f32>,`,
+      // band_mm, voxel_mm, _, _
+      `  seg${s}_bmin : vec4<f32>,`,
+      // aabb min (RAS) — for a contract-valid skip outside the texture
+      `  seg${s}_bmax : vec4<f32>,`
     ].join("\n");
   }
   declareBindings(s, base) {
@@ -3869,18 +3890,17 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     out[off + 22] = this.shade[2];
     out[off + 23] = this.shade[3];
     out[off + 24] = this.bandMm;
+    out[off + 25] = this.voxelMm;
+    out[off + 28] = this.box[0][0];
+    out[off + 29] = this.box[0][1];
+    out[off + 30] = this.box[0][2];
+    out[off + 32] = this.box[1][0];
+    out[off + 33] = this.box[1][1];
+    out[off + 34] = this.box[1][2];
   }
   bindEntries(_s, base) {
-    const e = [
-      {
-        binding: base,
-        resource: this.tex.createView()
-      }
-    ];
-    if (this.attrTex) e.push({
-      binding: base + 1,
-      resource: this.attrTex.createView()
-    });
+    const e = [{ binding: base, resource: this.tex.createView() }];
+    if (this.attrTex) e.push({ binding: base + 1, resource: this.attrTex.createView() });
     return e;
   }
 };
@@ -3940,90 +3960,29 @@ function gaussHalfKernel(sigma) {
   }
   const w = new Float32Array(16);
   for (let i = 0; i <= radius; i++) w[i] = raw[i] / total;
-  return {
-    radius,
-    w
-  };
+  return { radius, w };
 }
 function bakeColorizeRGBA(dev, labelmap, dims, palette, sigmaVoxels = 1.5) {
   const [dx, dy, dz] = dims;
   const storageUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING;
-  const labelTex = dev.createTexture({
-    size: dims,
-    dimension: "3d",
-    format: "r8uint",
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
-  });
-  dev.queue.writeTexture({
-    texture: labelTex
-  }, labelmap, {
-    bytesPerRow: dx,
-    rowsPerImage: dy
-  }, dims);
-  const texA = dev.createTexture({
-    size: dims,
-    dimension: "3d",
-    format: "rgba16float",
-    usage: storageUsage
-  });
-  const texB = dev.createTexture({
-    size: dims,
-    dimension: "3d",
-    format: "rgba16float",
-    usage: storageUsage
-  });
-  const palBuf = dev.createBuffer({
-    size: 256 * 16,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-  });
+  const labelTex = dev.createTexture({ size: dims, dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+  dev.queue.writeTexture({ texture: labelTex }, labelmap, { bytesPerRow: dx, rowsPerImage: dy }, dims);
+  const texA = dev.createTexture({ size: dims, dimension: "3d", format: "rgba16float", usage: storageUsage });
+  const texB = dev.createTexture({ size: dims, dimension: "3d", format: "rgba16float", usage: storageUsage });
+  const palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const palData = new Float32Array(256 * 4);
   palData.set(palette.subarray(0, Math.min(palette.length, 256 * 4)));
   dev.queue.writeBuffer(palBuf, 0, palData);
-  const dimsBuf = dev.createBuffer({
-    size: 16,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-  });
-  dev.queue.writeBuffer(dimsBuf, 0, new Uint32Array([
-    dx,
-    dy,
-    dz,
-    0
-  ]));
+  const dimsBuf = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  dev.queue.writeBuffer(dimsBuf, 0, new Uint32Array([dx, dy, dz, 0]));
   const gx = Math.ceil(dx / 4), gy = Math.ceil(dy / 4), gz = Math.ceil(dz / 4);
-  const initPipe = dev.createComputePipeline({
-    layout: "auto",
-    compute: {
-      module: dev.createShaderModule({
-        code: INIT_WGSL
-      }),
-      entryPoint: "main"
-    }
-  });
-  const initBind = dev.createBindGroup({
-    layout: initPipe.getBindGroupLayout(0),
-    entries: [
-      {
-        binding: 0,
-        resource: labelTex.createView()
-      },
-      {
-        binding: 1,
-        resource: texA.createView()
-      },
-      {
-        binding: 2,
-        resource: {
-          buffer: palBuf
-        }
-      },
-      {
-        binding: 3,
-        resource: {
-          buffer: dimsBuf
-        }
-      }
-    ]
-  });
+  const initPipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: INIT_WGSL }), entryPoint: "main" } });
+  const initBind = dev.createBindGroup({ layout: initPipe.getBindGroupLayout(0), entries: [
+    { binding: 0, resource: labelTex.createView() },
+    { binding: 1, resource: texA.createView() },
+    { binding: 2, resource: { buffer: palBuf } },
+    { binding: 3, resource: { buffer: dimsBuf } }
+  ] });
   const enc = dev.createCommandEncoder();
   {
     const p = enc.beginComputePass();
@@ -4033,99 +3992,35 @@ function bakeColorizeRGBA(dev, labelmap, dims, palette, sigmaVoxels = 1.5) {
     p.end();
   }
   if (sigmaVoxels <= 0) {
-    dev.queue.submit([
-      enc.finish()
-    ]);
+    dev.queue.submit([enc.finish()]);
     labelTex.destroy();
     texB.destroy();
     return texA;
   }
   const { radius, w } = gaussHalfKernel(sigmaVoxels);
-  const blurPipe = dev.createComputePipeline({
-    layout: "auto",
-    compute: {
-      module: dev.createShaderModule({
-        code: BLUR_WGSL
-      }),
-      entryPoint: "main"
-    }
-  });
-  const passes = [
-    [
-      texA,
-      texB,
-      0
-    ],
-    [
-      texB,
-      texA,
-      1
-    ],
-    [
-      texA,
-      texB,
-      2
-    ]
-  ];
+  const blurPipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: BLUR_WGSL }), entryPoint: "main" } });
+  const passes = [[texA, texB, 0], [texB, texA, 1], [texA, texB, 2]];
   for (const [src, dst, axis] of passes) {
-    const ub = dev.createBuffer({
-      size: 16 + 16 + 64,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    dev.queue.writeBuffer(ub, 0, new Uint32Array([
-      dx,
-      dy,
-      dz,
-      0,
-      axis,
-      radius,
-      0,
-      0
-    ]));
+    const ub = dev.createBuffer({ size: 16 + 16 + 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    dev.queue.writeBuffer(ub, 0, new Uint32Array([dx, dy, dz, 0, axis, radius, 0, 0]));
     dev.queue.writeBuffer(ub, 32, w);
-    const b = dev.createBindGroup({
-      layout: blurPipe.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: src.createView()
-        },
-        {
-          binding: 1,
-          resource: dst.createView()
-        },
-        {
-          binding: 2,
-          resource: {
-            buffer: ub
-          }
-        }
-      ]
-    });
+    const b = dev.createBindGroup({ layout: blurPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: src.createView() },
+      { binding: 1, resource: dst.createView() },
+      { binding: 2, resource: { buffer: ub } }
+    ] });
     const p = enc.beginComputePass();
     p.setPipeline(blurPipe);
     p.setBindGroup(0, b);
     p.dispatchWorkgroups(gx, gy, gz);
     p.end();
   }
-  dev.queue.submit([
-    enc.finish()
-  ]);
+  dev.queue.submit([enc.finish()]);
   labelTex.destroy();
   texA.destroy();
   return texB;
 }
 var ColorizeBaker = class {
-  dev;
-  dims;
-  labelTex;
-  ownsLabel;
-  scratch;
-  palBuf;
-  dimsBuf;
-  initPipe;
-  blurPipe;
-  g;
   /** `label` is either a CPU labelmap (baker allocates + uploads its own r8uint texture, the classic
    *  path) OR an EXTERNAL r8uint 3D texture the baker only READS (the shared-buffer path used by
    *  `algorithms/EditableSegmentation` — a compute effect writes the label texture on-GPU and the baker
@@ -4139,79 +4034,38 @@ var ColorizeBaker = class {
       this.labelTex = label;
       this.ownsLabel = false;
     } else {
-      this.labelTex = dev.createTexture({
-        size: dims,
-        dimension: "3d",
-        format: "r8uint",
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
-      });
-      dev.queue.writeTexture({
-        texture: this.labelTex
-      }, label, {
-        bytesPerRow: dx,
-        rowsPerImage: dy
-      }, dims);
+      this.labelTex = dev.createTexture({ size: dims, dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+      dev.queue.writeTexture({ texture: this.labelTex }, label, { bytesPerRow: dx, rowsPerImage: dy }, dims);
       this.ownsLabel = true;
     }
-    this.palBuf = dev.createBuffer({
-      size: 256 * 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    this.dimsBuf = dev.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    dev.queue.writeBuffer(this.dimsBuf, 0, new Uint32Array([
-      dx,
-      dy,
-      dz,
-      0
-    ]));
-    this.initPipe = dev.createComputePipeline({
-      layout: "auto",
-      compute: {
-        module: dev.createShaderModule({
-          code: INIT_WGSL
-        }),
-        entryPoint: "main"
-      }
-    });
-    this.blurPipe = dev.createComputePipeline({
-      layout: "auto",
-      compute: {
-        module: dev.createShaderModule({
-          code: BLUR_WGSL
-        }),
-        entryPoint: "main"
-      }
-    });
-    this.g = [
-      Math.ceil(dx / 4),
-      Math.ceil(dy / 4),
-      Math.ceil(dz / 4)
-    ];
+    this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.dimsBuf = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    dev.queue.writeBuffer(this.dimsBuf, 0, new Uint32Array([dx, dy, dz, 0]));
+    this.initPipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: INIT_WGSL }), entryPoint: "main" } });
+    this.blurPipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: BLUR_WGSL }), entryPoint: "main" } });
+    this.g = [Math.ceil(dx / 4), Math.ceil(dy / 4), Math.ceil(dz / 4)];
   }
+  labelTex;
+  ownsLabel;
+  // false when the label texture is owned externally (shared buffer)
+  scratch;
+  // blur ping-pong (lazy; only when sigma > 0)
+  palBuf;
+  dimsBuf;
+  initPipe;
+  blurPipe;
+  g;
   /** Re-upload an EDITED labelmap (same dims). Follow with bakeInto() to re-colorize into the caller's
    *  existing output textures — an in-place replace (no re-allocation, so a segmentation edit updates
    *  smoothly with no flash). */
   updateLabelmap(labelmap) {
     if (!this.ownsLabel) throw new Error("ColorizeBaker.updateLabelmap: label texture is external (write it via the owner, e.g. a compute effect), then call bakeInto()");
     const [dx, dy] = this.dims;
-    this.dev.queue.writeTexture({
-      texture: this.labelTex
-    }, labelmap, {
-      bytesPerRow: dx,
-      rowsPerImage: dy
-    }, this.dims);
+    this.dev.queue.writeTexture({ texture: this.labelTex }, labelmap, { bytesPerRow: dx, rowsPerImage: dy }, this.dims);
   }
   /** Allocate an output texture sized/typed for this baker's labelmap (caller owns it). */
   output() {
-    return this.dev.createTexture({
-      size: this.dims,
-      dimension: "3d",
-      format: "rgba16float",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
-    });
+    return this.dev.createTexture({ size: this.dims, dimension: "3d", format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
   }
   /** (Re)colorize into `out` with `palette` (256*4 f32: rgb + presence*opacity) and Gaussian
    *  `sigmaVoxels` (0 = crisp, for the 2D slice overlay). In place — reuses everything resident. */
@@ -4224,31 +4078,12 @@ var ColorizeBaker = class {
     const smooth = sigmaVoxels > 0;
     if (smooth && !this.scratch) this.scratch = this.output();
     const initDst = smooth ? this.scratch : out;
-    const initBind = dev.createBindGroup({
-      layout: this.initPipe.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: this.labelTex.createView()
-        },
-        {
-          binding: 1,
-          resource: initDst.createView()
-        },
-        {
-          binding: 2,
-          resource: {
-            buffer: this.palBuf
-          }
-        },
-        {
-          binding: 3,
-          resource: {
-            buffer: this.dimsBuf
-          }
-        }
-      ]
-    });
+    const initBind = dev.createBindGroup({ layout: this.initPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: this.labelTex.createView() },
+      { binding: 1, resource: initDst.createView() },
+      { binding: 2, resource: { buffer: this.palBuf } },
+      { binding: 3, resource: { buffer: this.dimsBuf } }
+    ] });
     {
       const p = enc.beginComputePass();
       p.setPipeline(this.initPipe);
@@ -4259,58 +4094,16 @@ var ColorizeBaker = class {
     if (smooth) {
       const s = this.scratch;
       const { radius, w } = gaussHalfKernel(sigmaVoxels);
-      const passes = [
-        [
-          s,
-          out,
-          0
-        ],
-        [
-          out,
-          s,
-          1
-        ],
-        [
-          s,
-          out,
-          2
-        ]
-      ];
+      const passes = [[s, out, 0], [out, s, 1], [s, out, 2]];
       for (const [src, dst, axis] of passes) {
-        const ub = dev.createBuffer({
-          size: 16 + 16 + 64,
-          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-        });
-        dev.queue.writeBuffer(ub, 0, new Uint32Array([
-          dx,
-          dy,
-          dz,
-          0,
-          axis,
-          radius,
-          0,
-          0
-        ]));
+        const ub = dev.createBuffer({ size: 16 + 16 + 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        dev.queue.writeBuffer(ub, 0, new Uint32Array([dx, dy, dz, 0, axis, radius, 0, 0]));
         dev.queue.writeBuffer(ub, 32, w);
-        const b = dev.createBindGroup({
-          layout: this.blurPipe.getBindGroupLayout(0),
-          entries: [
-            {
-              binding: 0,
-              resource: src.createView()
-            },
-            {
-              binding: 1,
-              resource: dst.createView()
-            },
-            {
-              binding: 2,
-              resource: {
-                buffer: ub
-              }
-            }
-          ]
-        });
+        const b = dev.createBindGroup({ layout: this.blurPipe.getBindGroupLayout(0), entries: [
+          { binding: 0, resource: src.createView() },
+          { binding: 1, resource: dst.createView() },
+          { binding: 2, resource: { buffer: ub } }
+        ] });
         const p = enc.beginComputePass();
         p.setPipeline(this.blurPipe);
         p.setBindGroup(0, b);
@@ -4318,9 +4111,7 @@ var ColorizeBaker = class {
         p.end();
       }
     }
-    dev.queue.submit([
-      enc.finish()
-    ]);
+    dev.queue.submit([enc.finish()]);
   }
   destroy() {
     if (this.ownsLabel) this.labelTex.destroy();
@@ -4347,25 +4138,27 @@ async function inflateDeflate(buf) {
   const ds = new DecompressionStream("deflate");
   return await new Response(new Response(buf).body.pipeThrough(ds)).arrayBuffer();
 }
+var blobFetch = (url) => fetch(url);
 async function fetchZarrVolume(blobBase, z, onBytes, concurrency = 12) {
+  const zv = await fetchZarrVolumeNative(blobBase, z, onBytes, concurrency);
+  const data = zv.data instanceof Float32Array ? zv.data : Float32Array.from(zv.data);
+  return { data, dims: zv.dims, range: zv.range };
+}
+async function fetchZarrVolumeNative(blobBase, z, onBytes, concurrency = 12) {
   const Ctor = ZDT[z.dtype] ?? Int16Array;
   const [nz, ny, nx] = z.shape, [cz, cy, cx] = z.chunks, [ncz, ncy, ncx] = z.chunkGrid;
   const hashes = z.chunkHashes;
   const posBase = blobBase + z.dir + "/" + z.dataset + "/";
   const chunkUrl = (kk, jj, ii) => hashes ? blobBase + hashes[kk + "." + jj + "." + ii] : posBase + kk + "." + jj + "." + ii;
-  const out = new Float32Array(nz * ny * nx);
+  const out = new Ctor(nz * ny * nx);
   let lo = Infinity, hi = -Infinity;
   const jobs = [];
-  for (let kk = 0; kk < ncz; kk++) for (let jj = 0; jj < ncy; jj++) for (let ii = 0; ii < ncx; ii++) jobs.push([
-    kk,
-    jj,
-    ii
-  ]);
+  for (let kk = 0; kk < ncz; kk++) for (let jj = 0; jj < ncy; jj++) for (let ii = 0; ii < ncx; ii++) jobs.push([kk, jj, ii]);
   let idx = 0;
   const worker = async () => {
     while (idx < jobs.length) {
       const [kk, jj, ii] = jobs[idx++];
-      const resp = await fetch(chunkUrl(kk, jj, ii));
+      const resp = await blobFetch(chunkUrl(kk, jj, ii));
       let gz;
       if (resp.body && onBytes) {
         const parts = [];
@@ -4406,31 +4199,14 @@ async function fetchZarrVolume(blobBase, z, onBytes, concurrency = 12) {
       }
     }
   };
-  await Promise.all(Array.from({
-    length: Math.min(concurrency, jobs.length)
-  }, worker));
-  return {
-    data: out,
-    dims: [
-      nx,
-      ny,
-      nz
-    ],
-    range: [
-      lo,
-      hi
-    ]
-  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, worker));
+  return { data: out, dtype: z.dtype, dims: [nx, ny, nz], range: [lo, hi] };
 }
 
 // algorithms/geom.ts
 function resampleIsotropic(lab, dims, ijkToRAS, maxDim, maxVoxels = Infinity) {
   const sp = spacingFromIjkToRAS2(ijkToRAS);
-  const ext = [
-    dims[0] * sp[0],
-    dims[1] * sp[1],
-    dims[2] * sp[2]
-  ];
+  const ext = [dims[0] * sp[0], dims[1] * sp[1], dims[2] * sp[2]];
   let vox = Math.max(...ext) / maxDim;
   const count = (v) => Math.max(1, Math.round(ext[0] / v)) * Math.max(1, Math.round(ext[1] / v)) * Math.max(1, Math.round(ext[2] / v));
   let coarsened = false;
@@ -4438,22 +4214,12 @@ function resampleIsotropic(lab, dims, ijkToRAS, maxDim, maxVoxels = Infinity) {
     vox = Math.cbrt(ext[0] * ext[1] * ext[2] / maxVoxels);
     coarsened = true;
   }
-  const cd = [
-    Math.max(1, Math.round(ext[0] / vox)),
-    Math.max(1, Math.round(ext[1] / vox)),
-    Math.max(1, Math.round(ext[2] / vox))
-  ];
+  const cd = [Math.max(1, Math.round(ext[0] / vox)), Math.max(1, Math.round(ext[1] / vox)), Math.max(1, Math.round(ext[2] / vox))];
   const [nx, ny, nz] = dims, [cx, cy, cz] = cd;
   const out = new Uint32Array(cx * cy * cz);
   if (cx === nx && cy === ny && cz === nz) {
     for (let i = 0; i < out.length; i++) out[i] = lab[i];
-    return {
-      lab: out,
-      dims,
-      ijkToRAS,
-      vox,
-      coarsened
-    };
+    return { lab: out, dims, ijkToRAS, vox, coarsened };
   }
   for (let z = 0; z < cz; z++) {
     const sz = Math.min(nz - 1, Math.floor((z + 0.5) * nz / cz));
@@ -4465,31 +4231,17 @@ function resampleIsotropic(lab, dims, ijkToRAS, maxDim, maxVoxels = Infinity) {
       }
     }
   }
-  const r = [
-    nx / cx,
-    ny / cy,
-    nz / cz
-  ], m = ijkToRAS.slice();
+  const r = [nx / cx, ny / cy, nz / cz], m = ijkToRAS.slice();
   for (let row = 0; row < 3; row++) {
     m[row * 4] *= r[0];
     m[row * 4 + 1] *= r[1];
     m[row * 4 + 2] *= r[2];
   }
-  return {
-    lab: out,
-    dims: cd,
-    ijkToRAS: m,
-    vox,
-    coarsened
-  };
+  return { lab: out, dims: cd, ijkToRAS: m, vox, coarsened };
 }
 function spacingFromIjkToRAS2(ijkToRAS) {
   const col = (c) => Math.hypot(ijkToRAS[c], ijkToRAS[4 + c], ijkToRAS[8 + c]);
-  return [
-    col(0),
-    col(1),
-    col(2)
-  ];
+  return [col(0), col(1), col(2)];
 }
 
 // algorithms/editable-segmentation.ts
@@ -4497,7 +4249,9 @@ var EditableSegmentation = class {
   dims;
   ijkToRAS;
   device;
+  // effects (algorithms/effects/*) build their own pipelines against this
   labelTex;
+  // master (r32uint, STORAGE) — the shared buffer effects write
   dirtyCbs = [];
   constructor(device, dims, opts) {
     this.device = device;
@@ -4536,29 +4290,19 @@ var EditableSegmentation = class {
   loadLabelmap(data) {
     const [dx, dy, dz] = this.dims;
     const u32 = data instanceof Uint32Array ? data : Uint32Array.from(data);
-    this.device.queue.writeTexture({
-      texture: this.labelTex
-    }, u32, {
-      bytesPerRow: dx * 4,
-      rowsPerImage: dy
-    }, [
-      dx,
-      dy,
-      dz
-    ]);
+    this.device.queue.writeTexture({ texture: this.labelTex }, u32, { bytesPerRow: dx * 4, rowsPerImage: dy }, [dx, dy, dz]);
     this.markDirty();
   }
   /** Region-limited labelmap write (`lo`/`size` in label-grid ijk; data x-fastest, tightly packed).
    *  Deliberately NO dirty notification: the caller pairs it with a region-limited rebake
    *  (SegmentationLogic.rebakeShellRegion) — an onDirty full rebake would defeat the point. */
   writeLabelRegion(data, lo, size) {
-    this.device.queue.writeTexture({
-      texture: this.labelTex,
-      origin: lo
-    }, data, {
-      bytesPerRow: size[0] * 4,
-      rowsPerImage: size[1]
-    }, size);
+    this.device.queue.writeTexture(
+      { texture: this.labelTex, origin: lo },
+      data,
+      { bytesPerRow: size[0] * 4, rowsPerImage: size[1] },
+      size
+    );
   }
   /** Read the master labelmap back to CPU (ids per voxel, x-fastest). Handles WebGPU's 256-byte
    *  bytesPerRow alignment. For tests + zarr serialization (A-7); not on the interactive path. */
@@ -4566,25 +4310,10 @@ var EditableSegmentation = class {
     const [dx, dy, dz] = this.dims;
     const bpr = Math.ceil(dx * 4 / 256) * 256;
     const rowU32 = bpr / 4;
-    const buf = this.device.createBuffer({
-      size: bpr * dy * dz,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
+    const buf = this.device.createBuffer({ size: bpr * dy * dz, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = this.device.createCommandEncoder();
-    enc.copyTextureToBuffer({
-      texture: this.labelTex
-    }, {
-      buffer: buf,
-      bytesPerRow: bpr,
-      rowsPerImage: dy
-    }, [
-      dx,
-      dy,
-      dz
-    ]);
-    this.device.queue.submit([
-      enc.finish()
-    ]);
+    enc.copyTextureToBuffer({ texture: this.labelTex }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: dy }, [dx, dy, dz]);
+    this.device.queue.submit([enc.finish()]);
     await buf.mapAsync(GPUMapMode.READ);
     const padded = new Uint32Array(buf.getMappedRange());
     const out = new Uint32Array(dx * dy * dz);
@@ -4807,116 +4536,86 @@ function gaussHalfKernel2(sigma) {
   }
   const w = new Float32Array(16);
   for (let i = 0; i <= radius; i++) w[i] = raw[i] / total;
-  return {
-    radius,
-    w
-  };
+  return { radius, w };
 }
 var JfaSdfBaker = class {
-  labelTex;
-  dims;
-  ijkToRAS;
-  dev;
-  seed;
-  sdfTex;
-  attrTex;
-  attrScratch;
-  lastSeed;
-  sdfScratch;
-  uni;
-  palBuf;
-  modeBuf;
-  initPipe;
-  jfaPipe;
-  finalPipe;
-  blurPipe;
-  colBlurPipe;
-  fullBlurPipe;
-  g;
-  steps;
-  smoothSigma;
-  pad;
-  labelDims;
-  // `pad` voxels of background are added on every side so segments touching the labelmap edge get a
-  // real cap + in-bounds gradient neighbourhood (docs/ALGORITHMS.md border artifact). The SDF textures,
-  // dispatch, seeds, blur and readback all run on the PADDED grid; `dims`/`ijkToRAS` become the padded
-  // grid's, and `sdfDims()`/`sdfIjkToRAS()` expose them to the SegmentField.
-  bmode;
+  // 0 = outer boundary (signed); 1 = any label change (unsigned, multi-material)
   constructor(dev, labelTex, dims, ijkToRAS, smoothSigmaVoxels = 1, pad = 2, boundaryMode = "outer") {
     this.labelTex = labelTex;
     this.dims = dims;
     this.ijkToRAS = ijkToRAS;
-    this.lastSeed = 0;
     this.dev = dev;
     this.smoothSigma = smoothSigmaVoxels;
     this.bmode = boundaryMode === "all" ? 1 : 0;
     this.pad = pad;
-    this.labelDims = [
-      dims[0],
-      dims[1],
-      dims[2]
-    ];
-    this.dims = [
-      dims[0] + 2 * pad,
-      dims[1] + 2 * pad,
-      dims[2] + 2 * pad
-    ];
+    this.labelDims = [dims[0], dims[1], dims[2]];
+    this.dims = [dims[0] + 2 * pad, dims[1] + 2 * pad, dims[2] + 2 * pad];
     const m = ijkToRAS.slice();
     for (let r = 0; r < 3; r++) m[r * 4 + 3] -= pad * (m[r * 4] + m[r * 4 + 1] + m[r * 4 + 2]);
     this.ijkToRAS = m;
     const [dx, dy, dz] = this.dims;
-    const mk = (fmt, extra = 0) => dev.createTexture({
-      size: this.dims,
-      dimension: "3d",
-      format: fmt,
-      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra
-    });
+    const mk = (fmt, extra = 0) => dev.createTexture({ size: this.dims, dimension: "3d", format: fmt, usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra });
     const seedUsage = GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
-    this.seed = [
-      mk("rgba32float", seedUsage),
-      mk("rgba32float", seedUsage)
-    ];
+    this.seed = [mk("rgba32float", seedUsage), mk("rgba32float", seedUsage)];
     this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC);
     this.attrTex = mk("rgba16float", GPUTextureUsage.COPY_DST);
     this.attrScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
     this.sdfScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
-    this.uni = dev.createBuffer({
-      size: 112,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    this.palBuf = dev.createBuffer({
-      size: 256 * 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    this.modeBuf = dev.createBuffer({
-      size: 256 * 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-    });
-    const mod = (code) => dev.createComputePipeline({
-      layout: "auto",
-      compute: {
-        module: dev.createShaderModule({
-          code
-        }),
-        entryPoint: "main"
-      }
-    });
+    this.uni = dev.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.modeBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const mod = (code) => dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code }), entryPoint: "main" } });
     this.initPipe = mod(INIT_WGSL2);
     this.jfaPipe = mod(JFA_WGSL);
     this.finalPipe = mod(FINAL_WGSL);
     this.blurPipe = mod(BLUR_WGSL2);
     this.colBlurPipe = mod(COLBLUR_WGSL);
     this.fullBlurPipe = mod(FULLBLUR_WGSL);
-    this.g = [
-      Math.ceil(dx / 4),
-      Math.ceil(dy / 4),
-      Math.ceil(dz / 4)
-    ];
+    this.g = [Math.ceil(dx / 4), Math.ceil(dy / 4), Math.ceil(dz / 4)];
     const maxDim = Math.max(dx, dy, dz);
     const steps = [];
     for (let s = 1 << Math.floor(Math.log2(maxDim - 1)); s >= 1; s >>= 1) steps.push(s);
     this.steps = steps;
   }
+  dev;
+  seed;
+  // rgba32float ping-pong (RAS seed xyz + regionLabel)
+  sdfTex;
+  // rgba16float: .rgb = per-label colour, .a = signed dist (mm) — sampled by SegmentField
+  attrTex;
+  // rgba16float: .r = per-segment opacity, .g = shading mode — sampled by SegmentField
+  attrScratch;
+  // rgba16float attr-blur ping-pong
+  lastSeed = 0;
+  // seed buffer the last sweep finalized from
+  sdfScratch;
+  // rgba16float blur ping-pong
+  uni;
+  palBuf;
+  // 256 × vec4 label→colour palette (.a = opacity)
+  modeBuf;
+  // 256 × vec4 label→shading mode (.x = 0 surface / 1 volume)
+  initPipe;
+  jfaPipe;
+  finalPipe;
+  blurPipe;
+  // blurs .a (distance), carries .rgb
+  colBlurPipe;
+  // blurs .rgb (colour), carries .a
+  fullBlurPipe;
+  // blurs all channels — the attr texture (opacity + mode)
+  g;
+  steps;
+  smoothSigma;
+  pad;
+  // background margin (voxels) padded around the labelmap
+  labelDims;
+  // original (label) dims, before padding
+  // `pad` voxels of background are added on every side so segments touching the labelmap edge get a
+  // real cap + in-bounds gradient neighbourhood (docs/ALGORITHMS.md border artifact). The SDF textures,
+  // dispatch, seeds, blur and readback all run on the PADDED grid; `dims`/`ijkToRAS` become the padded
+  // grid's, and `sdfDims()`/`sdfIjkToRAS()` expose them to the SegmentField.
+  bmode;
   /** The resident colorized-SDF texture (rgba16float: .rgb = per-label colour, .a = signed mm).
    *  Identity stable across bakes → the SceneRenderer bind group stays valid; a live edit updates in
    *  place. */
@@ -4945,25 +4644,10 @@ var JfaSdfBaker = class {
     const [dx, dy, dz] = this.dims;
     const bpr = Math.ceil(dx * 8 / 256) * 256;
     const rowU16 = bpr / 2;
-    const buf = this.dev.createBuffer({
-      size: bpr * dy * dz,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-    });
+    const buf = this.dev.createBuffer({ size: bpr * dy * dz, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = this.dev.createCommandEncoder();
-    enc.copyTextureToBuffer({
-      texture: this.sdfTex
-    }, {
-      buffer: buf,
-      bytesPerRow: bpr,
-      rowsPerImage: dy
-    }, [
-      dx,
-      dy,
-      dz
-    ]);
-    this.dev.queue.submit([
-      enc.finish()
-    ]);
+    enc.copyTextureToBuffer({ texture: this.sdfTex }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: dy }, [dx, dy, dz]);
+    this.dev.queue.submit([enc.finish()]);
     await buf.mapAsync(GPUMapMode.READ);
     const u16 = new Uint16Array(buf.getMappedRange());
     const h2f = (h) => {
@@ -4992,11 +4676,7 @@ var JfaSdfBaker = class {
     m.set(modes.subarray(0, Math.min(modes.length, 256 * 4)));
     this.dev.queue.writeBuffer(this.modeBuf, 0, m);
   }
-  writeUni(step, origin = [
-    0,
-    0,
-    0
-  ]) {
+  writeUni(step, origin = [0, 0, 0]) {
     const ab = new ArrayBuffer(112);
     const f = new Float32Array(ab), u = new Uint32Array(ab);
     f.set(transpose4(this.ijkToRAS), 0);
@@ -5015,6 +4695,17 @@ var JfaSdfBaker = class {
     i32v[27] = 0;
     this.dev.queue.writeBuffer(this.uni, 0, ab);
   }
+  /** Distance-blur σ, in VOXELS, applied to the signed distance on every bake/refine (0 = none).
+   *  The zero level set barely moves, so the silhouette stays where the labelmap put it; what the
+   *  blur smooths is the GRADIENT, i.e. the shading normal — which is what turns a voxel-faceted
+   *  "golf ball" into a surface. Takes effect on the next bake(); the caller decides when that is,
+   *  since a sweep is ~20 compute passes. */
+  setSmoothing(sigmaVoxels) {
+    this.smoothSigma = Math.max(0, sigmaVoxels);
+  }
+  smoothing() {
+    return this.smoothSigma;
+  }
   /** FAST bake for LIVE editing: plain JFA (approximate) + a light distance-only blur (crisp colour
    *  seams). Cheap, so it keeps up with an in-progress stroke; the seams stay voxel-jagged until the
    *  edit settles and refine() runs. */
@@ -5027,10 +4718,7 @@ var JfaSdfBaker = class {
    *  same σ (dropping it re-introduces Voronoi facets — crispness comes from the render band, not from
    *  under-smoothing). Higher quality lives in the resident texture, so camera renders stay cheap. */
   refine() {
-    this.sweep([
-      2,
-      1
-    ], this.smoothSigma, 1);
+    this.sweep([2, 1], this.smoothSigma, 1);
   }
   /** REGION-LIMITED refine: re-flood ONLY `regionIjk` (padded-grid coords) after a labelmap edit
    *  confined to it — a per-vertebra visibility flip re-bakes a few % of the grid instead of the
@@ -5041,72 +4729,31 @@ var JfaSdfBaker = class {
    *  ≫band away from any visible shell — invisible, and the next full sweep cleans them. */
   refineRegion(regionIjk) {
     const dev = this.dev, [dx, dy, dz] = this.dims;
-    const lo = [
-      Math.max(0, regionIjk.lo[0]),
-      Math.max(0, regionIjk.lo[1]),
-      Math.max(0, regionIjk.lo[2])
-    ];
-    const hi = [
-      Math.min(dx, regionIjk.hi[0]),
-      Math.min(dy, regionIjk.hi[1]),
-      Math.min(dz, regionIjk.hi[2])
-    ];
-    const [rx, ry, rz] = [
-      hi[0] - lo[0],
-      hi[1] - lo[1],
-      hi[2] - lo[2]
-    ];
+    const lo = [Math.max(0, regionIjk.lo[0]), Math.max(0, regionIjk.lo[1]), Math.max(0, regionIjk.lo[2])];
+    const hi = [Math.min(dx, regionIjk.hi[0]), Math.min(dy, regionIjk.hi[1]), Math.min(dz, regionIjk.hi[2])];
+    const [rx, ry, rz] = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     if (rx <= 0 || ry <= 0 || rz <= 0) return;
-    const g = [
-      Math.ceil(rx / 4),
-      Math.ceil(ry / 4),
-      Math.ceil(rz / 4)
-    ];
-    const region = {
-      lo,
-      hi
-    };
+    const g = [Math.ceil(rx / 4), Math.ceil(ry / 4), Math.ceil(rz / 4)];
+    const region = { lo, hi };
     let src = this.lastSeed;
     let enc = dev.createCommandEncoder();
-    enc.copyTextureToTexture({
-      texture: this.seed[src]
-    }, {
-      texture: this.seed[src ^ 1]
-    }, this.dims);
-    dev.queue.submit([
-      enc.finish()
-    ]);
+    enc.copyTextureToTexture({ texture: this.seed[src] }, { texture: this.seed[src ^ 1] }, this.dims);
+    dev.queue.submit([enc.finish()]);
     this.writeUni(0, lo);
     enc = dev.createCommandEncoder();
     {
-      const b = dev.createBindGroup({
-        layout: this.initPipe.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: this.labelTex.createView()
-          },
-          {
-            binding: 1,
-            resource: this.seed[src].createView()
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: this.uni
-            }
-          }
-        ]
-      });
+      const b = dev.createBindGroup({ layout: this.initPipe.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: this.labelTex.createView() },
+        { binding: 1, resource: this.seed[src].createView() },
+        { binding: 2, resource: { buffer: this.uni } }
+      ] });
       const p2 = enc.beginComputePass();
       p2.setPipeline(this.initPipe);
       p2.setBindGroup(0, b);
       p2.dispatchWorkgroups(g[0], g[1], g[2]);
       p2.end();
     }
-    dev.queue.submit([
-      enc.finish()
-    ]);
+    dev.queue.submit([enc.finish()]);
     const maxDim = Math.max(rx, ry, rz);
     const steps = [];
     for (let s = 1 << Math.floor(Math.log2(Math.max(2, maxDim - 1))); s >= 1; s >>= 1) steps.push(s);
@@ -5115,86 +4762,38 @@ var JfaSdfBaker = class {
       this.writeUni(step, lo);
       const dst = src ^ 1;
       enc = dev.createCommandEncoder();
-      const b = dev.createBindGroup({
-        layout: this.jfaPipe.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: this.seed[src].createView()
-          },
-          {
-            binding: 1,
-            resource: this.seed[dst].createView()
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: this.uni
-            }
-          }
-        ]
-      });
+      const b = dev.createBindGroup({ layout: this.jfaPipe.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: this.seed[src].createView() },
+        { binding: 1, resource: this.seed[dst].createView() },
+        { binding: 2, resource: { buffer: this.uni } }
+      ] });
       const p2 = enc.beginComputePass();
       p2.setPipeline(this.jfaPipe);
       p2.setBindGroup(0, b);
       p2.dispatchWorkgroups(g[0], g[1], g[2]);
       p2.end();
-      dev.queue.submit([
-        enc.finish()
-      ]);
+      dev.queue.submit([enc.finish()]);
       src = dst;
     }
     this.lastSeed = src;
     this.writeUni(0, lo);
     enc = dev.createCommandEncoder();
-    const bf = dev.createBindGroup({
-      layout: this.finalPipe.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: this.seed[src].createView()
-        },
-        {
-          binding: 1,
-          resource: this.labelTex.createView()
-        },
-        {
-          binding: 2,
-          resource: this.sdfTex.createView()
-        },
-        {
-          binding: 3,
-          resource: {
-            buffer: this.uni
-          }
-        },
-        {
-          binding: 4,
-          resource: {
-            buffer: this.palBuf
-          }
-        },
-        {
-          binding: 5,
-          resource: this.attrTex.createView()
-        },
-        {
-          binding: 6,
-          resource: {
-            buffer: this.modeBuf
-          }
-        }
-      ]
-    });
+    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: this.seed[src].createView() },
+      { binding: 1, resource: this.labelTex.createView() },
+      { binding: 2, resource: this.sdfTex.createView() },
+      { binding: 3, resource: { buffer: this.uni } },
+      { binding: 4, resource: { buffer: this.palBuf } },
+      { binding: 5, resource: this.attrTex.createView() },
+      { binding: 6, resource: { buffer: this.modeBuf } }
+    ] });
     const p = enc.beginComputePass();
     p.setPipeline(this.finalPipe);
     p.setBindGroup(0, bf);
     p.dispatchWorkgroups(g[0], g[1], g[2]);
     p.end();
-    dev.queue.submit([
-      enc.finish()
-    ]);
-    this.blurStage(this.blurPipe, this.smoothSigma, this.sdfTex, this.sdfScratch, region);
+    dev.queue.submit([enc.finish()]);
+    if (this.smoothSigma > 0) this.blurStage(this.blurPipe, this.smoothSigma, this.sdfTex, this.sdfScratch, region);
     this.blurStage(this.colBlurPipe, 1, this.sdfTex, this.sdfScratch, region);
     this.blurStage(this.fullBlurPipe, 1, this.attrTex, this.attrScratch, region);
   }
@@ -5206,76 +4805,29 @@ var JfaSdfBaker = class {
   rebakeAttr(blurSeams = false, regionIjk) {
     const dev = this.dev, [dx, dy, dz] = this.dims;
     const region = regionIjk && {
-      lo: [
-        Math.max(0, regionIjk.lo[0]),
-        Math.max(0, regionIjk.lo[1]),
-        Math.max(0, regionIjk.lo[2])
-      ],
-      hi: [
-        Math.min(dx, regionIjk.hi[0]),
-        Math.min(dy, regionIjk.hi[1]),
-        Math.min(dz, regionIjk.hi[2])
-      ]
+      lo: [Math.max(0, regionIjk.lo[0]), Math.max(0, regionIjk.lo[1]), Math.max(0, regionIjk.lo[2])],
+      hi: [Math.min(dx, regionIjk.hi[0]), Math.min(dy, regionIjk.hi[1]), Math.min(dz, regionIjk.hi[2])]
     };
-    const [gx, gy, gz] = region ? [
-      Math.ceil((region.hi[0] - region.lo[0]) / 4),
-      Math.ceil((region.hi[1] - region.lo[1]) / 4),
-      Math.ceil((region.hi[2] - region.lo[2]) / 4)
-    ] : this.g;
+    const [gx, gy, gz] = region ? [Math.ceil((region.hi[0] - region.lo[0]) / 4), Math.ceil((region.hi[1] - region.lo[1]) / 4), Math.ceil((region.hi[2] - region.lo[2]) / 4)] : this.g;
     if (region && (gx <= 0 || gy <= 0 || gz <= 0)) return;
-    this.writeUni(0, region ? region.lo : [
-      0,
-      0,
-      0
-    ]);
+    this.writeUni(0, region ? region.lo : [0, 0, 0]);
     const enc = dev.createCommandEncoder();
-    const bf = dev.createBindGroup({
-      layout: this.finalPipe.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: this.seed[this.lastSeed].createView()
-        },
-        {
-          binding: 1,
-          resource: this.labelTex.createView()
-        },
-        {
-          binding: 2,
-          resource: this.sdfScratch.createView()
-        },
-        {
-          binding: 3,
-          resource: {
-            buffer: this.uni
-          }
-        },
-        {
-          binding: 4,
-          resource: {
-            buffer: this.palBuf
-          }
-        },
-        {
-          binding: 5,
-          resource: this.attrTex.createView()
-        },
-        {
-          binding: 6,
-          resource: {
-            buffer: this.modeBuf
-          }
-        }
-      ]
-    });
+    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: this.seed[this.lastSeed].createView() },
+      { binding: 1, resource: this.labelTex.createView() },
+      { binding: 2, resource: this.sdfScratch.createView() },
+      // sdf writes discarded
+      { binding: 3, resource: { buffer: this.uni } },
+      { binding: 4, resource: { buffer: this.palBuf } },
+      { binding: 5, resource: this.attrTex.createView() },
+      { binding: 6, resource: { buffer: this.modeBuf } }
+    ] });
     const p = enc.beginComputePass();
     p.setPipeline(this.finalPipe);
     p.setBindGroup(0, bf);
     p.dispatchWorkgroups(gx, gy, gz);
     p.end();
-    dev.queue.submit([
-      enc.finish()
-    ]);
+    dev.queue.submit([enc.finish()]);
     if (blurSeams) this.blurStage(this.fullBlurPipe, 1, this.attrTex, this.attrScratch, region);
   }
   /** Blur the attribute seams of the CURRENT attr texture in place (no re-finalize) — the
@@ -5289,120 +4841,53 @@ var JfaSdfBaker = class {
     this.writeUni(0);
     let enc = dev.createCommandEncoder();
     {
-      const b = dev.createBindGroup({
-        layout: this.initPipe.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: this.labelTex.createView()
-          },
-          {
-            binding: 1,
-            resource: this.seed[0].createView()
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: this.uni
-            }
-          }
-        ]
-      });
+      const b = dev.createBindGroup({ layout: this.initPipe.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: this.labelTex.createView() },
+        { binding: 1, resource: this.seed[0].createView() },
+        { binding: 2, resource: { buffer: this.uni } }
+      ] });
       const p2 = enc.beginComputePass();
       p2.setPipeline(this.initPipe);
       p2.setBindGroup(0, b);
       p2.dispatchWorkgroups(gx, gy, gz);
       p2.end();
     }
-    dev.queue.submit([
-      enc.finish()
-    ]);
+    dev.queue.submit([enc.finish()]);
     let src = 0;
-    for (const step of [
-      ...this.steps,
-      ...extraSteps
-    ]) {
+    for (const step of [...this.steps, ...extraSteps]) {
       this.writeUni(step);
       const dst = src ^ 1;
       enc = dev.createCommandEncoder();
-      const b = dev.createBindGroup({
-        layout: this.jfaPipe.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: this.seed[src].createView()
-          },
-          {
-            binding: 1,
-            resource: this.seed[dst].createView()
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: this.uni
-            }
-          }
-        ]
-      });
+      const b = dev.createBindGroup({ layout: this.jfaPipe.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: this.seed[src].createView() },
+        { binding: 1, resource: this.seed[dst].createView() },
+        { binding: 2, resource: { buffer: this.uni } }
+      ] });
       const p2 = enc.beginComputePass();
       p2.setPipeline(this.jfaPipe);
       p2.setBindGroup(0, b);
       p2.dispatchWorkgroups(gx, gy, gz);
       p2.end();
-      dev.queue.submit([
-        enc.finish()
-      ]);
+      dev.queue.submit([enc.finish()]);
       src = dst;
     }
     this.lastSeed = src;
     enc = dev.createCommandEncoder();
-    const bf = dev.createBindGroup({
-      layout: this.finalPipe.getBindGroupLayout(0),
-      entries: [
-        {
-          binding: 0,
-          resource: this.seed[src].createView()
-        },
-        {
-          binding: 1,
-          resource: this.labelTex.createView()
-        },
-        {
-          binding: 2,
-          resource: this.sdfTex.createView()
-        },
-        {
-          binding: 3,
-          resource: {
-            buffer: this.uni
-          }
-        },
-        {
-          binding: 4,
-          resource: {
-            buffer: this.palBuf
-          }
-        },
-        {
-          binding: 5,
-          resource: this.attrTex.createView()
-        },
-        {
-          binding: 6,
-          resource: {
-            buffer: this.modeBuf
-          }
-        }
-      ]
-    });
+    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: this.seed[src].createView() },
+      { binding: 1, resource: this.labelTex.createView() },
+      { binding: 2, resource: this.sdfTex.createView() },
+      { binding: 3, resource: { buffer: this.uni } },
+      { binding: 4, resource: { buffer: this.palBuf } },
+      { binding: 5, resource: this.attrTex.createView() },
+      { binding: 6, resource: { buffer: this.modeBuf } }
+    ] });
     const p = enc.beginComputePass();
     p.setPipeline(this.finalPipe);
     p.setBindGroup(0, bf);
     p.dispatchWorkgroups(gx, gy, gz);
     p.end();
-    dev.queue.submit([
-      enc.finish()
-    ]);
+    dev.queue.submit([enc.finish()]);
     if (distSigma > 0) this.blurStage(this.blurPipe, distSigma, this.sdfTex, this.sdfScratch);
     if (colorSigma > 0) this.blurStage(this.colBlurPipe, colorSigma, this.sdfTex, this.sdfScratch);
     if (colorSigma > 0) this.blurStage(this.fullBlurPipe, colorSigma, this.attrTex, this.attrScratch);
@@ -5412,45 +4897,13 @@ var JfaSdfBaker = class {
   blurStage(pipe, sigma, tex, scratch, region) {
     const dev = this.dev, [dx, dy, dz] = this.dims;
     const { radius, w } = gaussHalfKernel2(sigma);
-    const passes = [
-      [
-        tex,
-        scratch,
-        0
-      ],
-      [
-        scratch,
-        tex,
-        1
-      ],
-      [
-        tex,
-        scratch,
-        2
-      ]
-    ];
+    const passes = [[tex, scratch, 0], [scratch, tex, 1], [tex, scratch, 2]];
     const enc = dev.createCommandEncoder();
     let passIdx = 0;
     for (const [srcT, dstT, axis] of passes) {
       const expand = region ? (2 - passIdx) * radius : 0;
-      const lo = region ? [
-        Math.max(0, region.lo[0] - expand),
-        Math.max(0, region.lo[1] - expand),
-        Math.max(0, region.lo[2] - expand)
-      ] : [
-        0,
-        0,
-        0
-      ];
-      const hi = region ? [
-        Math.min(dx, region.hi[0] + expand),
-        Math.min(dy, region.hi[1] + expand),
-        Math.min(dz, region.hi[2] + expand)
-      ] : [
-        dx,
-        dy,
-        dz
-      ];
+      const lo = region ? [Math.max(0, region.lo[0] - expand), Math.max(0, region.lo[1] - expand), Math.max(0, region.lo[2] - expand)] : [0, 0, 0];
+      const hi = region ? [Math.min(dx, region.hi[0] + expand), Math.min(dy, region.hi[1] + expand), Math.min(dz, region.hi[2] + expand)] : [dx, dy, dz];
       const ab = new ArrayBuffer(112);
       const u32 = new Uint32Array(ab), f32 = new Float32Array(ab), i32 = new Int32Array(ab);
       u32[0] = dx;
@@ -5462,30 +4915,13 @@ var JfaSdfBaker = class {
       i32[24] = lo[0];
       i32[25] = lo[1];
       i32[26] = lo[2];
-      const ub = dev.createBuffer({
-        size: 112,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-      });
+      const ub = dev.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       dev.queue.writeBuffer(ub, 0, ab);
-      const b = dev.createBindGroup({
-        layout: pipe.getBindGroupLayout(0),
-        entries: [
-          {
-            binding: 0,
-            resource: srcT.createView()
-          },
-          {
-            binding: 1,
-            resource: dstT.createView()
-          },
-          {
-            binding: 2,
-            resource: {
-              buffer: ub
-            }
-          }
-        ]
-      });
+      const b = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: srcT.createView() },
+        { binding: 1, resource: dstT.createView() },
+        { binding: 2, resource: { buffer: ub } }
+      ] });
       const bp = enc.beginComputePass();
       bp.setPipeline(pipe);
       bp.setBindGroup(0, b);
@@ -5494,28 +4930,12 @@ var JfaSdfBaker = class {
       passIdx++;
     }
     if (region) {
-      const sz = [
-        region.hi[0] - region.lo[0],
-        region.hi[1] - region.lo[1],
-        region.hi[2] - region.lo[2]
-      ];
-      enc.copyTextureToTexture({
-        texture: scratch,
-        origin: region.lo
-      }, {
-        texture: tex,
-        origin: region.lo
-      }, sz);
+      const sz = [region.hi[0] - region.lo[0], region.hi[1] - region.lo[1], region.hi[2] - region.lo[2]];
+      enc.copyTextureToTexture({ texture: scratch, origin: region.lo }, { texture: tex, origin: region.lo }, sz);
     } else {
-      enc.copyTextureToTexture({
-        texture: scratch
-      }, {
-        texture: tex
-      }, this.dims);
+      enc.copyTextureToTexture({ texture: scratch }, { texture: tex }, this.dims);
     }
-    dev.queue.submit([
-      enc.finish()
-    ]);
+    dev.queue.submit([enc.finish()]);
   }
   destroy() {
     this.seed[0].destroy();
@@ -5532,17 +4952,7 @@ var JfaSdfBaker = class {
 
 // logic/segmentation-logic.ts
 function invertAffine(m) {
-  const r = [
-    m[0],
-    m[1],
-    m[2],
-    m[4],
-    m[5],
-    m[6],
-    m[8],
-    m[9],
-    m[10]
-  ];
+  const r = [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]];
   const det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
   const i = [
     (r[4] * r[8] - r[5] * r[7]) / det,
@@ -5555,11 +4965,7 @@ function invertAffine(m) {
     (r[1] * r[6] - r[0] * r[7]) / det,
     (r[0] * r[4] - r[1] * r[3]) / det
   ];
-  const t = [
-    m[3],
-    m[7],
-    m[11]
-  ];
+  const t = [m[3], m[7], m[11]];
   return [
     i[0],
     i[1],
@@ -5580,29 +4986,8 @@ function invertAffine(m) {
   ];
 }
 var SegmentationLogic = class {
-  seg;
-  renderMode;
-  clippable;
-  attrSettleTimer;
-  sdf;
-  baker;
-  presenceTex;
-  sigma;
-  bandMm;
-  opacity;
-  palette;
-  modePalette;
-  segField;
-  redrawCbs;
-  unsubDirty;
-  refineTimer;
-  refineDelayMs;
-  boundaryMode;
   constructor(device, seg, opts = {}) {
     this.seg = seg;
-    this.palette = new Float32Array(256 * 4);
-    this.modePalette = new Float32Array(256 * 4);
-    this.redrawCbs = [];
     this.renderMode = opts.renderMode ?? "sdf";
     this.sigma = opts.sigmaVoxels ?? 1;
     this.bandMm = opts.bandMm;
@@ -5610,13 +4995,9 @@ var SegmentationLogic = class {
     this.refineDelayMs = opts.refineDelayMs ?? 180;
     this.boundaryMode = opts.boundaryMode ?? "outer";
     this.clippable = opts.clippable ?? false;
-    this.setLabelColor(1, opts.color ?? [
-      0.3,
-      0.85,
-      0.55
-    ]);
+    this.setLabelColor(1, opts.color ?? [0.3, 0.85, 0.55]);
     if (this.renderMode === "sdf") {
-      this.sdf = new JfaSdfBaker(device, seg.masterTexture(), seg.dims, seg.ijkToRAS, 1, 2, this.boundaryMode);
+      this.sdf = new JfaSdfBaker(device, seg.masterTexture(), seg.dims, seg.ijkToRAS, this.sigma, 2, this.boundaryMode);
     } else {
       this.baker = new ColorizeBaker(device, seg.masterTexture(), seg.dims);
       this.presenceTex = this.baker.output();
@@ -5629,6 +5010,28 @@ var SegmentationLogic = class {
       this.scheduleRefine();
     });
   }
+  renderMode;
+  clippable;
+  attrSettleTimer;
+  sdf;
+  // sdf path
+  baker;
+  // surface path
+  presenceTex;
+  sigma;
+  bandMm;
+  opacity;
+  palette = new Float32Array(256 * 4);
+  // label id → (r,g,b, opacity); shared by both paths
+  modePalette = new Float32Array(256 * 4);
+  // label id → (.x = shading mode: 0 surface / 1 volume) — sdf only
+  segField;
+  redrawCbs = [];
+  unsubDirty;
+  refineTimer;
+  refineDelayMs;
+  // quiescence before the settle-refine (sdf mode; capability-tuned)
+  boundaryMode;
   /** Assign a display colour to a label id (0..255). Keeps the current opacity (defaults to 1 =
    *  opaque). Takes effect on the next rebake. */
   setLabelColor(id, rgb) {
@@ -5691,26 +5094,9 @@ var SegmentationLogic = class {
   /** RAS bbox → padded-SDF-grid ijk bbox with an M-voxel margin (shell band + blur radii). */
   regionToIjk(regionRAS, M = 8) {
     const inv = invertAffine(this.sdf.sdfIjkToRAS());
-    const lo = [
-      Infinity,
-      Infinity,
-      Infinity
-    ];
-    const hi = [
-      -Infinity,
-      -Infinity,
-      -Infinity
-    ];
-    for (const x of [
-      regionRAS.lo[0],
-      regionRAS.hi[0]
-    ]) for (const y of [
-      regionRAS.lo[1],
-      regionRAS.hi[1]
-    ]) for (const z of [
-      regionRAS.lo[2],
-      regionRAS.hi[2]
-    ]) {
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (const x of [regionRAS.lo[0], regionRAS.hi[0]]) for (const y of [regionRAS.lo[1], regionRAS.hi[1]]) for (const z of [regionRAS.lo[2], regionRAS.hi[2]]) {
       const i = inv[0] * x + inv[1] * y + inv[2] * z + inv[3];
       const j = inv[4] * x + inv[5] * y + inv[6] * z + inv[7];
       const k = inv[8] * x + inv[9] * y + inv[10] * z + inv[11];
@@ -5722,16 +5108,8 @@ var SegmentationLogic = class {
       hi[2] = Math.max(hi[2], k);
     }
     return {
-      lo: [
-        Math.floor(lo[0]) - M,
-        Math.floor(lo[1]) - M,
-        Math.floor(lo[2]) - M
-      ],
-      hi: [
-        Math.ceil(hi[0]) + M,
-        Math.ceil(hi[1]) + M,
-        Math.ceil(hi[2]) + M
-      ]
+      lo: [Math.floor(lo[0]) - M, Math.floor(lo[1]) - M, Math.floor(lo[2]) - M],
+      hi: [Math.ceil(hi[0]) + M, Math.ceil(hi[1]) + M, Math.ceil(hi[2]) + M]
     };
   }
   /** REGION-LIMITED settle-refine after a labelmap edit confined to `regionRAS` (e.g. a
@@ -5784,16 +5162,8 @@ var SegmentationLogic = class {
       const band = this.bandMm ?? (this.renderMode === "sdf" ? (interfaceMode ? 1.5 : 0.65) * voxelMm : void 0);
       const fdims = this.sdf ? this.sdf.sdfDims() : this.seg.dims;
       const fijk = this.sdf ? this.sdf.sdfIjkToRAS() : this.seg.ijkToRAS;
-      this.segField = new SegmentField(tex, fdims, [
-        1,
-        1,
-        1
-      ], {
-        color: [
-          1,
-          1,
-          1
-        ],
+      this.segField = new SegmentField(tex, fdims, [1, 1, 1], {
+        color: [1, 1, 1],
         opacity: this.opacity,
         ijkToRAS: fijk,
         mode: this.renderMode === "sdf" ? "sdf" : "surface",
@@ -5801,6 +5171,7 @@ var SegmentationLogic = class {
         bandMm: band,
         clippable: this.clippable,
         attrTexture: this.sdf ? this.sdf.attrTexture() : void 0,
+        // per-segment opacity (sdf)
         interfaceMode
       });
     }
@@ -5811,6 +5182,23 @@ var SegmentationLogic = class {
   setGlobalOpacity(o) {
     this.opacity = o;
     this.segField?.setOpacity(o);
+  }
+  /** Surface smoothing, σ in VOXELS (0 = none). In sdf mode this is the distance blur: it barely
+   *  moves the zero level set, so the silhouette stays faithful to the labelmap, but it smooths
+   *  the shading normal — the difference between a faceted voxel surface and a modelled one. In
+   *  surface mode it is the presence-field Gaussian, which does move the surface outward.
+   *
+   *  Re-bakes immediately (fast path, so a slider stays responsive) and schedules the settle
+   *  refine, exactly as an edit does. */
+  setSmoothing(sigmaVoxels) {
+    this.sigma = Math.max(0, sigmaVoxels);
+    this.sdf?.setSmoothing(this.sigma);
+    this.rebake();
+    for (const cb of this.redrawCbs) cb();
+    this.scheduleRefine();
+  }
+  smoothing() {
+    return this.sigma;
   }
   /** Notified after every edit (post-rebake) so the app can redraw. */
   onRedraw(cb) {
@@ -5860,93 +5248,29 @@ var LEVEL_NAME = {
   30: "S3"
 };
 var LEVEL_COLORS = [
-  [
-    0.85,
-    0.42,
-    0.42
-  ],
-  [
-    0.42,
-    0.75,
-    0.42
-  ],
-  [
-    0.42,
-    0.55,
-    0.9
-  ],
-  [
-    0.9,
-    0.78,
-    0.35
-  ],
-  [
-    0.72,
-    0.45,
-    0.85
-  ],
-  [
-    0.35,
-    0.8,
-    0.8
-  ],
-  [
-    0.9,
-    0.55,
-    0.25
-  ],
-  [
-    0.55,
-    0.72,
-    0.3
-  ],
-  [
-    0.85,
-    0.45,
-    0.7
-  ],
-  [
-    0.4,
-    0.65,
-    0.6
-  ],
-  [
-    0.65,
-    0.55,
-    0.9
-  ],
-  [
-    0.8,
-    0.68,
-    0.5
-  ]
+  [0.85, 0.42, 0.42],
+  [0.42, 0.75, 0.42],
+  [0.42, 0.55, 0.9],
+  [0.9, 0.78, 0.35],
+  [0.72, 0.45, 0.85],
+  [0.35, 0.8, 0.8],
+  [0.9, 0.55, 0.25],
+  [0.55, 0.72, 0.3],
+  [0.85, 0.45, 0.7],
+  [0.4, 0.65, 0.6],
+  [0.65, 0.55, 0.9],
+  [0.8, 0.68, 0.5]
 ];
 var levelColor = (label) => LEVEL_COLORS[label % LEVEL_COLORS.length];
 var METHOD_COLORS = {
-  spineps: [
-    0.95,
-    0.6,
-    0.2
-  ],
-  ref: [
-    0.3,
-    0.65,
-    0.95
-  ]
+  spineps: [0.95, 0.6, 0.2],
+  // warm orange
+  ref: [0.3, 0.65, 0.95]
+  // cool blue
 };
 var flat = (m) => Array.isArray(m[0]) ? m.flat() : m;
 function invertAffine2(m) {
-  const r = [
-    m[0],
-    m[1],
-    m[2],
-    m[4],
-    m[5],
-    m[6],
-    m[8],
-    m[9],
-    m[10]
-  ];
+  const r = [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]];
   const det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
   const i = [
     (r[4] * r[8] - r[5] * r[7]) / det,
@@ -5959,11 +5283,7 @@ function invertAffine2(m) {
     (r[1] * r[6] - r[0] * r[7]) / det,
     (r[0] * r[4] - r[1] * r[3]) / det
   ];
-  const t = [
-    m[3],
-    m[7],
-    m[11]
-  ];
+  const t = [m[3], m[7], m[11]];
   return [
     i[0],
     i[1],
@@ -6016,24 +5336,7 @@ function levelGeometry(lab, dims, ijkToRAS) {
         if (!v) continue;
         let a = acc.get(v);
         if (!a) {
-          a = {
-            n: 0,
-            s: [
-              0,
-              0,
-              0
-            ],
-            lo: [
-              i,
-              j,
-              k
-            ],
-            hi: [
-              i,
-              j,
-              k
-            ]
-          };
+          a = { n: 0, s: [0, 0, 0], lo: [i, j, k], hi: [i, j, k] };
           acc.set(v, a);
         }
         a.n++;
@@ -6057,56 +5360,20 @@ function levelGeometry(lab, dims, ijkToRAS) {
   ];
   const out = /* @__PURE__ */ new Map();
   for (const [label, a] of acc) {
-    const c = xf([
-      a.s[0] / a.n,
-      a.s[1] / a.n,
-      a.s[2] / a.n
-    ]);
-    const lo = [
-      Infinity,
-      Infinity,
-      Infinity
-    ], hi = [
-      -Infinity,
-      -Infinity,
-      -Infinity
-    ];
-    for (const ci of [
-      a.lo[0],
-      a.hi[0]
-    ]) for (const cj of [
-      a.lo[1],
-      a.hi[1]
-    ]) for (const ck of [
-      a.lo[2],
-      a.hi[2]
-    ]) {
-      const r = xf([
-        ci,
-        cj,
-        ck
-      ]);
+    const c = xf([a.s[0] / a.n, a.s[1] / a.n, a.s[2] / a.n]);
+    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+    for (const ci of [a.lo[0], a.hi[0]]) for (const cj of [a.lo[1], a.hi[1]]) for (const ck of [a.lo[2], a.hi[2]]) {
+      const r = xf([ci, cj, ck]);
       for (let d = 0; d < 3; d++) {
         if (r[d] < lo[d]) lo[d] = r[d];
         if (r[d] > hi[d]) hi[d] = r[d];
       }
     }
-    out.set(label, {
-      label,
-      name: LEVEL_NAME[label] ?? String(label),
-      voxels: a.n,
-      centroid: c,
-      lo,
-      hi
-    });
+    out.set(label, { label, name: LEVEL_NAME[label] ?? String(label), voxels: a.n, centroid: c, lo, hi });
   }
   return out;
 }
-var DISC_COLOR = [
-  0.72,
-  0.72,
-  0.66
-];
+var DISC_COLOR = [0.72, 0.72, 0.66];
 var isDisc = (label) => label > 100;
 var CT_WIN = 1400;
 var CT_LEV = 400;
@@ -6126,18 +5393,9 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
   const vol = meta.volumes;
   const track = (msg) => (n) => onProgress?.(msg, n);
   const [ctLow, sp, ref] = await Promise.all([
-    fetchZarrVolume(base, {
-      ...vol.ct_low,
-      dataset: "."
-    }, track("CT preview")),
-    fetchZarrVolume(base, {
-      ...vol.spineps_med,
-      dataset: "."
-    }, track("SPINEPS labels")),
-    fetchZarrVolume(base, {
-      ...vol.ref_med,
-      dataset: "."
-    }, track("reference labels"))
+    fetchZarrVolume(base, { ...vol.ct_low, dataset: "." }, track("CT preview")),
+    fetchZarrVolume(base, { ...vol.spineps_med, dataset: "." }, track("SPINEPS labels")),
+    fetchZarrVolume(base, { ...vol.ref_med, dataset: "." }, track("reference labels"))
   ]);
   const medDims = sp.dims;
   const medRAS = flat(meta.ijkToRAS_med);
@@ -6159,22 +5417,10 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     for (let i = 0; i < 256; i++) l[i * 4 + 3] = Math.round(l[i * 4 + 3] * o);
     return l;
   };
-  const mkCtField = (v, ijk) => new ImageField(dev, v.data, v.dims, [
-    1,
-    1,
-    1
-  ], scaledLut(volOpacity), {
-    clim: [
-      CT_LEV - CT_WIN / 2,
-      CT_LEV + CT_WIN / 2
-    ],
+  const mkCtField = (v, ijk) => new ImageField(dev, v.data, v.dims, [1, 1, 1], scaledLut(volOpacity), {
+    clim: [CT_LEV - CT_WIN / 2, CT_LEV + CT_WIN / 2],
     ijkToRAS: ijk,
-    shade: [
-      0.25,
-      0.7,
-      0.45,
-      20
-    ]
+    shade: [0.25, 0.7, 0.45, 20]
   });
   let ctField = mkCtField(ctLow, lowRAS);
   let ctDims = ctLow.dims, ctRAS = lowRAS;
@@ -6187,27 +5433,21 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
   slice.setVolume(ctField.patientToTexture(), rasLo0, rasHi0);
   slice.setWindowLevel(CT_WIN, CT_LEV);
   slice.setOverlayOpacity(0.5);
-  const methodOp = {
-    spineps: 1,
-    ref: 1
-  };
+  const methodOp = { spineps: 1, ref: 1 };
   let clip = null;
-  let extentState = {
-    label: null,
-    count: 99
-  };
+  let extentState = { label: null, count: 99 };
+  let segSigma = 1;
   const makeRow = (key, lab) => {
     const overlayTex = bakeOverlay(lab);
     const cap = resampleIsotropic(lab, medDims, medRAS, 256);
-    const editable = new EditableSegmentation(dev, cap.dims, {
-      ijkToRAS: cap.ijkToRAS
-    });
+    const editable = new EditableSegmentation(dev, cap.dims, { ijkToRAS: cap.ijkToRAS });
     const outerShell = (shellOpts?.shell ?? "outer") === "outer";
     const logic = new SegmentationLogic(dev, editable, {
       renderMode: "sdf",
       boundaryMode: outerShell ? "outer" : "all",
       opacity: 1,
       clippable: true,
+      sigmaVoxels: segSigma,
       bandMm: shellOpts?.bandVox !== void 0 ? shellOpts.bandVox * cap.vox : void 0
     });
     const levels = levelGeometry(lab, medDims, medRAS);
@@ -6236,62 +5476,26 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     const rebakeShellRegion = (regionRAS) => {
       const vis = visOf();
       visKey = vis.join("");
-      const lo = [
-        Infinity,
-        Infinity,
-        Infinity
-      ], hi = [
-        -Infinity,
-        -Infinity,
-        -Infinity
-      ];
-      for (const x of [
-        regionRAS.lo[0],
-        regionRAS.hi[0]
-      ]) for (const y of [
-        regionRAS.lo[1],
-        regionRAS.hi[1]
-      ]) for (const z of [
-        regionRAS.lo[2],
-        regionRAS.hi[2]
-      ]) {
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (const x of [regionRAS.lo[0], regionRAS.hi[0]]) for (const y of [regionRAS.lo[1], regionRAS.hi[1]]) for (const z of [regionRAS.lo[2], regionRAS.hi[2]]) {
         const i = capInv[0] * x + capInv[1] * y + capInv[2] * z + capInv[3];
         const j = capInv[4] * x + capInv[5] * y + capInv[6] * z + capInv[7];
         const k = capInv[8] * x + capInv[9] * y + capInv[10] * z + capInv[11];
         for (let d = 0; d < 3; d++) {
-          const v = [
-            i,
-            j,
-            k
-          ][d];
+          const v = [i, j, k][d];
           if (v < lo[d]) lo[d] = v;
           if (v > hi[d]) hi[d] = v;
         }
       }
-      const rlo = [
-        0,
-        0,
-        0
-      ], rhi = [
-        0,
-        0,
-        0
-      ];
+      const rlo = [0, 0, 0], rhi = [0, 0, 0];
       for (let d = 0; d < 3; d++) {
         rlo[d] = Math.max(0, Math.floor(lo[d]) - 2);
         rhi[d] = Math.min(cap.dims[d], Math.ceil(hi[d]) + 2);
         if (rhi[d] <= rlo[d]) return;
       }
-      const [sx, sy, sz] = [
-        rhi[0] - rlo[0],
-        rhi[1] - rlo[1],
-        rhi[2] - rlo[2]
-      ];
+      const [sx, sy, sz] = [rhi[0] - rlo[0], rhi[1] - rlo[1], rhi[2] - rlo[2]];
       const out = new Uint32Array(sx * sy * sz);
-      const [dx, dy] = [
-        cap.dims[0],
-        cap.dims[1]
-      ];
+      const [dx, dy] = [cap.dims[0], cap.dims[1]];
       let w = 0;
       for (let z = rlo[2]; z < rhi[2]; z++) for (let y = rlo[1]; y < rhi[1]; y++) {
         let r = (z * dy + y) * dx + rlo[0];
@@ -6300,11 +5504,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
           if (vis[l]) out[w] = l;
         }
       }
-      editable.writeLabelRegion(out, rlo, [
-        sx,
-        sy,
-        sz
-      ]);
+      editable.writeLabelRegion(out, rlo, [sx, sy, sz]);
       logic.rebakeShellRegion(regionRAS);
     };
     if (outerShell) rebakeShellFull();
@@ -6357,23 +5557,17 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     ijkToRAS: ctRAS,
     rasLo: rasLo0,
     rasHi: rasHi0,
-    center: [
-      (rasLo0[0] + rasHi0[0]) / 2,
-      (rasLo0[1] + rasHi0[1]) / 2,
-      (rasLo0[2] + rasHi0[2]) / 2
-    ],
+    center: [(rasLo0[0] + rasHi0[0]) / 2, (rasLo0[1] + rasHi0[1]) / 2, (rasLo0[2] + rasHi0[2]) / 2],
     radius: Math.hypot(rasHi0[0] - rasLo0[0], rasHi0[1] - rasLo0[1], rasHi0[2] - rasLo0[2]) / 2,
     win: CT_WIN,
     lev: CT_LEV,
     slice,
-    rows: [
-      rowSp,
-      rowRef
-    ],
+    rows: [rowSp, rowRef],
     bindRowSlice(key) {
       slice.setTextures(ctField.volumeTexture(), rowOf(key).overlayTex);
     },
     upgraded: Promise.resolve(),
+    // replaced below
     setMethodOpacity(key, o) {
       const was = methodOp[key] > 1e-3;
       methodOp[key] = Math.max(0, Math.min(1, o));
@@ -6393,15 +5587,9 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     },
     volumeOpacity: () => volOpacity,
     setExtent(label, count) {
-      extentState = {
-        label,
-        count
-      };
+      extentState = { label, count };
       const applyVisibility = (inRange) => {
-        for (const row of [
-          rowSp,
-          rowRef
-        ]) {
+        for (const row of [rowSp, rowRef]) {
           const changed = [];
           for (const [l] of row.levels) {
             const vis = isDisc(l) ? inRange(l - 100) || inRange(l - 100 + 1) : inRange(l);
@@ -6415,15 +5603,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
           if (!changed.length) continue;
           let bbox = null;
           if (changed.length <= row.levels.size / 2) {
-            const lo2 = [
-              Infinity,
-              Infinity,
-              Infinity
-            ], hi2 = [
-              -Infinity,
-              -Infinity,
-              -Infinity
-            ];
+            const lo2 = [Infinity, Infinity, Infinity], hi2 = [-Infinity, -Infinity, -Infinity];
             for (const l of changed) {
               const g = row.levels.get(l);
               for (let d = 0; d < 3; d++) {
@@ -6431,18 +5611,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
                 if (g.hi[d] > hi2[d]) hi2[d] = g.hi[d];
               }
             }
-            bbox = {
-              lo: [
-                lo2[0],
-                lo2[1],
-                lo2[2]
-              ],
-              hi: [
-                hi2[0],
-                hi2[1],
-                hi2[2]
-              ]
-            };
+            bbox = { lo: [lo2[0], lo2[1], lo2[2]], hi: [hi2[0], hi2[1], hi2[2]] };
           }
           if (row.applyShellVisibility(bbox)) continue;
           if (bbox) row.logic.refreshOpacity(bbox);
@@ -6450,10 +5619,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
         }
       };
       const applyClip = () => {
-        for (const row of [
-          rowSp,
-          rowRef
-        ]) {
+        for (const row of [rowSp, rowRef]) {
           if (clip) row.scene.setClipBox(clip.lo, clip.hi);
           else row.scene.clearClip();
           row.scene.syncUniforms();
@@ -6465,20 +5631,9 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
         applyClip();
         return null;
       }
-      const lo = [
-        Infinity,
-        Infinity,
-        Infinity
-      ], hi = [
-        -Infinity,
-        -Infinity,
-        -Infinity
-      ];
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
       let any = false;
-      for (const levels of [
-        rowSp.levels,
-        rowRef.levels
-      ]) {
+      for (const levels of [rowSp.levels, rowRef.levels]) {
         for (const [l, g] of levels) {
           if (isDisc(l) || Math.abs(l - label) > count) continue;
           any = true;
@@ -6499,26 +5654,15 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
         lo[d] -= 12;
         hi[d] += 12;
       }
-      clip = {
-        lo,
-        hi
-      };
+      clip = { lo, hi };
       applyClip();
-      return {
-        lo,
-        hi
-      };
+      return { lo, hi };
     },
-    visibleLevels: (key) => [
-      ...rowOf(key).levels.keys()
-    ].filter((l) => !isDisc(l) && (rowOf(key).shown.get(l) ?? 1) > 0),
+    visibleLevels: (key) => [...rowOf(key).levels.keys()].filter((l) => !isDisc(l) && (rowOf(key).shown.get(l) ?? 1) > 0),
     setDiscOpacity(o) {
       discOp = Math.max(0, Math.min(1, o));
       for (let l = 101; l < 256; l++) levelPalette[l * 4 + 3] = discOp;
-      for (const row of [
-        rowSp,
-        rowRef
-      ]) {
+      for (const row of [rowSp, rowRef]) {
         const nt = bakeOverlay(row.lab);
         row.overlayTex.destroy();
         row.overlayTex = nt;
@@ -6526,16 +5670,19 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
       this.setExtent(extentState.label, extentState.count);
     },
     discOpacity: () => discOp,
+    setSegSmoothing(sigmaVoxels) {
+      segSigma = Math.max(0, sigmaVoxels);
+      rowSp.logic.setSmoothing(segSigma);
+      rowRef.logic.setSmoothing(segSigma);
+    },
+    segSmoothing: () => segSigma,
     destroy() {
       rowSp.destroy();
       rowRef.destroy();
     }
   };
   scObj.upgraded = (async () => {
-    const ctMed = await fetchZarrVolume(base, {
-      ...vol.ct_med,
-      dataset: "."
-    }, track("full-res CT"));
+    const ctMed = await fetchZarrVolume(base, { ...vol.ct_med, dataset: "." }, track("full-res CT"));
     ctField = mkCtField(ctMed, medRAS);
     ctDims = ctMed.dims;
     ctRAS = medRAS;
@@ -6545,10 +5692,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     scObj.rasLo = lo;
     scObj.rasHi = hi;
     slice.setVolume(ctField.patientToTexture(), lo, hi);
-    for (const row of [
-      rowSp,
-      rowRef
-    ]) {
+    for (const row of [rowSp, rowRef]) {
       const nt = bakeOverlay(row.lab);
       row.overlayTex.destroy();
       row.overlayTex = nt;
@@ -6562,18 +5706,11 @@ async function loadCaseMeta(coll, pid) {
   const base = `${BUCKET}${coll}/${pid}/zarr/`;
   const r = await fetch(base + "meta.json");
   if (!r.ok) throw new Error(`no zarr bundle yet for ${coll}/${pid} (HTTP ${r.status}) \u2014 the worker may not have reached this case`);
-  return {
-    meta: await r.json(),
-    base
-  };
+  return { meta: await r.json(), base };
 }
 
 // examples/spine/spine-compare-browser.ts
-var ORIENTS = [
-  "axial",
-  "sagittal",
-  "coronal"
-];
+var ORIENTS = ["axial", "sagittal", "coronal"];
 var PARAMS = new URLSearchParams(location.search);
 var el = (id) => document.getElementById(id);
 var status = (msg, err = false) => {
@@ -6592,16 +5729,12 @@ async function main() {
   const preferred = navigator.gpu.getPreferredCanvasFormat();
   const srgb = preferred + "-srgb";
   status("loading case list\u2026");
-  const casesDoc = await (await fetch(BUCKET + "cases.json", {
-    cache: "no-cache"
-  })).json();
+  const casesDoc = await (await fetch(BUCKET + "cases.json", { cache: "no-cache" })).json();
   let pid = PARAMS.get("case") ?? "";
   let coll = PARAMS.get("coll") ?? "";
   if (!pid) {
     for (const c of casesDoc.cases) {
-      const r = await fetch(`${BUCKET}${c.collection}/${c.pid}/zarr/meta.json`, {
-        method: "HEAD"
-      });
+      const r = await fetch(`${BUCKET}${c.collection}/${c.pid}/zarr/meta.json`, { method: "HEAD" });
       if (r.ok) {
         pid = c.pid;
         coll = c.collection;
@@ -6631,14 +5764,8 @@ async function main() {
     drawAll();
     status(`${coll}/${pid} \u2014 full-res CT loaded`);
   }).catch(() => status(`${coll}/${pid} \u2014 full-res CT failed to load (showing preview res)`, true));
-  const keys = [
-    "spineps",
-    "ref"
-  ];
-  const cellNames = [
-    ...ORIENTS,
-    "threeD"
-  ];
+  const keys = ["spineps", "ref"];
+  const cellNames = [...ORIENTS, "threeD"];
   const cv = {};
   const cx = {};
   for (const k of keys) {
@@ -6646,14 +5773,7 @@ async function main() {
       const id = `c-${k}-${c}`;
       cv[id] = document.getElementById(id);
       cx[id] = cv[id].getContext("webgpu");
-      cx[id].configure({
-        device: gpu.device,
-        format: preferred,
-        viewFormats: [
-          srgb
-        ],
-        alphaMode: "opaque"
-      });
+      cx[id].configure({ device: gpu.device, format: preferred, viewFormats: [srgb], alphaMode: "opaque" });
     }
   }
   const rowOf = (k) => sc.rows[k === "spineps" ? 0 : 1];
@@ -6662,20 +5782,14 @@ async function main() {
     coronal: slicerDefaultOffset01("coronal", sc.dims, sc.ijkToRAS, sc.rasLo, sc.rasHi),
     sagittal: slicerDefaultOffset01("sagittal", sc.dims, sc.ijkToRAS, sc.rasLo, sc.rasHi)
   };
-  const sliceIx = new SliceInteractor({
-    ijkToRAS: sc.ijkToRAS,
-    rasLo: sc.rasLo,
-    rasHi: sc.rasHi
-  });
+  const sliceIx = new SliceInteractor({ ijkToRAS: sc.ijkToRAS, rasLo: sc.rasLo, rasHi: sc.rasHi });
   const camera = framedCamera(sc.center, sc.radius);
   const drawSlice = (k, o) => {
     const c = cv[`c-${k}-${o}`];
     if (!c || !c.width) return;
     sc.bindRowSlice(k);
     sc.slice.setPlane(o, off[o]);
-    sc.slice.renderToView(cx[`c-${k}-${o}`].getCurrentTexture().createView({
-      format: srgb
-    }), c.width, c.height);
+    sc.slice.renderToView(cx[`c-${k}-${o}`].getCurrentTexture().createView({ format: srgb }), c.width, c.height);
   };
   let fast3d = false;
   let settle3dTimer = 0;
@@ -6683,9 +5797,7 @@ async function main() {
     const c = cv[`c-${k}-threeD`];
     if (!c || !c.width) return;
     const scene = rowOf(k).scene;
-    const view = cx[`c-${k}-threeD`].getCurrentTexture().createView({
-      format: srgb
-    });
+    const view = cx[`c-${k}-threeD`].getCurrentTexture().createView({ format: srgb });
     if (fast3d) {
       const rw = Math.max(16, Math.round(c.width * 0.5)), rh = Math.max(16, Math.round(c.height * 0.5));
       scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, rw, rh);
@@ -6731,10 +5843,7 @@ async function main() {
     const o = document.createElement("canvas");
     o.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;background:transparent;";
     cv[id].parentElement.appendChild(o);
-    overlays[id] = {
-      c: o,
-      g: o.getContext("2d")
-    };
+    overlays[id] = { c: o, g: o.getContext("2d") };
   }
   const xhairRedraw = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -6768,11 +5877,7 @@ async function main() {
   const isShiftHover = (e) => e.shiftKey && e.buttons === 0;
   const uvOf = (c, e) => {
     const r = c.getBoundingClientRect();
-    return {
-      u: (e.clientX - r.left) / r.width,
-      v: (e.clientY - r.top) / r.height,
-      aspect: r.width / r.height
-    };
+    return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height, aspect: r.width / r.height };
   };
   const hideXhair = () => {
     if (xhair.visible) {
@@ -6816,10 +5921,7 @@ async function main() {
       if (!isShiftHover(e)) return;
       if (!xhair.visible) xhair.toggle(true);
       const { u, v } = uvOf(cv[`c-${k}-threeD`], e);
-      if (inFlight) queued = {
-        u,
-        v
-      };
+      if (inFlight) queued = { u, v };
       else pick(u, v);
     });
   }
@@ -6835,21 +5937,17 @@ async function main() {
           for (const kk of keys) drawSlice(kk, o);
           xhairRedraw();
         },
-        hooks: {
-          onDoubleClick: () => {
-            toggleMax(`c-${k}-${o}`);
-            return true;
-          }
-        }
+        hooks: { onDoubleClick: () => {
+          toggleMax(`c-${k}-${o}`);
+          return true;
+        } }
       });
     }
   }
-  for (const k of keys) attachCameraControls(cv[`c-${k}-threeD`], camera, {
-    onChange: () => {
-      touch3d();
-      drawAll3d();
-    }
-  });
+  for (const k of keys) attachCameraControls(cv[`c-${k}-threeD`], camera, { onChange: () => {
+    touch3d();
+    drawAll3d();
+  } });
   let maxed = null;
   const toggleMax = (id) => {
     maxed = maxed === id ? null : id;
@@ -6867,12 +5965,7 @@ async function main() {
     resize();
   };
   for (const k of keys) attachDoubleClick(cv[`c-${k}-threeD`], () => toggleMax(`c-${k}-threeD`));
-  const shown = {
-    axial: true,
-    sagittal: true,
-    coronal: true,
-    threeD: true
-  };
+  const shown = { axial: true, sagittal: true, coronal: true, threeD: true };
   const applyColumns = () => {
     for (const k of keys) for (const c of cellNames) cv[`c-${k}-${c}`].parentElement.classList.toggle("hidden", !shown[c]);
     resize();
@@ -6887,24 +5980,7 @@ async function main() {
   }
   let currentLevel = null;
   let extent = 99;
-  const extents = [
-    [
-      "ext-one",
-      0
-    ],
-    [
-      "ext-pm1",
-      1
-    ],
-    [
-      "ext-pm3",
-      3
-    ],
-    [
-      "ext-full",
-      99
-    ]
-  ];
+  const extents = [["ext-one", 0], ["ext-pm1", 1], ["ext-pm3", 3], ["ext-full", 99]];
   const SLICE_MARGIN = 1.5;
   const frameCamera = (center, radius) => {
     const d = [
@@ -6914,33 +5990,16 @@ async function main() {
     ];
     const len = Math.hypot(d[0], d[1], d[2]) || 1;
     const dist = radius / Math.tan(camera.viewAngle / 2 * Math.PI / 180);
-    camera.focalPoint = [
-      ...center
-    ];
-    camera.position = [
-      center[0] - d[0] / len * dist,
-      center[1] - d[1] / len * dist,
-      center[2] - d[2] / len * dist
-    ];
+    camera.focalPoint = [...center];
+    camera.position = [center[0] - d[0] / len * dist, center[1] - d[1] / len * dist, center[2] - d[2] / len * dist];
   };
   const applyFocus = () => {
     const box = sc.setExtent(extent >= 99 ? null : currentLevel, extent);
     for (const [id, n] of extents) el(id)?.classList.toggle("on", extent === n);
     if (box) {
-      const c = [
-        (box.lo[0] + box.hi[0]) / 2,
-        (box.lo[1] + box.hi[1]) / 2,
-        (box.lo[2] + box.hi[2]) / 2
-      ];
-      const ext = [
-        box.hi[0] - box.lo[0],
-        box.hi[1] - box.lo[1],
-        box.hi[2] - box.lo[2]
-      ];
-      const fov = (a, b) => [
-        Math.max(30, ext[a] * SLICE_MARGIN),
-        Math.max(30, ext[b] * SLICE_MARGIN)
-      ];
+      const c = [(box.lo[0] + box.hi[0]) / 2, (box.lo[1] + box.hi[1]) / 2, (box.lo[2] + box.hi[2]) / 2];
+      const ext = [box.hi[0] - box.lo[0], box.hi[1] - box.lo[1], box.hi[2] - box.lo[2]];
+      const fov = (a, b) => [Math.max(30, ext[a] * SLICE_MARGIN), Math.max(30, ext[b] * SLICE_MARGIN)];
       const [axU, axV] = fov(0, 1);
       sc.slice.setMirrorFrame("axial", c, axU, axV);
       const [coU, coV] = fov(0, 2);
@@ -6958,10 +6017,7 @@ async function main() {
     extent = n;
     applyFocus();
   });
-  const nameToLabel = Object.fromEntries(Object.entries(LEVEL_NAME).map(([n, s]) => [
-    s,
-    Number(n)
-  ]));
+  const nameToLabel = Object.fromEntries(Object.entries(LEVEL_NAME).map(([n, s]) => [s, Number(n)]));
   const strip = el("levels");
   const selectLevel = (label) => {
     currentLevel = label;
@@ -7028,61 +6084,47 @@ async function main() {
       e.preventDefault();
       stepLevel(1);
     } else if (e.key === "Escape" && globalThis.parent !== globalThis) {
-      globalThis.parent.postMessage({
-        type: "closeDrill"
-      }, "*");
+      globalThis.parent.postMessage({ type: "closeDrill" }, "*");
     }
   });
   const controls = [
+    { label: "SPINEPS shell", getOpacity: () => sc.methodOpacity("spineps"), setOpacity: (o) => {
+      sc.setMethodOpacity("spineps", o);
+      drawAll3d();
+    }, color: METHOD_COLORS.spineps },
+    { label: "Reference shell", getOpacity: () => sc.methodOpacity("ref"), setOpacity: (o) => {
+      sc.setMethodOpacity("ref", o);
+      drawAll3d();
+    }, color: METHOD_COLORS.ref },
+    { label: "CT volume (3D)", getOpacity: () => sc.volumeOpacity(), setOpacity: (o) => {
+      sc.setVolumeOpacity(o);
+      drawAll3d();
+    }, color: [0.75, 0.78, 0.85] },
+    { label: "Discs (SPINEPS)", getOpacity: () => sc.discOpacity(), setOpacity: (o) => {
+      sc.setDiscOpacity(o);
+      requestDraw();
+    }, color: [0.72, 0.72, 0.66] },
+    // Shell smoothing. This is a REVIEW tool, so the bottom of the range matters as much as the
+    // top: at σ=0 the shell follows the labelmap voxel for voxel, which is what you need to see
+    // when judging whether SPINEPS and the reference disagree about actual voxels; smoothing it
+    // up turns the same labels into a modelled surface, which is what you need when several
+    // vertebrae are on screen and the question is which bone is which.
     {
-      label: "SPINEPS shell",
-      getOpacity: () => sc.methodOpacity("spineps"),
-      setOpacity: (o) => {
-        sc.setMethodOpacity("spineps", o);
-        drawAll3d();
-      },
-      color: METHOD_COLORS.spineps
-    },
-    {
-      label: "Reference shell",
-      getOpacity: () => sc.methodOpacity("ref"),
-      setOpacity: (o) => {
-        sc.setMethodOpacity("ref", o);
-        drawAll3d();
-      },
-      color: METHOD_COLORS.ref
-    },
-    {
-      label: "CT volume (3D)",
-      getOpacity: () => sc.volumeOpacity(),
-      setOpacity: (o) => {
-        sc.setVolumeOpacity(o);
-        drawAll3d();
-      },
-      color: [
-        0.75,
-        0.78,
-        0.85
-      ]
-    },
-    {
-      label: "Discs (SPINEPS)",
-      getOpacity: () => sc.discOpacity(),
-      setOpacity: (o) => {
-        sc.setDiscOpacity(o);
-        requestDraw();
-      },
-      color: [
-        0.72,
-        0.72,
-        0.66
-      ]
+      label: "Shell smoothing",
+      slider: {
+        min: 0,
+        max: 2,
+        step: 0.25,
+        get: () => sc.segSmoothing(),
+        set: (v) => {
+          sc.setSegSmoothing(v);
+          drawAll3d();
+        },
+        format: (v) => v > 0 ? `\u03C3 ${v.toFixed(2)} vox` : "voxels"
+      }
     }
   ];
-  installChrome({
-    controls,
-    anchor: cv["c-ref-threeD"].parentElement ?? void 0
-  });
+  installChrome({ controls, anchor: cv["c-ref-threeD"].parentElement ?? void 0 });
   const cmp = entry?.compare;
   el("info").textContent = `${coll}/${pid} \xB7 ${cmp ? `${cmp.n_agree}/${cmp.n_ref_labels} agree \xB7 ${cmp.n_shifted} shifted \xB7 mean Dice ${cmp.mean_dice_same?.toFixed(3)}` : "no compare record"}`;
   const caseBtn = el("case-btn");
@@ -7090,9 +6132,7 @@ async function main() {
   const listEl = el("case-list");
   const search = el("case-search");
   caseBtn.textContent = `${coll}/${pid} \u25BE`;
-  const sorted = [
-    ...casesDoc.cases
-  ].sort((a, b) => (a.compare?.mean_dice_same ?? 2) - (b.compare?.mean_dice_same ?? 2));
+  const sorted = [...casesDoc.cases].sort((a, b) => (a.compare?.mean_dice_same ?? 2) - (b.compare?.mean_dice_same ?? 2));
   const renderList = (filter = "") => {
     const f = filter.trim().toLowerCase();
     listEl.innerHTML = "";
@@ -7155,26 +6195,10 @@ async function main() {
     ready: () => true,
     dims: () => sc.dims,
     center: () => sc.center,
-    offsets: () => ({
-      ...off
-    }),
+    offsets: () => ({ ...off }),
     crosshair: () => xhair.ras,
-    camera: () => ({
-      position: [
-        ...camera.position
-      ],
-      focalPoint: [
-        ...camera.focalPoint
-      ]
-    }),
-    levels: (k) => [
-      ...rowOf(k).levels.values()
-    ].filter((g) => g.label < 100).map((g) => ({
-      label: g.label,
-      name: g.name,
-      voxels: g.voxels,
-      centroid: g.centroid
-    })),
+    camera: () => ({ position: [...camera.position], focalPoint: [...camera.focalPoint] }),
+    levels: (k) => [...rowOf(k).levels.values()].filter((g) => g.label < 100).map((g) => ({ label: g.label, name: g.name, voxels: g.voxels, centroid: g.centroid })),
     jumpLevel: (name) => {
       const label = nameToLabel[name];
       if (label == null) return null;
