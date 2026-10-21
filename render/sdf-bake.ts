@@ -363,6 +363,14 @@ export class JfaSdfBaker {
     this.dev.queue.writeBuffer(this.uni, 0, ab);
   }
 
+  /** Distance-blur σ, in VOXELS, applied to the signed distance on every bake/refine (0 = none).
+   *  The zero level set barely moves, so the silhouette stays where the labelmap put it; what the
+   *  blur smooths is the GRADIENT, i.e. the shading normal — which is what turns a voxel-faceted
+   *  "golf ball" into a surface. Takes effect on the next bake(); the caller decides when that is,
+   *  since a sweep is ~20 compute passes. */
+  setSmoothing(sigmaVoxels: number) { this.smoothSigma = Math.max(0, sigmaVoxels); }
+  smoothing(): number { return this.smoothSigma; }
+
   /** FAST bake for LIVE editing: plain JFA (approximate) + a light distance-only blur (crisp colour
    *  seams). Cheap, so it keeps up with an in-progress stroke; the seams stay voxel-jagged until the
    *  edit settles and refine() runs. */
@@ -439,7 +447,7 @@ export class JfaSdfBaker {
     ] });
     const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(g[0], g[1], g[2]); p.end();
     dev.queue.submit([enc.finish()]);
-    this.blurStage(this.blurPipe, this.smoothSigma, this.sdfTex, this.sdfScratch, region);
+    if (this.smoothSigma > 0) this.blurStage(this.blurPipe, this.smoothSigma, this.sdfTex, this.sdfScratch, region);
     this.blurStage(this.colBlurPipe, 1.0, this.sdfTex, this.sdfScratch, region);
     this.blurStage(this.fullBlurPipe, 1.0, this.attrTex, this.attrScratch, region);
   }

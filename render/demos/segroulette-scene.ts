@@ -87,6 +87,9 @@ export interface SegrouletteScene {
   setVolumeShift(hu: number): void;
   volumeShift(): number;
   setSegOpacity(o: number): void;
+  /** 3D segmentation surface smoothing, σ in voxels (0 = raw voxel facets). */
+  setSegSmoothing(sigmaVoxels: number): void;
+  segSmoothing(): number;
   segOpacity(): number;
   /** Per-segment opacity (0 = hidden, 0.5 = translucent, 1 = opaque) — 3D SDF shell + slice overlay.
    *  Rebakes the colorized overlay and the SDF attr in place. Caller redraws slices afterwards. */
@@ -280,6 +283,9 @@ export function buildSegrouletteScene(
   let mode: "sdf" | "volume" = "volume";
   let segLogic: SegmentationLogic | undefined;
   let editable: EditableSegmentation | undefined;
+  // 3D surface smoothing (σ, voxels): the SDF distance blur. Kept here, not only inside the
+  // logic, because a streaming load builds the SDF AFTER the user may have moved the control.
+  let segSigma = 1.0;
   const buildSdf = (sg: SegLabelmap) => {
     // ISOTROPIC resample (capacity-gated): thick-slice CTs must upsample the slice axis toward
     // isotropic or a near-slice-parallel surface falls between slices and the SDF shell misses it →
@@ -292,7 +298,7 @@ export function buildSegrouletteScene(
     // multi-material interface field ("all") so internal label↔label boundaries surface too, else the
     // crisp outer shell for segments separated by background (ribs/vertebrae render identically).
     const boundaryMode = labelmapHasInternalBoundary(cap.lab, cap.dims) ? "all" : "outer";
-    segLogic = new SegmentationLogic(dev, editable, { renderMode: "sdf", opacity: 1.0, boundaryMode, refineDelayMs: opts.refineDelayMs });
+    segLogic = new SegmentationLogic(dev, editable, { renderMode: "sdf", opacity: 1.0, boundaryMode, sigmaVoxels: segSigma, refineDelayMs: opts.refineDelayMs });
     for (const s of segments) { segLogic.setLabelColor(s.num, s.color); segLogic.setLabelOpacity(s.num, opacityOf(s.num)); }
     editable.loadLabelmap(cap.lab);   // fast bake
     segLogic.refineNow();             // static scene → high-quality bake now
@@ -400,6 +406,11 @@ export function buildSegrouletteScene(
       if (was !== showSeg) rebuild(); else scene.syncUniforms();   // op0 is a uniform → re-pack in place
     },
     segOpacity: () => segLayerOpacity,
+    setSegSmoothing(sigmaVoxels) {
+      segSigma = Math.max(0, sigmaVoxels);
+      segLogic?.setSmoothing(segSigma);
+    },
+    segSmoothing: () => segSigma,
     setSegmentOpacity(num, opacity) {
       const o = Math.max(0, Math.min(1, opacity));
       if (o >= 1) segOpacity.delete(num); else segOpacity.set(num, o);   // 1 is the default

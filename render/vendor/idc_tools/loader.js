@@ -104,6 +104,51 @@ export async function loadSeries(entry, handlers = {}, opts) {
     r.entry = entry;
     return r;
 }
+/** Decode JUST a segmentation, onto a grid the caller already has.
+ *
+ *  For switching which SEG is displayed over an image volume that is already loaded: the images
+ *  are not touched, so nothing re-downloads except the segmentation object itself. `ctLike` is
+ *  the decoded volume's grid — { dims, ijkToRAS } — which is what the SEG decoder resamples
+ *  onto. Runs in its OWN short-lived worker, so it neither terminates nor is terminated by the
+ *  shared series worker. Returns the labelmap, or null when the prefix holds no DICOM.
+ */
+export async function loadSegmentation(prefix, bucket, ctLike, handlers = {}, opts) {
+    const segKeys = await s3ListKeys(prefix, bucket);
+    if (!segKeys.length)
+        return null;
+    return new Promise((resolve, reject) => {
+        let w;
+        try {
+            w = new Worker(resolveWorkerURL(opts));
+        }
+        catch (err) {
+            return reject(err);
+        }
+        let seg;
+        const done = (fn) => { try { w.terminate(); } catch { /* ignore */ } fn(); };
+        w.onmessage = (e) => {
+            const m = e.data;
+            switch (m.t) {
+                case 'progress': handlers.onProgress?.({ frac: m.frac, msg: m.msg }); break;
+                case 'seg': handlers.onSegName?.(m.name); break;
+                case 'segerror':
+                    console.warn('[idc_tools] SEG failed:', m.error);
+                    handlers.onSegError?.(m.error);
+                    break;
+                case 'labelmap':
+                    seg = { lab: new Uint8Array(m.lab), extra: (m.extra ?? []).map((x) => new Uint8Array(x)), colors: m.colors, names: m.names, terminology: m.terminology, overlap: m.overlap };
+                    break;
+                case 'error': done(() => reject(new Error(m.error))); break;
+                case 'alldone': done(() => resolve(seg ?? null)); break;
+            }
+        };
+        w.onerror = (ev) => done(() => reject(new Error('idc_tools worker: ' + (ev.message || ev))));
+        w.postMessage({
+            ctKeys: [], segKeys, ctBucket: bucket, segBucket: bucket,
+            modality: 'SEG', segOnly: { dims: ctLike.dims, ijkToRAS: ctLike.ijkToRAS },
+        });
+    });
+}
 /** Decode ONE representative (middle) slice of a series into a small grayscale preview — for the
  *  OHIF-style series panel. Uses a PRIVATE, short-lived worker (NOT the shared singleton), so it
  *  never terminates or is terminated by a main series load, and several can run at once.

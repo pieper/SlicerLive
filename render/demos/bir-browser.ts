@@ -25,7 +25,7 @@ import { attachWidgetControls } from "./widget-control.ts";
 import type { Box, HandleMeta } from "./roi-widget.ts";
 import { createMosaic } from "./mosaic.ts";
 import { installChrome, type VizControl } from "./sl-chrome.ts";
-import { loadSeries, loadThumbnail } from "../vendor/idc_tools/index.js";
+import { loadSegmentation, loadSeries, loadThumbnail } from "../vendor/idc_tools/index.js";
 import type { CTVolume, GeomCheck, SegLabelmap, SeriesGeometry } from "../vendor/idc_tools/types.js";
 import { type BirApi, mountBir, type Plane, type StripItem } from "./bir.ts";
 import { downloadStudyWithDialog, type SeriesRef, shareStudy } from "./idc-share.ts";
@@ -47,6 +47,7 @@ interface Source {
   cb: string; // its bucket
   s?: string; // optional SEG series prefix
   sb?: string; // SEG bucket
+  sgid?: string; // the SEG's SeriesInstanceUID (marks which overlay the series panel is showing)
   m: string; // modality
   col: string; // collection
   st: string; // StudyInstanceUID
@@ -326,6 +327,7 @@ async function resolveFromIndex(
     geom: geometryOf(chosen) ?? undefined,
     c: String(chosen.crdc_series_uuid), cb: String(chosen.aws_bucket),
     s: seg ? String(seg.crdc_series_uuid) : undefined, sb: seg ? String(seg.aws_bucket) : undefined,
+    sgid: seg ? String(seg.SeriesInstanceUID) : undefined,
     m: mod === "PET" ? "PT" : mod, col: String(chosen.collection_id), st: studyUID,
     sid: String(chosen.SeriesInstanceUID),
     sd: `${chosen.PatientID} · ${chosen.SeriesDescription || mod}`,
@@ -842,6 +844,49 @@ async function main() {
     const mid = midSlice ?? (res.ct.vol as Float32Array).subarray(z * w * h, (z + 1) * w * h);
     return sliceToThumb({ vol: mid as Float32Array, dims: [w, h, 1], win, lev });
   };
+  /** Show a DIFFERENT segmentation over the images already on screen.
+   *
+   *  Reloading the page to change segmentation re-downloads the whole image series — hundreds of
+   *  megabytes — to redraw an overlay that is one object. The images are already decoded and the
+   *  scene already exists, so the SEG decodes against the volume's own grid and attaches to it;
+   *  nothing else moves. The URL is updated in place so the link still describes what is shown.
+   */
+  let segSwapping = false;
+  const showSegmentation = async (segUuid: string, bucket: string, seriesUID: string, label: string) => {
+    if (segSwapping) return;
+    segSwapping = true;
+    try {
+      status(`loading ${label}…`);
+      const sg = await loadSegmentation(segUuid, bucket, { dims: sc.dims, ijkToRAS: sc.ijkToRAS }, {
+        onProgress: (p: { msg: string; frac?: number }) =>
+          status(`${label}: ${p.msg}${p.frac ? ` — ${Math.round(p.frac * 100)}%` : ""}`),
+      });
+      if (!sg) throw new Error("no DICOM under that segmentation series");
+      shownSeg = sg;
+      source.s = segUuid;
+      source.sb = bucket;
+      source.sgid = seriesUID;
+      sc.attachSegmentation(sg);
+      segAttached = true;
+      applySegOverlay();
+      chrome.refresh();
+      buildAnnotations();
+      applyAnn();
+      drawAll();
+      bir?.markOverlay(seriesUID);
+      const u = new URL(location.href);
+      if (source.st) u.searchParams.set("StudyInstanceUIDs", source.st);
+      u.searchParams.set("SeriesInstanceUIDs", [source.sid, seriesUID].filter(Boolean).join(","));
+      history.replaceState(null, "", u.toString());
+      status(READY);
+    } catch (e) {
+      status(`Couldn't load ${label}: ${(e as Error).message}`, true);
+      setTimeout(() => status(READY), 6000);
+    } finally {
+      segSwapping = false;
+    }
+  };
+
   const navigateToSeries = (seriesUID: string) => {
     const u = new URL(location.href);
     u.searchParams.set("StudyInstanceUIDs", source.st);
@@ -871,6 +916,7 @@ async function main() {
         return {
           seriesUID: String(r.SeriesInstanceUID),
           modality: mod,
+          overlay: mod === "SEG",
           lines: [...(desc ? [desc] : []), `${Number(r.instanceCount) || 0} img`],
           current: isCurrent,
           // null = no picture: the row collapses to its text instead of showing a square that
@@ -889,7 +935,13 @@ async function main() {
               release();
             }
           },
-          open: () => navigateToSeries(String(r.SeriesInstanceUID)),
+          // A segmentation is an OVERLAY on what is already loaded, not a new thing to open:
+          // swapping it in place is the difference between one object and the whole series.
+          open: () =>
+            mod === "SEG" && r.crdc_series_uuid
+              ? showSegmentation(String(r.crdc_series_uuid), String(r.aws_bucket),
+                String(r.SeriesInstanceUID), desc || "segmentation")
+              : navigateToSeries(String(r.SeriesInstanceUID)),
         };
       });
     } catch { /* no study rows → no strip (e.g. direct ?series= with no study) */ }
@@ -1197,6 +1249,31 @@ async function main() {
       },
       disabled: () => !sc.hasSeg,
     },
+    // 3D segmentation surface smoothing. The segmentation is a labelmap, so its surface is a
+    // voxel staircase; this is the σ of the blur applied to the distance field, which barely
+    // moves the surface but smooths its shading normal. 0 shows the voxels honestly.
+    //
+    // Capped at 2 voxels, measured rather than guessed: on the KiTS kidneys σ=1.5 is still the
+    // whole organ, smoothly shaded, while by σ=2.25 the blur has begun eating thin structure —
+    // "barely moves the zero level set" stops being true once σ approaches the thickness of what
+    // is being smoothed. A control that can silently shrink a segmentation is worse than one
+    // that stops short.
+    {
+      label: "Segment smoothing (3D)",
+      slider: {
+        min: 0,
+        max: 2,
+        step: 0.25,
+        get: () => sc.segSmoothing(),
+        set: (v) => {
+          sc.setSegSmoothing(v);
+          draw3d();
+          xhair?.redraw();
+        },
+        format: (v) => (v > 0 ? `σ ${v.toFixed(2)} vox` : "off"),
+      },
+      disabled: () => !sc.hasSeg,
+    },
     // 3D volume-render crop: enabling it reveals the ROI box the first time (Slicer behaviour).
     {
       label: "Crop volume (3D)",
@@ -1280,6 +1357,10 @@ async function main() {
   buildAnnotations();
   applyAnn();
   applySegOverlay();   // outline-by-default: the scene is built with the fill showing
+  // Which segmentation is on screen, if the study opened with one.
+  if (source.s) {
+    if (source.sgid) bir.markOverlay(source.sgid);
+  }
   // What the headers said about the geometry, before anyone reads the images.
   if (geomCheck && (geomCheck.stack || geomCheck.notes.length)) {
     geometryNotice(geomCheck, !!(res.seg || source.s));

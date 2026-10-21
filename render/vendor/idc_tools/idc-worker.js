@@ -680,11 +680,21 @@ async function loadSeg(segKeys, ctLike) {
 }
 
 self.onmessage = async (e) => {
-    const { ctKeys, segKeys, ctBucket, segBucket, modality, thumbOnly, geometry } = e.data;
+    const { ctKeys, segKeys, ctBucket, segBucket, modality, thumbOnly, geometry, segOnly } = e.data;
     CT_S3 = s3url(ctBucket);
     SEG_S3 = s3url(segBucket);
     MODNAME = { CT: 'CT', MR: 'MR', PT: 'PET' }[modality] || modality || 'image';
     try {
+        // SEG-ONLY: the caller already has the image volume decoded and only wants a different
+        // segmentation drawn over it. `segOnly` carries that volume's grid ({dims, ijkToRAS}),
+        // which is all the SEG decoder needs — so switching segmentation costs one object,
+        // not the whole series again.
+        if (segOnly && segKeys && segKeys.length) {
+            prog('fetching SEG…', 0.1);
+            await loadSeg(segKeys, segOnly);
+            post({ t: 'alldone' });
+            return;
+        }
         prog('fetching ' + MODNAME + '…', 0.05);
         // Streaming path: the caller knows the geometry, so slices go out as they decode and the
         // SEG is fetched at the same time instead of after the last slice.

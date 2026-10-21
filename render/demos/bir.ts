@@ -50,6 +50,9 @@ export interface StripItem {
   current: boolean;
   /** Modality, for the badge on the row. Falls back to lines[0]. */
   modality?: string;
+  /** This series draws OVER the loaded images rather than replacing them (a segmentation).
+   *  Changes the row's tooltip, and lets the reader mark which overlay is showing. */
+  overlay?: boolean;
   /** The series' tile, or null when there is no image to show (a report, a presentation state,
    *  a segmentation object). A null tile makes the row COMPACT — modality badge + text, no
    *  picture box — rather than a square of placeholder. */
@@ -121,6 +124,9 @@ export interface BirApi {
   drawOverlay(p: Plane): void;
   /** Re-render the open series' thumbnail (its pixels may have arrived since it was drawn). */
   refreshStrip(): void;
+  /** Mark which overlay series (e.g. a segmentation) is currently drawn over the images.
+   *  null clears the mark. */
+  markOverlay(seriesUID: string | null): void;
   resize(): void;
   selected(): Plane;
   setLayout(l: "single" | "twoUp" | "fourUp"): void;
@@ -249,6 +255,9 @@ const STYLE = `
   overflow:hidden; background:#05060a; }
 #bir-strip .item:hover { border-color:#33507e; }
 #bir-strip .item.current { border-color:#2b6cb0; box-shadow:0 0 0 1px #2b6cb0; }
+/* The displayed OVERLAY (a segmentation drawn over the open series) — a second kind of
+   "showing", so it reads differently from the open series itself. */
+#bir-strip .item.overlay { border-color:#54c6f0; box-shadow:inset 3px 0 0 #54c6f0; }
 #bir-strip img { width:100%; aspect-ratio:1; object-fit:contain; background:#000; display:block; }
 #bir-strip .item.no-thumb img { display:none; }
 #bir-strip .cap { font:10px -apple-system,system-ui,sans-serif; color:#9fb3d0; padding:3px 6px;
@@ -884,7 +893,9 @@ export function mountBir(cfg: BirCfg): BirApi {
       const item = document.createElement("div");
       item.className = "item" + (it.current ? " current" : "");
       if (it.current) currentItem = item;
-      item.title = it.lines.join(" · ") + " — click to load";
+      item.dataset.uid = it.seriesUID;
+      item.title = it.lines.join(" · ") +
+        (it.overlay ? " — click to show over the current images" : " — click to load");
       const img = document.createElement("img");
       img.alt = "";
       // A series with no image to show (SR, SEG, RTSTRUCT, presentation state) collapses to a
@@ -1111,6 +1122,11 @@ export function mountBir(cfg: BirCfg): BirApi {
     hooks,
     drawOverlay,
     refreshStrip: () => refreshCurrentThumb?.(),
+    markOverlay: (uid) => {
+      for (const el of strip?.querySelectorAll(".item") ?? []) {
+        (el as HTMLElement).classList.toggle("overlay", !!uid && (el as HTMLElement).dataset.uid === uid);
+      }
+    },
     resize: () => {
       resizeOverlays();
       redrawOverlays();

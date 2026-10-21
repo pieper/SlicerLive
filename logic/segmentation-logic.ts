@@ -80,7 +80,7 @@ export class SegmentationLogic {
     this.setLabelColor(1, opts.color ?? [0.30, 0.85, 0.55]);   // single-label convenience default
 
     if (this.renderMode === "sdf") {
-      this.sdf = new JfaSdfBaker(device, seg.masterTexture(), seg.dims, seg.ijkToRAS, 1.0, 2, this.boundaryMode);
+      this.sdf = new JfaSdfBaker(device, seg.masterTexture(), seg.dims, seg.ijkToRAS, this.sigma, 2, this.boundaryMode);
     } else {
       this.baker = new ColorizeBaker(device, seg.masterTexture(), seg.dims);
       this.presenceTex = this.baker.output();
@@ -221,6 +221,22 @@ export class SegmentationLogic {
   /** Live GLOBAL segmentation opacity (0..1) — the field-level multiplier over every segment's own
    *  opacity. Caller does scene.syncUniforms() + redraw. */
   setGlobalOpacity(o: number) { this.opacity = o; this.segField?.setOpacity(o); }
+
+  /** Surface smoothing, σ in VOXELS (0 = none). In sdf mode this is the distance blur: it barely
+   *  moves the zero level set, so the silhouette stays faithful to the labelmap, but it smooths
+   *  the shading normal — the difference between a faceted voxel surface and a modelled one. In
+   *  surface mode it is the presence-field Gaussian, which does move the surface outward.
+   *
+   *  Re-bakes immediately (fast path, so a slider stays responsive) and schedules the settle
+   *  refine, exactly as an edit does. */
+  setSmoothing(sigmaVoxels: number) {
+    this.sigma = Math.max(0, sigmaVoxels);
+    this.sdf?.setSmoothing(this.sigma);
+    this.rebake();
+    for (const cb of this.redrawCbs) cb();
+    this.scheduleRefine();
+  }
+  smoothing(): number { return this.sigma; }
 
   /** Notified after every edit (post-rebake) so the app can redraw. */
   onRedraw(cb: () => void) { this.redrawCbs.push(cb); }
