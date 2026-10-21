@@ -3724,13 +3724,13 @@ fn bdist_seg${s}(wp : vec3<f32>) -> f32 {   // SMOOTHED distance from attr.b \u2
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).b;
-}` : ""}${this.interfaceMode ? `
+}
 fn pres_seg${s}(wp : vec3<f32>) -> f32 {   // CRISP in-segment presence (attr.a), linear-sampled for ~1-voxel AA
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 0.0; }
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).a;
-}
+}` : ""}${this.interfaceMode ? `
 fn g1_seg${s}(c : f32, wp : vec3<f32>, dir : vec3<f32>, h : f32) -> f32 {
   // One-sided difference of the SMOOTH interface distance along dir, picking the STEEPER side. The
   // unsigned distance has a V-crease at the surface: a central difference straddling it cancels (fake
@@ -3861,7 +3861,16 @@ fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step :
   // the surface at all, even inward-only, eats the thing being looked at: a vertebral process a
   // few voxels thick erodes away, and the detail that distinguishes one bone from its neighbour
   // goes with it.
-  let d_mm = abs(sdf);
+${this.attrTex && !this.interfaceMode ? `  // \u2026and WHERE the labelmap puts it is the voxel FACE. The JFA seeds both sides of the boundary
+  // at their voxel CENTRES, so |sdf| is the distance to the nearest boundary-voxel centre: it
+  // reads zero on the last inside voxel AND on the first outside one \u2014 a one-voxel plateau
+  // straddling the real surface, which rendered as a shell sitting half a voxel OUTSIDE the
+  // face. That is the step you see when switching between the voxel view (which draws the face)
+  // and any smoothing. The crisp presence says which side of the face a sample is on, so it
+  // recovers the true signed distance: half a voxel in on the inside, half a voxel out on the
+  // outside, and exactly zero at the face.
+  let d_sig = sdf + 0.5 * u_material.seg${s}_params.y * (1.0 - 2.0 * pres_seg${s}(wp));
+  let d_mm = abs(d_sig);` : `  let d_mm = abs(sdf);`}
   if (d_mm > band + step) { return vec4<f32>(0.0); }
   let T = clamp(op0 * seg_op, 0.0, 1.0);      // TARGET surface opacity (per-segment \xD7 field)
   if (T <= 0.0) { return vec4<f32>(0.0); }
@@ -4958,7 +4967,36 @@ var JfaSdfBaker = class {
     p.dispatchWorkgroups(gx, gy, gz);
     p.end();
     dev.queue.submit([enc.finish()]);
-    if (blurSeams) this.blurStage(this.fullBlurPipe, 1, this.attrTex, this.attrScratch, region);
+    if (blurSeams && this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch, region);
+  }
+  /** Re-apply the SMOOTHING only: the distance field does not depend on σ, so re-running the JFA
+   *  for a smoothing change is both wasteful and WRONG — the fast bake's approximate flood differs
+   *  from the refined one by a fraction of a voxel, so the surface visibly shifted back and forth
+   *  as the control moved. This re-derives the attributes and the colour from the EXISTING seeds
+   *  (so the distance is bit-identical) and re-blurs them at the new σ. */
+  resmooth() {
+    const dev = this.dev;
+    this.writeUni(0, [0, 0, 0]);
+    const enc = dev.createCommandEncoder();
+    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: this.seed[this.lastSeed].createView() },
+      { binding: 1, resource: this.labelTex.createView() },
+      { binding: 2, resource: this.sdfTex.createView() },
+      // re-derive colour + the SHARP distance
+      { binding: 3, resource: { buffer: this.uni } },
+      { binding: 4, resource: { buffer: this.palBuf } },
+      { binding: 5, resource: this.attrTex.createView() },
+      { binding: 6, resource: { buffer: this.modeBuf } }
+    ] });
+    const p = enc.beginComputePass();
+    p.setPipeline(this.finalPipe);
+    p.setBindGroup(0, bf);
+    p.dispatchWorkgroups(this.g[0], this.g[1], this.g[2]);
+    p.end();
+    dev.queue.submit([enc.finish()]);
+    const seam = Math.min(1, this.smoothSigma);
+    if (seam > 0) this.blurStage(this.colBlurPipe, seam, this.sdfTex, this.sdfScratch);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch);
   }
   /** Blur the attribute seams of the CURRENT attr texture in place (no re-finalize) — the
    *  cheapest possible settle after a run of rebakeAttr(false) visibility steps. */
@@ -5324,9 +5362,9 @@ var SegmentationLogic = class {
     this.sigma = Math.max(0, sigmaVoxels);
     this.sdf?.setSmoothing(this.sigma);
     this.segField?.setVoxelMode(this.renderMode === "sdf" && this.sigma <= 0);
-    this.rebake();
+    if (this.sdf) this.sdf.resmooth();
+    else this.baker.bakeInto(this.presenceTex, this.palette, this.sigma);
     for (const cb of this.redrawCbs) cb();
-    this.scheduleRefine();
   }
   smoothing() {
     return this.sigma;

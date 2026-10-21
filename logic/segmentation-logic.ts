@@ -239,9 +239,12 @@ export class SegmentationLogic {
     // per-voxel rendering instead (SegmentField.setVoxelMode) — same ray-march, same field, read
     // without interpolation.
     this.segField?.setVoxelMode(this.renderMode === "sdf" && this.sigma <= 0);
-    this.rebake();
+    // NOT rebake(): σ does not enter the distance field, and re-flooding it would swap the
+    // refined distance for the fast bake's approximation — the surface would shift slightly
+    // every time the control moved. resmooth() re-derives the attributes from the same seeds.
+    if (this.sdf) this.sdf.resmooth();
+    else this.baker!.bakeInto(this.presenceTex!, this.palette, this.sigma);
     for (const cb of this.redrawCbs) cb();
-    this.scheduleRefine();
   }
   smoothing(): number { return this.sigma; }
 

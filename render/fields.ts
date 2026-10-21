@@ -469,13 +469,13 @@ fn bdist_seg${s}(wp : vec3<f32>) -> f32 {   // SMOOTHED distance from attr.b —
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).b;
-}`: ""}${this.interfaceMode ? `
+}
 fn pres_seg${s}(wp : vec3<f32>) -> f32 {   // CRISP in-segment presence (attr.a), linear-sampled for ~1-voxel AA
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 0.0; }
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).a;
-}
+}`: ""}${this.interfaceMode ? `
 fn g1_seg${s}(c : f32, wp : vec3<f32>, dir : vec3<f32>, h : f32) -> f32 {
   // One-sided difference of the SMOOTH interface distance along dir, picking the STEEPER side. The
   // unsigned distance has a V-crease at the surface: a central difference straddling it cancels (fake
@@ -606,7 +606,16 @@ fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step :
   // the surface at all, even inward-only, eats the thing being looked at: a vertebral process a
   // few voxels thick erodes away, and the detail that distinguishes one bone from its neighbour
   // goes with it.
-  let d_mm = abs(sdf);
+${this.attrTex && !this.interfaceMode ? `  // …and WHERE the labelmap puts it is the voxel FACE. The JFA seeds both sides of the boundary
+  // at their voxel CENTRES, so |sdf| is the distance to the nearest boundary-voxel centre: it
+  // reads zero on the last inside voxel AND on the first outside one — a one-voxel plateau
+  // straddling the real surface, which rendered as a shell sitting half a voxel OUTSIDE the
+  // face. That is the step you see when switching between the voxel view (which draws the face)
+  // and any smoothing. The crisp presence says which side of the face a sample is on, so it
+  // recovers the true signed distance: half a voxel in on the inside, half a voxel out on the
+  // outside, and exactly zero at the face.
+  let d_sig = sdf + 0.5 * u_material.seg${s}_params.y * (1.0 - 2.0 * pres_seg${s}(wp));
+  let d_mm = abs(d_sig);` : `  let d_mm = abs(sdf);`}
   if (d_mm > band + step) { return vec4<f32>(0.0); }
   let T = clamp(op0 * seg_op, 0.0, 1.0);      // TARGET surface opacity (per-segment × field)
   if (T <= 0.0) { return vec4<f32>(0.0); }

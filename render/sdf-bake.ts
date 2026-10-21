@@ -483,7 +483,32 @@ export class JfaSdfBaker {
     dev.queue.submit([enc.finish()]);
     // blurSeams=false: instant (crisp attr) — right while rapidly stepping visibility.
     // blurSeams=true: the settled quality — still only ~4 passes, no JFA re-sweep.
-    if (blurSeams) this.blurStage(this.fullBlurPipe, 1.0, this.attrTex, this.attrScratch, region);
+    if (blurSeams && this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch, region);
+  }
+
+  /** Re-apply the SMOOTHING only: the distance field does not depend on σ, so re-running the JFA
+   *  for a smoothing change is both wasteful and WRONG — the fast bake's approximate flood differs
+   *  from the refined one by a fraction of a voxel, so the surface visibly shifted back and forth
+   *  as the control moved. This re-derives the attributes and the colour from the EXISTING seeds
+   *  (so the distance is bit-identical) and re-blurs them at the new σ. */
+  resmooth() {
+    const dev = this.dev;
+    this.writeUni(0, [0, 0, 0]);
+    const enc = dev.createCommandEncoder();
+    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: this.seed[this.lastSeed].createView() },
+      { binding: 1, resource: this.labelTex.createView() },
+      { binding: 2, resource: this.sdfTex.createView() },     // re-derive colour + the SHARP distance
+      { binding: 3, resource: { buffer: this.uni } },
+      { binding: 4, resource: { buffer: this.palBuf } },
+      { binding: 5, resource: this.attrTex.createView() },
+      { binding: 6, resource: { buffer: this.modeBuf } },
+    ] });
+    const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(this.g[0], this.g[1], this.g[2]); p.end();
+    dev.queue.submit([enc.finish()]);
+    const seam = Math.min(1.0, this.smoothSigma);
+    if (seam > 0) this.blurStage(this.colBlurPipe, seam, this.sdfTex, this.sdfScratch);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch);
   }
 
   /** Blur the attribute seams of the CURRENT attr texture in place (no re-finalize) — the
