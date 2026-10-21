@@ -452,8 +452,16 @@ export async function buildSpineCompareScene(
           // CHANGED labels' bbox: a level step touches a couple of vertebrae, a few % of the
           // volume — everything downstream (labelmap rewrite, JFA re-flood, attr rebake) runs
           // region-limited over it so stepping stays real-time. Large flips go full-volume.
+          // The region shortcut is only safe for a SMALL change — a level step. Sized to the
+          // region, the JFA's step schedule cannot reach seeds that lie outside it, so a voxel
+          // inside the region whose nearest surface is outside ends up with no seed at all: its
+          // distance reads "nothing here for a metre", the ray skip leaps past the surface, and
+          // the shell is CUT along the region's edge. That is why the two rows clipped
+          // differently at ±3 — identical clip box, but the reference row (14 levels, no discs)
+          // fell under the old "less than half the labels changed" rule and took the region
+          // path, while SPINEPS (40 labels with discs) did not and rebaked in full.
           let bbox: { lo: Vec3; hi: Vec3 } | null = null;
-          if (changed.length <= row.levels.size / 2) {
+          if (changed.length <= 6) {
             const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
             for (const l of changed) {
               const g = row.levels.get(l)!;

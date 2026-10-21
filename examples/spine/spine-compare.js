@@ -5771,7 +5771,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
           }
           if (!changed.length) continue;
           let bbox = null;
-          if (changed.length <= row.levels.size / 2) {
+          if (changed.length <= 6) {
             const lo2 = [Infinity, Infinity, Infinity], hi2 = [-Infinity, -Infinity, -Infinity];
             for (const l of changed) {
               const g = row.levels.get(l);
