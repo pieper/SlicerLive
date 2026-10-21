@@ -381,7 +381,7 @@ export class JfaSdfBaker {
    *  so neighbouring-label boundaries are smooth, not a voxel staircase. Distance blur stays at the
    *  same σ (dropping it re-introduces Voronoi facets — crispness comes from the render band, not from
    *  under-smoothing). Higher quality lives in the resident texture, so camera renders stay cheap. */
-  refine() { this.sweep([2, 1], this.smoothSigma, 1.0); }
+  refine() { this.sweep([2, 1], this.smoothSigma, Math.min(1.0, this.smoothSigma)); }
 
   /** REGION-LIMITED refine: re-flood ONLY `regionIjk` (padded-grid coords) after a labelmap edit
    *  confined to it — a per-vertebra visibility flip re-bakes a few % of the grid instead of the
@@ -447,7 +447,9 @@ export class JfaSdfBaker {
     ] });
     const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(g[0], g[1], g[2]); p.end();
     dev.queue.submit([enc.finish()]);
-    this.blurStage(this.colBlurPipe, 1.0, this.sdfTex, this.sdfScratch, region);
+    // The colour-seam blur follows the smoothing setting too: at a low σ the boundary between
+    // two labels should be as crisp as the surface is, not a fixed soft gradient.
+    if (this.smoothSigma > 0) this.blurStage(this.colBlurPipe, Math.min(1.0, this.smoothSigma), this.sdfTex, this.sdfScratch, region);
     if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch, region);
   }
 

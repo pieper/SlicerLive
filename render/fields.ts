@@ -601,14 +601,12 @@ ${this.attrTex ? `  let at = textureLoad(t_attr${s}, idx, 0);
 // morphs smoothly into the volume contribution across a blurred surface↔volume boundary.
 fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
   if (u_material.seg${s}_params.z > 0.5) { return voxels_seg${s}(wp, rd, band, step, seg_op, op0); }
-${this.attrTex && !this.interfaceMode ? `  // Smoothing may ERODE the surface but never GROW it: d = max(sharp, smoothed), with negative
-  // meaning inside. Where the blur rounds a voxel staircase off, the smoothed value is the larger
-  // (less inside) one and wins, so the silhouette smooths. Where the blur would bridge a gap —
-  // the disc space between two vertebrae, a vessel between two organs — the smoothed value is the
-  // smaller one and is ignored, so the gap survives at every setting. Smoothing that can close a
-  // gap is not smoothing, it is a different segmentation.
-  let d_use = max(sdf, bdist_seg${s}(wp));
-  let d_mm = abs(d_use);` : `  let d_mm = abs(sdf);`}
+  // The surface is WHERE THE LABELMAP PUTS IT, at every smoothing setting. Smoothing changes
+  // only the normal (below), i.e. how the surface is shaded — not where it is. Letting it move
+  // the surface at all, even inward-only, eats the thing being looked at: a vertebral process a
+  // few voxels thick erodes away, and the detail that distinguishes one bone from its neighbour
+  // goes with it.
+  let d_mm = abs(sdf);
   if (d_mm > band + step) { return vec4<f32>(0.0); }
   let T = clamp(op0 * seg_op, 0.0, 1.0);      // TARGET surface opacity (per-segment × field)
   if (T <= 0.0) { return vec4<f32>(0.0); }
