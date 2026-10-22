@@ -614,6 +614,11 @@ function handleWs(req: Request): Response {
       gizmo.setActive(null);
       scene.syncUniforms();
     }
+    // Same reason, for the appearance: Shift mutates the shared field's window in place, and a
+    // fresh client's slider starts at 0 — so a new viewer would inherit the previous viewer's
+    // Shift while the control claims 0. The preset does NOT need this: hello reports curPreset,
+    // so the picker and the render agree whatever a previous viewer chose.
+    if (xformTarget && curClimBase) { curShift = 0; applyAppearance(xformTarget); }
     socket.send(JSON.stringify({
       type: "hello", proto: PROTO, center, radius, name: sceneName, sceneUrl: SCENE_URL, demo: DEMO,
       rate: GPU_RATE_PER_HR, scaledownS: SCALEDOWN_S,
