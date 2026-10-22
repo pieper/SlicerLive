@@ -149,8 +149,44 @@ let currentScene = "";
 let curRange: [number, number] = [0, 255];   // current specimen scalar range (for shift)
 let curPreset = "";                          // current specimen VP preset name
 let curProxyLevel = 0, curProxyDims = "", curFullDims = "";   // what the proxy shows vs the full target
+// The appearance the current specimen is SHOWING: the preset's bake plus the live Shift. Kept
+// because a field can arrive LATER than the appearance (the full-res upgrade swaps in a field
+// baked with the scene's default preset), and because Shift is an offset FROM the bake's clim —
+// re-deriving it from the field's current clim would make every drag cumulative.
+let curLut: Uint8Array | null = null;
+let curClimBase: [number, number] | null = null;
+let curShift = 0;
+
+/** Record a preset bake as the current appearance (Shift re-anchors to it). */
+function rememberBake(lut: Uint8Array, clim: [number, number]): void {
+  curLut = lut; curClimBase = [clim[0], clim[1]];
+}
+
+/** Put the current appearance (bake + Shift) on `field`, WITHOUT flushing — for a caller that is
+ *  about to scene.build() anyway (build packs every field's uniforms itself). */
+function setAppearance(field: ImageField): void {
+  if (!curClimBase) return;
+  const span = curClimBase[1] - curClimBase[0];
+  if (curLut) field.setLUT(curLut);   // a VP preset was picked; otherwise keep the scene's OWN transfer function
+  field.setClim(curClimBase[0] + curShift * span, curClimBase[1] + curShift * span);
+}
+
+/** Put the current appearance on `field` and FLUSH it to the GPU — for a LIVE change to a scene
+ *  that is already built. setLUT writes its own 256-entry texture, so a preset change shows up on
+ *  the next frame by itself; clim lives in the material uniform, which is re-packed ONLY by
+ *  build()/syncUniforms(). Without that flush a clim-only change — exactly what Shift is — never
+ *  reaches the shader and the slider does nothing, silently.
+ *  Regression: render/test/verify-vr-shift.ts. */
+function applyAppearance(field: ImageField): void {
+  setAppearance(field);
+  scene.syncUniforms();
+}
 const fieldCache = new Map<string, ImageField>();
+/** The unshifted appearance recorded for each cached field. Shift mutates a field's window in
+ *  place, so the field alone can't say what "unshifted" looked like; this can. */
+const bakeCache = new Map<string, { lut: Uint8Array; clim: [number, number] }>();
 function cacheField(name: string, field: ImageField): void {
+  if (curLut && curClimBase) bakeCache.set(name, { lut: curLut, clim: [curClimBase[0], curClimBase[1]] });
   // NOTE: no GPU-texture destroy here yet — freeing a texture that may still be referenced by
   // in-flight render commands crashed the container. VRAM eviction needs a deferred/idle-time free.
   fieldCache.set(name, field);
@@ -180,9 +216,16 @@ async function loadScene(name: string, onProgress?: (done: number, total: number
   pendingUpgrade = null;
   notifyRefined = onRefined ?? null;
   curProxyLevel = 0; curProxyDims = ""; curFullDims = "";
+  curLut = null; curClimBase = null; curShift = 0;   // a new specimen starts at its own preset, unshifted
   if (name === "multi") {
     const sc = await buildMultiVolume(gpu.device, (n) => { mb += n; });
     xformTarget = sc.pano.field;
+    // Multi has no manifest range/preset: the LUT target's own window is the baseline, and leaving
+    // curLut null means a Shift moves the CT's OWN transfer function (Slicer's Shift semantics)
+    // rather than forcing a specimen VP onto a cardiac CT.
+    curRange = xformTarget.getClim();
+    curClimBase = xformTarget.getClim();
+    curPreset = "";
     xformC0 = sc.pano.field.worldCenter();
     gizmo = new TransformGizmoField(xformC0, 88);
     fields = [...sc.fields, gizmo];
@@ -197,6 +240,16 @@ async function loadScene(name: string, onProgress?: (done: number, total: number
     const cached = fieldCache.get(name);
     if (cached) {
       setupSpecimenScene(cached, spec);            // full res already in VRAM — no proxy needed
+      // Restore the appearance this specimen was BUILT with (the field itself was mutated in place
+      // by any earlier Shift), then apply it at the reset shift — so a revisit looks like a first
+      // visit and the client's zeroed slider tells the truth. Also re-anchors Shift: without a
+      // baseline applyAppearance has nothing to offset and Shift is dead on a revisited specimen.
+      const bake = bakeCache.get(name);
+      if (bake) rememberBake(bake.lut, bake.clim);
+      else curClimBase = cached.getClim();
+      curRange = curClimBase ?? cached.getClim();
+      curPreset = spec.preset;
+      setAppearance(cached);   // scene.build() at the end of loadScene does the packing
     } else if (spec.zarrBase) {
       // MULTISCALE: render the coarsest level immediately (a low-res proxy), then fetch the full
       // resolution in the BACKGROUND and swap it in — so a big volume is interactive in ~1s instead
@@ -207,6 +260,7 @@ async function loadScene(name: string, onProgress?: (done: number, total: number
       const vp = await fetchVP(meta.preset || spec.preset).catch(() => null);
       const mkField = (zv: { data: ArrayLike<number> & ArrayBufferView; dims: [number, number, number]; range: [number, number] }, ijk: number[]) => {
         const { lut, clim, shade } = vp ? lutFromVP(vp, zv.range) : { lut: buildGrayLut(), clim: zv.range, shade: [0.25, 0.75, 0.5, 24] as [number, number, number, number] };
+        if (!curLut) rememberBake(lut, clim);   // the proxy sets the baseline; the background full-res must NOT clobber a preset picked meanwhile
         // ImageField stores uint8 as r8unorm (native, 4× cheaper); any other dtype promotes to f32.
         const d: Float32Array | Uint8Array | Uint16Array = zv.data instanceof Uint8Array || zv.data instanceof Uint16Array || zv.data instanceof Float32Array
           ? zv.data : Float32Array.from(zv.data as ArrayLike<number>);
@@ -256,6 +310,7 @@ async function loadScene(name: string, onProgress?: (done: number, total: number
       const nrrd = await loadNrrd(spec.url, (n) => { mb += n; });
       const vp = await fetchVP(spec.preset).catch(() => null);
       const { lut, clim, shade } = vp ? lutFromVP(vp, nrrd.range) : { lut: buildGrayLut(), clim: nrrd.range, shade: [0.25, 0.75, 0.5, 24] as [number, number, number, number] };
+      rememberBake(lut, clim);
       const field = new ImageField(gpu.device, nrrd.data, nrrd.dims, [1, 1, 1], lut, { clim, ijkToRAS: nrrd.ijkToRAS, shade });
       cacheField(name, field);
       setupSpecimenScene(field, spec);
@@ -617,20 +672,22 @@ function handleWs(req: Request): Response {
       else if (m.type === "lut") {
         // Live LUT/shift on the current specimen (the SlicerLive popup control). shift is a fraction
         // of the scalar range that offsets the transfer function along the intensity axis (Slicer VR
-        // "Shift"). Rebuild the LUT from the chosen VP preset and re-window; one fresh frame follows.
+        // "Shift"). A preset change re-bakes the LUT; a Shift just re-windows the bake in place.
+        // Either way the appearance is flushed to the GPU and one fresh frame follows.
         const lm = m as { preset?: string; shift?: number };
-        if (xformTarget && currentScene !== "multi") {
+        if (xformTarget) {
           const preset = lm.preset ?? curPreset;
-          const shift = lm.shift ?? 0;
-          const vp = await fetchVP(preset).catch(() => null);
-          if (vp) {
-            const { lut, clim } = lutFromVP(vp, curRange);
-            const span = clim[1] - clim[0];
-            xformTarget.setLUT(lut);
-            xformTarget.setClim(clim[0] + shift * span, clim[1] + shift * span);
-            curPreset = preset;
-            gen++; abortWait();
+          curShift = lm.shift ?? 0;
+          // Re-bake ONLY when the preset actually CHANGES. A Shift drag sends a message per tick,
+          // and the VP JSON is fetched over the network — re-fetching it per tick put a round-trip
+          // in the middle of every drag, and made the baseline the shift anchors to re-derive
+          // itself mid-gesture. The bake is appearance state (rememberBake); Shift just offsets it.
+          if (preset && preset !== curPreset) {
+            const vp = await fetchVP(preset).catch(() => null);
+            if (vp) { const { lut, clim } = lutFromVP(vp, curRange); rememberBake(lut, clim); curPreset = preset; }
           }
+          applyAppearance(xformTarget);   // the syncUniforms() in here is what makes Shift visible
+          gen++; abortWait();
         }
       }
       else if (m.type === "caps") {
@@ -684,6 +741,7 @@ function handleWs(req: Request): Response {
         xformTarget = f; f.setWorldTransform(xformM);   // keep the transform the user set on the proxy
         fields = gizmo ? [f, gizmo] : [f];
         scene.build(fields); scene.syncUniforms();
+        applyAppearance(f);   // the upgrade was baked with the DEFAULT preset — keep the preset/Shift on screen
         gen++; abortWait();
         console.log("[live-renderer] upgraded to full resolution");
         notifyRefined?.();
