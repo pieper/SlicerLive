@@ -2,9 +2,15 @@
 async function initDevice() {
   const gpu = navigator.gpu;
   if (!gpu) throw new Error("WebGPU not available (need Chrome/Edge/Safari or Deno --unstable-webgpu)");
-  const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+  const adapter = await gpu.requestAdapter({
+    powerPreference: "high-performance"
+  });
   if (!adapter) throw new Error("no WebGPU adapter");
-  const want = ["float32-filterable", "timestamp-query", "shader-f16"].filter((f) => adapter.features.has(f));
+  const want = [
+    "float32-filterable",
+    "timestamp-query",
+    "shader-f16"
+  ].filter((f) => adapter.features.has(f));
   const lim = adapter.limits;
   const requiredLimits = {};
   const raise = (k) => {
@@ -14,8 +20,15 @@ async function initDevice() {
   raise("maxBufferSize");
   raise("maxStorageBufferBindingSize");
   raise("maxTextureDimension3D");
-  const device = await adapter.requestDevice({ requiredFeatures: want, requiredLimits });
-  return { adapter, device, features: new Set(want) };
+  const device = await adapter.requestDevice({
+    requiredFeatures: want,
+    requiredLimits
+  });
+  return {
+    adapter,
+    device,
+    features: new Set(want)
+  };
 }
 
 // render/mat4.ts
@@ -118,7 +131,11 @@ function invert(a) {
   o[15] = (m[8] * b03 - m[9] * b01 + m[10] * b00) * det;
   return o;
 }
-function patientToTexture(dims, spacing, center = [0, 0, 0]) {
+function patientToTexture(dims, spacing, center = [
+  0,
+  0,
+  0
+]) {
   const m = new Float32Array(16);
   for (let a = 0; a < 3; a++) {
     const s = 1 / (spacing[a] * dims[a]);
@@ -128,11 +145,27 @@ function patientToTexture(dims, spacing, center = [0, 0, 0]) {
   m[15] = 1;
   return m;
 }
-function volumeAABB(dims, spacing, center = [0, 0, 0]) {
-  const ext = [dims[0] * spacing[0] / 2, dims[1] * spacing[1] / 2, dims[2] * spacing[2] / 2];
+function volumeAABB(dims, spacing, center = [
+  0,
+  0,
+  0
+]) {
+  const ext = [
+    dims[0] * spacing[0] / 2,
+    dims[1] * spacing[1] / 2,
+    dims[2] * spacing[2] / 2
+  ];
   return [
-    [center[0] - ext[0], center[1] - ext[1], center[2] - ext[2]],
-    [center[0] + ext[0], center[1] + ext[1], center[2] + ext[2]]
+    [
+      center[0] - ext[0],
+      center[1] - ext[1],
+      center[2] - ext[2]
+    ],
+    [
+      center[0] + ext[0],
+      center[1] + ext[1],
+      center[2] + ext[2]
+    ]
   ];
 }
 function transpose4(m) {
@@ -155,7 +188,15 @@ function texToRASFromIjkToRAS(ijkToRAS, dims) {
 }
 function volumeAABBFromIjkToRAS(ijkToRAS, dims) {
   const t2r = texToRASFromIjkToRAS(ijkToRAS, dims);
-  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  const lo = [
+    Infinity,
+    Infinity,
+    Infinity
+  ], hi = [
+    -Infinity,
+    -Infinity,
+    -Infinity
+  ];
   for (let c = 0; c < 8; c++) {
     const u = c & 1, v = c >> 1 & 1, w = c >> 2 & 1;
     for (let r = 0; r < 3; r++) {
@@ -164,18 +205,29 @@ function volumeAABBFromIjkToRAS(ijkToRAS, dims) {
       if (p > hi[r]) hi[r] = p;
     }
   }
-  return [lo, hi];
+  return [
+    lo,
+    hi
+  ];
 }
 function applyMat4(m, p) {
   const x = m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12];
   const y = m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13];
   const z = m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14];
   const w = m[3] * p[0] + m[7] * p[1] + m[11] * p[2] + m[15] || 1;
-  return [x / w, y / w, z / w];
+  return [
+    x / w,
+    y / w,
+    z / w
+  ];
 }
 function spacingFromIjkToRAS(ijkToRAS) {
   const col = (c) => Math.hypot(ijkToRAS[c], ijkToRAS[4 + c], ijkToRAS[8 + c]);
-  return [col(0), col(1), col(2)];
+  return [
+    col(0),
+    col(1),
+    col(2)
+  ];
 }
 
 // render/slice-renderer.ts
@@ -346,9 +398,57 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
 `
 );
 var BASES = {
-  axial: { uDir: [-1, 0, 0], vDir: [0, 1, 0], nDir: [0, 0, 1] },
-  coronal: { uDir: [-1, 0, 0], vDir: [0, 0, 1], nDir: [0, 1, 0] },
-  sagittal: { uDir: [0, -1, 0], vDir: [0, 0, 1], nDir: [1, 0, 0] }
+  axial: {
+    uDir: [
+      -1,
+      0,
+      0
+    ],
+    vDir: [
+      0,
+      1,
+      0
+    ],
+    nDir: [
+      0,
+      0,
+      1
+    ]
+  },
+  coronal: {
+    uDir: [
+      -1,
+      0,
+      0
+    ],
+    vDir: [
+      0,
+      0,
+      1
+    ],
+    nDir: [
+      0,
+      1,
+      0
+    ]
+  },
+  sagittal: {
+    uDir: [
+      0,
+      -1,
+      0
+    ],
+    vDir: [
+      0,
+      0,
+      1
+    ],
+    nDir: [
+      1,
+      0,
+      0
+    ]
+  }
 };
 var dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 function ijkAxisForRasAxis(ijkToRAS, rasAxis) {
@@ -368,7 +468,11 @@ function slicerDefaultOffset01(orient, dims, ijkToRAS, rasLo, rasHi) {
   const n = nAbs[0] >= nAbs[1] && nAbs[0] >= nAbs[2] ? 0 : nAbs[1] >= nAbs[2] ? 1 : 2;
   const a = ijkAxisForRasAxis(ijkToRAS, n);
   const m = Math.floor((dims[a] - 1) / 2);
-  const ijk = [(dims[0] - 1) / 2, (dims[1] - 1) / 2, (dims[2] - 1) / 2];
+  const ijk = [
+    (dims[0] - 1) / 2,
+    (dims[1] - 1) / 2,
+    (dims[2] - 1) / 2
+  ];
   ijk[a] = m;
   const ras = ijkToRAS[n * 4 + 0] * ijk[0] + ijkToRAS[n * 4 + 1] * ijk[1] + ijkToRAS[n * 4 + 2] * ijk[2] + ijkToRAS[n * 4 + 3];
   const span = rasHi[n] - rasLo[n];
@@ -382,7 +486,6 @@ var SliceRenderer = class {
   nnSampler;
   ubuf;
   u = new Float32Array(80);
-  // p2t(16) origin(4) uvec(4) vvec(4) params(4) size(4) | p2tFg(16) fgParams(4) p2tLabel(16) labelParams(4)
   bind;
   // Adaptive downsample (moving frames): render the reslice into a low-res target, then bilinear-blit
   // it up to the view — the 2D analogue of SceneRenderer.renderUpscaled. Lets a slice cell degrade
@@ -399,7 +502,6 @@ var SliceRenderer = class {
   scalarTex;
   fgTex;
   lutTex;
-  // 256x2 rgba8: row 0 bg LUT, row 1 fg LUT
   labelVolTex;
   labelLutTex;
   // actual in-plane extents (mm) spanned by the LAST rendered viewport, aspect-corrected so
@@ -408,35 +510,89 @@ var SliceRenderer = class {
   vSpanMm = 0;
   // volume geometry + current plane
   p2t = new Float32Array(16);
-  rasLo = [-1, -1, -1];
-  rasHi = [1, 1, 1];
+  rasLo = [
+    -1,
+    -1,
+    -1
+  ];
+  rasHi = [
+    1,
+    1,
+    1
+  ];
   orient = "axial";
   offset01 = 0.5;
   // Per-orientation pan (mm along the plane's uDir/vDir) + zoom (1 = fitted). Slicer-style
   // slice navigation: pan translates the in-plane view centre, zoom scales the field of view.
   viewState = {
-    axial: { panU: 0, panV: 0, zoom: 1 },
-    coronal: { panU: 0, panV: 0, zoom: 1 },
-    sagittal: { panU: 0, panV: 0, zoom: 1 }
+    axial: {
+      panU: 0,
+      panV: 0,
+      zoom: 1
+    },
+    coronal: {
+      panU: 0,
+      panV: 0,
+      zoom: 1
+    },
+    sagittal: {
+      panU: 0,
+      panV: 0,
+      zoom: 1
+    }
   };
-  cX = [0, 0, 0];
-  // in-plane centre of the LAST rendered frame (for viewToTex picking)
+  cX = [
+    0,
+    0,
+    0
+  ];
   // Optional per-orientation basis override (reslice along a volume's own axes). null = the
   // anatomical preset.
   basisOverride = {};
   constructor(gpu, format = DEFAULT_FORMAT) {
     this.dev = gpu.device;
     this.format = format;
-    const m = this.dev.createShaderModule({ code: SHADER });
+    const m = this.dev.createShaderModule({
+      code: SHADER
+    });
     this.pipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: { module: m, entryPoint: "vs_main" },
-      fragment: { module: m, entryPoint: "fs_main", targets: [{ format }] },
-      primitive: { topology: "triangle-list", cullMode: "none" }
+      vertex: {
+        module: m,
+        entryPoint: "vs_main"
+      },
+      fragment: {
+        module: m,
+        entryPoint: "fs_main",
+        targets: [
+          {
+            format
+          }
+        ]
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none"
+      }
     });
-    this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
-    this.nnSampler = this.dev.createSampler({ magFilter: "nearest", minFilter: "nearest", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
-    this.ubuf = this.dev.createBuffer({ size: this.u.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.sampler = this.dev.createSampler({
+      magFilter: "linear",
+      minFilter: "linear",
+      addressModeU: "clamp-to-edge",
+      addressModeV: "clamp-to-edge",
+      addressModeW: "clamp-to-edge"
+    });
+    this.nnSampler = this.dev.createSampler({
+      magFilter: "nearest",
+      minFilter: "nearest",
+      addressModeU: "clamp-to-edge",
+      addressModeV: "clamp-to-edge",
+      addressModeW: "clamp-to-edge"
+    });
+    this.ubuf = this.dev.createBuffer({
+      size: this.u.byteLength,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
     this.setWindowLevel(255, 127);
     this.setOverlayOpacity(0.55);
   }
@@ -446,31 +602,95 @@ var SliceRenderer = class {
   emptyPalette;
   noLabels() {
     if (!this.emptyLabels) {
-      this.emptyLabels = this.dev.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-      this.dev.queue.writeTexture({ texture: this.emptyLabels }, new Uint8Array(1), { bytesPerRow: 1, rowsPerImage: 1 }, [1, 1, 1]);
+      this.emptyLabels = this.dev.createTexture({
+        size: [
+          1,
+          1,
+          1
+        ],
+        dimension: "3d",
+        format: "r8uint",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dev.queue.writeTexture({
+        texture: this.emptyLabels
+      }, new Uint8Array(1), {
+        bytesPerRow: 1,
+        rowsPerImage: 1
+      }, [
+        1,
+        1,
+        1
+      ]);
     }
     return this.emptyLabels;
   }
   noPalette() {
     if (!this.emptyPalette) {
-      this.emptyPalette = this.dev.createTexture({ size: [256, 2], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-      this.dev.queue.writeTexture({ texture: this.emptyPalette }, new Uint8Array(256 * 2 * 4), { bytesPerRow: 256 * 4 }, [256, 2]);
+      this.emptyPalette = this.dev.createTexture({
+        size: [
+          256,
+          2
+        ],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dev.queue.writeTexture({
+        texture: this.emptyPalette
+      }, new Uint8Array(256 * 2 * 4), {
+        bytesPerRow: 256 * 4
+      }, [
+        256,
+        2
+      ]);
     }
     return this.emptyPalette;
   }
   emptyScalar;
   noScalar() {
     if (!this.emptyScalar) {
-      this.emptyScalar = this.dev.createTexture({ size: [1, 1, 1], dimension: "3d", format: "r32float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-      this.dev.queue.writeTexture({ texture: this.emptyScalar }, new Float32Array(1), { bytesPerRow: 4, rowsPerImage: 1 }, [1, 1, 1]);
+      this.emptyScalar = this.dev.createTexture({
+        size: [
+          1,
+          1,
+          1
+        ],
+        dimension: "3d",
+        format: "r32float",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dev.queue.writeTexture({
+        texture: this.emptyScalar
+      }, new Float32Array(1), {
+        bytesPerRow: 4,
+        rowsPerImage: 1
+      }, [
+        1,
+        1,
+        1
+      ]);
     }
     return this.emptyScalar;
   }
   emptyLut;
   noLut() {
     if (!this.emptyLut) {
-      this.emptyLut = this.dev.createTexture({ size: [256, 2], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-      this.dev.queue.writeTexture({ texture: this.emptyLut }, new Uint8Array(256 * 2 * 4), { bytesPerRow: 256 * 4 }, [256, 2]);
+      this.emptyLut = this.dev.createTexture({
+        size: [
+          256,
+          2
+        ],
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dev.queue.writeTexture({
+        texture: this.emptyLut
+      }, new Uint8Array(256 * 2 * 4), {
+        bytesPerRow: 256 * 4
+      }, [
+        256,
+        2
+      ]);
     }
     return this.emptyLut;
   }
@@ -495,14 +715,43 @@ var SliceRenderer = class {
       if (this.scalarTex) this.rebind();
       return;
     }
-    if (!this.lutTex) this.lutTex = this.dev.createTexture({ size: [256, 2], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    if (!this.lutTex) this.lutTex = this.dev.createTexture({
+      size: [
+        256,
+        2
+      ],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+    });
     const gray = new Uint8Array(256 * 4);
     for (let i = 0; i < 256; i++) {
       gray[i * 4] = gray[i * 4 + 1] = gray[i * 4 + 2] = i;
       gray[i * 4 + 3] = 255;
     }
-    this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 0] }, bg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
-    this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 1] }, fg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
+    this.dev.queue.writeTexture({
+      texture: this.lutTex,
+      origin: [
+        0,
+        0
+      ]
+    }, bg ?? gray, {
+      bytesPerRow: 256 * 4
+    }, [
+      256,
+      1
+    ]);
+    this.dev.queue.writeTexture({
+      texture: this.lutTex,
+      origin: [
+        0,
+        1
+      ]
+    }, fg ?? gray, {
+      bytesPerRow: 256 * 4
+    }, [
+      256,
+      1
+    ]);
     this.u[35] = bg ? 1 : 0;
     this.u[58] = fg ? 1 : 0;
     if (this.scalarTex) this.rebind();
@@ -516,9 +765,23 @@ var SliceRenderer = class {
     if (table && n > 0) {
       if (!this.labelLutTex || this.labelLutTex.width !== n) {
         this.labelLutTex?.destroy();
-        this.labelLutTex = this.dev.createTexture({ size: [n, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+        this.labelLutTex = this.dev.createTexture({
+          size: [
+            n,
+            1
+          ],
+          format: "rgba8unorm",
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+        });
       }
-      this.dev.queue.writeTexture({ texture: this.labelLutTex }, table, { bytesPerRow: n * 4 }, [n, 1]);
+      this.dev.queue.writeTexture({
+        texture: this.labelLutTex
+      }, table, {
+        bytesPerRow: n * 4
+      }, [
+        n,
+        1
+      ]);
     }
     this.u[76] = tex && table ? opacity : 0;
     this.u[77] = n;
@@ -527,8 +790,26 @@ var SliceRenderer = class {
   emptyOverlay;
   transparentOverlay() {
     if (!this.emptyOverlay) {
-      this.emptyOverlay = this.dev.createTexture({ size: [1, 1, 1], dimension: "3d", format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-      this.dev.queue.writeTexture({ texture: this.emptyOverlay }, new Uint16Array(4), { bytesPerRow: 8, rowsPerImage: 1 }, [1, 1, 1]);
+      this.emptyOverlay = this.dev.createTexture({
+        size: [
+          1,
+          1,
+          1
+        ],
+        dimension: "3d",
+        format: "rgba16float",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      this.dev.queue.writeTexture({
+        texture: this.emptyOverlay
+      }, new Uint16Array(4), {
+        bytesPerRow: 8,
+        rowsPerImage: 1
+      }, [
+        1,
+        1,
+        1
+      ]);
     }
     return this.emptyOverlay;
   }
@@ -553,7 +834,11 @@ var SliceRenderer = class {
     const n = this.basisOf(orient).nDir;
     const { lo, hi } = this.extentAlong(n);
     const have = dot3(ras, n), want = Math.max(lo, Math.min(hi, have));
-    return [ras[0] + n[0] * (want - have), ras[1] + n[1] * (want - have), ras[2] + n[2] * (want - have)];
+    return [
+      ras[0] + n[0] * (want - have),
+      ras[1] + n[1] * (want - have),
+      ras[2] + n[2] * (want - have)
+    ];
   }
   basisOf(orient) {
     return this.basisOverride[orient] ?? BASES[orient];
@@ -573,7 +858,10 @@ var SliceRenderer = class {
       if (t < lo) lo = t;
       if (t > hi) hi = t;
     }
-    return { lo, hi };
+    return {
+      lo,
+      hi
+    };
   }
   /** Volume geometry: patientToTexture (RAS->tex[0,1], encodes ijkToRAS) + the RAS
    *  bounding box (for plane extents/scrub range). Get both from the ImageField. */
@@ -605,17 +893,52 @@ var SliceRenderer = class {
     this.bind = this.dev.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: { buffer: this.ubuf } },
-        { binding: 1, resource: this.sampler },
-        { binding: 2, resource: this.scalarTex.createView() },
-        { binding: 3, resource: (this.overlay ?? this.transparentOverlay()).createView() },
-        { binding: 4, resource: this.nnSampler },
-        { binding: 5, resource: (this.labels ?? this.noLabels()).createView() },
-        { binding: 6, resource: (this.palette ?? this.noPalette()).createView() },
-        { binding: 7, resource: (this.fgTex ?? this.noScalar()).createView() },
-        { binding: 8, resource: (this.lutTex ?? this.noLut()).createView() },
-        { binding: 9, resource: (this.labelVolTex ?? this.noScalar()).createView() },
-        { binding: 10, resource: (this.labelLutTex ?? this.noPalette()).createView() }
+        {
+          binding: 0,
+          resource: {
+            buffer: this.ubuf
+          }
+        },
+        {
+          binding: 1,
+          resource: this.sampler
+        },
+        {
+          binding: 2,
+          resource: this.scalarTex.createView()
+        },
+        {
+          binding: 3,
+          resource: (this.overlay ?? this.transparentOverlay()).createView()
+        },
+        {
+          binding: 4,
+          resource: this.nnSampler
+        },
+        {
+          binding: 5,
+          resource: (this.labels ?? this.noLabels()).createView()
+        },
+        {
+          binding: 6,
+          resource: (this.palette ?? this.noPalette()).createView()
+        },
+        {
+          binding: 7,
+          resource: (this.fgTex ?? this.noScalar()).createView()
+        },
+        {
+          binding: 8,
+          resource: (this.lutTex ?? this.noLut()).createView()
+        },
+        {
+          binding: 9,
+          resource: (this.labelVolTex ?? this.noScalar()).createView()
+        },
+        {
+          binding: 10,
+          resource: (this.labelLutTex ?? this.noPalette()).createView()
+        }
       ]
     });
   }
@@ -676,7 +999,10 @@ var SliceRenderer = class {
     const u = this.extentAlong(b.uDir), v = this.extentAlong(b.vDir);
     const uExt = u.hi - u.lo, vExt = v.hi - v.lo;
     const uS0 = Math.max(uExt, vExt * aspectWH);
-    return { uS0, vS0: uS0 / aspectWH };
+    return {
+      uS0,
+      vS0: uS0 / aspectWH
+    };
   }
   /** The complete in-plane view frame for an orientation at a given viewport aspect, folding
    *  in pan (mm along uDir/vDir) + zoom. Single source of truth shared by drawInto, rasToView,
@@ -688,7 +1014,11 @@ var SliceRenderer = class {
     const vs = this.viewState[orient];
     const { uS0, vS0 } = this.fitUV(orient, aspectWH);
     const uS = uS0 / vs.zoom, vS = vS0 / vs.zoom;
-    const c = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    const c = [
+      (this.rasLo[0] + this.rasHi[0]) / 2,
+      (this.rasLo[1] + this.rasHi[1]) / 2,
+      (this.rasLo[2] + this.rasHi[2]) / 2
+    ];
     const nx = this.extentAlong(b.nDir);
     const want = nx.lo + Math.max(0, Math.min(1, offset01)) * (nx.hi - nx.lo);
     const have = dot3(c, b.nDir);
@@ -698,7 +1028,12 @@ var SliceRenderer = class {
     c[0] += b.uDir[0] * vs.panU + b.vDir[0] * vs.panV;
     c[1] += b.uDir[1] * vs.panU + b.vDir[1] * vs.panV;
     c[2] += b.uDir[2] * vs.panU + b.vDir[2] * vs.panV;
-    return { b, c, uS, vS };
+    return {
+      b,
+      c,
+      uS,
+      vS
+    };
   }
   /** Zoom factor for an orientation (1 = fitted). */
   zoom(orient) {
@@ -723,7 +1058,11 @@ var SliceRenderer = class {
   }
   /** Reset pan/zoom for an orientation to the fitted view. */
   resetView(orient) {
-    this.viewState[orient] = { panU: 0, panV: 0, zoom: 1 };
+    this.viewState[orient] = {
+      panU: 0,
+      panV: 0,
+      zoom: 1
+    };
   }
   /** Snapshot per-orientation pan+zoom (e.g. to persist a view across reloads). */
   getViewState() {
@@ -733,7 +1072,9 @@ var SliceRenderer = class {
   setViewState(vs) {
     for (const k of Object.keys(vs)) {
       const v = vs[k];
-      if (v && Number.isFinite(v.zoom) && v.zoom > 0) this.viewState[k] = { ...v };
+      if (v && Number.isFinite(v.zoom) && v.zoom > 0) this.viewState[k] = {
+        ...v
+      };
     }
   }
   /** Mirror Slicer's in-plane navigation for an orientation: drive pan + zoom from the slice
@@ -746,11 +1087,23 @@ var SliceRenderer = class {
     const aspect = fovX / Math.max(fovY, 1e-6);
     const { uS0 } = this.fitUV(orient, aspect);
     const zoom = Math.max(1e-3, uS0 / Math.max(fovX, 1e-6));
-    const volC = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
-    const d = [centerRAS[0] - volC[0], centerRAS[1] - volC[1], centerRAS[2] - volC[2]];
+    const volC = [
+      (this.rasLo[0] + this.rasHi[0]) / 2,
+      (this.rasLo[1] + this.rasHi[1]) / 2,
+      (this.rasLo[2] + this.rasHi[2]) / 2
+    ];
+    const d = [
+      centerRAS[0] - volC[0],
+      centerRAS[1] - volC[1],
+      centerRAS[2] - volC[2]
+    ];
     const panU = d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2];
     const panV = d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2];
-    this.viewState[orient] = { panU, panV, zoom };
+    this.viewState[orient] = {
+      panU,
+      panV,
+      zoom
+    };
   }
   /** The current pan/zoom of a plane expressed the way Slicer's slice node stores it: in-plane centre
    *  (RAS, without the out-of-plane offset which the caller owns) + field of view (mm) — the inverse
@@ -760,13 +1113,21 @@ var SliceRenderer = class {
     const st = this.viewState[orient];
     const { uS0, vS0 } = this.fitUV(orient, aspectWH);
     const fovX = uS0 / st.zoom, fovY = vS0 / st.zoom;
-    const volC = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    const volC = [
+      (this.rasLo[0] + this.rasHi[0]) / 2,
+      (this.rasLo[1] + this.rasHi[1]) / 2,
+      (this.rasLo[2] + this.rasHi[2]) / 2
+    ];
     const centerRAS = [
       volC[0] + b.uDir[0] * st.panU + b.vDir[0] * st.panV,
       volC[1] + b.uDir[1] * st.panU + b.vDir[1] * st.panV,
       volC[2] + b.uDir[2] * st.panU + b.vDir[2] * st.panV
     ];
-    return { centerRAS, fovX, fovY };
+    return {
+      centerRAS,
+      fovX,
+      fovY
+    };
   }
   /** Map a view (u,v) in [0,1] (y down) to normalized texture coords for the current
    *  plane — for click picking. Returns the tex coord; the caller converts to IJK via
@@ -789,10 +1150,18 @@ var SliceRenderer = class {
    *  glyphs and hit-test clicks on them. */
   rasToView(orient, offset01, ras, aspectWH) {
     const { b, c, uS, vS } = this.frameFor(orient, offset01, aspectWH);
-    const d = [ras[0] - c[0], ras[1] - c[1], ras[2] - c[2]];
+    const d = [
+      ras[0] - c[0],
+      ras[1] - c[1],
+      ras[2] - c[2]
+    ];
     const u = 0.5 + (d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2]) / uS;
     const v = 0.5 - (d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2]) / vS;
-    return { u, v, distMm: dot3(d, b.nDir) };
+    return {
+      u,
+      v,
+      distMm: dot3(d, b.nDir)
+    };
   }
   /** Map a view (u,v in [0,1], y down) on a plane back to a RAS point ON that plane —
    *  the exact inverse of rasToView (same pan/zoom/aspect). Used to drag a 2D markup:
@@ -828,12 +1197,28 @@ var SliceRenderer = class {
     this.u[33] = h;
     this.dev.queue.writeBuffer(this.ubuf, 0, this.u);
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const pass = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view,
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 1
+          }
+        }
+      ]
+    });
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bind);
     pass.draw(3);
     pass.end();
-    this.dev.queue.submit([enc.finish()]);
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
   }
   renderToView(view, w, h) {
     this.drawInto(view, w, h);
@@ -858,22 +1243,52 @@ struct VO { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
     });
     this.blitPipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: { module: m, entryPoint: "vs" },
-      fragment: { module: m, entryPoint: "fs", targets: [{ format: this.format }] },
-      primitive: { topology: "triangle-list", cullMode: "none" }
+      vertex: {
+        module: m,
+        entryPoint: "vs"
+      },
+      fragment: {
+        module: m,
+        entryPoint: "fs",
+        targets: [
+          {
+            format: this.format
+          }
+        ]
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none"
+      }
     });
   }
   ensureLow(w, h) {
     this.ensureBlit();
     if (this.lowTex && this.lowW === w && this.lowH === h) return;
     this.lowTex?.destroy();
-    this.lowTex = this.dev.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    this.lowTex = this.dev.createTexture({
+      size: [
+        w,
+        h
+      ],
+      format: this.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+    });
     this.lowView = this.lowTex.createView();
     this.lowW = w;
     this.lowH = h;
     this.blitBind = this.dev.createBindGroup({
       layout: this.blitPipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: this.lowView }, { binding: 1, resource: this.sampler }]
+      entries: [
+        {
+          binding: 0,
+          resource: this.lowView
+        },
+        {
+          binding: 1,
+          resource: this.sampler
+        }
+      ]
     });
   }
   /** Adaptive (moving-frame) render: reslice at `rw×rh` into an off-screen target, then bilinear-blit
@@ -887,21 +1302,58 @@ struct VO { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
     this.ensureLow(rw, rh);
     this.drawInto(this.lowView, rw, rh);
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const pass = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view,
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 1
+          }
+        }
+      ]
+    });
     pass.setPipeline(this.blitPipeline);
     pass.setBindGroup(0, this.blitBind);
     pass.draw(3);
     pass.end();
-    this.dev.queue.submit([enc.finish()]);
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
   }
   async renderToRGBA(w, h) {
-    const target = this.dev.createTexture({ size: [w, h], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    const target = this.dev.createTexture({
+      size: [
+        w,
+        h
+      ],
+      format: this.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+    });
     this.drawInto(target.createView(), w, h);
     const bpr = Math.ceil(w * 4 / 256) * 256;
-    const buf = this.dev.createBuffer({ size: bpr * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const buf = this.dev.createBuffer({
+      size: bpr * h,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
     const enc = this.dev.createCommandEncoder();
-    enc.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: h }, [w, h]);
-    this.dev.queue.submit([enc.finish()]);
+    enc.copyTextureToBuffer({
+      texture: target
+    }, {
+      buffer: buf,
+      bytesPerRow: bpr,
+      rowsPerImage: h
+    }, [
+      w,
+      h
+    ]);
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
     await buf.mapAsync(GPUMapMode.READ);
     const padded = new Uint8Array(buf.getMappedRange());
     const out = new Uint8Array(w * h * 4);
@@ -915,12 +1367,18 @@ struct VO { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
 // render/slice-interactor.ts
 var NORMAL = {
-  axial: { axis: 2, sign: 1 },
-  // sliceToRAS col2 = +S
-  coronal: { axis: 1, sign: 1 },
-  // sliceToRAS col2 = +A
-  sagittal: { axis: 0, sign: -1 }
-  // sliceToRAS col2 = -R
+  axial: {
+    axis: 2,
+    sign: 1
+  },
+  coronal: {
+    axis: 1,
+    sign: 1
+  },
+  sagittal: {
+    axis: 0,
+    sign: -1
+  }
 };
 function ijkAxisForRasAxis2(ijkToRAS, rasAxis) {
   let best = 0, bestMag = -1;
@@ -940,7 +1398,13 @@ function sliceSpacingFor(orient, ijkToRAS) {
 }
 function sliceBoundsFor(orient, rasLo, rasHi) {
   const { axis, sign } = NORMAL[orient];
-  return sign > 0 ? [rasLo[axis], rasHi[axis]] : [-rasHi[axis], -rasLo[axis]];
+  return sign > 0 ? [
+    rasLo[axis],
+    rasHi[axis]
+  ] : [
+    -rasHi[axis],
+    -rasLo[axis]
+  ];
 }
 function offset01ToMm(orient, offset01, rasLo, rasHi) {
   const { axis, sign } = NORMAL[orient];
@@ -953,6 +1417,7 @@ function mmToOffset01(orient, mm, rasLo, rasHi) {
   return span === 0 ? 0.5 : (ras - rasLo[axis]) / span;
 }
 var SliceInteractor = class {
+  geom;
   constructor(geom) {
     this.geom = geom;
   }
@@ -1005,7 +1470,16 @@ var SliceInteractor = class {
   }
   /** True if this key is one Slicer's slice view consumes for stepping. */
   static isStepKey(key) {
-    return ["f", "F", "b", "B", "ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"].includes(key);
+    return [
+      "f",
+      "F",
+      "b",
+      "B",
+      "ArrowRight",
+      "ArrowLeft",
+      "ArrowUp",
+      "ArrowDown"
+    ].includes(key);
   }
 };
 
@@ -1015,7 +1489,12 @@ function attachSliceControls(canvas, cfg) {
   const h = cfg.hooks ?? {};
   const uv = (e) => {
     const r = canvas.getBoundingClientRect();
-    return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height, w: r.width, h: r.height };
+    return {
+      u: (e.clientX - r.left) / r.width,
+      v: (e.clientY - r.top) / r.height,
+      w: r.width,
+      h: r.height
+    };
   };
   let lastDown = 0, lastX = 0, lastY = 0;
   let view = null;
@@ -1058,7 +1537,13 @@ function attachSliceControls(canvas, cfg) {
     if (wantPan || wantZoom) {
       e.preventDefault();
       const { u: u2, v: v2 } = uv(e);
-      view = { mode: wantZoom ? "zoom" : "pan", x: e.clientX, y: e.clientY, pu: u2, pv: v2 };
+      view = {
+        mode: wantZoom ? "zoom" : "pan",
+        x: e.clientX,
+        y: e.clientY,
+        pu: u2,
+        pv: v2
+      };
       canvas.style.cursor = wantZoom ? "ns-resize" : "grabbing";
       canvas.setPointerCapture(e.pointerId);
       return;
@@ -1068,15 +1553,32 @@ function attachSliceControls(canvas, cfg) {
     const { u, v, w, h: hh } = uv(e);
     const mode = cfg.leftMode?.() ?? (cfg.wl?.enabled() ? "wl" : "scroll");
     if (h.onLeftGrab?.(u, v, w, hh)) {
-      grabbed = { moved: 0 };
+      grabbed = {
+        moved: 0
+      };
     } else if (mode === "wl" && cfg.wl) {
       const [win, lev] = cfg.wl.get();
-      wlDrag = { x: e.clientX, y: e.clientY, win, lev };
+      wlDrag = {
+        x: e.clientX,
+        y: e.clientY,
+        win,
+        lev
+      };
       canvas.style.cursor = "crosshair";
     } else if (mode === "zoom" || mode === "pan") {
-      view = { mode, x: e.clientX, y: e.clientY, pu: u, pv: v };
+      view = {
+        mode,
+        x: e.clientX,
+        y: e.clientY,
+        pu: u,
+        pv: v
+      };
       canvas.style.cursor = mode === "zoom" ? "ns-resize" : "grabbing";
-    } else scroll = { x: e.clientX, y: e.clientY, acc: 0 };
+    } else scroll = {
+      x: e.clientX,
+      y: e.clientY,
+      acc: 0
+    };
     canvas.setPointerCapture(e.pointerId);
   };
   const onMove = (e) => {
@@ -1106,7 +1608,12 @@ function attachSliceControls(canvas, cfg) {
       if (lev < lo - win / 2) lev = lo - win / 2;
       if (lev > hi + win / 2) lev = hi + win / 2;
       cfg.wl.set(win, lev);
-      wlDrag = { x: e.clientX, y: e.clientY, win, lev };
+      wlDrag = {
+        x: e.clientX,
+        y: e.clientY,
+        win,
+        lev
+      };
       cfg.redraw();
       return;
     }
@@ -1151,7 +1658,9 @@ function attachSliceControls(canvas, cfg) {
     scroll = null;
   };
   canvas.addEventListener("contextmenu", onContext);
-  canvas.addEventListener("wheel", onWheel, { passive: false });
+  canvas.addEventListener("wheel", onWheel, {
+    passive: false
+  });
   canvas.addEventListener("pointerdown", onDown);
   canvas.addEventListener("pointermove", onMove);
   canvas.addEventListener("pointerup", onUp);
@@ -1173,9 +1682,21 @@ function attachSliceControls(canvas, cfg) {
 }
 
 // render/vtk-camera.ts
-var sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-var add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
-var scale = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+var sub = (a, b) => [
+  a[0] - b[0],
+  a[1] - b[1],
+  a[2] - b[2]
+];
+var add = (a, b) => [
+  a[0] + b[0],
+  a[1] + b[1],
+  a[2] + b[2]
+];
+var scale = (a, s) => [
+  a[0] * s,
+  a[1] * s,
+  a[2] * s
+];
 var cross = (a, b) => [
   a[1] * b[2] - a[2] * b[1],
   a[2] * b[0] - a[0] * b[2],
@@ -1185,7 +1706,11 @@ var dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 var norm = (a) => Math.hypot(a[0], a[1], a[2]);
 var normalize = (a) => {
   const n = norm(a) || 1;
-  return [a[0] / n, a[1] / n, a[2] / n];
+  return [
+    a[0] / n,
+    a[1] / n,
+    a[2] / n
+  ];
 };
 function rotateAboutAxis(v, axis, deg) {
   const k = normalize(axis);
@@ -1204,18 +1729,47 @@ var VtkCamera = class _VtkCamera {
   focalPoint;
   viewUp;
   viewAngle;
-  // degrees (vtkCamera default 30)
   parallelProjection = false;
   parallelScale = 1;
-  constructor(position = [0, 0, 1], focalPoint = [0, 0, 0], viewUp = [0, 1, 0], viewAngle = 30) {
-    this.position = [...position];
-    this.focalPoint = [...focalPoint];
-    this.viewUp = [...viewUp];
+  constructor(position = [
+    0,
+    0,
+    1
+  ], focalPoint = [
+    0,
+    0,
+    0
+  ], viewUp = [
+    0,
+    1,
+    0
+  ], viewAngle = 30) {
+    this.position = [
+      ...position
+    ];
+    this.focalPoint = [
+      ...focalPoint
+    ];
+    this.viewUp = [
+      ...viewUp
+    ];
     this.viewAngle = viewAngle;
   }
   /** Slicer's default 3D camera (vtkMRMLCameraNode): (0,500,0) -> origin, +S up, 30 deg. */
   static slicerDefault() {
-    return new _VtkCamera([0, 500, 0], [0, 0, 0], [0, 0, 1], 30);
+    return new _VtkCamera([
+      0,
+      500,
+      0
+    ], [
+      0,
+      0,
+      0
+    ], [
+      0,
+      0,
+      1
+    ], 30);
   }
   clone() {
     const c = new _VtkCamera(this.position, this.focalPoint, this.viewUp, this.viewAngle);
@@ -1235,7 +1789,11 @@ var VtkCamera = class _VtkCamera {
     const back = normalize(sub(this.position, this.focalPoint));
     const right = normalize(cross(viewUp, back));
     const up = cross(back, right);
-    return { right, up, back };
+    return {
+      right,
+      up,
+      back
+    };
   }
   /** vtkCamera::Azimuth — rotate position about viewUp through the focal point. */
   azimuth(deg) {
@@ -1300,7 +1858,11 @@ var VtkCamera = class _VtkCamera {
     const aspect = w / h;
     const ndcx = dot(rel, right) / (halfH * aspect);
     const ndcy = dot(rel, up) / halfH;
-    return { x: (ndcx * 0.5 + 0.5) * w, y: (0.5 - ndcy * 0.5) * h, depth };
+    return {
+      x: (ndcx * 0.5 + 0.5) * w,
+      y: (0.5 - ndcy * 0.5) * h,
+      depth
+    };
   }
   /** Inverse of worldToDisplay at a FIXED view-depth: the world point under display pixel (x,y)
    *  lying in the plane perpendicular to the view at `depth`. Dragging a 3D handle in this plane
@@ -1318,9 +1880,15 @@ var VtkCamera = class _VtkCamera {
   /** vtkCamera-comparable snapshot for the harness. */
   state() {
     return {
-      position: [...this.position],
-      focalPoint: [...this.focalPoint],
-      viewUp: [...this.viewUp],
+      position: [
+        ...this.position
+      ],
+      focalPoint: [
+        ...this.focalPoint
+      ],
+      viewUp: [
+        ...this.viewUp
+      ],
       viewAngle: this.viewAngle,
       distance: this.distance
     };
@@ -1346,7 +1914,6 @@ var CameraInteractor = class _CameraInteractor {
   camera;
   action = "none";
   prev = null;
-  // previous position, VTK display coords
   onChange;
   constructor(camera, onChange) {
     this.camera = camera;
@@ -1354,7 +1921,10 @@ var CameraInteractor = class _CameraInteractor {
   }
   /** Convert browser (cssX, cssY within the view) to VTK display coords (y up). */
   static toDisplay(cssX, cssY, height) {
-    return [cssX, height - cssY];
+    return [
+      cssX,
+      height - cssY
+    ];
   }
   start(button, cssX, cssY, height, m = {}) {
     this.action = actionForButton(button, m);
@@ -1385,7 +1955,10 @@ var CameraInteractor = class _CameraInteractor {
         this.spin(x, y, this.prev[0], this.prev[1], width, height);
         break;
     }
-    this.prev = [x, y];
+    this.prev = [
+      x,
+      y
+    ];
     this.onChange?.();
   }
   /** vtkMRMLCameraWidget::ProcessRotate */
@@ -1418,7 +1991,11 @@ var CameraInteractor = class _CameraInteractor {
     const t = deg * Math.PI / 180, c = Math.cos(t), s = Math.sin(t);
     const v = cam.viewUp;
     const k = axis;
-    const kv = [k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0]];
+    const kv = [
+      k[1] * v[2] - k[2] * v[1],
+      k[2] * v[0] - k[0] * v[2],
+      k[0] * v[1] - k[1] * v[0]
+    ];
     const kd = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
     cam.viewUp = [
       v[0] * c + kv[0] * s + k[0] * kd * (1 - c),
@@ -1441,12 +2018,17 @@ function attachCameraControls(canvas, camera, opts = {}) {
   const interactor = new CameraInteractor(camera, opts.onChange);
   const local = (e) => {
     const r = canvas.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
+    return {
+      x: e.clientX - r.left,
+      y: e.clientY - r.top
+    };
   };
   canvas.style.touchAction = "none";
   const docEl = (canvas.ownerDocument ?? document).documentElement;
   if (docEl) docEl.style.overscrollBehavior = "none";
-  canvas.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+  canvas.addEventListener("touchmove", (e) => e.preventDefault(), {
+    passive: false
+  });
   const pointers = /* @__PURE__ */ new Map();
   let pinch = null;
   let triple = null;
@@ -1457,29 +2039,56 @@ function attachCameraControls(canvas, camera, opts = {}) {
       my += p.y;
     }
     const n = pointers.size || 1;
-    return { mx: mx / n, my: my / n };
+    return {
+      mx: mx / n,
+      my: my / n
+    };
   };
   const pinchState = () => {
-    const [a, b] = [...pointers.values()];
-    return { dist: Math.hypot(b.x - a.x, b.y - a.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+    const [a, b] = [
+      ...pointers.values()
+    ];
+    return {
+      dist: Math.hypot(b.x - a.x, b.y - a.y),
+      mx: (a.x + b.x) / 2,
+      my: (a.y + b.y) / 2
+    };
   };
   const on = () => opts.enabled?.() ?? true;
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   canvas.addEventListener("pointerdown", (e) => {
     if (!on()) return;
     const { x, y } = local(e);
-    pointers.set(e.pointerId, { x, y });
+    pointers.set(e.pointerId, {
+      x,
+      y
+    });
     canvas.setPointerCapture(e.pointerId);
     if (pointers.size === 1) {
-      interactor.start(e.button, x, y, canvas.clientHeight, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey });
-      opts.onLog?.("cameraStart", { action: interactor.action, x, y, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey });
+      interactor.start(e.button, x, y, canvas.clientHeight, {
+        shift: e.shiftKey,
+        ctrl: e.ctrlKey || e.metaKey,
+        alt: e.altKey
+      });
+      opts.onLog?.("cameraStart", {
+        action: interactor.action,
+        x,
+        y,
+        button: e.button,
+        shift: e.shiftKey,
+        ctrl: e.ctrlKey,
+        alt: e.altKey
+      });
     } else if (pointers.size === 2) {
       interactor.end();
       pinch = pinchState();
     } else if (pointers.size === 3) {
       pinch = null;
       const c = centroid();
-      triple = { mx: c.mx, my: c.my };
+      triple = {
+        mx: c.mx,
+        my: c.my
+      };
       opts.onVolumeDragStart?.();
     }
   });
@@ -1497,8 +2106,14 @@ function attachCameraControls(canvas, camera, opts = {}) {
       opts.onVolumeDragEnd?.();
     }
     if (pointers.size === 1) {
-      const p = [...pointers.values()][0];
-      interactor.start(0, p.x, p.y, canvas.clientHeight, { shift: false, ctrl: false, alt: false });
+      const p = [
+        ...pointers.values()
+      ][0];
+      interactor.start(0, p.x, p.y, canvas.clientHeight, {
+        shift: false,
+        ctrl: false,
+        alt: false
+      });
     } else if (pointers.size === 0) {
       interactor.end();
     }
@@ -1509,7 +2124,10 @@ function attachCameraControls(canvas, camera, opts = {}) {
     if (!on()) return;
     if (!pointers.has(e.pointerId)) return;
     const { x, y } = local(e);
-    pointers.set(e.pointerId, { x, y });
+    pointers.set(e.pointerId, {
+      x,
+      y
+    });
     if (pointers.size >= 3) {
       const c = centroid();
       if (triple) opts.onVolumeDrag?.(c.mx - triple.mx, c.my - triple.my);
@@ -1531,17 +2149,27 @@ function attachCameraControls(canvas, camera, opts = {}) {
     if (!on()) return;
     e.preventDefault();
     interactor.wheel(e.deltaY < 0);
-    opts.onLog?.("cameraWheel", { deltaY: e.deltaY, distance: camera.distance });
-  }, { passive: false });
+    opts.onLog?.("cameraWheel", {
+      deltaY: e.deltaY,
+      distance: camera.distance
+    });
+  }, {
+    passive: false
+  });
   return interactor;
 }
 function framedCamera(center, radius, distMul = 2.6) {
-  return new VtkCamera(
-    [center[0], center[1] + radius * distMul, center[2]],
-    [...center],
-    [0, 0, 1],
-    30
-  );
+  return new VtkCamera([
+    center[0],
+    center[1] + radius * distMul,
+    center[2]
+  ], [
+    ...center
+  ], [
+    0,
+    0,
+    1
+  ], 30);
 }
 
 // render/demos/view-grid.ts
@@ -1618,34 +2246,109 @@ var SL_FAVICON = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAYAAADi
 
 // render/demos/sl-chrome.ts
 var DEFAULT_HELP = [
-  { title: "3D view", rows: [
-    ["Left-drag", "Rotate"],
-    ["Right-drag", "Zoom"],
-    ["Middle / Shift+Left-drag", "Pan"],
-    ["Wheel / two-finger", "Zoom (dolly)"],
-    ["Double-click", "Maximize / restore"],
-    ["Shift + move", "Pick \u2192 jump slices to the point"]
-  ] },
-  { title: "Endovascular flight (fly-inside / endo demo)", rows: [
-    ["Up / Down", "Move in / out along the view axis"],
-    ["Left / Right", "Yaw"],
-    ["Shift + Left/Right", "Pitch"],
-    ["Ctrl + Left/Right", "Roll"],
-    ["Space", "Toggle forward cruise"],
-    ["Shift + Space", "Toggle reverse cruise"],
-    ["Escape", "Stop"],
-    ["Left-drag", "Look around"],
-    ["Shift + click", "Autopilot target"],
-    ["Speed slider", "Travel speed in mm/s (live, applies mid-flight)"]
-  ] },
-  { title: "Slice views", rows: [
-    ["Wheel / Left-drag", "Scroll through slices"],
-    ["Right-drag / \u2318-wheel", "Zoom this slice"],
-    ["Middle / Shift+Left-drag", "Pan"],
-    ["Double-click", "Maximize / restore"],
-    ["R", "Reset pan/zoom"],
-    ["Shift + move", "Jump the other views to the point under the cursor"]
-  ] }
+  {
+    title: "3D view",
+    rows: [
+      [
+        "Left-drag",
+        "Rotate"
+      ],
+      [
+        "Right-drag",
+        "Zoom"
+      ],
+      [
+        "Middle / Shift+Left-drag",
+        "Pan"
+      ],
+      [
+        "Wheel / two-finger",
+        "Zoom (dolly)"
+      ],
+      [
+        "Double-click",
+        "Maximize / restore"
+      ],
+      [
+        "Shift + move",
+        "Pick \u2192 jump slices to the point"
+      ]
+    ]
+  },
+  {
+    title: "Endovascular flight (fly-inside / endo demo)",
+    rows: [
+      [
+        "Up / Down",
+        "Move in / out along the view axis"
+      ],
+      [
+        "Left / Right",
+        "Yaw"
+      ],
+      [
+        "Shift + Left/Right",
+        "Pitch"
+      ],
+      [
+        "Ctrl + Left/Right",
+        "Roll"
+      ],
+      [
+        "Space",
+        "Toggle forward cruise"
+      ],
+      [
+        "Shift + Space",
+        "Toggle reverse cruise"
+      ],
+      [
+        "Escape",
+        "Stop"
+      ],
+      [
+        "Left-drag",
+        "Look around"
+      ],
+      [
+        "Shift + click",
+        "Autopilot target"
+      ],
+      [
+        "Speed slider",
+        "Travel speed in mm/s (live, applies mid-flight)"
+      ]
+    ]
+  },
+  {
+    title: "Slice views",
+    rows: [
+      [
+        "Wheel / Left-drag",
+        "Scroll through slices"
+      ],
+      [
+        "Right-drag / \u2318-wheel",
+        "Zoom this slice"
+      ],
+      [
+        "Middle / Shift+Left-drag",
+        "Pan"
+      ],
+      [
+        "Double-click",
+        "Maximize / restore"
+      ],
+      [
+        "R",
+        "Reset pan/zoom"
+      ],
+      [
+        "Shift + move",
+        "Jump the other views to the point under the cursor"
+      ]
+    ]
+  }
 ];
 function glass(el2, extra = "") {
   el2.style.cssText += ";background:linear-gradient(135deg,rgba(58,64,88,.55),rgba(20,24,38,.66));backdrop-filter:blur(20px) saturate(1.6);-webkit-backdrop-filter:blur(20px) saturate(1.6);border:1px solid rgba(255,255,255,.2);box-shadow:0 18px 50px rgba(0,0,0,.55);" + extra;
@@ -1892,7 +2595,10 @@ function installChrome(opts) {
     row.appendChild(lab);
     row.appendChild(sel);
     pop.appendChild(row);
-    selEls.push({ c, el: sel });
+    selEls.push({
+      c,
+      el: sel
+    });
   }
   const rows = [];
   if (controls.length) {
@@ -1940,11 +2646,15 @@ function installChrome(opts) {
         row.appendChild(top);
         row.appendChild(inp);
         pop.appendChild(row);
-        rows.push({ c, row, repaint: () => {
-          setBounds();
-          inp.value = String(c.slider.get());
-          paint();
-        } });
+        rows.push({
+          c,
+          row,
+          repaint: () => {
+            setBounds();
+            inp.value = String(c.slider.get());
+            paint();
+          }
+        });
         continue;
       }
       const lab = document.createElement("span");
@@ -1961,26 +2671,29 @@ function installChrome(opts) {
         pill.onpointerdown = (e) => e.stopPropagation();
         row.appendChild(pill);
         pop.appendChild(row);
-        rows.push({ c, row, repaint: () => {
-          pill.textContent = c.button.text();
-        } });
+        rows.push({
+          c,
+          row,
+          repaint: () => {
+            pill.textContent = c.button.text();
+          }
+        });
         continue;
       }
       if (c.steps) {
         const box = document.createElement("span");
         box.style.cssText = OPBOX_CSS;
         row.appendChild(box);
-        const paint = attachSteps(
-          box,
-          c.steps.max,
-          c.steps.get,
-          (v) => c.steps.set(v),
-          c.steps.format ?? ((v) => String(v)),
-          c.color ?? [0.62, 0.9, 1],
-          () => c.disabled?.() ?? false,
-          () => opts.onChange?.()
-        );
-        rows.push({ c, row, repaint: paint });
+        const paint = attachSteps(box, c.steps.max, c.steps.get, (v) => c.steps.set(v), c.steps.format ?? ((v) => String(v)), c.color ?? [
+          0.62,
+          0.9,
+          1
+        ], () => c.disabled?.() ?? false, () => opts.onChange?.());
+        rows.push({
+          c,
+          row,
+          repaint: paint
+        });
         pop.appendChild(row);
         continue;
       }
@@ -1988,8 +2701,16 @@ function installChrome(opts) {
         const box = document.createElement("span");
         box.style.cssText = OPBOX_CSS;
         row.appendChild(box);
-        const paint = attachOpacity(box, c.getOpacity, (o) => c.setOpacity(o), c.color ?? [0.62, 0.9, 1], () => opts.onChange?.());
-        rows.push({ c, row, repaint: paint });
+        const paint = attachOpacity(box, c.getOpacity, (o) => c.setOpacity(o), c.color ?? [
+          0.62,
+          0.9,
+          1
+        ], () => opts.onChange?.());
+        rows.push({
+          c,
+          row,
+          repaint: paint
+        });
       } else {
         row.style.cursor = "pointer";
         const sw = document.createElement("span");
@@ -2005,7 +2726,11 @@ function installChrome(opts) {
             refresh();
           });
         };
-        rows.push({ c, row, sw });
+        rows.push({
+          c,
+          row,
+          sw
+        });
       }
       pop.appendChild(row);
     }
@@ -2045,7 +2770,13 @@ function installChrome(opts) {
         if (!(S.enabled && !S.enabled())) S.set(s.num, o);
       }, s.color, () => opts.onChange?.());
       wrap.appendChild(row);
-      segRows.push({ num: s.num, name: s.name, box, color: s.color, paint });
+      segRows.push({
+        num: s.num,
+        name: s.name,
+        box,
+        color: s.color,
+        paint
+      });
     }
     if (noteText) {
       const n = document.createElement("div");
@@ -2167,7 +2898,10 @@ function installChrome(opts) {
     logo.remove();
     pop.remove();
   };
-  return { refresh, destroy };
+  return {
+    refresh,
+    destroy
+  };
 }
 
 // render/scene-renderer.ts
@@ -2199,7 +2933,11 @@ var SceneRenderer = class _SceneRenderer {
   gpuMeshes = [];
   meshTargetsBySize = /* @__PURE__ */ new Map();
   viewProj = new Float32Array(16);
-  eyePos = [0, 0, 0];
+  eyePos = [
+    0,
+    0,
+    0
+  ];
   /** Replace the surface meshes (world/RAS float32 xyz + uint32 triangles, colour, opacity). */
   setMeshes(meshes) {
     for (const m of this.gpuMeshes) {
@@ -2208,12 +2946,28 @@ var SceneRenderer = class _SceneRenderer {
       m.ubuf.destroy();
     }
     this.gpuMeshes = meshes.filter((m) => m.indices.length >= 3).map((m) => {
-      const vbuf = this.dev.createBuffer({ size: Math.ceil(m.positions.byteLength / 4) * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
+      const vbuf = this.dev.createBuffer({
+        size: Math.ceil(m.positions.byteLength / 4) * 4,
+        usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST
+      });
       this.dev.queue.writeBuffer(vbuf, 0, m.positions);
-      const ibuf = this.dev.createBuffer({ size: Math.ceil(m.indices.byteLength / 4) * 4, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST });
+      const ibuf = this.dev.createBuffer({
+        size: Math.ceil(m.indices.byteLength / 4) * 4,
+        usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST
+      });
       this.dev.queue.writeBuffer(ibuf, 0, m.indices);
-      const ubuf = this.dev.createBuffer({ size: 24 * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      return { vbuf, ibuf, count: m.indices.length, ubuf, color: m.color, opacity: m.opacity };
+      const ubuf = this.dev.createBuffer({
+        size: 24 * 4,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
+      return {
+        vbuf,
+        ibuf,
+        count: m.indices.length,
+        ubuf,
+        color: m.color,
+        opacity: m.opacity
+      };
     });
   }
   hasMeshes() {
@@ -2221,13 +2975,48 @@ var SceneRenderer = class _SceneRenderer {
   }
   ensureMeshPipeline() {
     if (this.meshPipeline) return;
-    const mod = this.dev.createShaderModule({ code: MESH_WGSL });
+    const mod = this.dev.createShaderModule({
+      code: MESH_WGSL
+    });
     this.meshPipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: { module: mod, entryPoint: "vs_mesh", buffers: [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] }] },
-      fragment: { module: mod, entryPoint: "fs_mesh", targets: [{ format: "rgba16float" }, { format: "r32float" }] },
-      primitive: { topology: "triangle-list", cullMode: "none" },
-      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
+      vertex: {
+        module: mod,
+        entryPoint: "vs_mesh",
+        buffers: [
+          {
+            arrayStride: 12,
+            attributes: [
+              {
+                shaderLocation: 0,
+                offset: 0,
+                format: "float32x3"
+              }
+            ]
+          }
+        ]
+      },
+      fragment: {
+        module: mod,
+        entryPoint: "fs_mesh",
+        targets: [
+          {
+            format: "rgba16float"
+          },
+          {
+            format: "r32float"
+          }
+        ]
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none"
+      },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: true,
+        depthCompare: "less"
+      }
     });
   }
   /** Colour/depth targets (+ the group-1 bind group of the trace pipeline) for a given trace size. */
@@ -2246,13 +3035,46 @@ var SceneRenderer = class _SceneRenderer {
       t = {
         w,
         h,
-        col: this.dev.createTexture({ size: [w, h], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }),
-        depth: this.dev.createTexture({ size: [w, h], format: "r32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }),
-        z: this.dev.createTexture({ size: [w, h], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT })
+        col: this.dev.createTexture({
+          size: [
+            w,
+            h
+          ],
+          format: "rgba16float",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+        }),
+        depth: this.dev.createTexture({
+          size: [
+            w,
+            h
+          ],
+          format: "r32float",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+        }),
+        z: this.dev.createTexture({
+          size: [
+            w,
+            h
+          ],
+          format: "depth24plus",
+          usage: GPUTextureUsage.RENDER_ATTACHMENT
+        })
       };
       this.meshTargetsBySize.set(key, t);
     }
-    if (!t.bind) t.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(1), entries: [{ binding: 0, resource: t.col.createView() }, { binding: 1, resource: t.depth.createView() }] });
+    if (!t.bind) t.bind = this.dev.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(1),
+      entries: [
+        {
+          binding: 0,
+          resource: t.col.createView()
+        },
+        {
+          binding: 1,
+          resource: t.depth.createView()
+        }
+      ]
+    });
     return t;
   }
   /** Rasterise the meshes for this frame's trace size; returns the bind group the trace pass needs. */
@@ -2260,10 +3082,35 @@ var SceneRenderer = class _SceneRenderer {
     const t = this.meshTargets(w, h);
     const pass = enc.beginRenderPass({
       colorAttachments: [
-        { view: t.col.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } },
-        { view: t.depth.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 1e30, g: 0, b: 0, a: 1 } }
+        {
+          view: t.col.createView(),
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0
+          }
+        },
+        {
+          view: t.depth.createView(),
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 1e30,
+            g: 0,
+            b: 0,
+            a: 1
+          }
+        }
       ],
-      depthStencilAttachment: { view: t.z.createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" }
+      depthStencilAttachment: {
+        view: t.z.createView(),
+        depthClearValue: 1,
+        depthLoadOp: "clear",
+        depthStoreOp: "store"
+      }
     });
     if (this.gpuMeshes.length) {
       this.ensureMeshPipeline();
@@ -2280,7 +3127,17 @@ var SceneRenderer = class _SceneRenderer {
         u[22] = m.color[2];
         u[23] = m.opacity;
         this.dev.queue.writeBuffer(m.ubuf, 0, u);
-        pass.setBindGroup(0, this.dev.createBindGroup({ layout: this.meshPipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: m.ubuf } }] }));
+        pass.setBindGroup(0, this.dev.createBindGroup({
+          layout: this.meshPipeline.getBindGroupLayout(0),
+          entries: [
+            {
+              binding: 0,
+              resource: {
+                buffer: m.ubuf
+              }
+            }
+          ]
+        }));
         pass.setVertexBuffer(0, m.vbuf);
         pass.setIndexBuffer(m.ibuf, "uint32");
         pass.drawIndexed(m.count);
@@ -2303,9 +3160,7 @@ var SceneRenderer = class _SceneRenderer {
   pickPipeline;
   pickBind;
   pickOff = 0;
-  // mat[] offset of the pick_cursor uniform (NDC)
   pickTarget;
-  // 1x1 rgba32float (wp.xyz, hit)
   pickReadBuf;
   // PRODUCER→RECONSTRUCTOR seam (docs/UNIFIED-RENDERING-PLAN.md M1). The ray-march writes the
   // premultiplied composited sample into `traceTex` (rgba32float, lossless); `resolvePipeline`
@@ -2323,33 +3178,33 @@ var SceneRenderer = class _SceneRenderer {
   // is untouched, so a non-jittered frame is byte-identical) and the Reconstructor folds it into a
   // running mean, converging to a supersampled, time-averaged-AA image. Ping-pong accum + running n.
   baseInvVP = new Float32Array(16);
-  // last setCamera invVP (unjittered)
   focalPx = 1;
-  // last setCamera focal (view→pixels); used to keep screen-space handles view-sized under low-res trace
   accumPipeline;
-  // MRT: trace + prev-accum -> new-accum + presented view
-  accumBind = [void 0, void 0];
+  accumBind = [
+    void 0,
+    void 0
+  ];
   accumUniformBuf;
-  // (bg.rgb, blend)
-  accumTex = [void 0, void 0];
-  accumView = [void 0, void 0];
+  accumTex = [
+    void 0,
+    void 0
+  ];
+  accumView = [
+    void 0,
+    void 0
+  ];
   accumPing = 0;
   accumN = 0;
   lastAccumCam = new Float32Array(16);
-  // camera (invVP) of the last accumulated frame
   lastAccumValid = false;
-  // false forces a reset (after a rebuild / first frame)
   streamPipeline;
-  // trace -> rgba8unorm, for compact sample readback (remote)
   streamBind;
-  // its OWN bind group (auto-layout differs from this.pipeline's)
   // RESOLUTION-SCALED reconstruction (M2b): while interacting, trace at a fraction of the view
   // (BudgetController) and Catmull-Rom UPSAMPLE the low-res trace to the view — the client-superres
   // ported from the Python spike. A settled view renders native + accumulates instead.
   superresPipeline;
   superresBind;
   superresBuf;
-  // (traceW, traceH, viewW, viewH)
   // The moving/upscale path traces into its OWN low-res target so it never resizes/destroys the
   // full-size traceTex the accumulation bind groups reference (that sharing caused destroyed-texture
   // submits + MRT attachment-size mismatches → 3D flicker/blank during interaction).
@@ -2383,31 +3238,100 @@ var SceneRenderer = class _SceneRenderer {
     this.dev = gpu.device;
     this.format = format;
     this.canTime = gpu.features.has("timestamp-query");
-    this.sampler = this.dev.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
-    this.camBuf = this.dev.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.resolveBgBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const rmod = this.dev.createShaderModule({ code: this.resolveWgsl() });
+    this.sampler = this.dev.createSampler({
+      magFilter: "linear",
+      minFilter: "linear",
+      addressModeU: "clamp-to-edge",
+      addressModeV: "clamp-to-edge",
+      addressModeW: "clamp-to-edge"
+    });
+    this.camBuf = this.dev.createBuffer({
+      size: 96,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    this.resolveBgBuf = this.dev.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    const rmod = this.dev.createShaderModule({
+      code: this.resolveWgsl()
+    });
     this.resolvePipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: { module: rmod, entryPoint: "vs_resolve" },
-      fragment: { module: rmod, entryPoint: "fs_resolve", targets: [{ format: this.format }] },
-      primitive: { topology: "triangle-list", cullMode: "none" }
+      vertex: {
+        module: rmod,
+        entryPoint: "vs_resolve"
+      },
+      fragment: {
+        module: rmod,
+        entryPoint: "fs_resolve",
+        targets: [
+          {
+            format: this.format
+          }
+        ]
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none"
+      }
     });
-    this.accumUniformBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const amod = this.dev.createShaderModule({ code: this.accumWgsl() });
+    this.accumUniformBuf = this.dev.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    const amod = this.dev.createShaderModule({
+      code: this.accumWgsl()
+    });
     this.accumPipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: { module: amod, entryPoint: "vs_resolve" },
-      fragment: { module: amod, entryPoint: "fs_accum", targets: [{ format: "rgba32float" }, { format: this.format }] },
-      primitive: { topology: "triangle-list", cullMode: "none" }
+      vertex: {
+        module: amod,
+        entryPoint: "vs_resolve"
+      },
+      fragment: {
+        module: amod,
+        entryPoint: "fs_accum",
+        targets: [
+          {
+            format: "rgba32float"
+          },
+          {
+            format: this.format
+          }
+        ]
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none"
+      }
     });
-    this.superresBuf = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const smod = this.dev.createShaderModule({ code: this.superresWgsl() });
+    this.superresBuf = this.dev.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    const smod = this.dev.createShaderModule({
+      code: this.superresWgsl()
+    });
     this.superresPipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: { module: smod, entryPoint: "vs_resolve" },
-      fragment: { module: smod, entryPoint: "fs_superres", targets: [{ format: this.format }] },
-      primitive: { topology: "triangle-list", cullMode: "none" }
+      vertex: {
+        module: smod,
+        entryPoint: "vs_resolve"
+      },
+      fragment: {
+        module: smod,
+        entryPoint: "fs_superres",
+        targets: [
+          {
+            format: this.format
+          }
+        ]
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none"
+      }
     });
   }
   /** RECONSTRUCTOR (upsampling): Catmull-Rom (bicubic, 9 bilinear taps) reconstruction of the
@@ -2544,7 +3468,10 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     if (this.traceTex && this.traceW === width && this.traceH === height) return;
     this.traceTex?.destroy();
     this.traceTex = this.dev.createTexture({
-      size: [width, height],
+      size: [
+        width,
+        height
+      ],
       format: "rgba32float",
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
     });
@@ -2553,7 +3480,18 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     this.traceH = height;
     this.resolveBind = this.dev.createBindGroup({
       layout: this.resolvePipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: this.traceView }, { binding: 1, resource: { buffer: this.resolveBgBuf } }]
+      entries: [
+        {
+          binding: 0,
+          resource: this.traceView
+        },
+        {
+          binding: 1,
+          resource: {
+            buffer: this.resolveBgBuf
+          }
+        }
+      ]
     });
   }
   /** (Re)allocate the low-res trace target + superres bind group when the moving render size changes.
@@ -2561,17 +3499,40 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
   ensureLow(width, height) {
     if (this.lowTex && this.lowW === width && this.lowH === height) return;
     this.lowTex?.destroy();
-    this.lowTex = this.dev.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+    this.lowTex = this.dev.createTexture({
+      size: [
+        width,
+        height
+      ],
+      format: "rgba32float",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+    });
     this.lowView = this.lowTex.createView();
     this.lowW = width;
     this.lowH = height;
     this.superresBind = this.dev.createBindGroup({
       layout: this.superresPipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: this.lowView },
-        { binding: 1, resource: this.sampler },
-        { binding: 2, resource: { buffer: this.superresBuf } },
-        { binding: 3, resource: { buffer: this.resolveBgBuf } }
+        {
+          binding: 0,
+          resource: this.lowView
+        },
+        {
+          binding: 1,
+          resource: this.sampler
+        },
+        {
+          binding: 2,
+          resource: {
+            buffer: this.superresBuf
+          }
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.resolveBgBuf
+          }
+        }
       ]
     });
   }
@@ -2582,34 +3543,99 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
   renderUpscaled(view, renderW, renderH, viewW, viewH) {
     this.ensureLow(renderW, renderH);
     this.flush();
-    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([this.focalPx * (viewH / renderH)]));
-    this.dev.queue.writeBuffer(this.superresBuf, 0, new Float32Array([renderW, renderH, viewW, viewH]));
+    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([
+      this.focalPx * (viewH / renderH)
+    ]));
+    this.dev.queue.writeBuffer(this.superresBuf, 0, new Float32Array([
+      renderW,
+      renderH,
+      viewW,
+      viewH
+    ]));
     this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
     const enc = this.dev.createCommandEncoder();
     const mb = this.meshPass(enc, renderW, renderH);
-    const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.lowView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    const tp = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.lowView,
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0
+          }
+        }
+      ]
+    });
     tp.setPipeline(this.pipeline);
     tp.setBindGroup(0, this.bind);
     tp.setBindGroup(1, mb);
     tp.draw(3);
     tp.end();
-    const sp = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const sp = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view,
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 1
+          }
+        }
+      ]
+    });
     sp.setPipeline(this.superresPipeline);
     sp.setBindGroup(0, this.superresBind);
     sp.draw(3);
     sp.end();
-    this.dev.queue.submit([enc.finish()]);
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
   }
   /** Encode trace (producer) + resolve (reconstructor) into `enc`, output to `outView`. */
   encodeFrame(enc, outView) {
     const mb = this.meshPass(enc, this.traceW, this.traceH);
-    const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.traceView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    const tp = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.traceView,
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0
+          }
+        }
+      ]
+    });
     tp.setPipeline(this.pipeline);
     tp.setBindGroup(0, this.bind);
     tp.setBindGroup(1, mb);
     tp.draw(3);
     tp.end();
-    const rp = enc.beginRenderPass({ colorAttachments: [{ view: outView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });
+    const rp = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view: outView,
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 1
+          }
+        }
+      ]
+    });
     rp.setPipeline(this.resolvePipeline);
     rp.setBindGroup(0, this.resolveBind);
     rp.draw(3);
@@ -2624,16 +3650,34 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     this.accumH = height;
     for (let k = 0; k < 2; k++) {
       this.accumTex[k]?.destroy();
-      this.accumTex[k] = this.dev.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+      this.accumTex[k] = this.dev.createTexture({
+        size: [
+          width,
+          height
+        ],
+        format: "rgba32float",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+      });
       this.accumView[k] = this.accumTex[k].createView();
     }
     for (let k = 0; k < 2; k++) {
       this.accumBind[k] = this.dev.createBindGroup({
         layout: this.accumPipeline.getBindGroupLayout(0),
         entries: [
-          { binding: 0, resource: this.traceView },
-          { binding: 1, resource: this.accumView[k] },
-          { binding: 2, resource: { buffer: this.accumUniformBuf } }
+          {
+            binding: 0,
+            resource: this.traceView
+          },
+          {
+            binding: 1,
+            resource: this.accumView[k]
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: this.accumUniformBuf
+            }
+          }
         ]
       });
     }
@@ -2679,27 +3723,72 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     } else {
       this.dev.queue.writeBuffer(this.camBuf, 0, this.baseInvVP);
     }
-    this.dev.queue.writeBuffer(this.camBuf, 76, new Float32Array([n - 1]));
+    this.dev.queue.writeBuffer(this.camBuf, 76, new Float32Array([
+      n - 1
+    ]));
     this.flush();
-    this.dev.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array([this.mat[12], this.mat[13], this.mat[14], 1 / Math.min(n, this.accumWindow)]));
+    this.dev.queue.writeBuffer(this.accumUniformBuf, 0, new Float32Array([
+      this.mat[12],
+      this.mat[13],
+      this.mat[14],
+      1 / Math.min(n, this.accumWindow)
+    ]));
     const prev = this.accumPing, next = 1 - this.accumPing;
     const enc = this.dev.createCommandEncoder();
     const mb = this.meshPass(enc, width, height);
-    const tp = enc.beginRenderPass({ colorAttachments: [{ view: this.traceView, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    const tp = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.traceView,
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0
+          }
+        }
+      ]
+    });
     tp.setPipeline(this.pipeline);
     tp.setBindGroup(0, this.bind);
     tp.setBindGroup(1, mb);
     tp.draw(3);
     tp.end();
-    const ap = enc.beginRenderPass({ colorAttachments: [
-      { view: this.accumView[next], loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } },
-      { view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }
-    ] });
+    const ap = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.accumView[next],
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0
+          }
+        },
+        {
+          view,
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 1
+          }
+        }
+      ]
+    });
     ap.setPipeline(this.accumPipeline);
     ap.setBindGroup(0, this.accumBind[prev]);
     ap.draw(3);
     ap.end();
-    this.dev.queue.submit([enc.finish()]);
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
     this.accumPing = next;
   }
   /** (Re)build the pipeline for a set of fields. */
@@ -2709,7 +3798,12 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     this.placed = fields.map((field) => {
       const slot = kindCount[field.kind] ?? 0;
       kindCount[field.kind] = slot + 1;
-      const p = { field, slot, uoff, bbase };
+      const p = {
+        field,
+        slot,
+        uoff,
+        bbase
+      };
       uoff += field.uniformFloats();
       bbase += field.bindingCount;
       return p;
@@ -2717,30 +3811,86 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     this.clipOff = uoff;
     this.pickOff = uoff + CLIP_FLOATS;
     this.mat = new Float32Array(uoff + CLIP_FLOATS + 12);
-    this.matBuf = this.dev.createBuffer({ size: (uoff + CLIP_FLOATS + 12) * 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.matBuf = this.dev.createBuffer({
+      size: (uoff + CLIP_FLOATS + 12) * 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
     for (const t of this.meshTargetsBySize.values()) t.bind = void 0;
-    const module = this.dev.createShaderModule({ code: this.wgsl() });
+    const module = this.dev.createShaderModule({
+      code: this.wgsl()
+    });
     this.pipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: { module, entryPoint: "vs_main" },
-      fragment: { module, entryPoint: "fs_trace", targets: [{ format: "rgba32float" }] },
-      primitive: { topology: "triangle-list", cullMode: "none" }
+      vertex: {
+        module,
+        entryPoint: "vs_main"
+      },
+      fragment: {
+        module,
+        entryPoint: "fs_trace",
+        targets: [
+          {
+            format: "rgba32float"
+          }
+        ]
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none"
+      }
     });
     this.pickPipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: { module, entryPoint: "vs_main" },
-      fragment: { module, entryPoint: "fs_pick", targets: [{ format: "rgba32float" }] },
-      primitive: { topology: "triangle-list", cullMode: "none" }
+      vertex: {
+        module,
+        entryPoint: "vs_main"
+      },
+      fragment: {
+        module,
+        entryPoint: "fs_pick",
+        targets: [
+          {
+            format: "rgba32float"
+          }
+        ]
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none"
+      }
     });
     this.streamPipeline = this.dev.createRenderPipeline({
       layout: "auto",
-      vertex: { module, entryPoint: "vs_main" },
-      fragment: { module, entryPoint: "fs_trace", targets: [{ format: "rgba8unorm" }] },
-      primitive: { topology: "triangle-list", cullMode: "none" }
+      vertex: {
+        module,
+        entryPoint: "vs_main"
+      },
+      fragment: {
+        module,
+        entryPoint: "fs_trace",
+        targets: [
+          {
+            format: "rgba8unorm"
+          }
+        ]
+      },
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "none"
+      }
     });
-    this.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
-    this.streamBind = this.dev.createBindGroup({ layout: this.streamPipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
-    if (this.pickPipeline) this.pickBind = this.dev.createBindGroup({ layout: this.pickPipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
+    this.bind = this.dev.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: this.bindGroupEntries()
+    });
+    this.streamBind = this.dev.createBindGroup({
+      layout: this.streamPipeline.getBindGroupLayout(0),
+      entries: this.bindGroupEntries()
+    });
+    if (this.pickPipeline) this.pickBind = this.dev.createBindGroup({
+      layout: this.pickPipeline.getBindGroupLayout(0),
+      entries: this.bindGroupEntries()
+    });
     this.setBackground(0.07, 0.08, 0.12);
     const step = this.placed.length ? Math.min(...this.placed.map((p) => p.field.sampleStep())) : 1;
     this.setSampleStep(step * 0.7);
@@ -2755,7 +3905,10 @@ fn fs_resolve(v : RV) -> @location(0) vec4<f32> {
     const modifiers = this.placed.filter((p) => p.field.modifier);
     const receivers = this.placed.filter((p) => !p.field.modifier);
     const modFns = modifiers.map((p) => p.field.samplingWGSL(p.slot)).join("\n");
-    const slotOf = new Map(this.placed.map((p) => [p.field, p.slot]));
+    const slotOf = new Map(this.placed.map((p) => [
+      p.field,
+      p.slot
+    ]));
     const tpFns = receivers.map((p) => {
       const tf = p.field.transform;
       const tfSlot = tf && tf.modifier ? slotOf.get(tf) : void 0;
@@ -2806,19 +3959,21 @@ fn skip_${p.field.kind}${p.slot}(wp : vec3<f32>) -> f32 {
       ...normalSkippers.map((p) => p.field.providesSkip && p.field.skipWGSL ? p.field.skipWGSL(p.slot) : boxSkipWGSL(p)),
       ...ghostSkippers.map((p) => p.field.skipWGSL(p.slot))
     ].join("\n");
-    const fns = [modFns, tpFns, fieldFns, skipFns].filter((s) => s.trim()).join("\n");
-    const skipInit = [...normalSkippers, ...ghostSkippers].map((p) => `  var resume_${p.field.kind}${p.slot} : f32 = -1.0e30;`).join("\n");
+    const fns = [
+      modFns,
+      tpFns,
+      fieldFns,
+      skipFns
+    ].filter((s) => s.trim()).join("\n");
+    const skipInit = [
+      ...normalSkippers,
+      ...ghostSkippers
+    ].map((p) => `  var resume_${p.field.kind}${p.slot} : f32 = -1.0e30;`).join("\n");
     const intervalInit = receivers.filter((p) => p.field.intervalSampling).map((p) => `  var last_${p.field.kind}${p.slot} : f32 = max(t_near - step, 0.0);`).join("\n");
-    const dispatch = normalReceivers.map(
-      (p) => canSkip.has(p.field) ? skipBranch(p, true) : plainBranch(p, true)
-    ).join("\n");
-    const ghostDispatch = ghostFields.map(
-      (p) => ghostCanSkip.has(p.field) ? skipBranch(p, false, true) : plainBranch(p, false, true)
-    ).join("\n");
+    const dispatch = normalReceivers.map((p) => canSkip.has(p.field) ? skipBranch(p, true) : plainBranch(p, true)).join("\n");
+    const ghostDispatch = ghostFields.map((p) => ghostCanSkip.has(p.field) ? skipBranch(p, false, true) : plainBranch(p, false, true)).join("\n");
     const hasGhost = ghostFields.length > 0;
-    const pickDispatch = normalReceivers.map(
-      (p) => `    ${clipGuard(p, `{ let c = sample_field_${p.field.kind}${p.slot}(wp, rd${p.field.intervalSampling ? ", step" : ""}); sum += c; }`)}`
-    ).join("\n");
+    const pickDispatch = normalReceivers.map((p) => `    ${clipGuard(p, `{ let c = sample_field_${p.field.kind}${p.slot}(wp, rd${p.field.intervalSampling ? ", step" : ""}); sum += c; }`)}`).join("\n");
     return (
       /* wgsl */
       `
@@ -3044,19 +4199,56 @@ ${pickDispatch}
   /** Axis-aligned RAS crop box [lo,hi] → 6 inward planes. offset = -dot(faceOrigin, n). */
   setClipBox(lo, hi) {
     this.setClipPlanes([
-      [1, 0, 0, -lo[0]],
-      [-1, 0, 0, hi[0]],
-      // keep lo.x <= x <= hi.x
-      [0, 1, 0, -lo[1]],
-      [0, -1, 0, hi[1]],
-      [0, 0, 1, -lo[2]],
-      [0, 0, -1, hi[2]]
+      [
+        1,
+        0,
+        0,
+        -lo[0]
+      ],
+      [
+        -1,
+        0,
+        0,
+        hi[0]
+      ],
+      [
+        0,
+        1,
+        0,
+        -lo[1]
+      ],
+      [
+        0,
+        -1,
+        0,
+        hi[1]
+      ],
+      [
+        0,
+        0,
+        1,
+        -lo[2]
+      ],
+      [
+        0,
+        0,
+        -1,
+        hi[2]
+      ]
     ]);
   }
   /** Scene AABB = union of field AABBs; also picks a default sample step from the smallest field extent. */
   recomputeBounds() {
     if (!this.placed.length) return;
-    let mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+    let mn = [
+      Infinity,
+      Infinity,
+      Infinity
+    ], mx = [
+      -Infinity,
+      -Infinity,
+      -Infinity
+    ];
     for (const p of this.placed) {
       const [a, b] = p.field.aabb();
       for (let i = 0; i < 3; i++) {
@@ -3092,9 +4284,18 @@ ${pickDispatch}
   /** Rebuild the bind group from the fields' current resources (e.g. after a field
    *  swapped a texture) without recompiling the pipeline. Field set/structure must be unchanged. */
   refreshBindings() {
-    this.bind = this.dev.createBindGroup({ layout: this.pipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
-    this.streamBind = this.dev.createBindGroup({ layout: this.streamPipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
-    if (this.pickPipeline) this.pickBind = this.dev.createBindGroup({ layout: this.pickPipeline.getBindGroupLayout(0), entries: this.bindGroupEntries() });
+    this.bind = this.dev.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: this.bindGroupEntries()
+    });
+    this.streamBind = this.dev.createBindGroup({
+      layout: this.streamPipeline.getBindGroupLayout(0),
+      entries: this.bindGroupEntries()
+    });
+    if (this.pickPipeline) this.pickBind = this.dev.createBindGroup({
+      layout: this.pickPipeline.getBindGroupLayout(0),
+      entries: this.bindGroupEntries()
+    });
   }
   /** Only fields with texture bindings use the shared sampler. `layout: "auto"` derives the
    *  layout from what the shader ACTUALLY references, so in a scene of purely procedural
@@ -3106,10 +4307,23 @@ ${pickDispatch}
   }
   bindGroupEntries() {
     const entries = [
-      { binding: 0, resource: { buffer: this.camBuf } },
-      { binding: 1, resource: { buffer: this.matBuf } }
+      {
+        binding: 0,
+        resource: {
+          buffer: this.camBuf
+        }
+      },
+      {
+        binding: 1,
+        resource: {
+          buffer: this.matBuf
+        }
+      }
     ];
-    if (this.usesSampler()) entries.push({ binding: 2, resource: this.sampler });
+    if (this.usesSampler()) entries.push({
+      binding: 2,
+      resource: this.sampler
+    });
     for (const p of this.placed) entries.push(...p.field.bindEntries(p.slot, p.bbase));
     return entries;
   }
@@ -3209,21 +4423,60 @@ ${pickDispatch}
   /** The shared 1x1 render + readback behind pick() and probe(). */
   async tracePick() {
     if (!this.pickTarget) {
-      this.pickTarget = this.dev.createTexture({ size: [1, 1], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
-      this.pickReadBuf = this.dev.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      this.pickTarget = this.dev.createTexture({
+        size: [
+          1,
+          1
+        ],
+        format: "rgba32float",
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+      });
+      this.pickReadBuf = this.dev.createBuffer({
+        size: 256,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
     }
     const enc = this.dev.createCommandEncoder();
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view: this.pickTarget.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    const pass = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view: this.pickTarget.createView(),
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0
+          }
+        }
+      ]
+    });
     pass.setPipeline(this.pickPipeline);
     pass.setBindGroup(0, this.pickBind);
     pass.draw(3);
     pass.end();
-    enc.copyTextureToBuffer({ texture: this.pickTarget }, { buffer: this.pickReadBuf, bytesPerRow: 256, rowsPerImage: 1 }, [1, 1]);
-    this.dev.queue.submit([enc.finish()]);
+    enc.copyTextureToBuffer({
+      texture: this.pickTarget
+    }, {
+      buffer: this.pickReadBuf,
+      bytesPerRow: 256,
+      rowsPerImage: 1
+    }, [
+      1,
+      1
+    ]);
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
     await this.pickReadBuf.mapAsync(GPUMapMode.READ);
     const r = new Float32Array(this.pickReadBuf.getMappedRange().slice(0, 16));
     this.pickReadBuf.unmap();
-    return r[3] > 0.5 ? [r[0], r[1], r[2]] : null;
+    return r[3] > 0.5 ? [
+      r[0],
+      r[1],
+      r[2]
+    ] : null;
   }
   renderToView(view, width, height) {
     this.ensureTrace(width, height);
@@ -3231,7 +4484,9 @@ ${pickDispatch}
     this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
     const enc = this.dev.createCommandEncoder();
     this.encodeFrame(enc, view);
-    this.dev.queue.submit([enc.finish()]);
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
   }
   /** Exact GPU time of the ray-march pass (median ms over `iters`), via timestamp-query.
    *  Times ONLY the render pass — no texture copy/readback — so it reflects shader cost.
@@ -3240,18 +4495,50 @@ ${pickDispatch}
   async timePass(width, height, iters = 40) {
     if (!this.canTime) return NaN;
     this.flush();
-    const target = this.dev.createTexture({ size: [width, height], format: "rgba32float", usage: GPUTextureUsage.RENDER_ATTACHMENT });
+    const target = this.dev.createTexture({
+      size: [
+        width,
+        height
+      ],
+      format: "rgba32float",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT
+    });
     const view = target.createView();
-    const qs = this.dev.createQuerySet({ type: "timestamp", count: 2 });
-    const resolve = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-    const read = this.dev.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const qs = this.dev.createQuerySet({
+      type: "timestamp",
+      count: 2
+    });
+    const resolve = this.dev.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC
+    });
+    const read = this.dev.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
     const samples = [];
     for (let i = 0; i < iters; i++) {
       const enc = this.dev.createCommandEncoder();
       const mb = this.meshPass(enc, width, height);
       const pass = enc.beginRenderPass({
-        colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
-        timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 }
+        colorAttachments: [
+          {
+            view,
+            loadOp: "clear",
+            storeOp: "store",
+            clearValue: {
+              r: 0,
+              g: 0,
+              b: 0,
+              a: 1
+            }
+          }
+        ],
+        timestampWrites: {
+          querySet: qs,
+          beginningOfPassWriteIndex: 0,
+          endOfPassWriteIndex: 1
+        }
       });
       pass.setPipeline(this.pipeline);
       pass.setBindGroup(0, this.bind);
@@ -3260,7 +4547,9 @@ ${pickDispatch}
       pass.end();
       enc.resolveQuerySet(qs, 0, 2, resolve, 0);
       enc.copyBufferToBuffer(resolve, 0, read, 0, 16);
-      this.dev.queue.submit([enc.finish()]);
+      this.dev.queue.submit([
+        enc.finish()
+      ]);
       await read.mapAsync(GPUMapMode.READ);
       const t = new BigUint64Array(read.getMappedRange());
       const ms = Number(t[1] - t[0]) / 1e6;
@@ -3279,13 +4568,34 @@ ${pickDispatch}
     this.ensureTrace(width, height);
     this.flush();
     this.dev.queue.writeBuffer(this.resolveBgBuf, 0, this.mat.subarray(12, 16));
-    const target = this.dev.createTexture({ size: [width, height], format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    const target = this.dev.createTexture({
+      size: [
+        width,
+        height
+      ],
+      format: this.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+    });
     const enc = this.dev.createCommandEncoder();
     this.encodeFrame(enc, target.createView());
     const bpr = Math.ceil(width * 4 / 256) * 256;
-    const buf = this.dev.createBuffer({ size: bpr * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    enc.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: height }, [width, height]);
-    this.dev.queue.submit([enc.finish()]);
+    const buf = this.dev.createBuffer({
+      size: bpr * height,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    enc.copyTextureToBuffer({
+      texture: target
+    }, {
+      buffer: buf,
+      bytesPerRow: bpr,
+      rowsPerImage: height
+    }, [
+      width,
+      height
+    ]);
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
     await buf.mapAsync(GPUMapMode.READ);
     const padded = new Uint8Array(buf.getMappedRange());
     const out = new Uint8Array(width * height * 4);
@@ -3301,23 +4611,75 @@ ${pickDispatch}
    *  the camera to width×height first (like renderUpscaled). Returns width*height*4 bytes. */
   async traceSamples(width, height, viewH = height) {
     this.flush();
-    this.dev.queue.writeBuffer(this.camBuf, 64, new Float32Array([width, height]));
-    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([this.focalPx * (viewH / height)]));
-    const target = this.dev.createTexture({ size: [width, height], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC });
+    this.dev.queue.writeBuffer(this.camBuf, 64, new Float32Array([
+      width,
+      height
+    ]));
+    this.dev.queue.writeBuffer(this.camBuf, 72, new Float32Array([
+      this.focalPx * (viewH / height)
+    ]));
+    const target = this.dev.createTexture({
+      size: [
+        width,
+        height
+      ],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+    });
     const enc = this.dev.createCommandEncoder();
     this.meshPass(enc, width, height);
     const smt = this.meshTargets(width, height);
-    const streamMb = this.dev.createBindGroup({ layout: this.streamPipeline.getBindGroupLayout(1), entries: [{ binding: 0, resource: smt.col.createView() }, { binding: 1, resource: smt.depth.createView() }] });
-    const tp = enc.beginRenderPass({ colorAttachments: [{ view: target.createView(), loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 0 } }] });
+    const streamMb = this.dev.createBindGroup({
+      layout: this.streamPipeline.getBindGroupLayout(1),
+      entries: [
+        {
+          binding: 0,
+          resource: smt.col.createView()
+        },
+        {
+          binding: 1,
+          resource: smt.depth.createView()
+        }
+      ]
+    });
+    const tp = enc.beginRenderPass({
+      colorAttachments: [
+        {
+          view: target.createView(),
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0
+          }
+        }
+      ]
+    });
     tp.setPipeline(this.streamPipeline);
     tp.setBindGroup(0, this.streamBind);
     tp.setBindGroup(1, streamMb);
     tp.draw(3);
     tp.end();
     const bpr = Math.ceil(width * 4 / 256) * 256;
-    const buf = this.dev.createBuffer({ size: bpr * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    enc.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: height }, [width, height]);
-    this.dev.queue.submit([enc.finish()]);
+    const buf = this.dev.createBuffer({
+      size: bpr * height,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
+    enc.copyTextureToBuffer({
+      texture: target
+    }, {
+      buffer: buf,
+      bytesPerRow: bpr,
+      rowsPerImage: height
+    }, [
+      width,
+      height
+    ]);
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
     await buf.mapAsync(GPUMapMode.READ);
     const padded = new Uint8Array(buf.getMappedRange());
     const out = new Uint8Array(width * height * 4);
@@ -3331,20 +4693,34 @@ ${pickDispatch}
 
 // render/fields.ts
 function transformedAABB(m, lo, hi) {
-  const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+  const mn = [
+    Infinity,
+    Infinity,
+    Infinity
+  ], mx = [
+    -Infinity,
+    -Infinity,
+    -Infinity
+  ];
   for (let i = 0; i < 8; i++) {
-    const c = applyMat4(m, [i & 1 ? hi[0] : lo[0], i & 2 ? hi[1] : lo[1], i & 4 ? hi[2] : lo[2]]);
+    const c = applyMat4(m, [
+      i & 1 ? hi[0] : lo[0],
+      i & 2 ? hi[1] : lo[1],
+      i & 4 ? hi[2] : lo[2]
+    ]);
     for (let a = 0; a < 3; a++) {
       mn[a] = Math.min(mn[a], c[a]);
       mx[a] = Math.max(mx[a], c[a]);
     }
   }
-  return [mn, mx];
+  return [
+    mn,
+    mx
+  ];
 }
 var ImageField = class {
   kind = "img";
   bindingCount = 2;
-  // volume (3d) + lut (2d)
   volTex;
   lutTex;
   dev;
@@ -3355,11 +4731,14 @@ var ImageField = class {
   stepMm;
   box;
   normScale = 1;
-  // r8unorm samples return raw/255; clim is packed /normScale so shader math is unchanged
   dims;
   constructor(dev, data, dims, spacing, lut, opts) {
     this.dims = dims;
-    const center = opts.center ?? [0, 0, 0];
+    const center = opts.center ?? [
+      0,
+      0,
+      0
+    ];
     let src = data, fmt = "r32float", bpe = 4;
     this.normScale = 1;
     if (data instanceof Uint8Array) {
@@ -3371,7 +4750,12 @@ var ImageField = class {
       fmt = "r32float";
       bpe = 4;
     }
-    this.volTex = dev.createTexture({ size: dims, dimension: "3d", format: fmt, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.volTex = dev.createTexture({
+      size: dims,
+      dimension: "3d",
+      format: fmt,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+    });
     {
       const bytesPerRow = dims[0] * bpe, rowsPerImage = dims[1], sliceBytes = bytesPerRow * rowsPerImage;
       const CHUNK = 256 * 1024 * 1024;
@@ -3381,16 +4765,40 @@ var ImageField = class {
         const depth = Math.min(slab, dims[2] - z);
         const slabBytes = depth * sliceBytes;
         const slabData = u8.slice(z * sliceBytes, z * sliceBytes + slabBytes);
-        dev.queue.writeTexture(
-          { texture: this.volTex, origin: { x: 0, y: 0, z } },
-          slabData,
-          { offset: 0, bytesPerRow, rowsPerImage },
-          [dims[0], dims[1], depth]
-        );
+        dev.queue.writeTexture({
+          texture: this.volTex,
+          origin: {
+            x: 0,
+            y: 0,
+            z
+          }
+        }, slabData, {
+          offset: 0,
+          bytesPerRow,
+          rowsPerImage
+        }, [
+          dims[0],
+          dims[1],
+          depth
+        ]);
       }
     }
-    this.lutTex = dev.createTexture({ size: [256, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
+    this.lutTex = dev.createTexture({
+      size: [
+        256,
+        1
+      ],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+    });
+    dev.queue.writeTexture({
+      texture: this.lutTex
+    }, lut, {
+      bytesPerRow: 256 * 4
+    }, [
+      256,
+      1
+    ]);
     if (opts.ijkToRAS) {
       this.p2t = patientToTextureFromIjkToRAS(opts.ijkToRAS, dims);
       this.box = volumeAABBFromIjkToRAS(opts.ijkToRAS, dims);
@@ -3401,35 +4809,56 @@ var ImageField = class {
       this.stepMm = Math.min(...spacing);
     }
     this.clim = opts.clim;
-    this.shade = opts.shade ?? [0.35, 0.75, 0.35, 20];
+    this.shade = opts.shade ?? [
+      0.35,
+      0.75,
+      0.35,
+      20
+    ];
     this.unit = opts.opacityUnitDistance ?? this.stepMm;
     this.dev = dev;
   }
   /** Replace the 256-entry rgba8 color/opacity LUT in place (no texture/bind-group churn).
    *  The bind group holds a stable view of lutTex, so the next render uses the new LUT. */
   setLUT(lut) {
-    this.dev.queue.writeTexture({ texture: this.lutTex }, lut, { bytesPerRow: 256 * 4 }, [256, 1]);
+    this.dev.queue.writeTexture({
+      texture: this.lutTex
+    }, lut, {
+      bytesPerRow: 256 * 4
+    }, [
+      256,
+      1
+    ]);
   }
   /** The scalar range the LUT spans — window/level for the volume rendering. Re-packed into
    *  the material uniform on the next syncUniforms()/render, so no pipeline rebuild. */
   setClim(lo, hi) {
-    this.clim = [lo, hi];
+    this.clim = [
+      lo,
+      hi
+    ];
   }
   getClim() {
-    return [this.clim[0], this.clim[1]];
+    return [
+      this.clim[0],
+      this.clim[1]
+    ];
   }
   /** Phong shading tuple [ka, kd, ks, shininess] — re-packed into the material uniform next
    *  render (VR presets carry their own lighting). [1,0,0,1] = flat emission (no shading). */
   setShade(shade) {
-    this.shade = [shade[0], shade[1], shade[2], shade[3]];
+    this.shade = [
+      shade[0],
+      shade[1],
+      shade[2],
+      shade[3]
+    ];
   }
   origP2t;
-  // sampling matrix + box at identity, for setWorldTransform
   origBox;
   uniformFloats() {
     return 28;
   }
-  // mat4(16) + clim(4) + shade(4) + params(4)
   aabb() {
     return this.box;
   }
@@ -3448,12 +4877,22 @@ var ImageField = class {
     const [nx, ny, nz] = this.dims;
     if (z < 0 || z + depth > nz) return;
     const bpe = data instanceof Uint8Array ? 1 : 4;
-    this.dev.queue.writeTexture(
-      { texture: this.volTex, origin: { x: 0, y: 0, z } },
-      data,
-      { offset: 0, bytesPerRow: nx * bpe, rowsPerImage: ny },
-      [nx, ny, depth]
-    );
+    this.dev.queue.writeTexture({
+      texture: this.volTex,
+      origin: {
+        x: 0,
+        y: 0,
+        z
+      }
+    }, data, {
+      offset: 0,
+      bytesPerRow: nx * bpe,
+      rowsPerImage: ny
+    }, [
+      nx,
+      ny,
+      depth
+    ]);
   }
   /** r8unorm volumes sample /255, so clim is packed /normScale in the shader; a slice plane sharing this
    *  texture must use the same factor. 1 for f32 volumes. */
@@ -3469,7 +4908,11 @@ var ImageField = class {
   /** Centre of the volume in world (RAS) at identity — a natural pivot for a transform widget. */
   worldCenter() {
     const [lo, hi] = this.origBox ?? this.box;
-    return [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+    return [
+      (lo[0] + hi[0]) / 2,
+      (lo[1] + hi[1]) / 2,
+      (lo[2] + hi[2]) / 2
+    ];
   }
   /** Place the volume in the world by a rigid transform M (worldFromLocal): the ray samples
    *  at p2t·M⁻¹·wp, so the volume appears moved/rotated. A Tier-A interactive update — caller
@@ -3496,11 +4939,8 @@ var ImageField = class {
     return [
       `  img${s}_p2t : mat4x4<f32>,`,
       `  img${s}_clim : vec4<f32>,`,
-      // lo, hi, _, _
       `  img${s}_shade : vec4<f32>,`,
-      // ka, kd, ks, shininess
       `  img${s}_params : vec4<f32>,`
-      // opacity_unit_distance, _, _, _
     ].join("\n");
   }
   declareBindings(s, base) {
@@ -3565,19 +5005,23 @@ fn sample_field_img${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
   }
   bindEntries(_s, base) {
     return [
-      { binding: base, resource: this.volTex.createView() },
-      { binding: base + 1, resource: this.lutTex.createView() }
+      {
+        binding: base,
+        resource: this.volTex.createView()
+      },
+      {
+        binding: base + 1,
+        resource: this.lutTex.createView()
+      }
     ];
   }
 };
 var SegmentField = class {
   kind = "seg";
   bindingCount;
-  // 1 (value texture) + 1 when an sdf attr (opacity) texture is bound
   clippable;
   tex;
   attrTex;
-  // sdf per-voxel attributes (.r = opacity)
   p2t;
   box;
   color;
@@ -3590,9 +5034,20 @@ var SegmentField = class {
   interfaceMode;
   voxelMm = 1;
   providesSkip;
+  /** The band-limited SOLID path: sdf mode, outer boundary, with the attr texture that carries the
+   *  band-limited label field. This is the only variant that uses the interval crossing test. */
+  outerSolid;
+  /** Interval sampling (Field): the shader is handed the ray distance back to THIS field's previous
+   *  sample, so consecutive intervals tile the ray exactly — what makes the crossing test immune to
+   *  the per-step ray jitter and to an empty-space leap. */
+  intervalSampling;
   constructor(tex, dims, spacing, opts) {
     this.tex = tex;
-    const center = opts.center ?? [0, 0, 0];
+    const center = opts.center ?? [
+      0,
+      0,
+      0
+    ];
     let voxelMm;
     if (opts.ijkToRAS) {
       this.p2t = patientToTextureFromIjkToRAS(opts.ijkToRAS, dims);
@@ -3605,7 +5060,12 @@ var SegmentField = class {
     }
     this.color = opts.color;
     this.opacity = opts.opacity ?? 1;
-    this.shade = opts.shade ?? [0.2, 0.85, 0.3, 32];
+    this.shade = opts.shade ?? [
+      0.2,
+      0.85,
+      0.3,
+      32
+    ];
     this.bandMm = opts.bandMm ?? voxelMm;
     this.stepMm = opts.sampleStepMm ?? Math.max(0.5 * voxelMm, 0.1);
     this.clippable = opts.clippable ?? true;
@@ -3616,6 +5076,8 @@ var SegmentField = class {
     this.interfaceMode = this.mode === "sdf" && (opts.interfaceMode ?? false);
     this.attrTex = this.mode === "sdf" ? opts.attrTexture : void 0;
     this.bindingCount = this.attrTex ? 2 : 1;
+    this.outerSolid = this.mode === "sdf" && !this.interfaceMode && !!this.attrTex;
+    this.intervalSampling = this.outerSolid;
   }
   /** Field-level opacity (multiplies every segment's per-label opacity in the shader). Live global
    *  segmentation opacity — the caller does scene.syncUniforms() + redraw to apply. */
@@ -3628,10 +5090,17 @@ var SegmentField = class {
     this.voxelMode = on;
   }
   voxelMode = false;
+  /** Reconstruction width σ (VOXELS) of the band-limited label field the sdf surface is the 0.5
+   *  level set of. The field itself is baked by JfaSdfBaker (attr.b); the renderer only needs σ to
+   *  keep the sphere-trace skip from leaping over a surface that has moved off the sharp one.
+   *  Caller does scene.syncUniforms(). */
+  setSmoothingVox(sigmaVoxels) {
+    this.sigmaVox = Math.max(0, sigmaVoxels);
+  }
+  sigmaVox = 0;
   uniformFloats() {
     return 36;
   }
-  // mat4(16) + color(4) + shade(4) + params(4) + bmin(4) + bmax(4)
   aabb() {
     return this.box;
   }
@@ -3660,8 +5129,27 @@ fn skip_seg${s}(wp : vec3<f32>) -> f32 {
     let q = abs(transform_point_seg${s}(wp) - cen) - ext;
     return max(0.0, length(max(q, vec3<f32>(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
   }
-  let d = abs(textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a);                  // |distance to surface| (mm)
-  return max(0.0, d - u_material.seg${s}_params.x - u_material.seg${s}_params.y);   // leap toward the shell (band + 1 voxel safe)
+  let sd = textureSampleLevel(t_seg${s}, s_lin, t, 0.0).a;                      // SIGNED distance to the labelmap surface (mm)
+  // An UNSEEDED voxel \u2014 one the jump flood never reached a seed from \u2014 reports 1e3 mm. That is not a
+  // distance, it is "unknown", and leaping on it sails through whatever surface is really there,
+  // which is how a partial re-flood used to come back as a flat cut across the shell. No real SDF
+  // grid here spans 500 mm, so treat anything beyond that as unknown and march instead of leaping.
+  if (abs(sd) > 500.0) { return 0.0; }
+  // params.w = \u03C3 in mm. The rendered surface is the band-limited field's 0.5 level set, which sits
+  // within ~\u03C3 of this sharp one, so the leap has to stop that much short of it or a \u03C3-wide feature
+  // can be jumped clean over.
+  var leap = max(0.0, abs(sd) - u_material.seg${s}_params.x - u_material.seg${s}_params.y - u_material.seg${s}_params.w);
+${this.clippable && this.outerSolid ? `  // INSIDE the solid, a clip plane is a surface too (the cut face). Leaping on |sd| alone would sail
+  // past it \u2014 the ray enters through the clip, sees a big interior distance, and jumps to the far
+  // wall, so the cap never gets sampled. Clamp the leap to the nearest plane while inside.
+  if (sd < 0.0) {
+    let ccount = u32(u_material.clip_count.x);
+    for (var ci = 0u; ci < ccount; ci = ci + 1u) {
+      let cp = u_material.clip_planes[ci];
+      leap = min(leap, abs(dot(wp, cp.xyz) + cp.w));
+    }
+  }` : ``}
+  return leap;
 }`
     );
   }
@@ -3669,13 +5157,9 @@ fn skip_seg${s}(wp : vec3<f32>) -> f32 {
     return [
       `  seg${s}_p2t : mat4x4<f32>,`,
       `  seg${s}_color : vec4<f32>,`,
-      // rgb, opacity
       `  seg${s}_shade : vec4<f32>,`,
-      // ka, kd, ks, shininess
       `  seg${s}_params : vec4<f32>,`,
-      // band_mm, voxel_mm, _, _
       `  seg${s}_bmin : vec4<f32>,`,
-      // aabb min (RAS) — for a contract-valid skip outside the texture
       `  seg${s}_bmax : vec4<f32>,`
     ].join("\n");
   }
@@ -3719,8 +5203,8 @@ fn attr_seg${s}(wp : vec3<f32>) -> vec2<f32> {   // per-segment (.x = opacity, .
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec2<f32>(0.0); }
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).rg;
-}` : ""}${this.attrTex ? `
-fn bdist_seg${s}(wp : vec3<f32>) -> f32 {   // SMOOTHED distance from attr.b \u2014 shading and erosion only, never growth
+}` : ""}${this.interfaceMode && this.attrTex ? `
+fn bdist_seg${s}(wp : vec3<f32>) -> f32 {   // SMOOTHED interface distance from attr.b (interface mode)
   let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
   let t = clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).b;
@@ -3730,6 +5214,15 @@ fn pres_seg${s}(wp : vec3<f32>) -> f32 {   // CRISP in-segment presence (attr.a)
   let t = t4.xyz;
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return 0.0; }
   return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).a;
+}` : ""}${this.outerSolid ? `
+fn pfield_seg${s}(wp : vec3<f32>) -> f32 {
+  // THE BAND-LIMITED LABEL FIELD: p = G_\u03C3 * 1(label != 0), carried in attr.b (JfaSdfBaker finalize
+  // writes the 0/1 indicator there, the attr blur low-passes it at the smoothing \u03C3). Clamped to the
+  // texture edge so a gradient tap just outside the padded grid reads real background instead of a
+  // cull sentinel. The surface is the p = 0.5 level set of this, and nothing else.
+  let t4 = u_material.seg${s}_p2t * vec4<f32>(transform_point_seg${s}(wp), 1.0);
+  let t = clamp(t4.xyz, vec3<f32>(0.0), vec3<f32>(1.0));
+  return textureSampleLevel(t_attr${s}, s_lin, t, 0.0).b;
 }` : ""}${this.interfaceMode ? `
 fn g1_seg${s}(c : f32, wp : vec3<f32>, dir : vec3<f32>, h : f32) -> f32 {
   // One-sided difference of the SMOOTH interface distance along dir, picking the STEEPER side. The
@@ -3852,25 +5345,93 @@ ${this.attrTex ? `  let at = textureLoad(t_attr${s}, idx, 0);
   lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
   return vec4<f32>(lit * op, op);
 }
-// Shell (surface) contribution at wp: crisp Phong shell around sdf=0. Weighted by (1-mode) so it
-// morphs smoothly into the volume contribution across a blurred surface\u2194volume boundary.
-fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, sdf : f32, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
+// Surface contribution at wp: a crisp Phong surface. Weighted by (1-mode) so it morphs smoothly
+// into the volume contribution across a blurred surface\u2194volume boundary.
+fn surface_seg${s}(wp : vec3<f32>, rd : vec3<f32>, ds : f32, sdf : f32, band : f32, step : f32, seg_op : f32, op0 : f32) -> vec4<f32> {
   if (u_material.seg${s}_params.z > 0.5) { return voxels_seg${s}(wp, rd, band, step, seg_op, op0); }
-  // The surface is WHERE THE LABELMAP PUTS IT, at every smoothing setting. Smoothing changes
-  // only the normal (below), i.e. how the surface is shaded \u2014 not where it is. Letting it move
-  // the surface at all, even inward-only, eats the thing being looked at: a vertebral process a
-  // few voxels thick erodes away, and the detail that distinguishes one bone from its neighbour
-  // goes with it.
-${this.attrTex && !this.interfaceMode ? `  // \u2026and WHERE the labelmap puts it is the voxel FACE. The JFA seeds both sides of the boundary
-  // at their voxel CENTRES, so |sdf| is the distance to the nearest boundary-voxel centre: it
-  // reads zero on the last inside voxel AND on the first outside one \u2014 a one-voxel plateau
-  // straddling the real surface, which rendered as a shell sitting half a voxel OUTSIDE the
-  // face. That is the step you see when switching between the voxel view (which draws the face)
-  // and any smoothing. The crisp presence says which side of the face a sample is on, so it
-  // recovers the true signed distance: half a voxel in on the inside, half a voxel out on the
-  // outside, and exactly zero at the face.
-  let d_sig = sdf + 0.5 * u_material.seg${s}_params.y * (1.0 - 2.0 * pres_seg${s}(wp));
-  let d_mm = abs(d_sig);` : `  let d_mm = abs(sdf);`}
+${this.outerSolid ? `  // A BAND-LIMITED SOLID, found by an INTERVAL CROSSING TEST.
+  //
+  // A labelmap is a SAMPLED indicator function, and its voxel steps are above the grid's Nyquist
+  // limit \u2014 they are aliasing, not anatomy. So the faithful surface is the 0.5 level set of that
+  // indicator RECONSTRUCTED with a kernel at the limit: p = G_\u03C3 * 1(label != 0), which the baker
+  // low-passes into attr.b and the smoothing control sets the \u03C3 of. Reconstructing with plain
+  // trilinear interpolation instead (what \u03C3\u21920 gives) reproduces the ALIASED surface \u2014 flat voxel
+  // faces and chamfered edges, which is the chunk. Band-limited, the surface still passes through
+  // the voxel faces but carries no energy above Nyquist, which is the smooth.
+  //
+  // This MOVES the geometry with \u03C3, which earlier versions refused to do because smoothing the
+  // signed DISTANCE closed the disc space between two vertebrae and fused them. A BOUNDED
+  // indicator cannot: at the centre of a 4-voxel gap p \u2248 2\xB7\u03A6(-2) \u2248 0.05, nowhere near 0.5. What it
+  // does cost is the curvature term, \u2248 \u03C3\xB2/2R inward on a convex ridge of radius R \u2014 a quarter of a
+  // voxel at \u03C3=1 on a 2-voxel vertebral process. Bounded and predictable, which is the trade a
+  // smoothing control is supposed to offer.
+  //
+  // WHY A CROSSING TEST AND NOT A SHELL BAND. A band wants the PERPENDICULAR distance to the
+  // surface, and the only way to get that from a scalar field is (0.5 - p)/|grad p| \u2014 which falls
+  // apart exactly where |grad p| collapses: concave creases where two surfaces meet, and thin
+  // features. There the estimated distance diverges, no sample falls inside the band, and an
+  // OPAQUE segment renders dusty, with background showing through it. (Measured on a sphere with a
+  // plate through it: 5-7% of interior pixels leaking, up to 31% on a single pixel; the shell-band
+  // design leaked 8-15%.) The test p > 0.5 has no such failure: it is well defined everywhere, so
+  // asking whether THIS interval contains the crossing cannot miss a surface, at any \u03C3, curvature or
+  // incidence. Field.intervalSampling hands us the exact distance back to this field's previous
+  // sample, so consecutive intervals tile the ray with no gap and no overlap \u2014 which is what makes
+  // the test exact under the per-step ray jitter, and across an empty-space leap.
+  let p1 = pfield_seg${s}(wp);
+  let back = wp - rd * max(ds, 1.0e-4);
+  let p0 = pfield_seg${s}(back);
+  let in1 = p1 > 0.5;
+  let in0 = p0 > 0.5;
+  var capNormal = vec3<f32>(0.0);
+  var prevClipped = false;` : ``}${this.outerSolid && this.clippable ? `
+  // SOLID: where a clip plane cuts the body, the body has a FACE there. The ray enters the kept
+  // half-space already inside the solid \u2014 no surface crossing \u2014 so the cut would be a hole into a
+  // bubble unless we treat that entry as a face of its own, with the plane's normal. The previous
+  // sample is the test: if it was on the discarded side, this interval crossed the plane.
+  let ccount = u32(u_material.clip_count.x);
+  for (var ci = 0u; ci < ccount; ci = ci + 1u) {
+    let cp = u_material.clip_planes[ci];
+    if (dot(back, cp.xyz) + cp.w < 0.0) { prevClipped = true; capNormal = -cp.xyz; }
+  }` : ``}${this.outerSolid ? `
+  let surfaceCross = in1 != in0;
+  if (!(surfaceCross || (in1 && prevClipped))) { return vec4<f32>(0.0); }
+  // Where in the interval: linear in p, which is exact to first order and sub-voxel in practice.
+  let u = select(1.0, clamp((0.5 - p0) / (p1 - p0), 0.0, 1.0), surfaceCross);
+  let wc = back + (wp - back) * u;
+  let T = clamp(op0 * seg_op, 0.0, 1.0);
+  if (T <= 0.0) { return vec4<f32>(0.0); }
+  // Normal from a FULL-VOXEL central difference of p. attr.b is read trilinearly, so the field is
+  // only C0 and its gradient jumps at every voxel-face plane; differencing inside a single cell
+  // (h = half a voxel) reports that cell's own gradient and the jumps show up as a rectangular
+  // lattice of dark creases over the surface \u2014 a maze, worst at small \u03C3 where the field is
+  // steepest. A full-voxel difference straddles the discontinuity and averages it out. Geometry
+  // and normal now come from the SAME field, which is what stops a stepped silhouette from being
+  // lit like a smooth one.
+  let hg = max(u_material.seg${s}_params.y, step);
+  let gp = vec3<f32>(
+    pfield_seg${s}(wc + vec3<f32>(hg,0,0)) - pfield_seg${s}(wc - vec3<f32>(hg,0,0)),
+    pfield_seg${s}(wc + vec3<f32>(0,hg,0)) - pfield_seg${s}(wc - vec3<f32>(0,hg,0)),
+    pfield_seg${s}(wc + vec3<f32>(0,0,hg)) - pfield_seg${s}(wc - vec3<f32>(0,0,hg))) / (2.0 * hg);
+  let glen = length(gp);
+  // p increases INWARD, so the outward normal is -grad p. On a cap (entered through a clip plane
+  // with no crossing) the face is the plane, so its normal is the plane's.
+  var n = select(capNormal, -gp / max(glen, 1.0e-6), surfaceCross && glen > 1.0e-5);
+  if (dot(n, n) < 0.25) { n = -rd; }     // degenerate: face the camera rather than drop the sample
+  if (dot(n, -rd) < 0.0) { n = -n; }
+  // ONE crossing = exactly the target opacity T, by construction \u2014 no band, no profile integral,
+  // no dependence on the sample step or the incidence angle. Front and back faces of a translucent
+  // segment still compose to 1-(1-T)\xB2, as a pair of polydata surfaces would.
+  let op = T;
+  let ka = u_material.seg${s}_shade.x; let kd = u_material.seg${s}_shade.y;
+  let ks = u_material.seg${s}_shade.z; let sh = u_material.seg${s}_shade.w;
+  let ldn = max(dot(-rd, n), 0.0);
+  let refl = normalize(2.0 * ldn * n + rd);
+  let rdv = max(dot(refl, -rd), 0.0);
+  let col = col_seg${s}(wc);
+  var lit = col * ka + col * (kd * ldn) + vec3<f32>(ks * pow(rdv, max(sh, 1.0)));
+  lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
+  return vec4<f32>(lit * op, op);` : `
+  let d_mm = abs(sdf);
   if (d_mm > band + step) { return vec4<f32>(0.0); }
   let T = clamp(op0 * seg_op, 0.0, 1.0);      // TARGET surface opacity (per-segment \xD7 field)
   if (T <= 0.0) { return vec4<f32>(0.0); }
@@ -3880,19 +5441,12 @@ ${this.interfaceMode ? `  let hg = 1.5 * step;
   let g = vec3<f32>(
     g1_seg${s}(dc, wp, vec3<f32>(1,0,0), hg),
     g1_seg${s}(dc, wp, vec3<f32>(0,1,0), hg),
-    g1_seg${s}(dc, wp, vec3<f32>(0,0,1), hg));` : this.attrTex ? `  // The NORMAL comes from the smoothed distance (attr.b) \u2014 that is what the smoothing control
-  // actually does now: it shades the surface smoothly without moving it. Central difference: in
-  // this mode the distance is signed, so there is no V-crease to straddle.
-  let hg = max(h, 1.0 * step);
-  let g = vec3<f32>(
-    bdist_seg${s}(wp + vec3<f32>(hg,0,0)) - bdist_seg${s}(wp - vec3<f32>(hg,0,0)),
-    bdist_seg${s}(wp + vec3<f32>(0,hg,0)) - bdist_seg${s}(wp - vec3<f32>(0,hg,0)),
-    bdist_seg${s}(wp + vec3<f32>(0,0,hg)) - bdist_seg${s}(wp - vec3<f32>(0,0,hg))) / (2.0 * hg);` : `  let g = vec3<f32>(
+    g1_seg${s}(dc, wp, vec3<f32>(0,0,1), hg));` : `  let g = vec3<f32>(
     vgrad_seg${s}(wp + vec3<f32>(h,0,0)) - vgrad_seg${s}(wp - vec3<f32>(h,0,0)),
     vgrad_seg${s}(wp + vec3<f32>(0,h,0)) - vgrad_seg${s}(wp - vec3<f32>(0,h,0)),
     vgrad_seg${s}(wp + vec3<f32>(0,0,h)) - vgrad_seg${s}(wp - vec3<f32>(0,0,h))) / (2.0 * h);`}
   let glen = length(g);
-  if (glen < 1e-5) { return vec4<f32>(0.0); }
+  if (glen < 1.0e-5) { return vec4<f32>(0.0); }
   var n = g / glen;
   if (dot(n, -rd) < 0.0) { n = -n; }
   // SURFACE opacity (Slicer polydata parity): the shell is a THIN surface of opacity T, not a solid
@@ -3902,13 +5456,9 @@ ${this.interfaceMode ? `  let hg = 1.5 * step;
   // so net opacity = 1-e^(-\u03A3d\u03C4) = T EXACTLY \u2014 independent of band thickness and sample rate, and T\u21921
   // stays crisply opaque. |dot(rd,n)| converts ray-step to shell-normal distance (\u21920 at grazing =
   // built-in silhouette AA).
-  let a = max(1.0 - d_mm / band, 0.0);   // d_mm is the eroded-but-never-grown distance
+  let a = max(1.0 - d_mm / band, 0.0);
   if (a <= 0.0) { return vec4<f32>(0.0); }
-  // Convert ray-step to d_mm-distance. Outer: RAW gradient projection |dot(rd,g)| = |d(d_mm)/ds|
-  // (includes |grad sdf|, which the distance blur pulls below 1). Interface: the re-signed gradient has
-  // an arbitrary magnitude (a sign jump at the interface), so use the UNIT normal cosine |dot(rd,n)| \u2014
-  // still \u21920 at grazing (silhouette AA), and keeps opacity thickness-consistent.
-  let rate = max(abs(dot(rd, ${this.interfaceMode ? "n" : "g"})), 1e-3);
+  let rate = max(abs(dot(rd, ${this.interfaceMode ? "n" : "g"})), 1.0e-3);
   let tau = -log(1.0 - min(T, 0.9999)) * (a / band) * (step * rate);
   var op = 1.0 - exp(-tau);
 ${this.interfaceMode ? `  op = op * pres_seg${s}(wp);   // gate to GENUINELY in-segment voxels \u2014 kills the bled colour/opacity halo beyond the real edge` : ""}
@@ -3921,9 +5471,9 @@ ${this.interfaceMode ? `  op = op * pres_seg${s}(wp);   // gate to GENUINELY in-
   let col = col_seg${s}(wp);
   var lit = col * ka + col * (kd * ldn) + vec3<f32>(ks * pow(rdv, max(sh, 1.0)));
   lit = srgb2physical(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0)));
-  return vec4<f32>(lit * op, op);
+  return vec4<f32>(lit * op, op);`}
 }
-fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
+fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>${this.intervalSampling ? ", ds : f32" : ""}) -> vec4<f32> {
   let op0 = u_material.seg${s}_color.a;
   if (op0 <= 0.0) { return vec4<f32>(0.0); }
   let sdf = v_seg${s}(wp);
@@ -3946,9 +5496,9 @@ ${this.attrTex ? `  let at = attr_seg${s}(wp);        // (opacity, shading mode)
     }
   }
   if (mode < 0.999) {
-    acc += (1.0 - mode) * surface_seg${s}(wp, rd, sdf, band, step, seg_op, op0);
+    acc += (1.0 - mode) * surface_seg${s}(wp, rd, ${this.intervalSampling ? "ds" : "step"}, sdf, band, step, seg_op, op0);
   }
-  return acc;` : `  return surface_seg${s}(wp, rd, sdf, band, step, 1.0, op0);`}
+  return acc;` : `  return surface_seg${s}(wp, rd, step, sdf, band, step, 1.0, op0);`}
 }`
       );
     }
@@ -4030,7 +5580,7 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     out[off + 24] = this.bandMm;
     out[off + 25] = this.voxelMm;
     out[off + 26] = this.voxelMode ? 1 : 0;
-    out[off + 27] = 0;
+    out[off + 27] = this.sigmaVox * this.voxelMm;
     out[off + 28] = this.box[0][0];
     out[off + 29] = this.box[0][1];
     out[off + 30] = this.box[0][2];
@@ -4039,8 +5589,16 @@ fn sample_field_seg${s}(wp : vec3<f32>, rd : vec3<f32>) -> vec4<f32> {
     out[off + 34] = this.box[1][2];
   }
   bindEntries(_s, base) {
-    const e = [{ binding: base, resource: this.tex.createView() }];
-    if (this.attrTex) e.push({ binding: base + 1, resource: this.attrTex.createView() });
+    const e = [
+      {
+        binding: base,
+        resource: this.tex.createView()
+      }
+    ];
+    if (this.attrTex) e.push({
+      binding: base + 1,
+      resource: this.attrTex.createView()
+    });
     return e;
   }
 };
@@ -4100,29 +5658,90 @@ function gaussHalfKernel(sigma) {
   }
   const w = new Float32Array(16);
   for (let i = 0; i <= radius; i++) w[i] = raw[i] / total;
-  return { radius, w };
+  return {
+    radius,
+    w
+  };
 }
 function bakeColorizeRGBA(dev, labelmap, dims, palette, sigmaVoxels = 1.5) {
   const [dx, dy, dz] = dims;
   const storageUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING;
-  const labelTex = dev.createTexture({ size: dims, dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-  dev.queue.writeTexture({ texture: labelTex }, labelmap, { bytesPerRow: dx, rowsPerImage: dy }, dims);
-  const texA = dev.createTexture({ size: dims, dimension: "3d", format: "rgba16float", usage: storageUsage });
-  const texB = dev.createTexture({ size: dims, dimension: "3d", format: "rgba16float", usage: storageUsage });
-  const palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const labelTex = dev.createTexture({
+    size: dims,
+    dimension: "3d",
+    format: "r8uint",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+  });
+  dev.queue.writeTexture({
+    texture: labelTex
+  }, labelmap, {
+    bytesPerRow: dx,
+    rowsPerImage: dy
+  }, dims);
+  const texA = dev.createTexture({
+    size: dims,
+    dimension: "3d",
+    format: "rgba16float",
+    usage: storageUsage
+  });
+  const texB = dev.createTexture({
+    size: dims,
+    dimension: "3d",
+    format: "rgba16float",
+    usage: storageUsage
+  });
+  const palBuf = dev.createBuffer({
+    size: 256 * 16,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
   const palData = new Float32Array(256 * 4);
   palData.set(palette.subarray(0, Math.min(palette.length, 256 * 4)));
   dev.queue.writeBuffer(palBuf, 0, palData);
-  const dimsBuf = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-  dev.queue.writeBuffer(dimsBuf, 0, new Uint32Array([dx, dy, dz, 0]));
+  const dimsBuf = dev.createBuffer({
+    size: 16,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
+  dev.queue.writeBuffer(dimsBuf, 0, new Uint32Array([
+    dx,
+    dy,
+    dz,
+    0
+  ]));
   const gx = Math.ceil(dx / 4), gy = Math.ceil(dy / 4), gz = Math.ceil(dz / 4);
-  const initPipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: INIT_WGSL }), entryPoint: "main" } });
-  const initBind = dev.createBindGroup({ layout: initPipe.getBindGroupLayout(0), entries: [
-    { binding: 0, resource: labelTex.createView() },
-    { binding: 1, resource: texA.createView() },
-    { binding: 2, resource: { buffer: palBuf } },
-    { binding: 3, resource: { buffer: dimsBuf } }
-  ] });
+  const initPipe = dev.createComputePipeline({
+    layout: "auto",
+    compute: {
+      module: dev.createShaderModule({
+        code: INIT_WGSL
+      }),
+      entryPoint: "main"
+    }
+  });
+  const initBind = dev.createBindGroup({
+    layout: initPipe.getBindGroupLayout(0),
+    entries: [
+      {
+        binding: 0,
+        resource: labelTex.createView()
+      },
+      {
+        binding: 1,
+        resource: texA.createView()
+      },
+      {
+        binding: 2,
+        resource: {
+          buffer: palBuf
+        }
+      },
+      {
+        binding: 3,
+        resource: {
+          buffer: dimsBuf
+        }
+      }
+    ]
+  });
   const enc = dev.createCommandEncoder();
   {
     const p = enc.beginComputePass();
@@ -4132,35 +5751,99 @@ function bakeColorizeRGBA(dev, labelmap, dims, palette, sigmaVoxels = 1.5) {
     p.end();
   }
   if (sigmaVoxels <= 0) {
-    dev.queue.submit([enc.finish()]);
+    dev.queue.submit([
+      enc.finish()
+    ]);
     labelTex.destroy();
     texB.destroy();
     return texA;
   }
   const { radius, w } = gaussHalfKernel(sigmaVoxels);
-  const blurPipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: BLUR_WGSL }), entryPoint: "main" } });
-  const passes = [[texA, texB, 0], [texB, texA, 1], [texA, texB, 2]];
+  const blurPipe = dev.createComputePipeline({
+    layout: "auto",
+    compute: {
+      module: dev.createShaderModule({
+        code: BLUR_WGSL
+      }),
+      entryPoint: "main"
+    }
+  });
+  const passes = [
+    [
+      texA,
+      texB,
+      0
+    ],
+    [
+      texB,
+      texA,
+      1
+    ],
+    [
+      texA,
+      texB,
+      2
+    ]
+  ];
   for (const [src, dst, axis] of passes) {
-    const ub = dev.createBuffer({ size: 16 + 16 + 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    dev.queue.writeBuffer(ub, 0, new Uint32Array([dx, dy, dz, 0, axis, radius, 0, 0]));
+    const ub = dev.createBuffer({
+      size: 16 + 16 + 64,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    dev.queue.writeBuffer(ub, 0, new Uint32Array([
+      dx,
+      dy,
+      dz,
+      0,
+      axis,
+      radius,
+      0,
+      0
+    ]));
     dev.queue.writeBuffer(ub, 32, w);
-    const b = dev.createBindGroup({ layout: blurPipe.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: src.createView() },
-      { binding: 1, resource: dst.createView() },
-      { binding: 2, resource: { buffer: ub } }
-    ] });
+    const b = dev.createBindGroup({
+      layout: blurPipe.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: src.createView()
+        },
+        {
+          binding: 1,
+          resource: dst.createView()
+        },
+        {
+          binding: 2,
+          resource: {
+            buffer: ub
+          }
+        }
+      ]
+    });
     const p = enc.beginComputePass();
     p.setPipeline(blurPipe);
     p.setBindGroup(0, b);
     p.dispatchWorkgroups(gx, gy, gz);
     p.end();
   }
-  dev.queue.submit([enc.finish()]);
+  dev.queue.submit([
+    enc.finish()
+  ]);
   labelTex.destroy();
   texA.destroy();
   return texB;
 }
 var ColorizeBaker = class {
+  dev;
+  dims;
+  labelTex;
+  ownsLabel;
+  scratch;
+  palBuf;
+  dimsBuf;
+  initPipe;
+  blurPipe;
+  g;
   /** `label` is either a CPU labelmap (baker allocates + uploads its own r8uint texture, the classic
    *  path) OR an EXTERNAL r8uint 3D texture the baker only READS (the shared-buffer path used by
    *  `algorithms/EditableSegmentation` — a compute effect writes the label texture on-GPU and the baker
@@ -4174,38 +5857,79 @@ var ColorizeBaker = class {
       this.labelTex = label;
       this.ownsLabel = false;
     } else {
-      this.labelTex = dev.createTexture({ size: dims, dimension: "3d", format: "r8uint", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-      dev.queue.writeTexture({ texture: this.labelTex }, label, { bytesPerRow: dx, rowsPerImage: dy }, dims);
+      this.labelTex = dev.createTexture({
+        size: dims,
+        dimension: "3d",
+        format: "r8uint",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+      });
+      dev.queue.writeTexture({
+        texture: this.labelTex
+      }, label, {
+        bytesPerRow: dx,
+        rowsPerImage: dy
+      }, dims);
       this.ownsLabel = true;
     }
-    this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.dimsBuf = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    dev.queue.writeBuffer(this.dimsBuf, 0, new Uint32Array([dx, dy, dz, 0]));
-    this.initPipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: INIT_WGSL }), entryPoint: "main" } });
-    this.blurPipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: BLUR_WGSL }), entryPoint: "main" } });
-    this.g = [Math.ceil(dx / 4), Math.ceil(dy / 4), Math.ceil(dz / 4)];
+    this.palBuf = dev.createBuffer({
+      size: 256 * 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    this.dimsBuf = dev.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    dev.queue.writeBuffer(this.dimsBuf, 0, new Uint32Array([
+      dx,
+      dy,
+      dz,
+      0
+    ]));
+    this.initPipe = dev.createComputePipeline({
+      layout: "auto",
+      compute: {
+        module: dev.createShaderModule({
+          code: INIT_WGSL
+        }),
+        entryPoint: "main"
+      }
+    });
+    this.blurPipe = dev.createComputePipeline({
+      layout: "auto",
+      compute: {
+        module: dev.createShaderModule({
+          code: BLUR_WGSL
+        }),
+        entryPoint: "main"
+      }
+    });
+    this.g = [
+      Math.ceil(dx / 4),
+      Math.ceil(dy / 4),
+      Math.ceil(dz / 4)
+    ];
   }
-  labelTex;
-  ownsLabel;
-  // false when the label texture is owned externally (shared buffer)
-  scratch;
-  // blur ping-pong (lazy; only when sigma > 0)
-  palBuf;
-  dimsBuf;
-  initPipe;
-  blurPipe;
-  g;
   /** Re-upload an EDITED labelmap (same dims). Follow with bakeInto() to re-colorize into the caller's
    *  existing output textures — an in-place replace (no re-allocation, so a segmentation edit updates
    *  smoothly with no flash). */
   updateLabelmap(labelmap) {
     if (!this.ownsLabel) throw new Error("ColorizeBaker.updateLabelmap: label texture is external (write it via the owner, e.g. a compute effect), then call bakeInto()");
     const [dx, dy] = this.dims;
-    this.dev.queue.writeTexture({ texture: this.labelTex }, labelmap, { bytesPerRow: dx, rowsPerImage: dy }, this.dims);
+    this.dev.queue.writeTexture({
+      texture: this.labelTex
+    }, labelmap, {
+      bytesPerRow: dx,
+      rowsPerImage: dy
+    }, this.dims);
   }
   /** Allocate an output texture sized/typed for this baker's labelmap (caller owns it). */
   output() {
-    return this.dev.createTexture({ size: this.dims, dimension: "3d", format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
+    return this.dev.createTexture({
+      size: this.dims,
+      dimension: "3d",
+      format: "rgba16float",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
+    });
   }
   /** (Re)colorize into `out` with `palette` (256*4 f32: rgb + presence*opacity) and Gaussian
    *  `sigmaVoxels` (0 = crisp, for the 2D slice overlay). In place — reuses everything resident. */
@@ -4218,12 +5942,31 @@ var ColorizeBaker = class {
     const smooth = sigmaVoxels > 0;
     if (smooth && !this.scratch) this.scratch = this.output();
     const initDst = smooth ? this.scratch : out;
-    const initBind = dev.createBindGroup({ layout: this.initPipe.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: this.labelTex.createView() },
-      { binding: 1, resource: initDst.createView() },
-      { binding: 2, resource: { buffer: this.palBuf } },
-      { binding: 3, resource: { buffer: this.dimsBuf } }
-    ] });
+    const initBind = dev.createBindGroup({
+      layout: this.initPipe.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.labelTex.createView()
+        },
+        {
+          binding: 1,
+          resource: initDst.createView()
+        },
+        {
+          binding: 2,
+          resource: {
+            buffer: this.palBuf
+          }
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.dimsBuf
+          }
+        }
+      ]
+    });
     {
       const p = enc.beginComputePass();
       p.setPipeline(this.initPipe);
@@ -4234,16 +5977,58 @@ var ColorizeBaker = class {
     if (smooth) {
       const s = this.scratch;
       const { radius, w } = gaussHalfKernel(sigmaVoxels);
-      const passes = [[s, out, 0], [out, s, 1], [s, out, 2]];
+      const passes = [
+        [
+          s,
+          out,
+          0
+        ],
+        [
+          out,
+          s,
+          1
+        ],
+        [
+          s,
+          out,
+          2
+        ]
+      ];
       for (const [src, dst, axis] of passes) {
-        const ub = dev.createBuffer({ size: 16 + 16 + 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-        dev.queue.writeBuffer(ub, 0, new Uint32Array([dx, dy, dz, 0, axis, radius, 0, 0]));
+        const ub = dev.createBuffer({
+          size: 16 + 16 + 64,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+        });
+        dev.queue.writeBuffer(ub, 0, new Uint32Array([
+          dx,
+          dy,
+          dz,
+          0,
+          axis,
+          radius,
+          0,
+          0
+        ]));
         dev.queue.writeBuffer(ub, 32, w);
-        const b = dev.createBindGroup({ layout: this.blurPipe.getBindGroupLayout(0), entries: [
-          { binding: 0, resource: src.createView() },
-          { binding: 1, resource: dst.createView() },
-          { binding: 2, resource: { buffer: ub } }
-        ] });
+        const b = dev.createBindGroup({
+          layout: this.blurPipe.getBindGroupLayout(0),
+          entries: [
+            {
+              binding: 0,
+              resource: src.createView()
+            },
+            {
+              binding: 1,
+              resource: dst.createView()
+            },
+            {
+              binding: 2,
+              resource: {
+                buffer: ub
+              }
+            }
+          ]
+        });
         const p = enc.beginComputePass();
         p.setPipeline(this.blurPipe);
         p.setBindGroup(0, b);
@@ -4251,7 +6036,9 @@ var ColorizeBaker = class {
         p.end();
       }
     }
-    dev.queue.submit([enc.finish()]);
+    dev.queue.submit([
+      enc.finish()
+    ]);
   }
   destroy() {
     if (this.ownsLabel) this.labelTex.destroy();
@@ -4282,7 +6069,11 @@ var blobFetch = (url) => fetch(url);
 async function fetchZarrVolume(blobBase, z, onBytes, concurrency = 12) {
   const zv = await fetchZarrVolumeNative(blobBase, z, onBytes, concurrency);
   const data = zv.data instanceof Float32Array ? zv.data : Float32Array.from(zv.data);
-  return { data, dims: zv.dims, range: zv.range };
+  return {
+    data,
+    dims: zv.dims,
+    range: zv.range
+  };
 }
 async function fetchZarrVolumeNative(blobBase, z, onBytes, concurrency = 12) {
   const Ctor = ZDT[z.dtype] ?? Int16Array;
@@ -4293,7 +6084,11 @@ async function fetchZarrVolumeNative(blobBase, z, onBytes, concurrency = 12) {
   const out = new Ctor(nz * ny * nx);
   let lo = Infinity, hi = -Infinity;
   const jobs = [];
-  for (let kk = 0; kk < ncz; kk++) for (let jj = 0; jj < ncy; jj++) for (let ii = 0; ii < ncx; ii++) jobs.push([kk, jj, ii]);
+  for (let kk = 0; kk < ncz; kk++) for (let jj = 0; jj < ncy; jj++) for (let ii = 0; ii < ncx; ii++) jobs.push([
+    kk,
+    jj,
+    ii
+  ]);
   let idx = 0;
   const worker = async () => {
     while (idx < jobs.length) {
@@ -4339,14 +6134,32 @@ async function fetchZarrVolumeNative(blobBase, z, onBytes, concurrency = 12) {
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, worker));
-  return { data: out, dtype: z.dtype, dims: [nx, ny, nz], range: [lo, hi] };
+  await Promise.all(Array.from({
+    length: Math.min(concurrency, jobs.length)
+  }, worker));
+  return {
+    data: out,
+    dtype: z.dtype,
+    dims: [
+      nx,
+      ny,
+      nz
+    ],
+    range: [
+      lo,
+      hi
+    ]
+  };
 }
 
 // algorithms/geom.ts
 function resampleIsotropic(lab, dims, ijkToRAS, maxDim, maxVoxels = Infinity) {
   const sp = spacingFromIjkToRAS2(ijkToRAS);
-  const ext = [dims[0] * sp[0], dims[1] * sp[1], dims[2] * sp[2]];
+  const ext = [
+    dims[0] * sp[0],
+    dims[1] * sp[1],
+    dims[2] * sp[2]
+  ];
   let vox = Math.max(...ext) / maxDim;
   const count = (v) => Math.max(1, Math.round(ext[0] / v)) * Math.max(1, Math.round(ext[1] / v)) * Math.max(1, Math.round(ext[2] / v));
   let coarsened = false;
@@ -4354,12 +6167,22 @@ function resampleIsotropic(lab, dims, ijkToRAS, maxDim, maxVoxels = Infinity) {
     vox = Math.cbrt(ext[0] * ext[1] * ext[2] / maxVoxels);
     coarsened = true;
   }
-  const cd = [Math.max(1, Math.round(ext[0] / vox)), Math.max(1, Math.round(ext[1] / vox)), Math.max(1, Math.round(ext[2] / vox))];
+  const cd = [
+    Math.max(1, Math.round(ext[0] / vox)),
+    Math.max(1, Math.round(ext[1] / vox)),
+    Math.max(1, Math.round(ext[2] / vox))
+  ];
   const [nx, ny, nz] = dims, [cx, cy, cz] = cd;
   const out = new Uint32Array(cx * cy * cz);
   if (cx === nx && cy === ny && cz === nz) {
     for (let i = 0; i < out.length; i++) out[i] = lab[i];
-    return { lab: out, dims, ijkToRAS, vox, coarsened };
+    return {
+      lab: out,
+      dims,
+      ijkToRAS,
+      vox,
+      coarsened
+    };
   }
   for (let z = 0; z < cz; z++) {
     const sz = Math.min(nz - 1, Math.floor((z + 0.5) * nz / cz));
@@ -4371,17 +6194,31 @@ function resampleIsotropic(lab, dims, ijkToRAS, maxDim, maxVoxels = Infinity) {
       }
     }
   }
-  const r = [nx / cx, ny / cy, nz / cz], m = ijkToRAS.slice();
+  const r = [
+    nx / cx,
+    ny / cy,
+    nz / cz
+  ], m = ijkToRAS.slice();
   for (let row = 0; row < 3; row++) {
     m[row * 4] *= r[0];
     m[row * 4 + 1] *= r[1];
     m[row * 4 + 2] *= r[2];
   }
-  return { lab: out, dims: cd, ijkToRAS: m, vox, coarsened };
+  return {
+    lab: out,
+    dims: cd,
+    ijkToRAS: m,
+    vox,
+    coarsened
+  };
 }
 function spacingFromIjkToRAS2(ijkToRAS) {
   const col = (c) => Math.hypot(ijkToRAS[c], ijkToRAS[4 + c], ijkToRAS[8 + c]);
-  return [col(0), col(1), col(2)];
+  return [
+    col(0),
+    col(1),
+    col(2)
+  ];
 }
 
 // algorithms/editable-segmentation.ts
@@ -4389,9 +6226,7 @@ var EditableSegmentation = class {
   dims;
   ijkToRAS;
   device;
-  // effects (algorithms/effects/*) build their own pipelines against this
   labelTex;
-  // master (r32uint, STORAGE) — the shared buffer effects write
   dirtyCbs = [];
   constructor(device, dims, opts) {
     this.device = device;
@@ -4430,19 +6265,29 @@ var EditableSegmentation = class {
   loadLabelmap(data) {
     const [dx, dy, dz] = this.dims;
     const u32 = data instanceof Uint32Array ? data : Uint32Array.from(data);
-    this.device.queue.writeTexture({ texture: this.labelTex }, u32, { bytesPerRow: dx * 4, rowsPerImage: dy }, [dx, dy, dz]);
+    this.device.queue.writeTexture({
+      texture: this.labelTex
+    }, u32, {
+      bytesPerRow: dx * 4,
+      rowsPerImage: dy
+    }, [
+      dx,
+      dy,
+      dz
+    ]);
     this.markDirty();
   }
   /** Region-limited labelmap write (`lo`/`size` in label-grid ijk; data x-fastest, tightly packed).
    *  Deliberately NO dirty notification: the caller pairs it with a region-limited rebake
    *  (SegmentationLogic.rebakeShellRegion) — an onDirty full rebake would defeat the point. */
   writeLabelRegion(data, lo, size) {
-    this.device.queue.writeTexture(
-      { texture: this.labelTex, origin: lo },
-      data,
-      { bytesPerRow: size[0] * 4, rowsPerImage: size[1] },
-      size
-    );
+    this.device.queue.writeTexture({
+      texture: this.labelTex,
+      origin: lo
+    }, data, {
+      bytesPerRow: size[0] * 4,
+      rowsPerImage: size[1]
+    }, size);
   }
   /** Read the master labelmap back to CPU (ids per voxel, x-fastest). Handles WebGPU's 256-byte
    *  bytesPerRow alignment. For tests + zarr serialization (A-7); not on the interactive path. */
@@ -4450,10 +6295,25 @@ var EditableSegmentation = class {
     const [dx, dy, dz] = this.dims;
     const bpr = Math.ceil(dx * 4 / 256) * 256;
     const rowU32 = bpr / 4;
-    const buf = this.device.createBuffer({ size: bpr * dy * dz, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const buf = this.device.createBuffer({
+      size: bpr * dy * dz,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
     const enc = this.device.createCommandEncoder();
-    enc.copyTextureToBuffer({ texture: this.labelTex }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: dy }, [dx, dy, dz]);
-    this.device.queue.submit([enc.finish()]);
+    enc.copyTextureToBuffer({
+      texture: this.labelTex
+    }, {
+      buffer: buf,
+      bytesPerRow: bpr,
+      rowsPerImage: dy
+    }, [
+      dx,
+      dy,
+      dz
+    ]);
+    this.device.queue.submit([
+      enc.finish()
+    ]);
     await buf.mapAsync(GPUMapMode.READ);
     const padded = new Uint32Array(buf.getMappedRange());
     const out = new Uint32Array(dx * dy * dz);
@@ -4584,11 +6444,24 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   // abutted (looked like half-opacity). The shader divides by the per-segment opacity to recover the
   // true colour, so a 0-opacity region contributes nothing to the blend.
   textureStore(t_out, c, vec4<f32>(pal.rgb * pal.a, sdf));
-  // .r = opacity, .g = shading mode, .b = distance (seam-blurred \u2192 SMOOTH distance for the interface-mode
-  // normal; sdfTex.a stays sharp for shell membership), .a = CRISP presence (1 inside a real segment, 0
-  // background) \u2014 the FULLBLUR carries it unblurred so the shader can tell a genuine in-segment voxel
-  // from one that merely caught BLED colour/opacity outside any segment, and gate the shell to the real edge.
-  textureStore(t_attr, c, vec4<f32>(pal.a, mode, sdf, select(0.0, 1.0, ins)));
+  // .r = opacity, .g = shading mode, .a = CRISP presence (1 inside a real segment, 0 background) \u2014
+  // the FULLBLUR carries .a unblurred so the shader can tell a genuine in-segment voxel from one that
+  // merely caught BLED colour/opacity outside any segment, and gate the shell to the real edge.
+  //
+  // .b is the BAND-LIMITED LABEL FIELD, and in outer mode it is what the surface IS. It starts as the
+  // crisp 0/1 presence and FULLBLUR low-passes it, so the shader reads p = G_\u03C3 * 1(label\u22600) and takes
+  // the surface to be its p = 0.5 level set. A labelmap is a SAMPLED indicator function: its voxel
+  // staircase is ALIASING, not data, and the faithful surface is that indicator reconstructed with a
+  // kernel at the grid's Nyquist limit \u2014 which is what the smoothing control now sets. Thresholding a
+  // BOUNDED field at 0.5 also cannot do what blurring the unbounded SIGNED DISTANCE did (fuse two
+  // vertebrae across a disc space): in the middle of a 4-voxel gap p \u2248 2\xB7\u03A6(-2) \u2248 0.05, nowhere near
+  // 0.5, so the gap stays open at every \u03C3 in range.
+  //
+  // Interface ("all") mode keeps the blurred DISTANCE here instead: its field is UNSIGNED (distance to
+  // the nearest label change), so a union indicator says nothing about the internal interfaces that
+  // mode exists to show, and its normal still comes from the smoothed distance.
+  let bchan = select(select(0.0, 1.0, ins), sdf, u.params.y > 0.5);
+  textureStore(t_attr, c, vec4<f32>(pal.a, mode, bchan, select(0.0, 1.0, ins)));
 }`
 );
 var BLUR_WGSL2 = (
@@ -4676,86 +6549,116 @@ function gaussHalfKernel2(sigma) {
   }
   const w = new Float32Array(16);
   for (let i = 0; i <= radius; i++) w[i] = raw[i] / total;
-  return { radius, w };
+  return {
+    radius,
+    w
+  };
 }
 var JfaSdfBaker = class {
-  // 0 = outer boundary (signed); 1 = any label change (unsigned, multi-material)
+  labelTex;
+  dims;
+  ijkToRAS;
+  dev;
+  seed;
+  sdfTex;
+  attrTex;
+  attrScratch;
+  lastSeed;
+  sdfScratch;
+  uni;
+  palBuf;
+  modeBuf;
+  initPipe;
+  jfaPipe;
+  finalPipe;
+  blurPipe;
+  colBlurPipe;
+  fullBlurPipe;
+  g;
+  steps;
+  smoothSigma;
+  pad;
+  labelDims;
+  // `pad` voxels of background are added on every side so segments touching the labelmap edge get a
+  // real cap + in-bounds gradient neighbourhood (docs/ALGORITHMS.md border artifact). The SDF textures,
+  // dispatch, seeds, blur and readback all run on the PADDED grid; `dims`/`ijkToRAS` become the padded
+  // grid's, and `sdfDims()`/`sdfIjkToRAS()` expose them to the SegmentField.
+  bmode;
   constructor(dev, labelTex, dims, ijkToRAS, smoothSigmaVoxels = 1, pad = 2, boundaryMode = "outer") {
     this.labelTex = labelTex;
     this.dims = dims;
     this.ijkToRAS = ijkToRAS;
+    this.lastSeed = 0;
     this.dev = dev;
     this.smoothSigma = smoothSigmaVoxels;
     this.bmode = boundaryMode === "all" ? 1 : 0;
     this.pad = pad;
-    this.labelDims = [dims[0], dims[1], dims[2]];
-    this.dims = [dims[0] + 2 * pad, dims[1] + 2 * pad, dims[2] + 2 * pad];
+    this.labelDims = [
+      dims[0],
+      dims[1],
+      dims[2]
+    ];
+    this.dims = [
+      dims[0] + 2 * pad,
+      dims[1] + 2 * pad,
+      dims[2] + 2 * pad
+    ];
     const m = ijkToRAS.slice();
     for (let r = 0; r < 3; r++) m[r * 4 + 3] -= pad * (m[r * 4] + m[r * 4 + 1] + m[r * 4 + 2]);
     this.ijkToRAS = m;
     const [dx, dy, dz] = this.dims;
-    const mk = (fmt, extra = 0) => dev.createTexture({ size: this.dims, dimension: "3d", format: fmt, usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra });
+    const mk = (fmt, extra = 0) => dev.createTexture({
+      size: this.dims,
+      dimension: "3d",
+      format: fmt,
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | extra
+    });
     const seedUsage = GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
-    this.seed = [mk("rgba32float", seedUsage), mk("rgba32float", seedUsage)];
+    this.seed = [
+      mk("rgba32float", seedUsage),
+      mk("rgba32float", seedUsage)
+    ];
     this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC);
     this.attrTex = mk("rgba16float", GPUTextureUsage.COPY_DST);
     this.attrScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
     this.sdfScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
-    this.uni = dev.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.modeBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const mod = (code) => dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code }), entryPoint: "main" } });
+    this.uni = dev.createBuffer({
+      size: 112,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    this.palBuf = dev.createBuffer({
+      size: 256 * 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    this.modeBuf = dev.createBuffer({
+      size: 256 * 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+    });
+    const mod = (code) => dev.createComputePipeline({
+      layout: "auto",
+      compute: {
+        module: dev.createShaderModule({
+          code
+        }),
+        entryPoint: "main"
+      }
+    });
     this.initPipe = mod(INIT_WGSL2);
     this.jfaPipe = mod(JFA_WGSL);
     this.finalPipe = mod(FINAL_WGSL);
     this.blurPipe = mod(BLUR_WGSL2);
     this.colBlurPipe = mod(COLBLUR_WGSL);
     this.fullBlurPipe = mod(FULLBLUR_WGSL);
-    this.g = [Math.ceil(dx / 4), Math.ceil(dy / 4), Math.ceil(dz / 4)];
+    this.g = [
+      Math.ceil(dx / 4),
+      Math.ceil(dy / 4),
+      Math.ceil(dz / 4)
+    ];
     const maxDim = Math.max(dx, dy, dz);
     const steps = [];
     for (let s = 1 << Math.floor(Math.log2(maxDim - 1)); s >= 1; s >>= 1) steps.push(s);
     this.steps = steps;
   }
-  dev;
-  seed;
-  // rgba32float ping-pong (RAS seed xyz + regionLabel)
-  sdfTex;
-  // rgba16float: .rgb = per-label colour, .a = signed dist (mm) — sampled by SegmentField
-  attrTex;
-  // rgba16float: .r = per-segment opacity, .g = shading mode — sampled by SegmentField
-  attrScratch;
-  // rgba16float attr-blur ping-pong
-  lastSeed = 0;
-  // seed buffer the last sweep finalized from
-  sdfScratch;
-  // rgba16float blur ping-pong
-  uni;
-  palBuf;
-  // 256 × vec4 label→colour palette (.a = opacity)
-  modeBuf;
-  // 256 × vec4 label→shading mode (.x = 0 surface / 1 volume)
-  initPipe;
-  jfaPipe;
-  finalPipe;
-  blurPipe;
-  // blurs .a (distance), carries .rgb
-  colBlurPipe;
-  // blurs .rgb (colour), carries .a
-  fullBlurPipe;
-  // blurs all channels — the attr texture (opacity + mode)
-  g;
-  steps;
-  smoothSigma;
-  pad;
-  // background margin (voxels) padded around the labelmap
-  labelDims;
-  // original (label) dims, before padding
-  // `pad` voxels of background are added on every side so segments touching the labelmap edge get a
-  // real cap + in-bounds gradient neighbourhood (docs/ALGORITHMS.md border artifact). The SDF textures,
-  // dispatch, seeds, blur and readback all run on the PADDED grid; `dims`/`ijkToRAS` become the padded
-  // grid's, and `sdfDims()`/`sdfIjkToRAS()` expose them to the SegmentField.
-  bmode;
   /** The resident colorized-SDF texture (rgba16float: .rgb = per-label colour, .a = signed mm).
    *  Identity stable across bakes → the SceneRenderer bind group stays valid; a live edit updates in
    *  place. */
@@ -4784,10 +6687,25 @@ var JfaSdfBaker = class {
     const [dx, dy, dz] = this.dims;
     const bpr = Math.ceil(dx * 8 / 256) * 256;
     const rowU16 = bpr / 2;
-    const buf = this.dev.createBuffer({ size: bpr * dy * dz, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const buf = this.dev.createBuffer({
+      size: bpr * dy * dz,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+    });
     const enc = this.dev.createCommandEncoder();
-    enc.copyTextureToBuffer({ texture: this.sdfTex }, { buffer: buf, bytesPerRow: bpr, rowsPerImage: dy }, [dx, dy, dz]);
-    this.dev.queue.submit([enc.finish()]);
+    enc.copyTextureToBuffer({
+      texture: this.sdfTex
+    }, {
+      buffer: buf,
+      bytesPerRow: bpr,
+      rowsPerImage: dy
+    }, [
+      dx,
+      dy,
+      dz
+    ]);
+    this.dev.queue.submit([
+      enc.finish()
+    ]);
     await buf.mapAsync(GPUMapMode.READ);
     const u16 = new Uint16Array(buf.getMappedRange());
     const h2f = (h) => {
@@ -4816,7 +6734,11 @@ var JfaSdfBaker = class {
     m.set(modes.subarray(0, Math.min(modes.length, 256 * 4)));
     this.dev.queue.writeBuffer(this.modeBuf, 0, m);
   }
-  writeUni(step, origin = [0, 0, 0]) {
+  writeUni(step, origin = [
+    0,
+    0,
+    0
+  ]) {
     const ab = new ArrayBuffer(112);
     const f = new Float32Array(ab), u = new Uint32Array(ab);
     f.set(transpose4(this.ijkToRAS), 0);
@@ -4846,19 +6768,34 @@ var JfaSdfBaker = class {
   smoothing() {
     return this.smoothSigma;
   }
-  /** FAST bake for LIVE editing: plain JFA (approximate) + a light distance-only blur (crisp colour
-   *  seams). Cheap, so it keeps up with an in-progress stroke; the seams stay voxel-jagged until the
-   *  edit settles and refine() runs. */
+  /** σ for the COLOUR-seam blur, which is NOT the geometry σ and must not follow it up.
+   *
+   *  The seam blur exists for one narrow job: the region colour is flooded per voxel, so the border
+   *  between two labels is a voxel staircase in COLOUR even when the surface is smooth. A fraction of
+   *  a voxel of blur hides that. Tying it to the geometry σ (it used to be min(1, σ)) meant that
+   *  asking for a smoother SURFACE also dissolved the label boundaries — and a boundary is the entire
+   *  signal in a comparison view. It showed up worst on the SPINEPS disc layer: a near-white disc
+   *  between two saturated vertebra colours, blurred a full voxel, reads as a milky smear over both
+   *  bones instead of a disc. Capped well below a voxel, the seam stays a seam. */
+  seamSigma() {
+    return Math.min(0.4, this.smoothSigma);
+  }
+  /** FAST bake for LIVE editing: plain JFA (approximate) + the attr blur that band-limits the label
+   *  field (no colour-seam blur). Cheap, so it keeps up with an in-progress stroke; the colour seams
+   *  stay voxel-jagged until the edit settles and refine() runs. */
   bake() {
     this.sweep([], this.smoothSigma, 0);
   }
   /** REFINE for a STATIC labelmap (run once the edit settles): JFA+2 extra passes → a near-exact
    *  Voronoi/SDF (fixes the small JFA mistakes near close/overlapping segments) and a colour-seam blur
-   *  so neighbouring-label boundaries are smooth, not a voxel staircase. Distance blur stays at the
-   *  same σ (dropping it re-introduces Voronoi facets — crispness comes from the render band, not from
-   *  under-smoothing). Higher quality lives in the resident texture, so camera renders stay cheap. */
+   *  so neighbouring-label boundaries are smooth, not a voxel staircase. The attr blur stays at the
+   *  caller's σ — it is the geometry, not a quality knob. Higher quality lives in the resident
+   *  texture, so camera renders stay cheap. */
   refine() {
-    this.sweep([2, 1], this.smoothSigma, Math.min(1, this.smoothSigma));
+    this.sweep([
+      2,
+      1
+    ], this.smoothSigma, this.seamSigma());
   }
   /** REGION-LIMITED refine: re-flood ONLY `regionIjk` (padded-grid coords) after a labelmap edit
    *  confined to it — a per-vertebra visibility flip re-bakes a few % of the grid instead of the
@@ -4867,107 +6804,244 @@ var JfaSdfBaker = class {
    *  taps read valid exterior seeds (surfaces just outside the region flood in correctly).
    *  Exterior distances that referenced a surface REMOVED inside the region go stale, but only
    *  ≫band away from any visible shell — invisible, and the next full sweep cleans them. */
-  refineRegion(regionIjk) {
+  refineRegion(regionIjk, maxStep = Infinity) {
     const dev = this.dev, [dx, dy, dz] = this.dims;
-    const lo = [Math.max(0, regionIjk.lo[0]), Math.max(0, regionIjk.lo[1]), Math.max(0, regionIjk.lo[2])];
-    const hi = [Math.min(dx, regionIjk.hi[0]), Math.min(dy, regionIjk.hi[1]), Math.min(dz, regionIjk.hi[2])];
-    const [rx, ry, rz] = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    const lo = [
+      Math.max(0, regionIjk.lo[0]),
+      Math.max(0, regionIjk.lo[1]),
+      Math.max(0, regionIjk.lo[2])
+    ];
+    const hi = [
+      Math.min(dx, regionIjk.hi[0]),
+      Math.min(dy, regionIjk.hi[1]),
+      Math.min(dz, regionIjk.hi[2])
+    ];
+    const [rx, ry, rz] = [
+      hi[0] - lo[0],
+      hi[1] - lo[1],
+      hi[2] - lo[2]
+    ];
     if (rx <= 0 || ry <= 0 || rz <= 0) return;
-    const g = [Math.ceil(rx / 4), Math.ceil(ry / 4), Math.ceil(rz / 4)];
-    const region = { lo, hi };
+    const g = [
+      Math.ceil(rx / 4),
+      Math.ceil(ry / 4),
+      Math.ceil(rz / 4)
+    ];
+    const region = {
+      lo,
+      hi
+    };
     let src = this.lastSeed;
     let enc = dev.createCommandEncoder();
-    enc.copyTextureToTexture({ texture: this.seed[src] }, { texture: this.seed[src ^ 1] }, this.dims);
-    dev.queue.submit([enc.finish()]);
+    enc.copyTextureToTexture({
+      texture: this.seed[src]
+    }, {
+      texture: this.seed[src ^ 1]
+    }, this.dims);
+    dev.queue.submit([
+      enc.finish()
+    ]);
     this.writeUni(0, lo);
     enc = dev.createCommandEncoder();
     {
-      const b = dev.createBindGroup({ layout: this.initPipe.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: this.labelTex.createView() },
-        { binding: 1, resource: this.seed[src].createView() },
-        { binding: 2, resource: { buffer: this.uni } }
-      ] });
+      const b = dev.createBindGroup({
+        layout: this.initPipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.labelTex.createView()
+          },
+          {
+            binding: 1,
+            resource: this.seed[src].createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: this.uni
+            }
+          }
+        ]
+      });
       const p2 = enc.beginComputePass();
       p2.setPipeline(this.initPipe);
       p2.setBindGroup(0, b);
       p2.dispatchWorkgroups(g[0], g[1], g[2]);
       p2.end();
     }
-    dev.queue.submit([enc.finish()]);
-    const maxDim = Math.max(rx, ry, rz);
-    const steps = [];
-    for (let s = 1 << Math.floor(Math.log2(Math.max(2, maxDim - 1))); s >= 1; s >>= 1) steps.push(s);
-    steps.push(2, 1);
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    const steps = [
+      ...this.steps.filter((v) => v <= maxStep),
+      2,
+      1
+    ];
     for (const step of steps) {
       this.writeUni(step, lo);
       const dst = src ^ 1;
       enc = dev.createCommandEncoder();
-      const b = dev.createBindGroup({ layout: this.jfaPipe.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: this.seed[src].createView() },
-        { binding: 1, resource: this.seed[dst].createView() },
-        { binding: 2, resource: { buffer: this.uni } }
-      ] });
+      const b = dev.createBindGroup({
+        layout: this.jfaPipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.seed[src].createView()
+          },
+          {
+            binding: 1,
+            resource: this.seed[dst].createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: this.uni
+            }
+          }
+        ]
+      });
       const p2 = enc.beginComputePass();
       p2.setPipeline(this.jfaPipe);
       p2.setBindGroup(0, b);
       p2.dispatchWorkgroups(g[0], g[1], g[2]);
       p2.end();
-      dev.queue.submit([enc.finish()]);
+      dev.queue.submit([
+        enc.finish()
+      ]);
       src = dst;
     }
     this.lastSeed = src;
     this.writeUni(0, lo);
     enc = dev.createCommandEncoder();
-    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: this.seed[src].createView() },
-      { binding: 1, resource: this.labelTex.createView() },
-      { binding: 2, resource: this.sdfTex.createView() },
-      { binding: 3, resource: { buffer: this.uni } },
-      { binding: 4, resource: { buffer: this.palBuf } },
-      { binding: 5, resource: this.attrTex.createView() },
-      { binding: 6, resource: { buffer: this.modeBuf } }
-    ] });
+    const bf = dev.createBindGroup({
+      layout: this.finalPipe.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.seed[src].createView()
+        },
+        {
+          binding: 1,
+          resource: this.labelTex.createView()
+        },
+        {
+          binding: 2,
+          resource: this.sdfTex.createView()
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.uni
+          }
+        },
+        {
+          binding: 4,
+          resource: {
+            buffer: this.palBuf
+          }
+        },
+        {
+          binding: 5,
+          resource: this.attrTex.createView()
+        },
+        {
+          binding: 6,
+          resource: {
+            buffer: this.modeBuf
+          }
+        }
+      ]
+    });
     const p = enc.beginComputePass();
     p.setPipeline(this.finalPipe);
     p.setBindGroup(0, bf);
     p.dispatchWorkgroups(g[0], g[1], g[2]);
     p.end();
-    dev.queue.submit([enc.finish()]);
-    if (this.smoothSigma > 0) this.blurStage(this.colBlurPipe, Math.min(1, this.smoothSigma), this.sdfTex, this.sdfScratch, region);
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    if (this.seamSigma() > 0) this.blurStage(this.colBlurPipe, this.seamSigma(), this.sdfTex, this.sdfScratch, region);
     if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch, region);
   }
   /** ATTR-ONLY rebake for palette/opacity changes (per-segment visibility): the distance field
    *  doesn't move, so re-run ONLY the finalize (from the last sweep's seed) with its sdf writes
    *  routed to the scratch texture (discarded — the blurred resident sdfTex stays pristine) and
-   *  re-blur the attribute seams. ~4 passes instead of the ~20-pass init+JFA+blur sweep, which is
+   *  re-blur the attributes. ~4 passes instead of the ~20-pass init+JFA+blur sweep, which is
    *  what makes per-vertebra focus switching real-time. */
   rebakeAttr(blurSeams = false, regionIjk) {
     const dev = this.dev, [dx, dy, dz] = this.dims;
     const region = regionIjk && {
-      lo: [Math.max(0, regionIjk.lo[0]), Math.max(0, regionIjk.lo[1]), Math.max(0, regionIjk.lo[2])],
-      hi: [Math.min(dx, regionIjk.hi[0]), Math.min(dy, regionIjk.hi[1]), Math.min(dz, regionIjk.hi[2])]
+      lo: [
+        Math.max(0, regionIjk.lo[0]),
+        Math.max(0, regionIjk.lo[1]),
+        Math.max(0, regionIjk.lo[2])
+      ],
+      hi: [
+        Math.min(dx, regionIjk.hi[0]),
+        Math.min(dy, regionIjk.hi[1]),
+        Math.min(dz, regionIjk.hi[2])
+      ]
     };
-    const [gx, gy, gz] = region ? [Math.ceil((region.hi[0] - region.lo[0]) / 4), Math.ceil((region.hi[1] - region.lo[1]) / 4), Math.ceil((region.hi[2] - region.lo[2]) / 4)] : this.g;
+    const [gx, gy, gz] = region ? [
+      Math.ceil((region.hi[0] - region.lo[0]) / 4),
+      Math.ceil((region.hi[1] - region.lo[1]) / 4),
+      Math.ceil((region.hi[2] - region.lo[2]) / 4)
+    ] : this.g;
     if (region && (gx <= 0 || gy <= 0 || gz <= 0)) return;
-    this.writeUni(0, region ? region.lo : [0, 0, 0]);
+    this.writeUni(0, region ? region.lo : [
+      0,
+      0,
+      0
+    ]);
     const enc = dev.createCommandEncoder();
-    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: this.seed[this.lastSeed].createView() },
-      { binding: 1, resource: this.labelTex.createView() },
-      { binding: 2, resource: this.sdfScratch.createView() },
-      // sdf writes discarded
-      { binding: 3, resource: { buffer: this.uni } },
-      { binding: 4, resource: { buffer: this.palBuf } },
-      { binding: 5, resource: this.attrTex.createView() },
-      { binding: 6, resource: { buffer: this.modeBuf } }
-    ] });
+    const bf = dev.createBindGroup({
+      layout: this.finalPipe.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.seed[this.lastSeed].createView()
+        },
+        {
+          binding: 1,
+          resource: this.labelTex.createView()
+        },
+        {
+          binding: 2,
+          resource: this.sdfScratch.createView()
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.uni
+          }
+        },
+        {
+          binding: 4,
+          resource: {
+            buffer: this.palBuf
+          }
+        },
+        {
+          binding: 5,
+          resource: this.attrTex.createView()
+        },
+        {
+          binding: 6,
+          resource: {
+            buffer: this.modeBuf
+          }
+        }
+      ]
+    });
     const p = enc.beginComputePass();
     p.setPipeline(this.finalPipe);
     p.setBindGroup(0, bf);
     p.dispatchWorkgroups(gx, gy, gz);
     p.end();
-    dev.queue.submit([enc.finish()]);
-    if (blurSeams && this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch, region);
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch, region);
   }
   /** Re-apply the SMOOTHING only: the distance field does not depend on σ, so re-running the JFA
    *  for a smoothing change is both wasteful and WRONG — the fast bake's approximate flood differs
@@ -4976,32 +7050,67 @@ var JfaSdfBaker = class {
    *  (so the distance is bit-identical) and re-blurs them at the new σ. */
   resmooth() {
     const dev = this.dev;
-    this.writeUni(0, [0, 0, 0]);
+    this.writeUni(0, [
+      0,
+      0,
+      0
+    ]);
     const enc = dev.createCommandEncoder();
-    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: this.seed[this.lastSeed].createView() },
-      { binding: 1, resource: this.labelTex.createView() },
-      { binding: 2, resource: this.sdfTex.createView() },
-      // re-derive colour + the SHARP distance
-      { binding: 3, resource: { buffer: this.uni } },
-      { binding: 4, resource: { buffer: this.palBuf } },
-      { binding: 5, resource: this.attrTex.createView() },
-      { binding: 6, resource: { buffer: this.modeBuf } }
-    ] });
+    const bf = dev.createBindGroup({
+      layout: this.finalPipe.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.seed[this.lastSeed].createView()
+        },
+        {
+          binding: 1,
+          resource: this.labelTex.createView()
+        },
+        {
+          binding: 2,
+          resource: this.sdfTex.createView()
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.uni
+          }
+        },
+        {
+          binding: 4,
+          resource: {
+            buffer: this.palBuf
+          }
+        },
+        {
+          binding: 5,
+          resource: this.attrTex.createView()
+        },
+        {
+          binding: 6,
+          resource: {
+            buffer: this.modeBuf
+          }
+        }
+      ]
+    });
     const p = enc.beginComputePass();
     p.setPipeline(this.finalPipe);
     p.setBindGroup(0, bf);
     p.dispatchWorkgroups(this.g[0], this.g[1], this.g[2]);
     p.end();
-    dev.queue.submit([enc.finish()]);
-    const seam = Math.min(1, this.smoothSigma);
+    dev.queue.submit([
+      enc.finish()
+    ]);
+    const seam = this.seamSigma();
     if (seam > 0) this.blurStage(this.colBlurPipe, seam, this.sdfTex, this.sdfScratch);
     if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch);
   }
   /** Blur the attribute seams of the CURRENT attr texture in place (no re-finalize) — the
    *  cheapest possible settle after a run of rebakeAttr(false) visibility steps. */
   blurAttrOnly() {
-    this.blurStage(this.fullBlurPipe, 1, this.attrTex, this.attrScratch);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch);
   }
   /** One full sweep: init → JFA (schedule + extra) → finalize → blur .a → optional blur .rgb. */
   sweep(extraSteps, distSigma, colorSigma) {
@@ -5009,53 +7118,120 @@ var JfaSdfBaker = class {
     this.writeUni(0);
     let enc = dev.createCommandEncoder();
     {
-      const b = dev.createBindGroup({ layout: this.initPipe.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: this.labelTex.createView() },
-        { binding: 1, resource: this.seed[0].createView() },
-        { binding: 2, resource: { buffer: this.uni } }
-      ] });
+      const b = dev.createBindGroup({
+        layout: this.initPipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.labelTex.createView()
+          },
+          {
+            binding: 1,
+            resource: this.seed[0].createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: this.uni
+            }
+          }
+        ]
+      });
       const p2 = enc.beginComputePass();
       p2.setPipeline(this.initPipe);
       p2.setBindGroup(0, b);
       p2.dispatchWorkgroups(gx, gy, gz);
       p2.end();
     }
-    dev.queue.submit([enc.finish()]);
+    dev.queue.submit([
+      enc.finish()
+    ]);
     let src = 0;
-    for (const step of [...this.steps, ...extraSteps]) {
+    for (const step of [
+      ...this.steps,
+      ...extraSteps
+    ]) {
       this.writeUni(step);
       const dst = src ^ 1;
       enc = dev.createCommandEncoder();
-      const b = dev.createBindGroup({ layout: this.jfaPipe.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: this.seed[src].createView() },
-        { binding: 1, resource: this.seed[dst].createView() },
-        { binding: 2, resource: { buffer: this.uni } }
-      ] });
+      const b = dev.createBindGroup({
+        layout: this.jfaPipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: this.seed[src].createView()
+          },
+          {
+            binding: 1,
+            resource: this.seed[dst].createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: this.uni
+            }
+          }
+        ]
+      });
       const p2 = enc.beginComputePass();
       p2.setPipeline(this.jfaPipe);
       p2.setBindGroup(0, b);
       p2.dispatchWorkgroups(gx, gy, gz);
       p2.end();
-      dev.queue.submit([enc.finish()]);
+      dev.queue.submit([
+        enc.finish()
+      ]);
       src = dst;
     }
     this.lastSeed = src;
     enc = dev.createCommandEncoder();
-    const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: this.seed[src].createView() },
-      { binding: 1, resource: this.labelTex.createView() },
-      { binding: 2, resource: this.sdfTex.createView() },
-      { binding: 3, resource: { buffer: this.uni } },
-      { binding: 4, resource: { buffer: this.palBuf } },
-      { binding: 5, resource: this.attrTex.createView() },
-      { binding: 6, resource: { buffer: this.modeBuf } }
-    ] });
+    const bf = dev.createBindGroup({
+      layout: this.finalPipe.getBindGroupLayout(0),
+      entries: [
+        {
+          binding: 0,
+          resource: this.seed[src].createView()
+        },
+        {
+          binding: 1,
+          resource: this.labelTex.createView()
+        },
+        {
+          binding: 2,
+          resource: this.sdfTex.createView()
+        },
+        {
+          binding: 3,
+          resource: {
+            buffer: this.uni
+          }
+        },
+        {
+          binding: 4,
+          resource: {
+            buffer: this.palBuf
+          }
+        },
+        {
+          binding: 5,
+          resource: this.attrTex.createView()
+        },
+        {
+          binding: 6,
+          resource: {
+            buffer: this.modeBuf
+          }
+        }
+      ]
+    });
     const p = enc.beginComputePass();
     p.setPipeline(this.finalPipe);
     p.setBindGroup(0, bf);
     p.dispatchWorkgroups(gx, gy, gz);
     p.end();
-    dev.queue.submit([enc.finish()]);
+    dev.queue.submit([
+      enc.finish()
+    ]);
     if (colorSigma > 0) this.blurStage(this.colBlurPipe, colorSigma, this.sdfTex, this.sdfScratch);
     if (distSigma > 0) this.blurStage(this.fullBlurPipe, distSigma, this.attrTex, this.attrScratch);
   }
@@ -5064,13 +7240,45 @@ var JfaSdfBaker = class {
   blurStage(pipe, sigma, tex, scratch, region) {
     const dev = this.dev, [dx, dy, dz] = this.dims;
     const { radius, w } = gaussHalfKernel2(sigma);
-    const passes = [[tex, scratch, 0], [scratch, tex, 1], [tex, scratch, 2]];
+    const passes = [
+      [
+        tex,
+        scratch,
+        0
+      ],
+      [
+        scratch,
+        tex,
+        1
+      ],
+      [
+        tex,
+        scratch,
+        2
+      ]
+    ];
     const enc = dev.createCommandEncoder();
     let passIdx = 0;
     for (const [srcT, dstT, axis] of passes) {
       const expand = region ? (2 - passIdx) * radius : 0;
-      const lo = region ? [Math.max(0, region.lo[0] - expand), Math.max(0, region.lo[1] - expand), Math.max(0, region.lo[2] - expand)] : [0, 0, 0];
-      const hi = region ? [Math.min(dx, region.hi[0] + expand), Math.min(dy, region.hi[1] + expand), Math.min(dz, region.hi[2] + expand)] : [dx, dy, dz];
+      const lo = region ? [
+        Math.max(0, region.lo[0] - expand),
+        Math.max(0, region.lo[1] - expand),
+        Math.max(0, region.lo[2] - expand)
+      ] : [
+        0,
+        0,
+        0
+      ];
+      const hi = region ? [
+        Math.min(dx, region.hi[0] + expand),
+        Math.min(dy, region.hi[1] + expand),
+        Math.min(dz, region.hi[2] + expand)
+      ] : [
+        dx,
+        dy,
+        dz
+      ];
       const ab = new ArrayBuffer(112);
       const u32 = new Uint32Array(ab), f32 = new Float32Array(ab), i32 = new Int32Array(ab);
       u32[0] = dx;
@@ -5082,13 +7290,30 @@ var JfaSdfBaker = class {
       i32[24] = lo[0];
       i32[25] = lo[1];
       i32[26] = lo[2];
-      const ub = dev.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const ub = dev.createBuffer({
+        size: 112,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+      });
       dev.queue.writeBuffer(ub, 0, ab);
-      const b = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: srcT.createView() },
-        { binding: 1, resource: dstT.createView() },
-        { binding: 2, resource: { buffer: ub } }
-      ] });
+      const b = dev.createBindGroup({
+        layout: pipe.getBindGroupLayout(0),
+        entries: [
+          {
+            binding: 0,
+            resource: srcT.createView()
+          },
+          {
+            binding: 1,
+            resource: dstT.createView()
+          },
+          {
+            binding: 2,
+            resource: {
+              buffer: ub
+            }
+          }
+        ]
+      });
       const bp = enc.beginComputePass();
       bp.setPipeline(pipe);
       bp.setBindGroup(0, b);
@@ -5097,12 +7322,28 @@ var JfaSdfBaker = class {
       passIdx++;
     }
     if (region) {
-      const sz = [region.hi[0] - region.lo[0], region.hi[1] - region.lo[1], region.hi[2] - region.lo[2]];
-      enc.copyTextureToTexture({ texture: scratch, origin: region.lo }, { texture: tex, origin: region.lo }, sz);
+      const sz = [
+        region.hi[0] - region.lo[0],
+        region.hi[1] - region.lo[1],
+        region.hi[2] - region.lo[2]
+      ];
+      enc.copyTextureToTexture({
+        texture: scratch,
+        origin: region.lo
+      }, {
+        texture: tex,
+        origin: region.lo
+      }, sz);
     } else {
-      enc.copyTextureToTexture({ texture: scratch }, { texture: tex }, this.dims);
+      enc.copyTextureToTexture({
+        texture: scratch
+      }, {
+        texture: tex
+      }, this.dims);
     }
-    dev.queue.submit([enc.finish()]);
+    dev.queue.submit([
+      enc.finish()
+    ]);
   }
   destroy() {
     this.seed[0].destroy();
@@ -5119,7 +7360,17 @@ var JfaSdfBaker = class {
 
 // logic/segmentation-logic.ts
 function invertAffine(m) {
-  const r = [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]];
+  const r = [
+    m[0],
+    m[1],
+    m[2],
+    m[4],
+    m[5],
+    m[6],
+    m[8],
+    m[9],
+    m[10]
+  ];
   const det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
   const i = [
     (r[4] * r[8] - r[5] * r[7]) / det,
@@ -5132,7 +7383,11 @@ function invertAffine(m) {
     (r[1] * r[6] - r[0] * r[7]) / det,
     (r[0] * r[4] - r[1] * r[3]) / det
   ];
-  const t = [m[3], m[7], m[11]];
+  const t = [
+    m[3],
+    m[7],
+    m[11]
+  ];
   return [
     i[0],
     i[1],
@@ -5152,9 +7407,29 @@ function invertAffine(m) {
     1
   ];
 }
-var SegmentationLogic = class {
+var SegmentationLogic = class _SegmentationLogic {
+  seg;
+  renderMode;
+  clippable;
+  sdf;
+  baker;
+  presenceTex;
+  sigma;
+  bandMm;
+  opacity;
+  palette;
+  modePalette;
+  segField;
+  redrawCbs;
+  unsubDirty;
+  refineTimer;
+  refineDelayMs;
+  boundaryMode;
   constructor(device, seg, opts = {}) {
     this.seg = seg;
+    this.palette = new Float32Array(256 * 4);
+    this.modePalette = new Float32Array(256 * 4);
+    this.redrawCbs = [];
     this.renderMode = opts.renderMode ?? "sdf";
     this.sigma = opts.sigmaVoxels ?? 1;
     this.bandMm = opts.bandMm;
@@ -5162,7 +7437,11 @@ var SegmentationLogic = class {
     this.refineDelayMs = opts.refineDelayMs ?? 180;
     this.boundaryMode = opts.boundaryMode ?? "outer";
     this.clippable = opts.clippable ?? false;
-    this.setLabelColor(1, opts.color ?? [0.3, 0.85, 0.55]);
+    this.setLabelColor(1, opts.color ?? [
+      0.3,
+      0.85,
+      0.55
+    ]);
     if (this.renderMode === "sdf") {
       this.sdf = new JfaSdfBaker(device, seg.masterTexture(), seg.dims, seg.ijkToRAS, this.sigma, 2, this.boundaryMode);
     } else {
@@ -5177,28 +7456,6 @@ var SegmentationLogic = class {
       this.scheduleRefine();
     });
   }
-  renderMode;
-  clippable;
-  attrSettleTimer;
-  sdf;
-  // sdf path
-  baker;
-  // surface path
-  presenceTex;
-  sigma;
-  bandMm;
-  opacity;
-  palette = new Float32Array(256 * 4);
-  // label id → (r,g,b, opacity); shared by both paths
-  modePalette = new Float32Array(256 * 4);
-  // label id → (.x = shading mode: 0 surface / 1 volume) — sdf only
-  segField;
-  redrawCbs = [];
-  unsubDirty;
-  refineTimer;
-  refineDelayMs;
-  // quiescence before the settle-refine (sdf mode; capability-tuned)
-  boundaryMode;
   /** Assign a display colour to a label id (0..255). Keeps the current opacity (defaults to 1 =
    *  opaque). Takes effect on the next rebake. */
   setLabelColor(id, rgb) {
@@ -5258,12 +7515,44 @@ var SegmentationLogic = class {
    *  With `regionRAS` (the bbox of the labels whose opacity changed): the finalize AND the
    *  seam blur run region-limited in one shot — full settled quality lands immediately, no
    *  two-phase. Without it: full-volume fast pass + a debounced full-volume seam blur. */
-  /** RAS bbox → padded-SDF-grid ijk bbox with an M-voxel margin (shell band + blur radii). */
-  regionToIjk(regionRAS, M = 8) {
+  /** RAS bbox → padded-SDF-grid ijk bbox with an M-voxel HALO.
+  *
+  *  The halo is not just room for the shell band and the blur radii. A region re-flood reuses the
+  *  previous flood's seeds outside the box, and a seed OUTSIDE the box that pointed at a surface
+  *  just DELETED inside it is stale — a voxel in the box that taps it inherits a phantom surface
+  *  that is no longer there. Re-initialising over a wide halo rebuilds those seeds, so the halo has
+  *  to be at least as wide as the spacing to the next real structure (~15-20 mm between vertebrae);
+  *  at 8 voxels it was not, and one arrow step left a sliver of the hidden level on screen. The box
+  *  is still a few per cent of the grid, so this costs essentially nothing (measured: a level step
+  *  stays ~14 ms against ~390 ms for a full rebake). */
+  static HALO = 32;
+  /** Largest JFA step a region patch may use: capped so a tap (reach = 2·step - 1) stays inside the
+   *  halo this patch re-seeded, and can never read a seed left over from an older bake. */
+  static haloMaxStep() {
+    return 1 << Math.floor(Math.log2((_SegmentationLogic.HALO + 1) / 2));
+  }
+  regionToIjk(regionRAS, M = _SegmentationLogic.HALO) {
     const inv = invertAffine(this.sdf.sdfIjkToRAS());
-    const lo = [Infinity, Infinity, Infinity];
-    const hi = [-Infinity, -Infinity, -Infinity];
-    for (const x of [regionRAS.lo[0], regionRAS.hi[0]]) for (const y of [regionRAS.lo[1], regionRAS.hi[1]]) for (const z of [regionRAS.lo[2], regionRAS.hi[2]]) {
+    const lo = [
+      Infinity,
+      Infinity,
+      Infinity
+    ];
+    const hi = [
+      -Infinity,
+      -Infinity,
+      -Infinity
+    ];
+    for (const x of [
+      regionRAS.lo[0],
+      regionRAS.hi[0]
+    ]) for (const y of [
+      regionRAS.lo[1],
+      regionRAS.hi[1]
+    ]) for (const z of [
+      regionRAS.lo[2],
+      regionRAS.hi[2]
+    ]) {
       const i = inv[0] * x + inv[1] * y + inv[2] * z + inv[3];
       const j = inv[4] * x + inv[5] * y + inv[6] * z + inv[7];
       const k = inv[8] * x + inv[9] * y + inv[10] * z + inv[11];
@@ -5275,8 +7564,16 @@ var SegmentationLogic = class {
       hi[2] = Math.max(hi[2], k);
     }
     return {
-      lo: [Math.floor(lo[0]) - M, Math.floor(lo[1]) - M, Math.floor(lo[2]) - M],
-      hi: [Math.ceil(hi[0]) + M, Math.ceil(hi[1]) + M, Math.ceil(hi[2]) + M]
+      lo: [
+        Math.floor(lo[0]) - M,
+        Math.floor(lo[1]) - M,
+        Math.floor(lo[2]) - M
+      ],
+      hi: [
+        Math.ceil(hi[0]) + M,
+        Math.ceil(hi[1]) + M,
+        Math.ceil(hi[2]) + M
+      ]
     };
   }
   /** REGION-LIMITED settle-refine after a labelmap edit confined to `regionRAS` (e.g. a
@@ -5288,13 +7585,24 @@ var SegmentationLogic = class {
       this.rebake();
       return;
     }
+    const region = this.regionToIjk(regionRAS);
+    const core = this.regionToIjk(regionRAS, 0);
+    const reach = 2 * _SegmentationLogic.haloMaxStep();
+    if ([
+      0,
+      1,
+      2
+    ].some((d) => core.hi[d] - core.lo[d] > reach)) {
+      this.refineNow();
+      return;
+    }
     if (this.refineTimer !== void 0) {
       clearTimeout(this.refineTimer);
       this.refineTimer = void 0;
     }
     this.sdf.setPalette(this.palette);
     this.sdf.setModePalette(this.modePalette);
-    this.sdf.refineRegion(this.regionToIjk(regionRAS));
+    this.sdf.refineRegion(region, _SegmentationLogic.haloMaxStep());
     for (const cb of this.redrawCbs) cb();
   }
   refreshOpacity(regionRAS) {
@@ -5308,16 +7616,8 @@ var SegmentationLogic = class {
       for (const cb of this.redrawCbs) cb();
       return;
     }
-    this.sdf.rebakeAttr(false);
+    this.sdf.rebakeAttr(true);
     for (const cb of this.redrawCbs) cb();
-    if (this.attrSettleTimer !== void 0) clearTimeout(this.attrSettleTimer);
-    this.attrSettleTimer = setTimeout(() => {
-      this.attrSettleTimer = void 0;
-      if (this.sdf) {
-        this.sdf.blurAttrOnly();
-        for (const cb of this.redrawCbs) cb();
-      }
-    }, 600);
   }
   /** A SegmentField bound to the shared render texture — hand this to the SceneRenderer once; edits
    *  update it in place. Colour comes from the texture (per-label); the uniform supplies opacity. */
@@ -5329,8 +7629,16 @@ var SegmentationLogic = class {
       const band = this.bandMm ?? (this.renderMode === "sdf" ? (interfaceMode ? 1.5 : 0.65) * voxelMm : void 0);
       const fdims = this.sdf ? this.sdf.sdfDims() : this.seg.dims;
       const fijk = this.sdf ? this.sdf.sdfIjkToRAS() : this.seg.ijkToRAS;
-      this.segField = new SegmentField(tex, fdims, [1, 1, 1], {
-        color: [1, 1, 1],
+      this.segField = new SegmentField(tex, fdims, [
+        1,
+        1,
+        1
+      ], {
+        color: [
+          1,
+          1,
+          1
+        ],
         opacity: this.opacity,
         ijkToRAS: fijk,
         mode: this.renderMode === "sdf" ? "sdf" : "surface",
@@ -5338,10 +7646,10 @@ var SegmentationLogic = class {
         bandMm: band,
         clippable: this.clippable,
         attrTexture: this.sdf ? this.sdf.attrTexture() : void 0,
-        // per-segment opacity (sdf)
         interfaceMode
       });
       this.segField.setVoxelMode(this.renderMode === "sdf" && this.sigma <= 0);
+      this.segField.setSmoothingVox(this.sigma);
     }
     return this.segField;
   }
@@ -5351,16 +7659,20 @@ var SegmentationLogic = class {
     this.opacity = o;
     this.segField?.setOpacity(o);
   }
-  /** Surface smoothing, σ in VOXELS (0 = none). In sdf mode this is the distance blur: it barely
-   *  moves the zero level set, so the silhouette stays faithful to the labelmap, but it smooths
-   *  the shading normal — the difference between a faceted voxel surface and a modelled one. In
-   *  surface mode it is the presence-field Gaussian, which does move the surface outward.
+  /** Surface smoothing, σ in VOXELS (0 = none) — the RECONSTRUCTION WIDTH of the band-limited label
+   *  field. In sdf/outer mode the rendered surface is the 0.5 level set of p = G_σ * 1(label != 0):
+   *  σ ≈ 0.5 is the grid's Nyquist limit, the most faithful rendition of the labels that is not
+   *  aliased; below that it approaches the trilinear (voxel-faceted) reconstruction and at 0 it
+   *  switches to literal cubes; above it the surface is deliberately modelled, trading ≈ σ²/2R of
+   *  inward motion on convex features for smoothness. In interface ("all") mode σ still only blurs
+   *  the shading distance. In surface (Gaussian presence) mode it is the presence-field Gaussian.
    *
    *  Re-bakes immediately (fast path, so a slider stays responsive) and schedules the settle
    *  refine, exactly as an edit does. */
   setSmoothing(sigmaVoxels) {
     this.sigma = Math.max(0, sigmaVoxels);
     this.sdf?.setSmoothing(this.sigma);
+    this.segField?.setSmoothingVox(this.sigma);
     this.segField?.setVoxelMode(this.renderMode === "sdf" && this.sigma <= 0);
     if (this.sdf) this.sdf.resmooth();
     else this.baker.bakeInto(this.presenceTex, this.palette, this.sigma);
@@ -5417,29 +7729,93 @@ var LEVEL_NAME = {
   30: "S3"
 };
 var LEVEL_COLORS = [
-  [0.85, 0.42, 0.42],
-  [0.42, 0.75, 0.42],
-  [0.42, 0.55, 0.9],
-  [0.9, 0.78, 0.35],
-  [0.72, 0.45, 0.85],
-  [0.35, 0.8, 0.8],
-  [0.9, 0.55, 0.25],
-  [0.55, 0.72, 0.3],
-  [0.85, 0.45, 0.7],
-  [0.4, 0.65, 0.6],
-  [0.65, 0.55, 0.9],
-  [0.8, 0.68, 0.5]
+  [
+    0.85,
+    0.42,
+    0.42
+  ],
+  [
+    0.42,
+    0.75,
+    0.42
+  ],
+  [
+    0.42,
+    0.55,
+    0.9
+  ],
+  [
+    0.9,
+    0.78,
+    0.35
+  ],
+  [
+    0.72,
+    0.45,
+    0.85
+  ],
+  [
+    0.35,
+    0.8,
+    0.8
+  ],
+  [
+    0.9,
+    0.55,
+    0.25
+  ],
+  [
+    0.55,
+    0.72,
+    0.3
+  ],
+  [
+    0.85,
+    0.45,
+    0.7
+  ],
+  [
+    0.4,
+    0.65,
+    0.6
+  ],
+  [
+    0.65,
+    0.55,
+    0.9
+  ],
+  [
+    0.8,
+    0.68,
+    0.5
+  ]
 ];
 var levelColor = (label) => LEVEL_COLORS[label % LEVEL_COLORS.length];
 var METHOD_COLORS = {
-  spineps: [0.95, 0.6, 0.2],
-  // warm orange
-  ref: [0.3, 0.65, 0.95]
-  // cool blue
+  spineps: [
+    0.95,
+    0.6,
+    0.2
+  ],
+  ref: [
+    0.3,
+    0.65,
+    0.95
+  ]
 };
 var flat = (m) => Array.isArray(m[0]) ? m.flat() : m;
 function invertAffine2(m) {
-  const r = [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]];
+  const r = [
+    m[0],
+    m[1],
+    m[2],
+    m[4],
+    m[5],
+    m[6],
+    m[8],
+    m[9],
+    m[10]
+  ];
   const det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
   const i = [
     (r[4] * r[8] - r[5] * r[7]) / det,
@@ -5452,7 +7828,11 @@ function invertAffine2(m) {
     (r[1] * r[6] - r[0] * r[7]) / det,
     (r[0] * r[4] - r[1] * r[3]) / det
   ];
-  const t = [m[3], m[7], m[11]];
+  const t = [
+    m[3],
+    m[7],
+    m[11]
+  ];
   return [
     i[0],
     i[1],
@@ -5505,7 +7885,24 @@ function levelGeometry(lab, dims, ijkToRAS) {
         if (!v) continue;
         let a = acc.get(v);
         if (!a) {
-          a = { n: 0, s: [0, 0, 0], lo: [i, j, k], hi: [i, j, k] };
+          a = {
+            n: 0,
+            s: [
+              0,
+              0,
+              0
+            ],
+            lo: [
+              i,
+              j,
+              k
+            ],
+            hi: [
+              i,
+              j,
+              k
+            ]
+          };
           acc.set(v, a);
         }
         a.n++;
@@ -5529,20 +7926,56 @@ function levelGeometry(lab, dims, ijkToRAS) {
   ];
   const out = /* @__PURE__ */ new Map();
   for (const [label, a] of acc) {
-    const c = xf([a.s[0] / a.n, a.s[1] / a.n, a.s[2] / a.n]);
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (const ci of [a.lo[0], a.hi[0]]) for (const cj of [a.lo[1], a.hi[1]]) for (const ck of [a.lo[2], a.hi[2]]) {
-      const r = xf([ci, cj, ck]);
+    const c = xf([
+      a.s[0] / a.n,
+      a.s[1] / a.n,
+      a.s[2] / a.n
+    ]);
+    const lo = [
+      Infinity,
+      Infinity,
+      Infinity
+    ], hi = [
+      -Infinity,
+      -Infinity,
+      -Infinity
+    ];
+    for (const ci of [
+      a.lo[0],
+      a.hi[0]
+    ]) for (const cj of [
+      a.lo[1],
+      a.hi[1]
+    ]) for (const ck of [
+      a.lo[2],
+      a.hi[2]
+    ]) {
+      const r = xf([
+        ci,
+        cj,
+        ck
+      ]);
       for (let d = 0; d < 3; d++) {
         if (r[d] < lo[d]) lo[d] = r[d];
         if (r[d] > hi[d]) hi[d] = r[d];
       }
     }
-    out.set(label, { label, name: LEVEL_NAME[label] ?? String(label), voxels: a.n, centroid: c, lo, hi });
+    out.set(label, {
+      label,
+      name: LEVEL_NAME[label] ?? String(label),
+      voxels: a.n,
+      centroid: c,
+      lo,
+      hi
+    });
   }
   return out;
 }
-var DISC_COLOR = [0.72, 0.72, 0.66];
+var DISC_COLOR = [
+  0.96,
+  0.96,
+  0.94
+];
 var isDisc = (label) => label > 100;
 var CT_WIN = 1400;
 var CT_LEV = 400;
@@ -5562,9 +7995,18 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
   const vol = meta.volumes;
   const track = (msg) => (n) => onProgress?.(msg, n);
   const [ctLow, sp, ref] = await Promise.all([
-    fetchZarrVolume(base, { ...vol.ct_low, dataset: "." }, track("CT preview")),
-    fetchZarrVolume(base, { ...vol.spineps_med, dataset: "." }, track("SPINEPS labels")),
-    fetchZarrVolume(base, { ...vol.ref_med, dataset: "." }, track("reference labels"))
+    fetchZarrVolume(base, {
+      ...vol.ct_low,
+      dataset: "."
+    }, track("CT preview")),
+    fetchZarrVolume(base, {
+      ...vol.spineps_med,
+      dataset: "."
+    }, track("SPINEPS labels")),
+    fetchZarrVolume(base, {
+      ...vol.ref_med,
+      dataset: "."
+    }, track("reference labels"))
   ]);
   const medDims = sp.dims;
   const medRAS = flat(meta.ijkToRAS_med);
@@ -5586,10 +8028,22 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     for (let i = 0; i < 256; i++) l[i * 4 + 3] = Math.round(l[i * 4 + 3] * o);
     return l;
   };
-  const mkCtField = (v, ijk) => new ImageField(dev, v.data, v.dims, [1, 1, 1], scaledLut(volOpacity), {
-    clim: [CT_LEV - CT_WIN / 2, CT_LEV + CT_WIN / 2],
+  const mkCtField = (v, ijk) => new ImageField(dev, v.data, v.dims, [
+    1,
+    1,
+    1
+  ], scaledLut(volOpacity), {
+    clim: [
+      CT_LEV - CT_WIN / 2,
+      CT_LEV + CT_WIN / 2
+    ],
     ijkToRAS: ijk,
-    shade: [0.25, 0.7, 0.45, 20]
+    shade: [
+      0.25,
+      0.7,
+      0.45,
+      20
+    ]
   });
   let ctField = mkCtField(ctLow, lowRAS);
   let ctDims = ctLow.dims, ctRAS = lowRAS;
@@ -5602,14 +8056,22 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
   slice.setVolume(ctField.patientToTexture(), rasLo0, rasHi0);
   slice.setWindowLevel(CT_WIN, CT_LEV);
   slice.setOverlayOpacity(0.5);
-  const methodOp = { spineps: 1, ref: 1 };
+  const methodOp = {
+    spineps: 1,
+    ref: 1
+  };
   let clip = null;
-  let extentState = { label: null, count: 99 };
+  let extentState = {
+    label: null,
+    count: 99
+  };
   let segSigma = 1;
   const makeRow = (key, lab) => {
     const overlayTex = bakeOverlay(lab);
     const cap = resampleIsotropic(lab, medDims, medRAS, 256);
-    const editable = new EditableSegmentation(dev, cap.dims, { ijkToRAS: cap.ijkToRAS });
+    const editable = new EditableSegmentation(dev, cap.dims, {
+      ijkToRAS: cap.ijkToRAS
+    });
     const outerShell = (shellOpts?.shell ?? "outer") === "outer";
     const logic = new SegmentationLogic(dev, editable, {
       renderMode: "sdf",
@@ -5630,9 +8092,15 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
       return v;
     };
     let visKey = "";
+    let lastBakeEmpty = true;
+    const anyVisible = () => {
+      for (const [, o] of shown) if (o > 1e-3) return true;
+      return false;
+    };
     const rebakeShellFull = () => {
       const vis = visOf();
       visKey = vis.join("");
+      lastBakeEmpty = !anyVisible();
       const f = new Uint32Array(cap.lab.length);
       for (let i = 0; i < f.length; i++) {
         const l = cap.lab[i];
@@ -5645,26 +8113,62 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     const rebakeShellRegion = (regionRAS) => {
       const vis = visOf();
       visKey = vis.join("");
-      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-      for (const x of [regionRAS.lo[0], regionRAS.hi[0]]) for (const y of [regionRAS.lo[1], regionRAS.hi[1]]) for (const z of [regionRAS.lo[2], regionRAS.hi[2]]) {
+      const lo = [
+        Infinity,
+        Infinity,
+        Infinity
+      ], hi = [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ];
+      for (const x of [
+        regionRAS.lo[0],
+        regionRAS.hi[0]
+      ]) for (const y of [
+        regionRAS.lo[1],
+        regionRAS.hi[1]
+      ]) for (const z of [
+        regionRAS.lo[2],
+        regionRAS.hi[2]
+      ]) {
         const i = capInv[0] * x + capInv[1] * y + capInv[2] * z + capInv[3];
         const j = capInv[4] * x + capInv[5] * y + capInv[6] * z + capInv[7];
         const k = capInv[8] * x + capInv[9] * y + capInv[10] * z + capInv[11];
         for (let d = 0; d < 3; d++) {
-          const v = [i, j, k][d];
+          const v = [
+            i,
+            j,
+            k
+          ][d];
           if (v < lo[d]) lo[d] = v;
           if (v > hi[d]) hi[d] = v;
         }
       }
-      const rlo = [0, 0, 0], rhi = [0, 0, 0];
+      const rlo = [
+        0,
+        0,
+        0
+      ], rhi = [
+        0,
+        0,
+        0
+      ];
       for (let d = 0; d < 3; d++) {
         rlo[d] = Math.max(0, Math.floor(lo[d]) - 2);
         rhi[d] = Math.min(cap.dims[d], Math.ceil(hi[d]) + 2);
         if (rhi[d] <= rlo[d]) return;
       }
-      const [sx, sy, sz] = [rhi[0] - rlo[0], rhi[1] - rlo[1], rhi[2] - rlo[2]];
+      const [sx, sy, sz] = [
+        rhi[0] - rlo[0],
+        rhi[1] - rlo[1],
+        rhi[2] - rlo[2]
+      ];
       const out = new Uint32Array(sx * sy * sz);
-      const [dx, dy] = [cap.dims[0], cap.dims[1]];
+      const [dx, dy] = [
+        cap.dims[0],
+        cap.dims[1]
+      ];
       let w = 0;
       for (let z = rlo[2]; z < rhi[2]; z++) for (let y = rlo[1]; y < rhi[1]; y++) {
         let r = (z * dy + y) * dx + rlo[0];
@@ -5673,8 +8177,13 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
           if (vis[l]) out[w] = l;
         }
       }
-      editable.writeLabelRegion(out, rlo, [sx, sy, sz]);
+      editable.writeLabelRegion(out, rlo, [
+        sx,
+        sy,
+        sz
+      ]);
       logic.rebakeShellRegion(regionRAS);
+      lastBakeEmpty = !anyVisible();
     };
     if (outerShell) rebakeShellFull();
     else {
@@ -5702,7 +8211,7 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
       applyShellVisibility(regionRAS) {
         if (!outerShell) return false;
         if (visOf().join("") === visKey) return false;
-        if (regionRAS) rebakeShellRegion(regionRAS);
+        if (regionRAS && !lastBakeEmpty) rebakeShellRegion(regionRAS);
         else rebakeShellFull();
         return true;
       },
@@ -5726,17 +8235,27 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     ijkToRAS: ctRAS,
     rasLo: rasLo0,
     rasHi: rasHi0,
-    center: [(rasLo0[0] + rasHi0[0]) / 2, (rasLo0[1] + rasHi0[1]) / 2, (rasLo0[2] + rasHi0[2]) / 2],
+    center: [
+      (rasLo0[0] + rasHi0[0]) / 2,
+      (rasLo0[1] + rasHi0[1]) / 2,
+      (rasLo0[2] + rasHi0[2]) / 2
+    ],
     radius: Math.hypot(rasHi0[0] - rasLo0[0], rasHi0[1] - rasLo0[1], rasHi0[2] - rasLo0[2]) / 2,
     win: CT_WIN,
     lev: CT_LEV,
     slice,
-    rows: [rowSp, rowRef],
+    rows: [
+      rowSp,
+      rowRef
+    ],
+    // The 2D overlay follows the SAME per-method control as the 3D surface: "hide SPINEPS" that
+    // leaves SPINEPS labels painted over the CT is not hiding SPINEPS. 0.5 is the overlay's normal
+    // strength over the CT; the control scales it, so the tri-state reads the same in both places.
     bindRowSlice(key) {
       slice.setTextures(ctField.volumeTexture(), rowOf(key).overlayTex);
+      slice.setOverlayOpacity(0.5 * methodOp[key]);
     },
     upgraded: Promise.resolve(),
-    // replaced below
     setMethodOpacity(key, o) {
       const was = methodOp[key] > 1e-3;
       methodOp[key] = Math.max(0, Math.min(1, o));
@@ -5756,9 +8275,15 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     },
     volumeOpacity: () => volOpacity,
     setExtent(label, count) {
-      extentState = { label, count };
+      extentState = {
+        label,
+        count
+      };
       const applyVisibility = (inRange) => {
-        for (const row of [rowSp, rowRef]) {
+        for (const row of [
+          rowSp,
+          rowRef
+        ]) {
           const changed = [];
           for (const [l] of row.levels) {
             const vis = isDisc(l) ? inRange(l - 100) || inRange(l - 100 + 1) : inRange(l);
@@ -5771,8 +8296,16 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
           }
           if (!changed.length) continue;
           let bbox = null;
-          if (changed.length <= 6) {
-            const lo2 = [Infinity, Infinity, Infinity], hi2 = [-Infinity, -Infinity, -Infinity];
+          if (changed.length <= 6 && extentState.count <= 1) {
+            const lo2 = [
+              Infinity,
+              Infinity,
+              Infinity
+            ], hi2 = [
+              -Infinity,
+              -Infinity,
+              -Infinity
+            ];
             for (const l of changed) {
               const g = row.levels.get(l);
               for (let d = 0; d < 3; d++) {
@@ -5780,7 +8313,18 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
                 if (g.hi[d] > hi2[d]) hi2[d] = g.hi[d];
               }
             }
-            bbox = { lo: [lo2[0], lo2[1], lo2[2]], hi: [hi2[0], hi2[1], hi2[2]] };
+            bbox = {
+              lo: [
+                lo2[0],
+                lo2[1],
+                lo2[2]
+              ],
+              hi: [
+                hi2[0],
+                hi2[1],
+                hi2[2]
+              ]
+            };
           }
           if (row.applyShellVisibility(bbox)) continue;
           if (bbox) row.logic.refreshOpacity(bbox);
@@ -5788,7 +8332,10 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
         }
       };
       const applyClip = () => {
-        for (const row of [rowSp, rowRef]) {
+        for (const row of [
+          rowSp,
+          rowRef
+        ]) {
           if (clip) row.scene.setClipBox(clip.lo, clip.hi);
           else row.scene.clearClip();
           row.scene.syncUniforms();
@@ -5800,9 +8347,20 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
         applyClip();
         return null;
       }
-      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      const lo = [
+        Infinity,
+        Infinity,
+        Infinity
+      ], hi = [
+        -Infinity,
+        -Infinity,
+        -Infinity
+      ];
       let any = false;
-      for (const levels of [rowSp.levels, rowRef.levels]) {
+      for (const levels of [
+        rowSp.levels,
+        rowRef.levels
+      ]) {
         for (const [l, g] of levels) {
           if (isDisc(l) || Math.abs(l - label) > count) continue;
           any = true;
@@ -5823,15 +8381,26 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
         lo[d] -= 12;
         hi[d] += 12;
       }
-      clip = { lo, hi };
+      clip = {
+        lo,
+        hi
+      };
       applyClip();
-      return { lo, hi };
+      return {
+        lo,
+        hi
+      };
     },
-    visibleLevels: (key) => [...rowOf(key).levels.keys()].filter((l) => !isDisc(l) && (rowOf(key).shown.get(l) ?? 1) > 0),
+    visibleLevels: (key) => [
+      ...rowOf(key).levels.keys()
+    ].filter((l) => !isDisc(l) && (rowOf(key).shown.get(l) ?? 1) > 0),
     setDiscOpacity(o) {
       discOp = Math.max(0, Math.min(1, o));
       for (let l = 101; l < 256; l++) levelPalette[l * 4 + 3] = discOp;
-      for (const row of [rowSp, rowRef]) {
+      for (const row of [
+        rowSp,
+        rowRef
+      ]) {
         const nt = bakeOverlay(row.lab);
         row.overlayTex.destroy();
         row.overlayTex = nt;
@@ -5853,7 +8422,10 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     }
   };
   scObj.upgraded = (async () => {
-    const ctMed = await fetchZarrVolume(base, { ...vol.ct_med, dataset: "." }, track("full-res CT"));
+    const ctMed = await fetchZarrVolume(base, {
+      ...vol.ct_med,
+      dataset: "."
+    }, track("full-res CT"));
     ctField = mkCtField(ctMed, medRAS);
     ctDims = ctMed.dims;
     ctRAS = medRAS;
@@ -5863,7 +8435,10 @@ async function buildSpineCompareScene(gpu, format, meta, base, onProgress, shell
     scObj.rasLo = lo;
     scObj.rasHi = hi;
     slice.setVolume(ctField.patientToTexture(), lo, hi);
-    for (const row of [rowSp, rowRef]) {
+    for (const row of [
+      rowSp,
+      rowRef
+    ]) {
       const nt = bakeOverlay(row.lab);
       row.overlayTex.destroy();
       row.overlayTex = nt;
@@ -5877,11 +8452,18 @@ async function loadCaseMeta(coll, pid) {
   const base = `${BUCKET}${coll}/${pid}/zarr/`;
   const r = await fetch(base + "meta.json");
   if (!r.ok) throw new Error(`no zarr bundle yet for ${coll}/${pid} (HTTP ${r.status}) \u2014 the worker may not have reached this case`);
-  return { meta: await r.json(), base };
+  return {
+    meta: await r.json(),
+    base
+  };
 }
 
 // examples/spine/spine-compare-browser.ts
-var ORIENTS = ["axial", "sagittal", "coronal"];
+var ORIENTS = [
+  "axial",
+  "sagittal",
+  "coronal"
+];
 var PARAMS = new URLSearchParams(location.search);
 var el = (id) => document.getElementById(id);
 var status = (msg, err = false) => {
@@ -5900,12 +8482,16 @@ async function main() {
   const preferred = navigator.gpu.getPreferredCanvasFormat();
   const srgb = preferred + "-srgb";
   status("loading case list\u2026");
-  const casesDoc = await (await fetch(BUCKET + "cases.json", { cache: "no-cache" })).json();
+  const casesDoc = await (await fetch(BUCKET + "cases.json", {
+    cache: "no-cache"
+  })).json();
   let pid = PARAMS.get("case") ?? "";
   let coll = PARAMS.get("coll") ?? "";
   if (!pid) {
     for (const c of casesDoc.cases) {
-      const r = await fetch(`${BUCKET}${c.collection}/${c.pid}/zarr/meta.json`, { method: "HEAD" });
+      const r = await fetch(`${BUCKET}${c.collection}/${c.pid}/zarr/meta.json`, {
+        method: "HEAD"
+      });
       if (r.ok) {
         pid = c.pid;
         coll = c.collection;
@@ -5935,8 +8521,14 @@ async function main() {
     drawAll();
     status(`${coll}/${pid} \u2014 full-res CT loaded`);
   }).catch(() => status(`${coll}/${pid} \u2014 full-res CT failed to load (showing preview res)`, true));
-  const keys = ["spineps", "ref"];
-  const cellNames = [...ORIENTS, "threeD"];
+  const keys = [
+    "spineps",
+    "ref"
+  ];
+  const cellNames = [
+    ...ORIENTS,
+    "threeD"
+  ];
   const cv = {};
   const cx = {};
   for (const k of keys) {
@@ -5944,7 +8536,14 @@ async function main() {
       const id = `c-${k}-${c}`;
       cv[id] = document.getElementById(id);
       cx[id] = cv[id].getContext("webgpu");
-      cx[id].configure({ device: gpu.device, format: preferred, viewFormats: [srgb], alphaMode: "opaque" });
+      cx[id].configure({
+        device: gpu.device,
+        format: preferred,
+        viewFormats: [
+          srgb
+        ],
+        alphaMode: "opaque"
+      });
     }
   }
   const rowOf = (k) => sc.rows[k === "spineps" ? 0 : 1];
@@ -5953,14 +8552,20 @@ async function main() {
     coronal: slicerDefaultOffset01("coronal", sc.dims, sc.ijkToRAS, sc.rasLo, sc.rasHi),
     sagittal: slicerDefaultOffset01("sagittal", sc.dims, sc.ijkToRAS, sc.rasLo, sc.rasHi)
   };
-  const sliceIx = new SliceInteractor({ ijkToRAS: sc.ijkToRAS, rasLo: sc.rasLo, rasHi: sc.rasHi });
+  const sliceIx = new SliceInteractor({
+    ijkToRAS: sc.ijkToRAS,
+    rasLo: sc.rasLo,
+    rasHi: sc.rasHi
+  });
   const camera = framedCamera(sc.center, sc.radius);
   const drawSlice = (k, o) => {
     const c = cv[`c-${k}-${o}`];
     if (!c || !c.width) return;
     sc.bindRowSlice(k);
     sc.slice.setPlane(o, off[o]);
-    sc.slice.renderToView(cx[`c-${k}-${o}`].getCurrentTexture().createView({ format: srgb }), c.width, c.height);
+    sc.slice.renderToView(cx[`c-${k}-${o}`].getCurrentTexture().createView({
+      format: srgb
+    }), c.width, c.height);
   };
   let fast3d = false;
   let settle3dTimer = 0;
@@ -5968,7 +8573,9 @@ async function main() {
     const c = cv[`c-${k}-threeD`];
     if (!c || !c.width) return;
     const scene = rowOf(k).scene;
-    const view = cx[`c-${k}-threeD`].getCurrentTexture().createView({ format: srgb });
+    const view = cx[`c-${k}-threeD`].getCurrentTexture().createView({
+      format: srgb
+    });
     if (fast3d) {
       const rw = Math.max(16, Math.round(c.width * 0.5)), rh = Math.max(16, Math.round(c.height * 0.5));
       scene.setCamera(camera.position, camera.focalPoint, camera.viewUp, camera.viewAngle, rw, rh);
@@ -6014,7 +8621,10 @@ async function main() {
     const o = document.createElement("canvas");
     o.style.cssText = "position:absolute;inset:0;width:100%;height:100%;pointer-events:none;background:transparent;";
     cv[id].parentElement.appendChild(o);
-    overlays[id] = { c: o, g: o.getContext("2d") };
+    overlays[id] = {
+      c: o,
+      g: o.getContext("2d")
+    };
   }
   const xhairRedraw = () => {
     const dpr = Math.min(2, globalThis.devicePixelRatio || 1);
@@ -6048,7 +8658,11 @@ async function main() {
   const isShiftHover = (e) => e.shiftKey && e.buttons === 0;
   const uvOf = (c, e) => {
     const r = c.getBoundingClientRect();
-    return { u: (e.clientX - r.left) / r.width, v: (e.clientY - r.top) / r.height, aspect: r.width / r.height };
+    return {
+      u: (e.clientX - r.left) / r.width,
+      v: (e.clientY - r.top) / r.height,
+      aspect: r.width / r.height
+    };
   };
   const hideXhair = () => {
     if (xhair.visible) {
@@ -6092,7 +8706,10 @@ async function main() {
       if (!isShiftHover(e)) return;
       if (!xhair.visible) xhair.toggle(true);
       const { u, v } = uvOf(cv[`c-${k}-threeD`], e);
-      if (inFlight) queued = { u, v };
+      if (inFlight) queued = {
+        u,
+        v
+      };
       else pick(u, v);
     });
   }
@@ -6108,17 +8725,21 @@ async function main() {
           for (const kk of keys) drawSlice(kk, o);
           xhairRedraw();
         },
-        hooks: { onDoubleClick: () => {
-          toggleMax(`c-${k}-${o}`);
-          return true;
-        } }
+        hooks: {
+          onDoubleClick: () => {
+            toggleMax(`c-${k}-${o}`);
+            return true;
+          }
+        }
       });
     }
   }
-  for (const k of keys) attachCameraControls(cv[`c-${k}-threeD`], camera, { onChange: () => {
-    touch3d();
-    drawAll3d();
-  } });
+  for (const k of keys) attachCameraControls(cv[`c-${k}-threeD`], camera, {
+    onChange: () => {
+      touch3d();
+      drawAll3d();
+    }
+  });
   let maxed = null;
   const toggleMax = (id) => {
     maxed = maxed === id ? null : id;
@@ -6136,7 +8757,12 @@ async function main() {
     resize();
   };
   for (const k of keys) attachDoubleClick(cv[`c-${k}-threeD`], () => toggleMax(`c-${k}-threeD`));
-  const shown = { axial: true, sagittal: true, coronal: true, threeD: true };
+  const shown = {
+    axial: true,
+    sagittal: true,
+    coronal: true,
+    threeD: true
+  };
   const applyColumns = () => {
     for (const k of keys) for (const c of cellNames) cv[`c-${k}-${c}`].parentElement.classList.toggle("hidden", !shown[c]);
     resize();
@@ -6151,7 +8777,24 @@ async function main() {
   }
   let currentLevel = null;
   let extent = 99;
-  const extents = [["ext-one", 0], ["ext-pm1", 1], ["ext-pm3", 3], ["ext-full", 99]];
+  const extents = [
+    [
+      "ext-one",
+      0
+    ],
+    [
+      "ext-pm1",
+      1
+    ],
+    [
+      "ext-pm3",
+      3
+    ],
+    [
+      "ext-full",
+      99
+    ]
+  ];
   const SLICE_MARGIN = 1.5;
   const frameCamera = (center, radius) => {
     const d = [
@@ -6161,16 +8804,52 @@ async function main() {
     ];
     const len = Math.hypot(d[0], d[1], d[2]) || 1;
     const dist = radius / Math.tan(camera.viewAngle / 2 * Math.PI / 180);
-    camera.focalPoint = [...center];
-    camera.position = [center[0] - d[0] / len * dist, center[1] - d[1] / len * dist, center[2] - d[2] / len * dist];
+    camera.focalPoint = [
+      ...center
+    ];
+    camera.position = [
+      center[0] - d[0] / len * dist,
+      center[1] - d[1] / len * dist,
+      center[2] - d[2] / len * dist
+    ];
+  };
+  const emptyNote = {};
+  for (const k of keys) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    cv[`c-${k}-threeD`].parentElement.appendChild(d);
+    emptyNote[k] = d;
+  }
+  const updateEmptyNotes = () => {
+    for (const k of keys) {
+      const none = sc.visibleLevels(k).length === 0;
+      emptyNote[k].classList.toggle("on", none);
+      if (none) {
+        const lvl = currentLevel == null ? "" : ` at ${LEVEL_NAME[currentLevel] ?? currentLevel}`;
+        const span = extent === 0 ? "" : ` \xB1${extent}`;
+        emptyNote[k].textContent = `${k === "spineps" ? "SPINEPS" : "Reference"} has no label${lvl}${span}`;
+      }
+    }
   };
   const applyFocus = () => {
     const box = sc.setExtent(extent >= 99 ? null : currentLevel, extent);
     for (const [id, n] of extents) el(id)?.classList.toggle("on", extent === n);
+    updateEmptyNotes();
     if (box) {
-      const c = [(box.lo[0] + box.hi[0]) / 2, (box.lo[1] + box.hi[1]) / 2, (box.lo[2] + box.hi[2]) / 2];
-      const ext = [box.hi[0] - box.lo[0], box.hi[1] - box.lo[1], box.hi[2] - box.lo[2]];
-      const fov = (a, b) => [Math.max(30, ext[a] * SLICE_MARGIN), Math.max(30, ext[b] * SLICE_MARGIN)];
+      const c = [
+        (box.lo[0] + box.hi[0]) / 2,
+        (box.lo[1] + box.hi[1]) / 2,
+        (box.lo[2] + box.hi[2]) / 2
+      ];
+      const ext = [
+        box.hi[0] - box.lo[0],
+        box.hi[1] - box.lo[1],
+        box.hi[2] - box.lo[2]
+      ];
+      const fov = (a, b) => [
+        Math.max(30, ext[a] * SLICE_MARGIN),
+        Math.max(30, ext[b] * SLICE_MARGIN)
+      ];
       const [axU, axV] = fov(0, 1);
       sc.slice.setMirrorFrame("axial", c, axU, axV);
       const [coU, coV] = fov(0, 2);
@@ -6184,11 +8863,37 @@ async function main() {
     }
     requestDraw();
   };
-  for (const [id, n] of extents) el(id)?.addEventListener("click", () => {
-    extent = n;
-    applyFocus();
-  });
-  const nameToLabel = Object.fromEntries(Object.entries(LEVEL_NAME).map(([n, s]) => [s, Number(n)]));
+  const nearestLevel = (p) => {
+    let best = null, bd = Infinity;
+    for (const row of sc.rows) {
+      for (const [l, g] of row.levels) {
+        if (isDisc(l)) continue;
+        const d = Math.hypot(g.centroid[0] - p[0], g.centroid[1] - p[1], g.centroid[2] - p[2]);
+        if (d < bd) {
+          bd = d;
+          best = l;
+        }
+      }
+    }
+    return best;
+  };
+  for (const [id, n] of extents) {
+    el(id)?.addEventListener("click", () => {
+      extent = n;
+      if (n < 99 && currentLevel == null) {
+        const l = nearestLevel(xhair.ras ?? sc.center);
+        if (l != null) {
+          selectLevel(l);
+          return;
+        }
+      }
+      applyFocus();
+    });
+  }
+  const nameToLabel = Object.fromEntries(Object.entries(LEVEL_NAME).map(([n, s]) => [
+    s,
+    Number(n)
+  ]));
   const strip = el("levels");
   const selectLevel = (label) => {
     currentLevel = label;
@@ -6255,33 +8960,60 @@ async function main() {
       e.preventDefault();
       stepLevel(1);
     } else if (e.key === "Escape" && globalThis.parent !== globalThis) {
-      globalThis.parent.postMessage({ type: "closeDrill" }, "*");
+      globalThis.parent.postMessage({
+        type: "closeDrill"
+      }, "*");
     }
   });
   const controls = [
-    { label: "SPINEPS shell", getOpacity: () => sc.methodOpacity("spineps"), setOpacity: (o) => {
-      sc.setMethodOpacity("spineps", o);
-      drawAll3d();
-    }, color: METHOD_COLORS.spineps },
-    { label: "Reference shell", getOpacity: () => sc.methodOpacity("ref"), setOpacity: (o) => {
-      sc.setMethodOpacity("ref", o);
-      drawAll3d();
-    }, color: METHOD_COLORS.ref },
-    { label: "CT volume (3D)", getOpacity: () => sc.volumeOpacity(), setOpacity: (o) => {
-      sc.setVolumeOpacity(o);
-      drawAll3d();
-    }, color: [0.75, 0.78, 0.85] },
-    { label: "Discs (SPINEPS)", getOpacity: () => sc.discOpacity(), setOpacity: (o) => {
-      sc.setDiscOpacity(o);
-      requestDraw();
-    }, color: [0.72, 0.72, 0.66] },
-    // Shell smoothing. This is a REVIEW tool, so the bottom of the range matters as much as the
-    // top: at σ=0 the shell follows the labelmap voxel for voxel, which is what you need to see
+    {
+      label: "SPINEPS segmentation",
+      getOpacity: () => sc.methodOpacity("spineps"),
+      setOpacity: (o) => {
+        sc.setMethodOpacity("spineps", o);
+        requestDraw();
+      },
+      color: METHOD_COLORS.spineps
+    },
+    {
+      label: "Reference segmentation",
+      getOpacity: () => sc.methodOpacity("ref"),
+      setOpacity: (o) => {
+        sc.setMethodOpacity("ref", o);
+        requestDraw();
+      },
+      color: METHOD_COLORS.ref
+    },
+    {
+      label: "CT volume (3D)",
+      getOpacity: () => sc.volumeOpacity(),
+      setOpacity: (o) => {
+        sc.setVolumeOpacity(o);
+        drawAll3d();
+      },
+      color: [
+        0.75,
+        0.78,
+        0.85
+      ]
+    },
+    {
+      label: "Discs (SPINEPS)",
+      getOpacity: () => sc.discOpacity(),
+      setOpacity: (o) => {
+        sc.setDiscOpacity(o);
+        requestDraw();
+      },
+      color: DISC_COLOR
+    },
+    // Surface smoothing — the reconstruction width of the band-limited label field the surface is
+    // the 0.5 level set of. This is a REVIEW tool, so the bottom of the range matters as much as the
+    // top: at σ=0 the surface follows the labelmap voxel for voxel, which is what you need to see
     // when judging whether SPINEPS and the reference disagree about actual voxels; smoothing it
     // up turns the same labels into a modelled surface, which is what you need when several
     // vertebrae are on screen and the question is which bone is which.
     {
-      label: "Shell smoothing",
+      label: "Surface smoothing",
       slider: {
         min: 0,
         max: 2,
@@ -6295,7 +9027,10 @@ async function main() {
       }
     }
   ];
-  installChrome({ controls, anchor: cv["c-ref-threeD"].parentElement ?? void 0 });
+  installChrome({
+    controls,
+    anchor: cv["c-ref-threeD"].parentElement ?? void 0
+  });
   const cmp = entry?.compare;
   el("info").textContent = `${coll}/${pid} \xB7 ${cmp ? `${cmp.n_agree}/${cmp.n_ref_labels} agree \xB7 ${cmp.n_shifted} shifted \xB7 mean Dice ${cmp.mean_dice_same?.toFixed(3)}` : "no compare record"}`;
   const caseBtn = el("case-btn");
@@ -6303,7 +9038,9 @@ async function main() {
   const listEl = el("case-list");
   const search = el("case-search");
   caseBtn.textContent = `${coll}/${pid} \u25BE`;
-  const sorted = [...casesDoc.cases].sort((a, b) => (a.compare?.mean_dice_same ?? 2) - (b.compare?.mean_dice_same ?? 2));
+  const sorted = [
+    ...casesDoc.cases
+  ].sort((a, b) => (a.compare?.mean_dice_same ?? 2) - (b.compare?.mean_dice_same ?? 2));
   const renderList = (filter = "") => {
     const f = filter.trim().toLowerCase();
     listEl.innerHTML = "";
@@ -6366,10 +9103,53 @@ async function main() {
     ready: () => true,
     dims: () => sc.dims,
     center: () => sc.center,
-    offsets: () => ({ ...off }),
+    offsets: () => ({
+      ...off
+    }),
     crosshair: () => xhair.ras,
-    camera: () => ({ position: [...camera.position], focalPoint: [...camera.focalPoint] }),
-    levels: (k) => [...rowOf(k).levels.values()].filter((g) => g.label < 100).map((g) => ({ label: g.label, name: g.name, voxels: g.voxels, centroid: g.centroid })),
+    camera: () => ({
+      position: [
+        ...camera.position
+      ],
+      focalPoint: [
+        ...camera.focalPoint
+      ],
+      viewUp: [
+        ...camera.viewUp
+      ],
+      viewAngle: camera.viewAngle
+    }),
+    setCamera: (p, f, up, va) => {
+      camera.position = [
+        p[0],
+        p[1],
+        p[2]
+      ];
+      camera.focalPoint = [
+        f[0],
+        f[1],
+        f[2]
+      ];
+      if (up) camera.viewUp = [
+        up[0],
+        up[1],
+        up[2]
+      ];
+      if (typeof va === "number") camera.viewAngle = va;
+      drawAll3d();
+    },
+    // Raw scene handles, for bisecting a render artifact from the console/CDP without going
+    // through the UI (which refits the camera every time the extent changes).
+    scenes: () => sc.rows.map((r) => r.scene),
+    redraw: () => drawAll3d(),
+    levels: (k) => [
+      ...rowOf(k).levels.values()
+    ].filter((g) => g.label < 100).map((g) => ({
+      label: g.label,
+      name: g.name,
+      voxels: g.voxels,
+      centroid: g.centroid
+    })),
     jumpLevel: (name) => {
       const label = nameToLabel[name];
       if (label == null) return null;
@@ -6389,7 +9169,17 @@ async function main() {
     methodOpacity: (k) => sc.methodOpacity(k),
     setMethodOpacity: (k, o) => {
       sc.setMethodOpacity(k, o);
+      requestDraw();
+    },
+    smoothing: () => sc.segSmoothing(),
+    setSmoothing: (v) => {
+      sc.setSegSmoothing(v);
       drawAll3d();
+    },
+    discOpacity: () => sc.discOpacity(),
+    setDiscOpacity: (v) => {
+      sc.setDiscOpacity(v);
+      requestDraw();
     }
   };
 }

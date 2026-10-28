@@ -17,7 +17,7 @@ import { attachDoubleClick } from "../../render/demos/view-grid.ts";
 import { createCrosshair, drawCross, rasToScreen3D } from "../../render/demos/crosshair.ts";
 import { installChrome, type VizControl } from "../../render/demos/sl-chrome.ts";
 import {
-  BUCKET, buildSpineCompareScene, loadCaseMeta, LEVEL_NAME, METHOD_COLORS,
+  BUCKET, buildSpineCompareScene, DISC_COLOR, isDisc, loadCaseMeta, LEVEL_NAME, METHOD_COLORS,
   type SpineCompareScene,
 } from "./spine-compare-scene.ts";
 import type { Vec3 } from "../../render/mat4.ts";
@@ -276,9 +276,33 @@ async function main() {
     camera.focalPoint = [...center] as Vec3;
     camera.position = [center[0] - d[0] / len * dist, center[1] - d[1] / len * dist, center[2] - d[2] / len * dist];
   };
+  // An EMPTY 3D cell is almost always real: this method has no label at the focused level (SPINEPS
+  // and the reference disagree about which bone is which — that is the whole point of the view), or
+  // its labels stop short of the reference's range. An unexplained black box reads as a broken
+  // renderer, so each 3D cell carries a note that says which.
+  const emptyNote: Record<MethodKey, HTMLElement> = {} as Record<MethodKey, HTMLElement>;
+  for (const k of keys) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    cv[`c-${k}-threeD`].parentElement!.appendChild(d);
+    emptyNote[k] = d;
+  }
+  const updateEmptyNotes = () => {
+    for (const k of keys) {
+      const none = sc.visibleLevels(k).length === 0;
+      emptyNote[k].classList.toggle("on", none);
+      if (none) {
+        const lvl = currentLevel == null ? "" : ` at ${LEVEL_NAME[currentLevel] ?? currentLevel}`;
+        const span = extent === 0 ? "" : ` ±${extent}`;
+        emptyNote[k].textContent = `${k === "spineps" ? "SPINEPS" : "Reference"} has no label${lvl}${span}`;
+      }
+    }
+  };
+
   const applyFocus = () => {
     const box = sc.setExtent(extent >= 99 ? null : currentLevel, extent);
     for (const [id, n] of extents) el(id)?.classList.toggle("on", extent === n);
+    updateEmptyNotes();
     if (box) {
       const c: Vec3 = [(box.lo[0] + box.hi[0]) / 2, (box.lo[1] + box.hi[1]) / 2, (box.lo[2] + box.hi[2]) / 2];
       const ext: Vec3 = [box.hi[0] - box.lo[0], box.hi[1] - box.lo[1], box.hi[2] - box.lo[2]];
@@ -294,7 +318,31 @@ async function main() {
     }
     requestDraw();
   };
-  for (const [id, n] of extents) el(id)?.addEventListener("click", () => { extent = n; applyFocus(); });
+  /** The vertebra whose centroid is nearest `p`, across both methods. */
+  const nearestLevel = (p: Vec3): number | null => {
+    let best: number | null = null, bd = Infinity;
+    for (const row of sc.rows) {
+      for (const [l, g] of row.levels) {
+        if (isDisc(l)) continue;
+        const d = Math.hypot(g.centroid[0] - p[0], g.centroid[1] - p[1], g.centroid[2] - p[2]);
+        if (d < bd) { bd = d; best = l; }
+      }
+    }
+    return best;
+  };
+  for (const [id, n] of extents) {
+    el(id)?.addEventListener("click", () => {
+      extent = n;
+      // A scoped extent needs a level to scope AROUND. With none chosen the chip used to light up
+      // and nothing else happened — the view only switched once an arrow key happened to select
+      // one. Fall back to the level nearest the crosshair (the volume centre on a fresh load).
+      if (n < 99 && currentLevel == null) {
+        const l = nearestLevel(xhair.ras ?? sc.center);
+        if (l != null) { selectLevel(l); return; }
+      }
+      applyFocus();
+    });
+  }
 
   const nameToLabel = Object.fromEntries(Object.entries(LEVEL_NAME).map(([n, s]) => [s, Number(n)]));
   const strip = el("levels");
@@ -371,17 +419,18 @@ async function main() {
 
   // ── chrome: layer toggles (tri-state opacity, SEGRoulette-style) on the rows ─
   const controls: VizControl[] = [
-    { label: "SPINEPS shell", getOpacity: () => sc.methodOpacity("spineps"), setOpacity: (o) => { sc.setMethodOpacity("spineps", o); drawAll3d(); }, color: METHOD_COLORS.spineps },
-    { label: "Reference shell", getOpacity: () => sc.methodOpacity("ref"), setOpacity: (o) => { sc.setMethodOpacity("ref", o); drawAll3d(); }, color: METHOD_COLORS.ref },
+    { label: "SPINEPS segmentation", getOpacity: () => sc.methodOpacity("spineps"), setOpacity: (o) => { sc.setMethodOpacity("spineps", o); requestDraw(); }, color: METHOD_COLORS.spineps },
+    { label: "Reference segmentation", getOpacity: () => sc.methodOpacity("ref"), setOpacity: (o) => { sc.setMethodOpacity("ref", o); requestDraw(); }, color: METHOD_COLORS.ref },
     { label: "CT volume (3D)", getOpacity: () => sc.volumeOpacity(), setOpacity: (o) => { sc.setVolumeOpacity(o); drawAll3d(); }, color: [0.75, 0.78, 0.85] },
-    { label: "Discs (SPINEPS)", getOpacity: () => sc.discOpacity(), setOpacity: (o) => { sc.setDiscOpacity(o); requestDraw(); }, color: [0.72, 0.72, 0.66] },
-    // Shell smoothing. This is a REVIEW tool, so the bottom of the range matters as much as the
-    // top: at σ=0 the shell follows the labelmap voxel for voxel, which is what you need to see
+    { label: "Discs (SPINEPS)", getOpacity: () => sc.discOpacity(), setOpacity: (o) => { sc.setDiscOpacity(o); requestDraw(); }, color: DISC_COLOR },
+    // Surface smoothing — the reconstruction width of the band-limited label field the surface is
+    // the 0.5 level set of. This is a REVIEW tool, so the bottom of the range matters as much as the
+    // top: at σ=0 the surface follows the labelmap voxel for voxel, which is what you need to see
     // when judging whether SPINEPS and the reference disagree about actual voxels; smoothing it
     // up turns the same labels into a modelled surface, which is what you need when several
     // vertebrae are on screen and the question is which bone is which.
     {
-      label: "Shell smoothing",
+      label: "Surface smoothing",
       slider: {
         min: 0,
         max: 2,
@@ -466,7 +515,18 @@ async function main() {
     center: () => sc.center,
     offsets: () => ({ ...off }),
     crosshair: () => xhair.ras,
-    camera: () => ({ position: [...camera.position], focalPoint: [...camera.focalPoint] }),
+    camera: () => ({ position: [...camera.position], focalPoint: [...camera.focalPoint], viewUp: [...camera.viewUp], viewAngle: camera.viewAngle }),
+    setCamera: (p: number[], f: number[], up?: number[], va?: number[] | number) => {
+      camera.position = [p[0], p[1], p[2]];
+      camera.focalPoint = [f[0], f[1], f[2]];
+      if (up) camera.viewUp = [up[0], up[1], up[2]];
+      if (typeof va === "number") camera.viewAngle = va;
+      drawAll3d();
+    },
+    // Raw scene handles, for bisecting a render artifact from the console/CDP without going
+    // through the UI (which refits the camera every time the extent changes).
+    scenes: () => sc.rows.map((r) => r.scene),
+    redraw: () => drawAll3d(),
     levels: (k: MethodKey) => [...rowOf(k).levels.values()].filter((g) => g.label < 100).map((g) => ({ label: g.label, name: g.name, voxels: g.voxels, centroid: g.centroid })),
     jumpLevel: (name: string) => {
       const label = nameToLabel[name];
@@ -482,7 +542,11 @@ async function main() {
     extent: () => extent,
     setExtent: (n: number) => { extent = n; applyFocus(); },
     methodOpacity: (k: MethodKey) => sc.methodOpacity(k),
-    setMethodOpacity: (k: MethodKey, o: number) => { sc.setMethodOpacity(k, o); drawAll3d(); },
+    setMethodOpacity: (k: MethodKey, o: number) => { sc.setMethodOpacity(k, o); requestDraw(); },
+    smoothing: () => sc.segSmoothing(),
+    setSmoothing: (v: number) => { sc.setSegSmoothing(v); drawAll3d(); },
+    discOpacity: () => sc.discOpacity(),
+    setDiscOpacity: (v: number) => { sc.setDiscOpacity(v); requestDraw(); },
   };
 }
 

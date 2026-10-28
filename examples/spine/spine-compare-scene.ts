@@ -160,7 +160,11 @@ function levelGeometry(lab: Uint8Array, dims: [number, number, number], ijkToRAS
 // SPINEPS vert_msk labels: n = vertebra (bone), 100+n = the INTERVERTEBRAL DISC below
 // vertebra n (semantic class 100 — verified against spine_msk). Discs render as their own
 // muted layer, never merged into the bone.
-export const DISC_COLOR: [number, number, number] = [0.72, 0.72, 0.66];
+// NEAR-WHITE, not a muted tone close to the level colours. The vertebra palette is saturated, and a
+// disc sits between two of those bodies with no gap, so a beige disc read as a smear ACROSS the two
+// levels rather than as a structure of its own — the thing the disc layer exists to show. White is
+// outside the level palette entirely, so the boundary between bone and disc is unambiguous.
+export const DISC_COLOR: [number, number, number] = [0.96, 0.96, 0.94];
 export const isDisc = (label: number) => label > 100;
 
 export interface MethodRow {
@@ -343,9 +347,19 @@ export async function buildSpineCompareScene(
       return v;
     };
     let visKey = "";
+    // Was the labelmap the last shell bake saw EMPTY? A region re-flood patches the previous flood's
+    // seed texture — and if that texture has no seeds in it at all, there is nothing for the box's
+    // taps to build on outside the box, and the patch comes back as a scatter of speckles instead of
+    // a vertebra. It happens exactly once per row, on the step where a method's labels first come
+    // into range: SPINEPS labels 12 of the reference's 24 levels, so arrowing down from the cervical
+    // spine crosses that edge, and the first SPINEPS vertebra rendered at 511 px against 5500 for the
+    // same level reached any other way. A full bake there costs ~390 ms, once.
+    let lastBakeEmpty = true;
+    const anyVisible = () => { for (const [, o] of shown) if (o > 0.001) return true; return false; };
     const rebakeShellFull = () => {
       const vis = visOf();
       visKey = vis.join("");
+      lastBakeEmpty = !anyVisible();
       const f = new Uint32Array(cap.lab.length);
       for (let i = 0; i < f.length; i++) { const l = cap.lab[i]; if (vis[l]) f[i] = l; }
       editable.loadLabelmap(f);
@@ -379,6 +393,7 @@ export async function buildSpineCompareScene(
       }
       editable.writeLabelRegion(out, rlo, [sx, sy, sz]);
       logic.rebakeShellRegion(regionRAS);
+      lastBakeEmpty = !anyVisible();
     };
     if (outerShell) rebakeShellFull();   // initial bake already excludes the hidden discs
     else { editable.loadLabelmap(cap.lab); logic.refineNow(); }
@@ -396,7 +411,8 @@ export async function buildSpineCompareScene(
       applyShellVisibility(regionRAS: { lo: Vec3; hi: Vec3 } | null) {
         if (!outerShell) return false;                 // "all" caps interfaces in the field itself
         if (visOf().join("") === visKey) return false; // pure opacity tweak — attr fast path suffices
-        if (regionRAS) rebakeShellRegion(regionRAS); else rebakeShellFull();
+        // The region fast path patches the PREVIOUS flood; it needs one to patch.
+        if (regionRAS && !lastBakeEmpty) rebakeShellRegion(regionRAS); else rebakeShellFull();
         return true;
       },
       destroy() { logic.destroy(); editable.destroy(); this.overlayTex.destroy(); },
@@ -417,7 +433,13 @@ export async function buildSpineCompareScene(
     win: CT_WIN, lev: CT_LEV,
     slice,
     rows: [rowSp, rowRef],
-    bindRowSlice(key) { slice.setTextures(ctField.volumeTexture(), rowOf(key).overlayTex); },
+    // The 2D overlay follows the SAME per-method control as the 3D surface: "hide SPINEPS" that
+    // leaves SPINEPS labels painted over the CT is not hiding SPINEPS. 0.5 is the overlay's normal
+    // strength over the CT; the control scales it, so the tri-state reads the same in both places.
+    bindRowSlice(key) {
+      slice.setTextures(ctField.volumeTexture(), rowOf(key).overlayTex);
+      slice.setOverlayOpacity(0.5 * methodOp[key]);
+    },
     upgraded: Promise.resolve(),   // replaced below
     setMethodOpacity(key, o) {
       const was = methodOp[key] > 0.001;
@@ -460,8 +482,17 @@ export async function buildSpineCompareScene(
           // differently at ±3 — identical clip box, but the reference row (14 levels, no discs)
           // fell under the old "less than half the labels changed" rule and took the region
           // path, while SPINEPS (40 labels with discs) did not and rebaked in full.
+          //
+          // VERIFIED SCOPE. The fast path is used only where it has been checked against a full
+          // rebake at every level of the spine, in both rows: "1 vert" and "±1" (see
+          // examples/spine/test/level-step-equivalence.ts and the sweep it was derived from — 22
+          // level steps × 2 rows × 2 modes, max deviation 0.6%). At ±3 a walk down the spine still
+          // reaches one state where the patched bake renders ~5% less than a full one, reproducibly
+          // but only via that walk; the cause is not pinned down, so ±3 takes the full bake until it
+          // is. Wider extents are also where the fast path is worth least: the box spans the whole
+          // visible stack.
           let bbox: { lo: Vec3; hi: Vec3 } | null = null;
-          if (changed.length <= 6) {
+          if (changed.length <= 6 && extentState.count <= 1) {
             const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
             for (const l of changed) {
               const g = row.levels.get(l)!;
