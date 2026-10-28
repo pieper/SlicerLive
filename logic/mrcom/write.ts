@@ -240,6 +240,12 @@ export async function writeMrcomBundle(options: WriteBundleOpts): Promise<Writte
     if (value !== "") dataset[tag] = value;
   }
 
+  // PixelData's dictionary VR is "ox" - OB or OW, depending on BitsAllocated - so dcmjs has to be
+  // told which. A capture is 8 bits per sample, which makes it a byte stream: OB. Without this,
+  // every write logged "No value representation given for PixelData" and dcmjs guessed OW.
+  const vrMap = (dataset._vrMap ?? {}) as Record<string, string>;
+  dataset._vrMap = { ...vrMap, PixelData: "OB" };
+
   const sopInstanceUID = String(dataset.SOPInstanceUID ?? "");
   const seriesInstanceUID = String(dataset.SeriesInstanceUID ?? "");
   const studyInstanceUID = String(dataset.StudyInstanceUID ?? "");

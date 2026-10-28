@@ -1,7 +1,7 @@
 // How logic/mrcom/ gets hold of dcmjs, in every runtime it has to work in.
 //
 // Three callers, three situations:
-//   - a page that already loaded the UMD build (window.dcmjs) - use it, and never load twice
+//   - a page that already loaded the UMD build (the dcmjs global) - use it, never load twice
 //   - Deno, or SlicerAlbula's server - dynamically import the vendored ESM build
 //   - a test that wants to inject a specific instance - setDcmjs()
 //
@@ -39,7 +39,7 @@ export function getDcmjs(): Promise<Dcmjs> {
       .catch((cause) => {
         loading = null;
         throw new Error(
-          "dcmjs is unavailable: no window.dcmjs, and the vendored build at " +
+          "dcmjs is unavailable: no dcmjs on globalThis, and the vendored build at " +
             "render/vendor/dcmjs/dcmjs.es.js could not be imported. " +
             "Pass one with setDcmjs(), or see render/vendor/dcmjs/README.md.",
           { cause },

@@ -250,8 +250,10 @@ export async function readMrcomBundle(
   let nodes: Record<string, MrsonNode> = {};
   if (sceneBytes) {
     try {
-      const document = JSON.parse(utf8Decode(sceneBytes)) as { nodes?: Record<string, MrsonNode> };
-      nodes = document.nodes ?? (document as Record<string, MrsonNode>);
+      // not named `document`: this module must never touch the DOM global, and a local that
+      // shadows it makes that harder to see (logic/mrcom/no-dom.test.ts enforces the absence)
+      const sceneDoc = JSON.parse(utf8Decode(sceneBytes)) as { nodes?: Record<string, MrsonNode> };
+      nodes = sceneDoc.nodes ?? (sceneDoc as Record<string, MrsonNode>);
     } catch (cause) {
       problems.push(`the scene is not valid JSON: ${String((cause as Error).message)}`);
     }
