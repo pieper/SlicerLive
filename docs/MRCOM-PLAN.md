@@ -49,32 +49,45 @@ Do not re-litigate these without a reason; each cost some analysis.
 
 ### Done and green
 
-- **[`MRCOM-SCENE-BUNDLE.md`](MRCOM-SCENE-BUNDLE.md)** — the format spec. Private block element table,
-  manifest, the three modes, SC attributes, lineage rules, detection, resolution, `voxelDigest`
-  defined byte-for-byte, the `SlicerDataBundle` comparison, privacy.
-- **[`../mrson/`](../mrson/)** — the schema that `MRSON-LIVESCENE.md` cited at a repo that never
-  existed, plus `validate.ts` and a stdlib-only `validate.py` reading the same tables, and
-  conformance + TS/Python parity tests. 44 tests. No external dependency, so it stays liftable with
-  `git subtree split`. Read [`../mrson/README.md`](../mrson/README.md) — it records **eight
+Tasks 1-13 and 15 of §6. The hermetic tier passes; `logic/mrcom/` and `mrson/` are lint-clean.
+
+- **[`MRCOM-SCENE-BUNDLE.md`](MRCOM-SCENE-BUNDLE.md)** — the format spec. Private block element
+  table, manifest, the three modes, SC attributes, lineage rules, detection, resolution,
+  `voxelDigest` defined byte-for-byte, the `SlicerDataBundle` comparison, privacy.
+- **[`../mrson/`](../mrson/)** — the schema `MRSON-LIVESCENE.md` cited at a repo that never existed,
+  plus `validate.ts`, a stdlib-only `validate.py`, and conformance + TS/Python parity tests over
+  **real producer output**. [`../mrson/README.md`](../mrson/README.md) records **eight
   doc-versus-code divergences** the schema work adjudicated.
-- **`render/mrson.ts`** — `MrsonZarrRef`, `MrsonHashRef`, `MrsonDicomRef`, `MrsonBulk`; `MrsonNode`
-  gains `dicom?`, `blobs?`, `origin?`.
-- **`render/sessions/session-store.ts`** — `blobRefs()` now walks mesh `normals` and any `blobs` map
-  (it did not, so a mesh's normals were reachable in a scene and silently absent from every export),
-  plus a new `bulkSources()` giving the embed-versus-reference split.
-- **The dcmjs dependency** — see §4.
+- **`render/vendor/dcmjs/`** — the vendored ESM + UMD builds (§4), with both loaders repointed.
+- **`logic/bytes.ts`** — the blob-channel helpers, with the zlib-wrapper commitment tested.
+- **`logic/bulk.ts`** — `blobRefs()` and `bulkSources()`, moved out of
+  `render/sessions/session-store.ts` so `logic/mrcom/` stays DOM-free. `blobRefs()` now walks mesh
+  `normals` and any `blobs` map; it did not, so a mesh's normals were reachable in a scene and
+  silently absent from every export.
+- **`logic/mrcom/format.ts`** — a typed view of `mrson/schema/mrcom.schema.json`, so the TypeScript
+  writer, the pydicom reader and the spec cannot disagree about a tag.
+- **`logic/mrcom/vr.ts`** — the VR guard for the ctkDICOM-index trap (§5.4).
+- **`logic/mrcom/sc-pixels.ts`** — raw pixels in, Image Pixel module out, box-filter downscale,
+  placeholder for when capture fails.
+- **`logic/mrcom/write.ts`** — the writer. Embed / reference / hybrid, the closure split, coerced
+  composite context, STORED blob items, the size cap.
+- **`logic/mrcom/read.ts`** — the reader. `peekMrcomManifest()` from a prefix read, digest
+  verification that **refuses** rather than warns, typed-length slicing, and "stripped bundle"
+  reporting.
+- **`logic/mrcom/load.ts`** — a non-destructive merge: `put` ops only, collision renaming, and what
+  is still missing.
+- **`logic/mrcom/no-dom.test.ts`** — enforces the contract §5.1 depends on.
+- **`logic/readers/synthetic-dicom.ts`** — shared fixtures, tied to the validated geometry oracle.
 
 ### Next
 
-Task numbers are from the ordered list in §6.
-
-- **6** vendor dcmjs, repoint the loaders
-- **7** `logic/bytes.ts`
-- **8** `logic/mrcom/format.ts`, `logic/mrcom/vr.ts`
-- **9** `logic/mrcom/sc-pixels.ts`
-- **10** `logic/readers/synthetic-dicom.ts`
-- **11–14** writer, reader, scene load, resolution + the resolver registry
-- **16–20** screenshot capture, UI panel, browser round trip, real IDC round trip, external validation
+- **14** reference resolution: `logic/mrcom/{resolve,resolvers}.ts`, `logic/mrcom/sources/*`, and
+  extracting the IDC study→series lookup out of `render/demos/bir-browser.ts` into
+  `logic/idc/index-api.ts`. **This is the next task and the biggest remaining one in M1.**
+- **16-17** `render/capture.ts` (the only DOM/GPU part) and the UI panel
+- **18-20** browser round trip, the real IDC round trip, external validation with pydicom and
+  `dcmdump`, and an import into an unmodified Slicer
+- **21** CI and harness docs
 
 ---
 
