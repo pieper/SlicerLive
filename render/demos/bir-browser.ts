@@ -11,6 +11,7 @@
 //   deno run -A npm:esbuild@0.21.5 render/demos/bir-browser.ts --bundle --format=esm \
 //     --outfile=live/webgpu/bir.js
 //   cp render/vendor/idc_tools/idc-worker.js live/webgpu/idc-worker.js
+//   cp render/vendor/dcmjs/dcmjs.min.js live/webgpu/dcmjs.min.js
 //   cp render/demos/bir.html live/webgpu/bir.html
 // then add a gallery tile linking webgpu/bir.html.
 import { initDevice } from "../device.ts";

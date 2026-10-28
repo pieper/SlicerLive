@@ -8,6 +8,7 @@
 import type { ZarrDesc } from "../render/zarr.ts";
 import { getBlobFetch, setBlobFetch } from "../render/zarr.ts";
 import type { Volume } from "./readers/nifti.ts";
+import { deflateBytes, sha256Name } from "./bytes.ts";
 import type { LiveScene } from "../render/livescene.ts";
 import type { MrsonNode } from "../render/mrson.ts";
 import { histogramPercentiles } from "./window-level.ts";
@@ -16,14 +17,10 @@ export const CHUNK_MAX: [number, number, number] = [64, 128, 128];   // (cz, cy,
 
 export interface ZarrBlobs { desc: ZarrDesc; blobs: Map<string, Uint8Array> }
 
-async function deflate(raw: Uint8Array): Promise<Uint8Array> {
-  const cs = new CompressionStream("deflate");                                   // zlib-wrapped, like Python zlib.compress
-  return new Uint8Array(await new Response(new Blob([raw as BlobPart]).stream().pipeThrough(cs)).arrayBuffer());
-}
-export async function sha256(bytes: Uint8Array): Promise<string> {
-  const h = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
-  return "sha256-" + [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
+// Moved to logic/bytes.ts, so the MRCOM writer and this path cannot drift on what a chunk IS
+// ("zlib-wrapped deflate, named by the sha256 of the compressed bytes" is a format commitment).
+// `sha256` keeps its old name and its "sha256-"-prefixed return value for back-compat.
+export { deflateBytes as deflate, sha256Name as sha256 } from "./bytes.ts";
 
 /** Chunk + compress + hash a volume's voxels. `data` is C-order (z,y,x) with dims [nx,ny,nz]. */
 export async function volumeToZarr(data: Volume["data"], dims: [number, number, number], dtype: string): Promise<ZarrBlobs> {
@@ -46,8 +43,8 @@ export async function volumeToZarr(data: Volume["data"], dims: [number, number, 
       (sub as unknown as { set(a: ArrayLike<number>, o: number): void }).set((data as unknown as { subarray(a: number, b: number): ArrayLike<number> }).subarray(src, src + xw), dst);
     }
     const raw = new Uint8Array(sub.buffer, sub.byteOffset, sub.length * bpe);
-    const comp = await deflate(raw);
-    const h = await sha256(comp);
+    const comp = await deflateBytes(raw);
+    const h = await sha256Name(comp);
     if (!blobs.has(h)) { blobs.set(h, comp); bytes += comp.byteLength; }
     chunkHashes[`${kk}.${jj}.${ii}`] = h;
   }

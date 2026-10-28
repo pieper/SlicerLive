@@ -1,0 +1,656 @@
+{
+  "$id": "mrson/schema/mrson-core.schema.json",
+  "title": "mrson core \u2014 envelope and node record",
+  "mrson": 0,
+  "note": [
+    "A DECLARATIVE FIELD TABLE, not JSON Schema \u2014 interpreted by both mrson/validate.ts and",
+    "mrson/validate.py so the two cannot drift. See mrson/README.md for why.",
+    "",
+    "STRICTNESS RULE: mrson is an OPEN model (docs/MRSON-LIVESCENE.md section 1a: arbitrary fields,",
+    "new types). So an UNKNOWN field or an unknown `type` is allowed and reported only as info.",
+    "A KNOWN field with the wrong shape is an ERROR. Strict where it matters, open where it must be."
+  ],
+  "envelope": {
+    "required": [],
+    "fields": {
+      "mrson": {
+        "kind": "int",
+        "optional": true,
+        "doc": "format generation; 0 today. Absent is accepted for the bare-map legacy form."
+      },
+      "blobBase": {
+        "kind": "string",
+        "optional": true,
+        "doc": "resolved relative to the DOCUMENT, not the page"
+      },
+      "nodes": {
+        "kind": "map<string,node>",
+        "optional": true
+      }
+    },
+    "legacyBareMap": {
+      "doc": "A bare { <id>: Node } map with no envelope is accepted. Detected when `nodes` is absent and at least one value looks like a node.",
+      "severity": "warning"
+    }
+  },
+  "node": {
+    "required": [
+      "id",
+      "type"
+    ],
+    "reservedKeys": [
+      "id",
+      "type",
+      "name",
+      "frame",
+      "refs",
+      "source",
+      "origin",
+      "v",
+      "blobs",
+      "dicom",
+      "class",
+      "attrs",
+      "viewRefs"
+    ],
+    "fields": {
+      "id": {
+        "kind": "string",
+        "minLen": 1,
+        "doc": "must equal the map key it is stored under"
+      },
+      "type": {
+        "kind": "string",
+        "minLen": 1,
+        "doc": "NEUTRAL discriminator (image, mesh, ...), never a vtkMRML class name"
+      },
+      "name": {
+        "kind": "string",
+        "optional": true
+      },
+      "frame": {
+        "kind": "string",
+        "optional": true,
+        "doc": "frame of reference; world is RAS"
+      },
+      "refs": {
+        "kind": "map<string,string[]>",
+        "optional": true,
+        "doc": "graph edges. ALWAYS arrays of node-id strings keyed by a neutral role, even for a single target."
+      },
+      "source": {
+        "kind": "object",
+        "optional": true,
+        "doc": "provenance, e.g. { mrmlClass, from }. Runtime never reads it."
+      },
+      "origin": {
+        "kind": "object",
+        "optional": true,
+        "doc": "PROVENANCE metadata about how this node came to exist, e.g. logic/ingest.ts writes { local: true, dtype, ...meta }. NOT the Lamport origin: that string lives on an OP envelope and on a change record (render/liveops.ts OpBase.origin, LiveScene.feed), never on a node. The two share a name and nothing else -- see divergence 6 in mrson/README.md."
+      },
+      "blobs": {
+        "kind": "map<string,bulk>",
+        "optional": true,
+        "doc": "optional map { role: BulkRef }. A bare [] is an ERROR (nothing emits it any more)."
+      },
+      "dicom": {
+        "kind": "bulk-dicom",
+        "optional": true,
+        "doc": "see bulk.schema.json shapes.dicom"
+      },
+      "class": {
+        "kind": "string",
+        "optional": true,
+        "legacy": true,
+        "doc": "LEGACY: the published gallery scenes key on `class` instead of `type`. Accepted; the MRML class belongs in source.mrmlClass."
+      },
+      "attrs": {
+        "kind": "object",
+        "optional": true,
+        "legacy": true,
+        "doc": "LEGACY INPUT ALIAS ONLY. Type-specific fields are FLAT on the node for mrson 0 \u2014 op paths are flat JSON Pointers and render/commits.ts canonicalize hashes the flat record, so renesting would change every commit hash and every recorded op path. hoistLegacyAttrs() lifts these onto the node with a warning; nothing emits them."
+      },
+      "viewRefs": {
+        "kind": "string[]",
+        "optional": true,
+        "doc": "on a display node: the views it applies to; empty means all."
+      }
+    },
+    "reservedNote": "`v` and a string `origin` belong to the OP/change envelope (render/liveops.ts), not to a node record. They stay in reservedKeys so no type claims them as a field name."
+  },
+  "invariants": [
+    {
+      "id": "matrix16",
+      "rule": "ijkToRAS, toParent, toWorld, sliceToRAS, xyToRAS are flat ROW-MAJOR 4x4 = 16 numbers"
+    },
+    {
+      "id": "rasWorld",
+      "rule": "internal world space is RAS; markup positions and mesh points are RAS world"
+    },
+    {
+      "id": "dimsOrder",
+      "rule": "node.dims is [nx, ny, nz] while zarr.shape is C order [nz, ny, nx] \u2014 both present, deliberately. A validator checks they are consistent when both exist."
+    },
+    {
+      "id": "idMatches",
+      "rule": "node.id equals the key it is stored under"
+    },
+    {
+      "id": "refsArrays",
+      "rule": "every refs value is an array of strings, even for one target"
+    }
+  ],
+  "types": {
+    "_doc": "Known fields per neutral type, extracted from LiveStoryLib/serialize_mrson.py (the shipped producer). Unknown fields are permitted; known fields are shape-checked.",
+    "image": {
+      "fields": {
+        "dims": {
+          "kind": "int[]",
+          "len": 3
+        },
+        "comps": {
+          "kind": "int"
+        },
+        "ijkToRAS": {
+          "kind": "number[]",
+          "len": 16
+        },
+        "zarr": {
+          "kind": "bulk-zarr"
+        },
+        "labelmap": {
+          "kind": "bool"
+        }
+      }
+    },
+    "mesh": {
+      "fields": {
+        "points": {
+          "kind": "bulk-hash"
+        },
+        "triangles": {
+          "kind": "bulk-hash"
+        },
+        "normals": {
+          "kind": "bulk-hash"
+        },
+        "pointCount": {
+          "kind": "int"
+        },
+        "triangleCount": {
+          "kind": "int"
+        },
+        "bounds": {
+          "kind": "number[]",
+          "len": 6
+        }
+      }
+    },
+    "segmentation": {
+      "fields": {
+        "segments": {
+          "kind": "object[]",
+          "itemRequired": [
+            "labelValue",
+            "name"
+          ],
+          "doc": "A segment's identity is `labelValue` -- it is what indexes the labelmap. `id` (the Slicer segment ID) is carried forward when available: serialize_mrson.py emits it, logic/segmentation-editor.ts::createSegmentation does not. See divergence 7 in mrson/README.md."
+        },
+        "dims": {
+          "kind": "int[]",
+          "len": 3
+        },
+        "ijkToRAS": {
+          "kind": "number[]",
+          "len": 16
+        },
+        "zarr": {
+          "kind": "bulk-zarr"
+        },
+        "visible": {
+          "kind": "bool"
+        },
+        "opacity": {
+          "kind": "number"
+        },
+        "fill2D": {
+          "kind": "object"
+        },
+        "outline2D": {
+          "kind": "object"
+        }
+      }
+    },
+    "transform": {
+      "fields": {
+        "transformType": {
+          "kind": "enum",
+          "values": [
+            "linear",
+            "nonlinear"
+          ]
+        },
+        "toParent": {
+          "kind": "number[]",
+          "len": 16
+        },
+        "toWorld": {
+          "kind": "number[]",
+          "len": 16,
+          "nullable": true
+        }
+      }
+    },
+    "transferFunction": {
+      "fields": {
+        "colorStops": {
+          "kind": "object[]",
+          "itemRequired": [
+            "value",
+            "rgba"
+          ]
+        },
+        "scalarOpacity": {
+          "kind": "object[]",
+          "itemRequired": [
+            "value",
+            "opacity"
+          ]
+        },
+        "gradientOpacity": {
+          "kind": "object[]",
+          "itemRequired": [
+            "value",
+            "opacity"
+          ]
+        },
+        "shade": {
+          "kind": "bool"
+        }
+      }
+    },
+    "scalarVolumeDisplay": {
+      "fields": {
+        "window": {
+          "kind": "number"
+        },
+        "level": {
+          "kind": "number"
+        },
+        "color": {
+          "kind": "number[]",
+          "len": 4
+        },
+        "interpolate": {
+          "kind": "bool"
+        },
+        "autoWindowLevel": {
+          "kind": "bool"
+        },
+        "applyThreshold": {
+          "kind": "bool"
+        },
+        "threshold": {
+          "kind": "number[]",
+          "len": 2
+        },
+        "visible": {
+          "kind": "bool"
+        }
+      }
+    },
+    "labelMapDisplay": {
+      "fields": {
+        "interpolate": {
+          "kind": "bool"
+        },
+        "visible": {
+          "kind": "bool"
+        }
+      }
+    },
+    "volumeRenderingDisplay": {
+      "fields": {
+        "cropEnabled": {
+          "kind": "bool"
+        },
+        "visible": {
+          "kind": "bool"
+        }
+      }
+    },
+    "modelDisplay": {
+      "fields": {
+        "color": {
+          "kind": "number[]",
+          "len": 4
+        },
+        "opacity": {
+          "kind": "number"
+        },
+        "edgeVisibility": {
+          "kind": "bool"
+        },
+        "representation": {
+          "kind": "int"
+        },
+        "visible": {
+          "kind": "bool"
+        }
+      }
+    },
+    "markupDisplay": {
+      "fields": {
+        "color": {
+          "kind": "number[]",
+          "len": 4
+        },
+        "selectedColor": {
+          "kind": "number[]",
+          "len": 4
+        },
+        "glyphScale": {
+          "kind": "number"
+        },
+        "textScale": {
+          "kind": "number"
+        },
+        "visible": {
+          "kind": "bool"
+        }
+      }
+    },
+    "markup": {
+      "fields": {
+        "markupType": {
+          "kind": "enum",
+          "values": [
+            "fiducial",
+            "line",
+            "angle",
+            "curve",
+            "closedCurve",
+            "plane",
+            "roi"
+          ]
+        },
+        "controlPoints": {
+          "kind": "object[]",
+          "itemRequired": [
+            "position"
+          ]
+        },
+        "locked": {
+          "kind": "bool"
+        },
+        "color": {
+          "kind": "number[]",
+          "len": 4
+        },
+        "visible": {
+          "kind": "bool"
+        },
+        "glyphScale": {
+          "kind": "number"
+        },
+        "textScale": {
+          "kind": "number"
+        },
+        "linePoints": {
+          "kind": "number[][]",
+          "innerLen": 3
+        },
+        "closed": {
+          "kind": "bool"
+        },
+        "corners": {
+          "kind": "number[][]",
+          "innerLen": 3
+        },
+        "center": {
+          "kind": "number[]",
+          "len": 3
+        },
+        "size": {
+          "kind": "number[]",
+          "len": 3
+        }
+      }
+    },
+    "camera": {
+      "fields": {
+        "position": {
+          "kind": "number[]",
+          "len": 3
+        },
+        "focalPoint": {
+          "kind": "number[]",
+          "len": 3
+        },
+        "viewUp": {
+          "kind": "number[]",
+          "len": 3
+        },
+        "viewAngle": {
+          "kind": "number"
+        },
+        "parallelScale": {
+          "kind": "number"
+        }
+      }
+    },
+    "view": {
+      "fields": {
+        "kind": {
+          "kind": "enum",
+          "values": [
+            "slice",
+            "3d"
+          ]
+        },
+        "layoutName": {
+          "kind": "string"
+        },
+        "orientation": {
+          "kind": "string"
+        },
+        "sliceToRAS": {
+          "kind": "number[]",
+          "len": 16
+        },
+        "xyToRAS": {
+          "kind": "number[]",
+          "len": 16
+        },
+        "dimensions": {
+          "kind": "int[]"
+        },
+        "offset": {
+          "kind": "number"
+        },
+        "fieldOfView": {
+          "kind": "number[]"
+        },
+        "sliceVisible": {
+          "kind": "bool"
+        },
+        "widgetVisible": {
+          "kind": "bool"
+        },
+        "useLabelOutline": {
+          "kind": "bool"
+        },
+        "boxVisible": {
+          "kind": "bool"
+        },
+        "axisLabelsVisible": {
+          "kind": "bool"
+        },
+        "backgroundColor": {
+          "kind": "number[]",
+          "len": 3
+        },
+        "backgroundColor2": {
+          "kind": "number[]",
+          "len": 3
+        },
+        "fiducialsVisible": {
+          "kind": "bool"
+        },
+        "fiducialLabelsVisible": {
+          "kind": "bool"
+        },
+        "orientationMarkerType": {
+          "kind": "int"
+        },
+        "orientationMarkerSize": {
+          "kind": "int"
+        },
+        "rulerType": {
+          "kind": "int"
+        },
+        "rulerColor": {
+          "kind": "int"
+        }
+      }
+    },
+    "layout": {
+      "fields": {
+        "arrangement": {
+          "kind": "int"
+        },
+        "arrangementName": {
+          "kind": "string"
+        }
+      }
+    },
+    "crosshair": {
+      "fields": {
+        "mode": {
+          "kind": "int",
+          "doc": "The raw MRML crosshair mode as an int -- NOT neutralized, unlike interaction.mode."
+        },
+        "behavior": {
+          "kind": "int"
+        },
+        "thickness": {
+          "kind": "int"
+        },
+        "crosshairRAS": {
+          "kind": "number[]",
+          "len": 3
+        },
+        "cursorRAS": {
+          "kind": "number[]",
+          "len": 3
+        }
+      }
+    },
+    "interaction": {
+      "fields": {
+        "mode": {
+          "kind": "enum",
+          "values": [
+            "place",
+            "viewTransform",
+            "select",
+            "user",
+            "adjustWindowLevel"
+          ],
+          "doc": "A NEUTRAL STRING, not the MRML integer: serialize_mrson.py maps vtkMRMLInteractionNode's mode through _INTERACTION_MODES. Contrast crosshair.mode, which stays an int because it has no neutral vocabulary yet. See divergence 8 in mrson/README.md."
+        },
+        "placeModePersistence": {
+          "kind": "bool"
+        }
+      }
+    },
+    "selection": {
+      "fields": {
+        "activeVolumeID": {
+          "kind": "string",
+          "nullable": true
+        },
+        "secondaryVolumeID": {
+          "kind": "string",
+          "nullable": true
+        },
+        "activeLabelVolumeID": {
+          "kind": "string",
+          "nullable": true
+        },
+        "activePlaceNodeID": {
+          "kind": "string",
+          "nullable": true
+        },
+        "activePlaceNodeClassName": {
+          "kind": "string",
+          "nullable": true
+        }
+      }
+    },
+    "sliceComposite": {
+      "fields": {
+        "layoutName": {
+          "kind": "string"
+        },
+        "foregroundOpacity": {
+          "kind": "number"
+        },
+        "labelOpacity": {
+          "kind": "number"
+        },
+        "compositing": {
+          "kind": "int"
+        },
+        "linkedControl": {
+          "kind": "bool"
+        },
+        "hotLinkedControl": {
+          "kind": "bool"
+        }
+      }
+    },
+    "colorTable": {
+      "fields": {
+        "entries": {
+          "kind": "number[][]",
+          "innerLen": 4
+        },
+        "continuous": {
+          "kind": "bool"
+        },
+        "range": {
+          "kind": "number[]",
+          "len": 2
+        }
+      }
+    },
+    "segmentEditor": {
+      "fields": {
+        "activeEffect": {
+          "kind": "string",
+          "nullable": true
+        },
+        "selectedSegmentID": {
+          "kind": "string",
+          "nullable": true
+        },
+        "params": {
+          "kind": "object"
+        }
+      }
+    },
+    "stream": {
+      "fields": {},
+      "doc": "reserved by MRSON-LIVESCENE section 1a; no producer yet"
+    },
+    "text": {
+      "fields": {},
+      "doc": "reserved"
+    },
+    "status": {
+      "fields": {},
+      "doc": "reserved"
+    }
+  }
+}

@@ -1,0 +1,281 @@
+{
+  "$id": "mrson/schema/bulk.schema.json",
+  "title": "mrson bulk descriptors",
+  "mrson": 0,
+  "note": [
+    "mrson never inlines bulk. A bulk-bearing field holds one of the descriptor shapes below.",
+    "This file is a DECLARATIVE FIELD TABLE, not JSON Schema: it is interpreted by both",
+    "mrson/validate.ts and mrson/validate.py so the two cannot drift. See mrson/README.md."
+  ],
+  "shapes": {
+    "hash": {
+      "kind": "string",
+      "pattern": "^sha256-[0-9a-f]{64}$",
+      "doc": "A content-addressed blob, fetched at blobBase + <this string>. Used by mesh points/triangles/normals.",
+      "producers": [
+        "LiveStoryLib/serialize_mrson.py::_mesh_blob"
+      ]
+    },
+    "hashRef": {
+      "kind": "object",
+      "doc": [
+        "The LEGACY BulkRef(hash) form, named normatively by docs/MRSON-LIVESCENE.md section 2:",
+        "{ hash, dtype, count, comps, size }. Still on disk in the published gallery scenes under",
+        "live/legacy/scenes/, so it is a SUPPORTED READ form. Nothing emits it any more:",
+        "serialize_mrson.py::_mesh_blob writes the bare 'sha256-<hex>' string instead."
+      ],
+      "required": [
+        "hash"
+      ],
+      "fields": {
+        "hash": {
+          "kind": "string",
+          "pattern": "^[0-9a-f]{32}$",
+          "doc": "32 lowercase hex, NOT sha256-prefixed and NOT a sha256 digest. Fetched at blobBase + <hash>, verbatim."
+        },
+        "dtype": {
+          "kind": "enum",
+          "optional": true,
+          "values": [
+            "float32",
+            "float64",
+            "uint8",
+            "int8",
+            "uint16",
+            "int16",
+            "uint32",
+            "int32"
+          ],
+          "doc": "LEGACY dtype vocabulary \u2014 plain names, NOT the NumPy-style strings zarr uses ('<f4', '|u1'). See divergence 4 in mrson/README.md."
+        },
+        "count": {
+          "kind": "int",
+          "optional": true,
+          "doc": "number of tuples"
+        },
+        "comps": {
+          "kind": "int",
+          "optional": true,
+          "doc": "components per tuple (3 for points/normals, 1 for scalars)"
+        },
+        "size": {
+          "kind": "int",
+          "optional": true,
+          "doc": "advisory stored byte count"
+        }
+      },
+      "legacy": true
+    },
+    "zarr": {
+      "kind": "object",
+      "doc": "A chunked array. Chunks are zlib-deflated, content-addressed, and stored flat under blobBase.",
+      "required": [
+        "shape",
+        "chunks",
+        "chunkGrid",
+        "dtype"
+      ],
+      "fields": {
+        "shape": {
+          "kind": "int[]",
+          "len": 3,
+          "doc": "C order (nz, ny, nx)"
+        },
+        "chunks": {
+          "kind": "int[]",
+          "len": 3,
+          "doc": "C order (cz, cy, cx); edge chunks are zero-padded"
+        },
+        "chunkGrid": {
+          "kind": "int[]",
+          "len": 3,
+          "doc": "number of chunks along (z, y, x)"
+        },
+        "dtype": {
+          "kind": "string",
+          "pattern": "^[<>|][a-z][0-9]+$",
+          "doc": "NumPy-style, e.g. <i2, <f4, |u1"
+        },
+        "bytes": {
+          "kind": "int-or-numeric-string",
+          "optional": true,
+          "doc": "Advisory total compressed size.",
+          "divergence": "serialize_mrson.py::_zarr_desc stringifies this ('mrson int64-safe rule'); logic/ingest.ts and serialize.py emit a number; render/zarr.ts types it as number. Both forms are accepted and normalized to a number on read; the string form warns. It is advisory, so nothing load-bearing depends on it."
+        },
+        "chunkHashes": {
+          "kind": "map<string,hash>",
+          "optional": true,
+          "keyPattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "doc": "'k.j.i' -> blob hash. Absent only in the legacy positional layout below."
+        },
+        "dir": {
+          "kind": "string",
+          "optional": true,
+          "legacy": true,
+          "doc": "Legacy positional layout: chunks at blobBase + dir + '/' + dataset + '/k.j.i'."
+        },
+        "dataset": {
+          "kind": "string",
+          "optional": true,
+          "legacy": true
+        }
+      },
+      "constraints": [
+        "chunkHashes OR (dir AND dataset) must be present \u2014 a reader needs some way to locate chunks.",
+        "chunkGrid[d] == ceil(shape[d] / chunks[d]) for d in 0..2."
+      ]
+    },
+    "dicom": {
+      "kind": "object",
+      "since": "mrson 0, MRCOM 1",
+      "doc": [
+        "Bulk BY REFERENCE: 'this object's bulk is these DICOM instances.' Defined by",
+        "docs/MRCOM-SCENE-BUNDLE.md sections 4 and 6. Instances are named by SOPInstanceUID,",
+        "which is authoritative and archive-independent; `retrieve` entries are ordered HINTS.",
+        "A reader reconstructs, VERIFIES against `recon`, re-chunks, and replaces this descriptor",
+        "with an honest `zarr` descriptor for the bytes it actually has \u2014 it never trusts a chunk",
+        "hash it cannot recompute."
+      ],
+      "required": [
+        "kind",
+        "instances"
+      ],
+      "fields": {
+        "kind": {
+          "kind": "enum",
+          "values": [
+            "dicom-series",
+            "dicom-seg",
+            "dicom-surface"
+          ]
+        },
+        "studyInstanceUID": {
+          "kind": "string",
+          "optional": true,
+          "pattern": "^[0-9.]{1,64}$"
+        },
+        "seriesInstanceUID": {
+          "kind": "string",
+          "optional": true,
+          "pattern": "^[0-9.]{1,64}$"
+        },
+        "sopClassUID": {
+          "kind": "string",
+          "optional": true,
+          "pattern": "^[0-9.]{1,64}$"
+        },
+        "frameOfReferenceUID": {
+          "kind": "string",
+          "optional": true,
+          "pattern": "^[0-9.]{1,64}$"
+        },
+        "instances": {
+          "kind": "string[]",
+          "minLen": 1,
+          "doc": "Ordered SOPInstanceUIDs. The ORDER IS NORMATIVE: it is the author's geometric order, so slice order is never re-guessed."
+        },
+        "onGridOf": {
+          "kind": "string",
+          "optional": true,
+          "doc": "node id whose grid this resamples onto (dicom-seg)"
+        },
+        "segments": {
+          "kind": "object[]",
+          "optional": true
+        },
+        "recon": {
+          "kind": "object",
+          "optional": true,
+          "fields": {
+            "reader": {
+              "kind": "string",
+              "doc": "which reconstruction algorithm produced the fields below, e.g. mrcom/dicom-series/1"
+            },
+            "dims": {
+              "kind": "int[]",
+              "len": 3,
+              "optional": true
+            },
+            "ijkToRAS": {
+              "kind": "number[]",
+              "len": 16,
+              "optional": true
+            },
+            "dtype": {
+              "kind": "string",
+              "optional": true
+            },
+            "rescale": {
+              "kind": "enum",
+              "values": [
+                "applied",
+                "none"
+              ],
+              "optional": true
+            },
+            "chunks": {
+              "kind": "int[]",
+              "len": 3,
+              "optional": true
+            },
+            "voxelDigest": {
+              "kind": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "optional": true,
+              "doc": "SHA-256 of the reconstructed voxels: C order (z,y,x), post-rescale, native dtype, little-endian, unpadded. Pinned byte-for-byte in docs/MRCOM-SCENE-BUNDLE.md section 6.3."
+            }
+          }
+        },
+        "retrieve": {
+          "kind": "object[]",
+          "optional": true,
+          "doc": "Ordered location hints, fast path first, durable path second. Each has a `scheme`; a reader dispatches to the resolver registered for it and falls through on failure. Credentials are NEVER stored here.",
+          "itemRequired": [
+            "scheme"
+          ]
+        }
+      }
+    }
+  },
+  "bulkFields": {
+    "doc": [
+      "Where bulk descriptors legitimately appear. Anything added here must also be walked by",
+      "blobRefs() in render/sessions/session-store.ts, or the closure silently loses blobs."
+    ],
+    "image": {
+      "zarr": "zarr",
+      "dicom": "dicom"
+    },
+    "segmentation": {
+      "zarr": "zarr",
+      "dicom": "dicom"
+    },
+    "mesh": {
+      "points": "hash",
+      "triangles": "hash",
+      "normals": "hash",
+      "dicom": "dicom"
+    },
+    "any": {
+      "blobs": "map<string, hash|hashRef|zarr>"
+    },
+    "legacyBlobRoles": {
+      "doc": "Role names seen in the published legacy scenes' `blobs` maps. Note `polys`, where the current serializer emits a flat `triangles` field \u2014 divergence 5 in mrson/README.md.",
+      "roles": [
+        "points",
+        "polys",
+        "normals",
+        "labelmap"
+      ]
+    }
+  },
+  "dispatch": {
+    "doc": "How a reader tells the four bulk shapes apart. Checked in this order.",
+    "rules": [
+      "a string                        -> shapes.hash     (must match ^sha256-[0-9a-f]{64}$)",
+      "an object with `kind: dicom-*`  -> shapes.dicom",
+      "an object with `hash`           -> shapes.hashRef  (legacy)",
+      "an object otherwise            -> shapes.zarr"
+    ]
+  }
+}

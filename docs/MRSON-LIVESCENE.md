@@ -173,7 +173,13 @@ lost and plain DICOM systems still work — **graceful degradation**:
 **Where MRCOM sits.** It is one **transport binding** of the format (§5), the DICOM-infrastructure
 binding — peer to HTTP-bucket, WS-hot-channel, SHM, and p2p. Directionally: **mrson/LiveScene for
 research + interaction + realtime; MRCOM for import, clinical hand-off, and archival.** DICOM (via
-MRCOM) is how content *enters and is stored*; it never dictates how content *runs* (§1a). MRCOM is P6.
+MRCOM) is how content *enters and is stored*; it never dictates how content *runs* (§1a).
+
+> **Status (2026-10-27): MRCOM P6 is in progress.** Its first concrete binding — an mrson scene
+> carried in a DICOM Secondary Capture, with bulk either embedded or referenced back to the
+> source instances — is specified in [`MRCOM-SCENE-BUNDLE.md`](MRCOM-SCENE-BUNDLE.md). That doc
+> defines the `dicom` bulk descriptor this section promised, and supersedes 3D Slicer's
+> `SlicerDataBundle`.
 
 ## 2. The mrson document (materialized state)
 
@@ -183,8 +189,18 @@ A JSON-Schema'd formalization of the current format, reconciling its three known
 (`blobBase` resolves relative to the document, not the page). A bare `{<id>:Node}` map stays accepted
 for back-compat.
 
-**Node record.** `{ id, type, name?, frame?, refs?, attrs, blobs?, dicom?, source? }` (the §1a neutral
-envelope).
+**Node record.** `{ id, type, name?, frame?, refs?, blobs?, dicom?, source?, …type fields }` (the §1a
+neutral envelope).
+
+> **Correction (2026-10-27): type-specific fields are FLAT on the node, not nested under `attrs`.**
+> This paragraph described a nesting that was never built, and the code is right while the doc was
+> wrong. Flat is **normative for `mrson: 0`**, because the delta layer depends on it: op `path`s are
+> flat JSON Pointers (`#/window`, `#/refs/label` — §3, `render/liveops.ts`, `SessionStore.pushUndo`),
+> and `render/commits.ts canonicalize` hashes the flat record. Renesting would change every commit
+> hash and every recorded op path in every session log. `attrs` is accepted as a **legacy input
+> alias** and hoisted on read with a warning; it is never emitted. A future `mrson: 1` could renest,
+> but only with an op-path and commit-hash migration priced in.
+> See [`MRCOM-SCENE-BUNDLE.md`](MRCOM-SCENE-BUNDLE.md) and the schema in `mrson/`.
 - `type` — the **neutral** discriminator (`image`, `transform`, `mesh`, … — §1a), not a `vtkMRML…`
   class. The original MRML class (when the object came from Slicer) is carried in `source`, not used at
   runtime. *(Transitional: the shipped scenes still key on `class`; the P1 schema accepts both and the
@@ -193,9 +209,15 @@ envelope).
   (`"display":[…]`, `"volumeProperty":[…]`, `"transform":[…]`, `"referenceImageGeometryRef":[…]`), even
   for a single target. Reconstructed generically from MRML's own reference roles → faithful even where
   per-class `attrs` are shallow.
-- `attrs` — class-specific state, schema'd per class (§4).
-- `blobs` — **always a map** `{ role: BulkRef }` (fix: the current serializer emits `[]` for empty; the
-  schema mandates `{}`).
+- type-specific state — **flat on the node**, schema'd per `type` (§4). `attrs` is a legacy alias,
+  hoisted by the validator, never emitted.
+- `blobs` — **optional**; when present a map `{ role: BulkRef }`. A bare `[]` is an error (nothing
+  emits it any more). Absence means bulk lives in the type-specific fields (`zarr`, `points`,
+  `triangles`, `normals`) or in `dicom`.
+- `dicom` — the bulk-by-reference descriptor: *"this object's bulk is these DICOM instances."* Named
+  by SOPInstanceUID with recorded geometry (`dims`, `ijkToRAS`, `voxelDigest`) and ordered retrieve
+  hints, so a reader reconstructs, **verifies**, and re-chunks rather than trusting a hash it cannot
+  recompute. Specified in [`MRCOM-SCENE-BUNDLE.md`](MRCOM-SCENE-BUNDLE.md) §4 and §6.
 
 **Invariants (schema-enforced, from the coordinate-discipline + code):**
 - Matrices are **flat row-major 4×4 (16 floats)**; internal space is **RAS**; markup positions are RAS

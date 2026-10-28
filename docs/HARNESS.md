@@ -61,6 +61,34 @@ Slicer session (`harness/fixtures/`) against the TS ports. These are the CI-able
 | Real drag through Slicer's `vtkMRMLCameraWidget`, reproduced in TS **and** via the DOM | `verify-drag-parity.ts` | browser |
 | Slice stepping through the real DOM wiring | `verify-slice-step.ts` | browser |
 
+## Two conformance suites, on different axes
+
+Both are T1 and both are named "conformance"; they check unrelated things and neither subsumes the
+other.
+
+| | `render/test/conformance.ts` | `mrson/conformance.test.ts` |
+|---|---|---|
+| axis | the **protocol/model** contract: `applyOp`, `LiveScene.write`, echo suppression, coalescing | the **format** contract: does real output satisfy `mrson/schema/`? |
+| shape | one runtime-agnostic `runConformance()` run in Deno **and** in the browser, with `conformance-run.ts` diffing the two result sets — they must be identical | validates the live output of `logic/ingest.ts` and `logic/segmentation-editor.ts`, the committed `mrson/fixtures/`, and the published gallery scenes |
+| companion | `commits-conformance.test.ts` pins the TS and Python canonical **hashers** to each other | `validate-parity.test.ts` pins the TS and Python **validators** to each other, issue for issue |
+
+The format suite deliberately validates **real producer output rather than fixtures written to match
+the schema** — a fixture that agrees with the schema proves nothing about the code. Every divergence
+listed in `mrson/README.md` was found that way, including a live bug: `blobRefs()` was not walking
+mesh `normals` or any `blobs` map, so a mesh's normals were reachable in the scene and silently
+absent from every export.
+
+Two inputs are conditional, and both skip rather than fail:
+
+- **the published gallery** (`../live/{scenes,legacy/scenes}`) is a *sibling checkout*, not part of
+  this repo. Set `SLICERLIVE_GALLERY` or clone `pieper/live` beside it.
+- **`serialize_mrson.py` output** needs a running Slicer, so it is captured once and committed to
+  `mrson/fixtures/` instead of being run in CI. `mrson/fixtures/README.md` has the capture recipe —
+  and the warning to check a fixture for patient data before committing it.
+
+`mrson/` has **no external dependency** (its own `assert.ts`, not `jsr:@std/assert`) so it stays
+liftable to its own repo with `git subtree split`.
+
 ## Non-obvious rationale (read before "fixing" any of this)
 
 These are all things that cost real debugging time; the values are measured from Slicer, not chosen.

@@ -4,11 +4,16 @@
     // (importScripts their copy first) — respect it instead of hitting the CDN.
     if (typeof dcmjs !== "undefined")
         return;
+    // The vendored build first, copied next to this worker at build time exactly as
+    // dicom-volume.js is. It carries the write-path support MRCOM needs that no published
+    // version has (render/vendor/dcmjs/README.md), and keeps the worker on the SAME dcmjs as
+    // the main thread — a CDN pin plus a mirror list is two places to skew.
     const mirrors = [
-        'https://cdn.jsdelivr.net/npm/dcmjs@0.41.0/build/dcmjs.min.js',
-        'https://unpkg.com/dcmjs@0.41.0/build/dcmjs.min.js',
-        'https://cdn.jsdelivr.net/npm/dcmjs@0.41.0/build/dcmjs.js',
-        'https://unpkg.com/dcmjs@0.41.0/build/dcmjs.js',
+        './dcmjs.min.js',
+        'https://cdn.jsdelivr.net/npm/dcmjs@0.49.2/build/dcmjs.min.js',
+        'https://unpkg.com/dcmjs@0.49.2/build/dcmjs.min.js',
+        'https://cdn.jsdelivr.net/npm/dcmjs@0.49.2/build/dcmjs.js',
+        'https://unpkg.com/dcmjs@0.49.2/build/dcmjs.js',
     ];
     for (let i = 0; i < 12; i++) {
         try {

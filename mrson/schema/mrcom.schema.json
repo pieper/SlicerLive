@@ -1,0 +1,145 @@
+{
+  "$id": "mrson/schema/mrcom.schema.json",
+  "title": "MRCOM scene bundle — private block and manifest",
+  "mrcom": 1,
+  "spec": "docs/MRCOM-SCENE-BUNDLE.md",
+  "note": [
+    "A DECLARATIVE TABLE, not JSON Schema. This file is the SINGLE SOURCE for the private-block",
+    "element list: logic/mrcom/format.ts and tools/mrcom_check.py are both checked against it by",
+    "tests, so the TypeScript writer and the pydicom reader cannot disagree about a tag."
+  ],
+
+  "privateBlock": {
+    "group": "4D43",
+    "groupRationale": "Odd (required for private data) and reads as 'MC' in a hex dump. 0x4D52 ('MR') is even and therefore not a legal private group. Checked unclaimed against dcmjs dictionary.private.data.js (51 groups, no 4Dxx), DCMTK private.dic (2836 entries, no 4Dxx), and GDCM privatedicts.xml (144 owners; the only 4Dxx is 4d4d, GDCM's own conformance-test group).",
+    "creator": "MRCOM.MRSON.1",
+    "creatorRules": [
+      "The creator string is the ONLY identity and carries no data. It will not change; the block LAYOUT is versioned in element 1003.",
+      "A reader locates the block by scanning (4D43,0010)-(4D43,00FF) for this creator and MUST NOT assume block offset 0x10.",
+      "A writer allocates the lowest free slot.",
+      "Every sequence ITEM carries its own creator element: private block reservation is per-dataset."
+    ],
+    "preferredBlock": "10",
+    "sortsBeforePixelData": true,
+    "sortRationale": "0x4D43 < 0x7FE0, so the whole block precedes (7FE0,0010) in a tag-ordered dataset and the manifest is reachable from a prefix read or an HTTP range request. This is the structural opposite of SlicerDataBundle, which relies on 0xCADB > 0x7FE0 to put its payload last so it can be found by seeking back from EOF.",
+
+    "elements": [
+      { "el": "0010", "vr": "LO", "vm": "1", "name": "PrivateCreator",        "req": true,  "doc": "MRCOM.MRSON.1 — the only detection key" },
+      { "el": "1001", "vr": "CS", "vm": "1", "name": "MRCOMBundleMode",       "req": true,  "values": ["EMBED", "REFERENCE", "HYBRID"] },
+      { "el": "1002", "vr": "UI", "vm": "1", "name": "MRCOMBundleUID",        "req": true,  "doc": "fresh UID, stable across copies; lets a reader dedupe. Reserved as the splitting point for a future multi-instance bundle; this version does not split." },
+      { "el": "1003", "vr": "SH", "vm": "1", "name": "MRCOMFormatVersion",    "req": true,  "value": "1" },
+      { "el": "1004", "vr": "UT", "vm": "1", "name": "MRCOMManifest",         "req": true,  "doc": "the manifest below, UTF-8 JSON, non-ASCII \\u-escaped. UT has no length limit." },
+      { "el": "1005", "vr": "LO", "vm": "1", "name": "MRCOMManifestDigest",   "req": true,  "pattern": "^[0-9a-f]{64}$", "doc": "BARE hex — see digestEncoding" },
+      { "el": "1006", "vr": "CS", "vm": "1", "name": "MRCOMDigestAlgorithm",  "req": true,  "values": ["SHA256"] },
+      { "el": "1010", "vr": "OB", "vm": "1", "name": "MRCOMScene",            "req": false, "doc": "scene.mrson.json bytes, encoded per 1011. Absent only in a bundle whose scene was stripped." },
+      { "el": "1011", "vr": "CS", "vm": "1", "name": "MRCOMSceneEncoding",    "req": false, "values": ["NONE", "DEFLATE"], "doc": "DEFLATE is zlib-wrapped, the same flavour every blob uses" },
+      { "el": "1012", "vr": "UL", "vm": "1", "name": "MRCOMSceneLength",      "req": false, "doc": "exact ENCODED byte count of 1010 — see explicitLengths" },
+      { "el": "1013", "vr": "LO", "vm": "1", "name": "MRCOMSceneDigest",      "req": false, "pattern": "^[0-9a-f]{64}$", "doc": "digest of the DECODED JSON bytes" },
+      { "el": "1014", "vr": "UL", "vm": "1", "name": "MRCOMSceneNodeCount",   "req": false },
+      { "el": "1015", "vr": "LO", "vm": "1", "name": "MRCOMProducer",         "req": false },
+      { "el": "1016", "vr": "LO", "vm": "1", "name": "MRCOMProducerVersion",  "req": false },
+      { "el": "1020", "vr": "SQ", "vm": "1", "name": "MRCOMBlobSequence",     "req": false, "item": "blobItem", "doc": "0..N embedded content-addressed blobs. The natural mrson chunking IS the fragmentation strategy — items are typically <= 1-2 MB, so there is no archive and no huge element." },
+      { "el": "1030", "vr": "UL", "vm": "1", "name": "MRCOMBlobCount",        "req": false },
+      { "el": "1031", "vr": "UL", "vm": "1", "name": "MRCOMBlobTotalLength",  "req": false }
+    ],
+
+    "blobItem": [
+      { "el": "0010", "vr": "LO", "vm": "1", "name": "PrivateCreator",   "req": true },
+      { "el": "1021", "vr": "LO", "vm": "1", "name": "MRCOMBlobHash",    "req": true, "pattern": "^[0-9a-f]{64}$", "doc": "bare hex; the mrson blob name is 'sha256-' + this" },
+      { "el": "1022", "vr": "UL", "vm": "1", "name": "MRCOMBlobLength",  "req": true, "doc": "exact stored byte count of 1024" },
+      { "el": "1023", "vr": "CS", "vm": "1", "name": "MRCOMBlobEncoding","req": true, "values": ["STORED", "DEFLATE"],
+        "doc": "STORED means these bytes are BYTE-IDENTICAL to what a blob store would serve, so no recompression happens on either side. DEFLATE is for blobs not already compressed." },
+      { "el": "1024", "vr": "OB", "vm": "1", "name": "MRCOMBlobData",    "req": true }
+    ],
+
+    "digestEncoding": {
+      "rule": "Every digest element is BARE lowercase hex, with the algorithm named once in 1006.",
+      "why": "LO is 64 characters and writers truncate silently. 'sha256-' + 64 hex = 71 characters, which would be clipped to something that still looks like a digest. The 'sha256-' prefix mrson uses in blob names is RECONSTRUCTED by the reader, never stored in an LO."
+    },
+
+    "explicitLengths": {
+      "rule": "A reader MUST slice 1010 to 1012 bytes, and each 1024 to its item's 1022 bytes. It must not trust the element's value length.",
+      "why": "DICOM pads values to even length. An OB of odd length is written with a trailing pad byte and the element length reports the PADDED count. Observable in dcmjs: BinaryRepresentation.writeBytes returns the padded count and Tag.write stores it."
+    }
+  },
+
+  "manifest": {
+    "required": ["mrcom", "mode", "scene"],
+    "fields": {
+      "mrcom":      { "kind": "int", "value": 1 },
+      "mode":       { "kind": "enum", "values": ["embed", "reference", "hybrid"] },
+      "bundleUID":  { "kind": "string", "optional": true, "pattern": "^[0-9.]{1,64}$" },
+      "created":    { "kind": "string", "optional": true, "doc": "DICOM DT-ish YYYYMMDDTHHMMSS" },
+      "producer":   { "kind": "object", "optional": true, "fields": {
+                        "name": {"kind":"string"}, "version": {"kind":"string","optional":true}, "mrson": {"kind":"int","optional":true} } },
+      "scene":      { "kind": "object", "fields": {
+                        "length":   {"kind":"int"},
+                        "encoding": {"kind":"enum","values":["none","deflate"]},
+                        "digest":   {"kind":"string","pattern":"^[0-9a-f]{64}$"},
+                        "nodes":    {"kind":"int","optional":true},
+                        "blobBase": {"kind":"string","optional":true} } },
+      "context":    { "kind": "object", "optional": true, "fields": {
+                        "studyInstanceUID":    {"kind":"string","optional":true},
+                        "patientID":           {"kind":"string","optional":true},
+                        "primaryParentSeries": {"kind":"string","optional":true,
+                          "doc":"MUST equal ReferencedSeriesSequence item 0's SeriesInstanceUID. Item 0 is normatively the primary parent, which is what gives a provenance index a deterministic single parent from STANDARD attributes alone."} } },
+      "bulk":       { "kind": "object", "optional": true, "fields": {
+                        "embedded": {"kind":"object","optional":true,"fields":{"count":{"kind":"int"},"bytes":{"kind":"int"}}},
+                        "required": {"kind":"object[]","optional":true,"itemRequired":["hash"],
+                          "doc":"hashes the scene names that are NOT in this instance"},
+                        "sources":  {"kind":"object[]","optional":true,"itemRequired":["kind"],
+                          "doc":"one per referenced origin; see bulk.schema.json shapes.dicom, plus { kind: 'blob-base', url }"} } },
+      "screenshot": { "kind": "object", "optional": true, "fields": {
+                        "rows": {"kind":"int"}, "columns": {"kind":"int"} } }
+    },
+    "constraints": [
+      "mode == 'embed'     => bulk.required is absent or empty",
+      "mode == 'reference' => MRCOMBlobSequence is absent or empty",
+      "every hash in bulk.required is reachable from the scene's nodes",
+      "context.primaryParentSeries, when present, equals ReferencedSeriesSequence item 0"
+    ]
+  },
+
+  "secondaryCapture": {
+    "doc": "Attributes the carrier must set. Checked by tools/mrcom_check.py.",
+    "sopClassUID": "1.2.840.10008.5.1.4.1.1.7",
+    "transferSyntaxUID": "1.2.840.10008.1.2.1",
+    "transferSyntaxRule": "ALWAYS Explicit VR Little Endian, regardless of the reference instance's transfer syntax. A writer that copies the reference's file meta silently emits implicit VR when the reference is implicit-VR-LE — a real trap in dcmjs, whose DerivedDataset copies _meta.",
+    "required": {
+      "Modality": "OT",
+      "ConversionType": "WSD",
+      "ImageType": ["DERIVED", "SECONDARY", "OTHER"],
+      "SpecificCharacterSet": "ISO_IR 192",
+      "SamplesPerPixel": 3,
+      "PhotometricInterpretation": "RGB",
+      "PlanarConfiguration": 0,
+      "BitsAllocated": 8,
+      "BitsStored": 8,
+      "HighBit": 7,
+      "PixelRepresentation": 0,
+      "BurnedInAnnotation": "YES",
+      "LossyImageCompression": "00"
+    },
+    "burnedInRationale": "The capture contains patient-identifying view labels and chrome. Declaring YES is conformant and tells a downstream de-identifier not to pass the pixels through untouched.",
+    "forbidden": {
+      "ImagePositionPatient": "a Secondary Capture is a picture of a screen, not a registered slice",
+      "ImageOrientationPatient": "same",
+      "FrameOfReferenceUID": "scene geometry lives in mrson (RAS); the derived-from frame is recorded in the manifest and the reference sequences, so a viewer can never mis-register the screenshot into a volume"
+    },
+    "pixelDataLength": "Rows * Columns * 3",
+    "compositeContextRule": "Inherit PatientName/ID/BirthDate/Sex/Age, StudyInstanceUID/ID/Date/Time/Description, AccessionNumber, ReferringPhysicianName from a PARSED REFERENCE INSTANCE. NEVER from a ctkDICOMDatabase index or a Displayed* column: the index stores display concatenations and reformatted values that violate VR limits (a 68-char StudyDescription against LO's 64; an ISO birth date against DA's 8 digits). Every inherited value is VR-checked and every coercion is reported to the caller."
+  },
+
+  "standardReferences": {
+    "doc": "Written in EVERY mode. Lineage must be legible without the private block, because conformant de-identification removes private attributes by default (PS3.15 Annex E).",
+    "ReferencedSeriesSequence": "(0008,1115) — ITEM 0 IS NORMATIVELY THE PRIMARY PARENT",
+    "ReferencedInstanceSequence": "(0008,114A) — items in author/geometric order",
+    "StudiesContainingOtherReferencedInstancesSequence": "(0008,1200) — a referenced SEG in another study",
+    "SourceImageSequence": "(0008,2112)",
+    "DerivationDescription": "(0008,2111)",
+    "DerivationCodeSequence": "(0008,9215)",
+    "codingSchemeDesignator": "99MRCOM",
+    "codeValueRule": "CodeValue is SH (16 chars) so codes are short (MRCOMBUNDLE); the human-readable text goes in CodeMeaning, which is LO (64).",
+    "strippedBundleRule": "Reference sequences present + creator absent => report 'an MRCOM bundle whose scene was stripped', never 'unrecognized file'."
+  }
+}

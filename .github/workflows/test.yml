@@ -16,9 +16,9 @@ jobs:
           deno-version: v2.9.x
       - name: lint
         # scoped to the directories kept lint-clean; widen as demos/vendor code is cleaned up
-        run: deno lint test harness logic algorithms render/selftest.ts render/introspect.ts render/livescene.ts render/livesync.ts render/liveops.ts render/mrson.ts render/sessions ModuleServer/conformance ModuleServer/mock
+        run: deno lint test harness logic algorithms mrson render/selftest.ts render/introspect.ts render/livescene.ts render/livesync.ts render/liveops.ts render/mrson.ts render/sessions ModuleServer/conformance ModuleServer/mock
       - name: typecheck entry points
         # GPU-facing modules trip TS lib strictness under deno check (BufferSource); the model/protocol files are checked
-        run: deno check test/run.ts test/tiers.ts test/oracle.ts harness/cdp.ts harness/slicer.ts harness/ready.ts render/liveops.ts render/mrson.ts render/selftest.ts
+        run: deno check test/run.ts test/tiers.ts test/oracle.ts harness/cdp.ts harness/slicer.ts harness/ready.ts render/liveops.ts render/mrson.ts render/selftest.ts mrson/validate.ts
       - name: unit tier
         run: deno run -A test/run.ts

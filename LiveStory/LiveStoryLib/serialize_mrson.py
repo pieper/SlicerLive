@@ -1,7 +1,11 @@
 """Serialize the live MRML scene to **mrson** (Medical Reality Scripted Object Notation).
 
-Neutral, Slicer-independent scene JSON — the format defined at ~/slicer/mrson
-(schema/mrson-core.struct.json). Neutralizes the MRML scene: nodes keyed by a neutral
+Neutral, Slicer-independent scene JSON — the format defined by the schema in this
+repository's mrson/ directory (mrson/schema/mrson-core.schema.json), validated by
+mrson/validate.py. (This docstring used to point at an external ~/slicer/mrson repo that
+was never created; the schema lives here so it is versioned with this serializer and the
+conformance test can check both halves in one checkout.) Neutralizes the MRML scene:
+nodes keyed by a neutral
 `type` (image / mesh / markup / camera / view / transferFunction / *Display) instead of
 the vtkMRML class, with the vtkMRML class preserved under `source.mrmlClass` for lossless
 reverse mapping.

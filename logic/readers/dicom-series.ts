@@ -83,7 +83,17 @@ export function reconstructSeries(instances: DicomInstance[]): Volume {
 // ---- dcmjs parse (browser) ------------------------------------------------------------------
 interface Dcmjs { data: { DicomMessage: { readFile(b: ArrayBuffer): { dict: unknown } }; DicomMetaDictionary: { naturalizeDataset(d: unknown): Record<string, unknown> } } }
 let dcmjsPromise: Promise<Dcmjs> | null = null;
-const DCMJS_MIRRORS = ["https://cdn.jsdelivr.net/npm/dcmjs@0.41.0/build/dcmjs.min.js", "https://unpkg.com/dcmjs@0.41.0/build/dcmjs.min.js"];
+// The VENDORED build comes first: it is page-relative (copied next to the bundle at build time,
+// exactly as idc-worker.js already is), and it carries the write-path support MRCOM needs that no
+// published version has yet — see render/vendor/dcmjs/README.md and docs/MRCOM-PLAN.md section 4.
+// A write path must not depend on the network: a CDN flake while loading the library that is about
+// to encode a file is a corrupted save. The CDN entries stay as a reader-only fallback for a page
+// served without the vendored copy beside it.
+const DCMJS_MIRRORS = [
+  "./dcmjs.min.js",
+  "https://cdn.jsdelivr.net/npm/dcmjs@0.49.2/build/dcmjs.min.js",
+  "https://unpkg.com/dcmjs@0.49.2/build/dcmjs.min.js",
+];
 
 /** Lazy-load dcmjs (UMD) via a script tag; returns window.dcmjs. Browser only. */
 export function loadDcmjs(): Promise<Dcmjs> {
