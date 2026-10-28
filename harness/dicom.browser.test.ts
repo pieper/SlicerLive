@@ -2,6 +2,7 @@
 // DICOM loader, and verify the reconstructed geometry (dims, ijkToRAS) and that it lands as an image node.
 // Uses the page's dcmjs (loaded by the DICOM reader) so no server is needed.
 import { assertEquals } from "jsr:@std/assert@1";
+import { VALIDATED_FIXTURE } from "../logic/readers/synthetic-dicom.ts";
 import { CDP } from "./cdp.ts";
 import { waitReady } from "./ready.ts";
 
@@ -10,6 +11,10 @@ let chrome = false;
 try { await CDP.targets(); chrome = true; } catch { /* no browser */ }
 
 // Build N axial CT instances (4x3, 2mm spacing, IPP ascending) as DICOM Part-10 buffers, in-page via dcmjs.
+// The same 4x3x5 series logic/readers/synthetic-dicom.ts builds, written inline because this runs
+// as an eval'd string in the page and cannot import a module. The GEOMETRY is not duplicated: both
+// sides assert against VALIDATED_FIXTURE below, and the T1 test proves reconstructSeries() produces
+// it from the module's bytes. Change one side and the other fails.
 const MAKE_SERIES = `
   const dcmjs = await window.__dcmjs();
   const nx = 4, ny = 3, N = 5, uid = "1.2.826.0.1.3680043.8.498." + Date.now();
@@ -42,9 +47,9 @@ Deno.test({ name: "dicom: 5-slice CT reconstructs (dims, ijkToRAS, subseries) an
       const stats = await window.__volumeStats(res.imageId);
       return { series: res.series, dims: stats.dims, ijkToRAS: stats.ijkToRAS };`);
     assertEquals(r.series.length, 1);
-    assertEquals(r.series[0].count, 5);
-    assertEquals(r.series[0].modality, "CT");
-    assertEquals(r.dims, [4, 3, 5]);
-    assertEquals(r.ijkToRAS, [-0.5, 0, 0, 10, 0, -0.8, 0, 20, 0, 0, 2, 5, 0, 0, 0, 1]);
+    assertEquals(r.series[0].count, VALIDATED_FIXTURE.instances);
+    assertEquals(r.series[0].modality, VALIDATED_FIXTURE.modality);
+    assertEquals(r.dims, VALIDATED_FIXTURE.dims);
+    assertEquals(r.ijkToRAS, VALIDATED_FIXTURE.ijkToRAS);
   } finally { await cdp.closeTab(); }
 } });
