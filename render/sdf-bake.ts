@@ -254,9 +254,13 @@ export class JfaSdfBaker {
   private seed: [GPUTexture, GPUTexture];       // rgba32float ping-pong (RAS seed xyz + regionLabel)
   private sdfTex: GPUTexture;                    // rgba16float: .rgb = per-label colour, .a = signed dist (mm) — sampled by SegmentField
   private attrTex: GPUTexture;                   // rgba16float: .r = per-segment opacity, .g = shading mode — sampled by SegmentField
-  private attrScratch: GPUTexture;              // rgba16float attr-blur ping-pong
+  // ONE blur scratch, shared by the colour, distance and attribute blurs. They are the same format
+  // and size and blurStage runs them one at a time, so a second copy was 8 B per voxel of pure
+  // duplication — 12% of this pipeline, which is the difference between fitting a device and losing
+  // it. Named `scratch` rather than per-target so it cannot drift back into two.
+  private scratch: GPUTexture;                   // rgba16float blur ping-pong (shared)
   private lastSeed = 0;                          // seed buffer the last sweep finalized from
-  private sdfScratch: GPUTexture;               // rgba16float blur ping-pong
+
   private uni: GPUBuffer;
   private palBuf: GPUBuffer;                     // 256 × vec4 label→colour palette (.a = opacity)
   private modeBuf: GPUBuffer;                    // 256 × vec4 label→shading mode (.x = 0 surface / 1 volume)
@@ -298,8 +302,7 @@ export class JfaSdfBaker {
     this.seed = [mk("rgba32float", seedUsage), mk("rgba32float", seedUsage)];
     this.sdfTex = mk("rgba16float", GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC);   // blur copies in; readDistance copies out
     this.attrTex = mk("rgba16float", GPUTextureUsage.COPY_DST);  // .r opacity, .g mode; seam-blurred in refine
-    this.attrScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
-    this.sdfScratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
+    this.scratch = mk("rgba16float", GPUTextureUsage.COPY_SRC);
     this.uni = dev.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.palBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.modeBuf = dev.createBuffer({ size: 256 * 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -316,6 +319,33 @@ export class JfaSdfBaker {
     const steps: number[] = [];
     for (let s = 1 << Math.floor(Math.log2(maxDim - 1)); s >= 1; s >>= 1) steps.push(s);
     this.steps = steps;
+  }
+
+  /** GPU bytes this baker holds, and what it WOULD hold for a given label grid.
+   *
+   *  The JFA is the memory-hungry part of the pipeline by a wide margin: the seed ping-pong is two
+   *  rgba32float volumes (32 B/voxel between them) and there are four more rgba16float volumes
+   *  (sdf, attr, and a scratch for each). On the PADDED grid that is 68 B per voxel including the
+   *  r32uint master the caller owns — so a 250³ grid is 1.06 GB, per segmentation. Two of them side
+   *  by side is how a comparison view walks off the end of a laptop's VRAM: the device is lost and
+   *  the canvas goes white, with no error a user can act on. Callers size their grid against this
+   *  (see render/gpu-budget.ts) instead of finding out the hard way. */
+  static bytesPerVoxel(): number {
+    return 2 * 16    // seed ping-pong, rgba32float
+      + 8             // sdfTex, rgba16float
+      + 8             // attrTex, rgba16float
+      + 8             // ONE shared blur scratch, rgba16float
+      + 4;            // the r32uint master the EditableSegmentation owns
+  }
+  /** Bytes for a label grid of `dims` once padded by `pad` voxels on every side. */
+  static estimateBytes(dims: Vec3, pad = 2): number {
+    const n = (dims[0] + 2 * pad) * (dims[1] + 2 * pad) * (dims[2] + 2 * pad);
+    return n * JfaSdfBaker.bytesPerVoxel();
+  }
+  /** Bytes this instance actually holds. */
+  byteSize(): number {
+    const n = this.dims[0] * this.dims[1] * this.dims[2];
+    return n * JfaSdfBaker.bytesPerVoxel();
   }
 
   /** The resident colorized-SDF texture (rgba16float: .rgb = per-label colour, .a = signed mm).
@@ -493,8 +523,8 @@ export class JfaSdfBaker {
     dev.queue.submit([enc.finish()]);
     // The colour-seam blur is capped well below a voxel (seamSigma): it hides the per-voxel colour
     // staircase at a label boundary without dissolving the boundary itself.
-    if (this.seamSigma() > 0) this.blurStage(this.colBlurPipe, this.seamSigma(), this.sdfTex, this.sdfScratch, region);
-    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch, region);
+    if (this.seamSigma() > 0) this.blurStage(this.colBlurPipe, this.seamSigma(), this.sdfTex, this.scratch, region);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch, region);
   }
 
   /** ATTR-ONLY rebake for palette/opacity changes (per-segment visibility): the distance field
@@ -517,7 +547,7 @@ export class JfaSdfBaker {
     const bf = dev.createBindGroup({ layout: this.finalPipe.getBindGroupLayout(0), entries: [
       { binding: 0, resource: this.seed[this.lastSeed].createView() },
       { binding: 1, resource: this.labelTex.createView() },
-      { binding: 2, resource: this.sdfScratch.createView() },   // sdf writes discarded
+      { binding: 2, resource: this.scratch.createView() },   // sdf writes discarded
       { binding: 3, resource: { buffer: this.uni } },
       { binding: 4, resource: { buffer: this.palBuf } },
       { binding: 5, resource: this.attrTex.createView() },
@@ -529,7 +559,7 @@ export class JfaSdfBaker {
     // the 0.5 level set OF, so skipping it would snap the geometry back to the raw voxel staircase for
     // the duration of a visibility step and pop smooth again 600 ms later. `blurSeams` now only records
     // the caller's intent (it is ~4 passes either way, and no JFA re-sweep).
-    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch, region);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch, region);
   }
 
   /** Re-apply the SMOOTHING only: the distance field does not depend on σ, so re-running the JFA
@@ -553,13 +583,13 @@ export class JfaSdfBaker {
     const p = enc.beginComputePass(); p.setPipeline(this.finalPipe); p.setBindGroup(0, bf); p.dispatchWorkgroups(this.g[0], this.g[1], this.g[2]); p.end();
     dev.queue.submit([enc.finish()]);
     const seam = this.seamSigma();
-    if (seam > 0) this.blurStage(this.colBlurPipe, seam, this.sdfTex, this.sdfScratch);
-    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch);
+    if (seam > 0) this.blurStage(this.colBlurPipe, seam, this.sdfTex, this.scratch);
+    if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch);
   }
 
   /** Blur the attribute seams of the CURRENT attr texture in place (no re-finalize) — the
    *  cheapest possible settle after a run of rebakeAttr(false) visibility steps. */
-  blurAttrOnly() { if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.attrScratch); }
+  blurAttrOnly() { if (this.smoothSigma > 0) this.blurStage(this.fullBlurPipe, this.smoothSigma, this.attrTex, this.scratch); }
 
   /** One full sweep: init → JFA (schedule + extra) → finalize → blur .a → optional blur .rgb. */
   private sweep(extraSteps: number[], distSigma: number, colorSigma: number) {
@@ -619,11 +649,11 @@ export class JfaSdfBaker {
     // bones. That is a property of smoothing an UNBOUNDED field, not of smoothing as such: attr.b
     // is a BOUNDED 0/1 indicator, whose 0.5 level set cannot cross a gap much wider than 2σ.
     // sdfTex.a stays sharp — it is still what the sphere-trace skip and the colour flood use.
-    if (colorSigma > 0) this.blurStage(this.colBlurPipe, colorSigma, this.sdfTex, this.sdfScratch);
+    if (colorSigma > 0) this.blurStage(this.colBlurPipe, colorSigma, this.sdfTex, this.scratch);
     // attr's blur is the SHADING smoothness, so it takes the caller's σ exactly. Flooring it at
     // the colour-seam σ (1.0) made every setting from 0 to 1 render identically — the control
     // did nothing over half its range.
-    if (distSigma > 0) this.blurStage(this.fullBlurPipe, distSigma, this.attrTex, this.attrScratch);
+    if (distSigma > 0) this.blurStage(this.fullBlurPipe, distSigma, this.attrTex, this.scratch);
   }
 
   /** 3 separable Gaussian passes with the given pipeline (which channels it blurs), tex↔scratch,
@@ -673,5 +703,5 @@ export class JfaSdfBaker {
     dev.queue.submit([enc.finish()]);
   }
 
-  destroy() { this.seed[0].destroy(); this.seed[1].destroy(); this.sdfTex.destroy(); this.attrTex.destroy(); this.attrScratch.destroy(); this.sdfScratch.destroy(); this.uni.destroy(); this.palBuf.destroy(); this.modeBuf.destroy(); }
+  destroy() { this.seed[0].destroy(); this.seed[1].destroy(); this.sdfTex.destroy(); this.attrTex.destroy(); this.scratch.destroy(); this.uni.destroy(); this.palBuf.destroy(); this.modeBuf.destroy(); }
 }

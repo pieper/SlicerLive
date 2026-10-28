@@ -55,6 +55,17 @@ await call("Page.bringToFront");
 await ev("['axial','sagittal','coronal'].forEach(c => document.getElementById('col-'+c)?.click()), 1");
 await new Promise((r) => setTimeout(r, 800));
 
+/** Pin the camera before measuring. Stepping levels PRESERVES zoom (that is the point of it) while
+ *  the full-rebake reference reframes, so without this the comparison reads a camera difference as a
+ *  bake difference — it did, as a steady ~4%. */
+const pinCamera = async (level: number) => {
+  const all = JSON.parse(await ev("JSON.stringify(__cmpDbg.levels('ref').concat(__cmpDbg.levels('spineps')))") as string) as { label: number; centroid: number[] }[];
+  const c = all.find((x) => x.label === level)?.centroid;
+  if (!c) return;
+  await ev(`__cmpDbg.setCamera([${c[0]}, ${c[1] - 260}, ${c[2] + 90}], [${c[0]}, ${c[1]}, ${c[2]}], [0,0,1])`);
+  await new Promise((r) => setTimeout(r, 1500));
+};
+
 /** Lit pixels and the dominant hues of one method's 3D cell — hues catch a label that should be
  *  hidden but is still drawn; lit pixels catch a surface that was cut away. */
 const look = async (which: string) => {
@@ -82,12 +93,14 @@ for (const steps of [1, 3, 5]) {
   await ev("__cmpDbg.setExtent(0)");                       // "1 vert": exactly one level per row
   await new Promise((r) => setTimeout(r, 3500));
   for (let k = 0; k < steps; k++) { await ev("__cmpDbg.stepLevel(1)"); await new Promise((r) => setTimeout(r, 2200)); }
-  const level = await ev("__cmpDbg.currentLevel()");
+  const level = await ev("__cmpDbg.currentLevel()") as number;
+  await pinCamera(level);
   const stepped: Record<string, { lit: number; hues: string[] }> = {};
   for (const row of ["spineps", "ref"]) stepped[row] = await look(row);
   // the same level, reached by a full rebake
   await ev("__cmpDbg.setExtent(99)"); await new Promise((r) => setTimeout(r, 2500));
   await ev("__cmpDbg.setExtent(0)"); await new Promise((r) => setTimeout(r, 3500));
+  await pinCamera(level);
   for (const row of ["spineps", "ref"]) {
     const full = await look(row);
     const s = stepped[row];

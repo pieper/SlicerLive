@@ -9,6 +9,7 @@
 //   ?case=<pid>&coll=<mets|myeloma>     (defaults to the first zarr-ready case)
 // Bundled to live/webgpu/spine-compare.js
 import { initDevice } from "../../render/device.ts";
+import { budgetWasReduced, reduceBudget } from "../../render/gpu-budget.ts";
 import { slicerDefaultOffset01, type Orientation } from "../../render/slice-renderer.ts";
 import { SliceInteractor } from "../../render/slice-interactor.ts";
 import { attachSliceControls } from "../../render/demos/slice-control.ts";
@@ -42,6 +43,31 @@ interface CaseEntry {
 async function main() {
   if (!(navigator as unknown as { gpu?: unknown }).gpu) { status("WebGPU not available — try Chrome/Edge 113+ or Safari 18+.", true); return; }
   const gpu = await initDevice();
+  // The budget this load is running on. Captured in a mutable so the device-lost handler below can
+  // halve it even if the loss happens DURING scene construction, when `sc` is still in its TDZ.
+  let budgetInUse = 0.75e9;
+  // A LOST DEVICE IS WHAT "the viewers went black, then white" ACTUALLY IS. The browser drops the
+  // GPU out from under the page — usually out of memory with several large volumes resident — and
+  // every canvas stops updating with nothing in the console a user can act on. Say so, and say what
+  // to do about it, instead of leaving blank boxes on screen.
+  gpu.device.lost.then((info) => {
+    if (info.reason === "destroyed") return;        // our own teardown, not a failure
+    status(`GPU device lost (${info.reason}) — the views stopped updating.`, true);
+    const warn = document.createElement("div");
+    warn.style.cssText = "position:fixed;inset:auto 0 0 0;padding:10px 14px;background:#3a1216;color:#ffd7da;" +
+      "font:13px/1.4 system-ui;z-index:9999;border-top:1px solid #6b2630;display:flex;gap:12px;align-items:center";
+    const txt = document.createElement("span");
+    txt.textContent = "The GPU dropped this page" + (info.message ? ` (${info.message})` : "") +
+      ". Running out of GPU memory is the usual cause.";
+    const btn = document.createElement("button");
+    btn.textContent = "Reload at lower resolution";
+    btn.style.cssText = "padding:5px 10px;border-radius:6px;border:1px solid #8a3340;background:#5a1d24;color:#ffd7da;cursor:pointer";
+    // A lost device cannot be revived, so the only way to act on this is to come back smaller. The
+    // reduced budget is remembered for the session, so the reload does not walk into it again.
+    btn.addEventListener("click", () => { reduceBudget(budgetInUse); location.reload(); });
+    warn.append(txt, btn);
+    document.body.appendChild(warn);
+  });
   const preferred = (navigator as unknown as { gpu: GPU }).gpu.getPreferredCanvasFormat();
   const srgb = (preferred + "-srgb") as GPUTextureFormat;
 
@@ -71,6 +97,13 @@ async function main() {
     shell: PARAMS.get("shell") === "all" ? "all" : "outer",
     bandVox: PARAMS.get("band") ? Number(PARAMS.get("band")) : undefined,
   });
+  // Say what this view sized itself to. When the grid was coarsened to fit the device, the surfaces
+  // being compared are lower-resolution than the data — a reviewer has to know that, not discover it.
+  {
+    const m = sc.memory();
+    budgetInUse = m.budgetBytes;
+    console.info(`spine-compare GPU budget: ${(m.budgetBytes / 1e9).toFixed(2)} GB (${m.why})\n  ` + m.rows.join("\n  "));
+  }
   sc.upgraded.then(() => { drawAll(); status(`${coll}/${pid} — full-res CT loaded`); })
     .catch(() => status(`${coll}/${pid} — full-res CT failed to load (showing preview res)`, true));
 
@@ -458,8 +491,16 @@ async function main() {
 
   // ── header info + case selector ────────────────────────────────────────────
   const cmp = entry?.compare;
+  const mem = sc.memory();
+  // When the 3D grid was coarsened to fit the GPU, the surfaces being compared are lower-resolution
+  // than the data. A reviewer has to be told that in the view, not left to infer it.
+  const memNote = budgetWasReduced()
+    ? ` · reduced GPU budget after a device loss — 3D surfaces at ${mem.rows[0]?.match(/@ ([\d.]+mm)/)?.[1] ?? "lower res"}`
+    : mem.coarsened
+    ? ` · 3D surfaces coarsened to ${mem.rows[0]?.match(/@ ([\d.]+mm)/)?.[1] ?? "fit"} to fit GPU memory`
+    : "";
   el("info").textContent =
-    `${coll}/${pid} · ${cmp ? `${cmp.n_agree}/${cmp.n_ref_labels} agree · ${cmp.n_shifted} shifted · mean Dice ${cmp.mean_dice_same?.toFixed(3)}` : "no compare record"}`;
+    `${coll}/${pid} · ${cmp ? `${cmp.n_agree}/${cmp.n_ref_labels} agree · ${cmp.n_shifted} shifted · mean Dice ${cmp.mean_dice_same?.toFixed(3)}` : "no compare record"}${memNote}`;
 
   // Case button (upper right) → dropdown selector over all 121 cases, worst
   // agreement first. Picking one navigates (?case=…) — a case load rebuilds
@@ -564,6 +605,7 @@ async function main() {
     smoothing: () => sc.segSmoothing(),
     setSmoothing: (v: number) => { sc.setSegSmoothing(v); drawAll3d(); },
     discOpacity: () => sc.discOpacity(),
+    mem: () => sc.memory(),
     setDiscOpacity: (v: number) => { sc.setDiscOpacity(v); requestDraw(); },
   };
 }

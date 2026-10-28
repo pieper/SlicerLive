@@ -33,6 +33,13 @@ export interface SegmentationLogicOpts {
   refineDelayMs?: number;                     // debounce before the settle-refine (capability-tuned; default 180)
   boundaryMode?: "outer" | "all";             // sdf: "outer" = shell only at segment↔background (default; crisp separated segments). "all" = shell at ANY label change (multi-material interface field) so EMBEDDED/NESTED labels surface too — islands within islands — without one SDF per segment.
   clippable?: boolean;                        // let scene clip boxes crop the shell (default false — Slicer's ROI crops the volume, not the segmentation; spine-compare's extent control opts in)
+  /** Let rebakeShellRegion() re-flood only the changed box instead of the whole grid. Fast (~17 ms
+   *  against ~70 ms at a typical grid) but NOT exact: after a run of patches the result still drifts
+   *  a few per cent from a full re-flood, reproducibly but not explicably — see
+   *  examples/spine/test/level-step-equivalence.ts. Off by default: a view whose job is to show
+   *  whether two segmentations differ cannot afford to be approximately right about either. Opt in
+   *  for live editing, where the next stroke corrects it anyway. */
+  regionReflood?: boolean;
 }
 
 function invertAffine(m: number[]): number[] {
@@ -69,6 +76,7 @@ export class SegmentationLogic {
   private refineTimer?: ReturnType<typeof setTimeout>;
   private refineDelayMs: number;             // quiescence before the settle-refine (sdf mode; capability-tuned)
   private boundaryMode: "outer" | "all";
+  private regionReflood: boolean;
 
   constructor(device: GPUDevice, private seg: EditableSegmentation, opts: SegmentationLogicOpts = {}) {
     this.renderMode = opts.renderMode ?? "sdf";
@@ -78,6 +86,7 @@ export class SegmentationLogic {
     this.refineDelayMs = opts.refineDelayMs ?? 180;
     this.boundaryMode = opts.boundaryMode ?? "outer";
     this.clippable = opts.clippable ?? false;
+    this.regionReflood = opts.regionReflood ?? false;
     this.setLabelColor(1, opts.color ?? [0.30, 0.85, 0.55]);   // single-label convenience default
 
     if (this.renderMode === "sdf") {
@@ -198,7 +207,7 @@ export class SegmentationLogic {
     // rebake) and checking it away again, not by deriving when a partial flood is safe.
     const core = this.regionToIjk(regionRAS, 0);   // the CHANGED extent, without the halo
     const reach = 2 * SegmentationLogic.haloMaxStep();
-    if ([0, 1, 2].some((d) => core.hi[d] - core.lo[d] > reach)) { this.refineNow(); return; }
+    if (!this.regionReflood || [0, 1, 2].some((d) => core.hi[d] - core.lo[d] > reach)) { this.refineNow(); return; }
     if (this.refineTimer !== undefined) { clearTimeout(this.refineTimer); this.refineTimer = undefined; }
     this.sdf.setPalette(this.palette);
     this.sdf.setModePalette(this.modePalette);

@@ -242,6 +242,32 @@ disc: 0.62 (hollow) → 1.00 (flat cap); the uncapped multi-material path, uncha
 are one pixel harder in a single frame. The accumulation path's sub-pixel camera jitter covers it where
 it runs; `renderToView` (what the spine demo settles to) does not.
 
+### Sizing the SDF to the device, not to the data (2026-10-28)
+
+The JFA-SDF pipeline costs **60 B per padded voxel** — seed ping-pong (rgba32float ×2), sdf, attr and
+one shared blur scratch (rgba16float), plus the r32uint master. A flat 256-per-axis cap on a chest CT
+is ~880 MB, and a comparison view holds TWO. WebGPU has no VRAM query, so allocation simply keeps
+succeeding until the device is LOST and every canvas on the page goes white with nothing actionable
+in the console. Reported from the field: "it loads for some time, then flicks some images, but then
+turns white, browser loses responsiveness".
+
+`render/gpu-budget.ts` is a budget, not a measurement, because there is nothing to measure:
+`navigator.deviceMemory` (clamped — a dev machine here reports **32**, outside the spec's own 0.25-8
+range, which is why the clamp and the ceiling both exist), `isFallbackAdapter`, a 25% share, and a
+hard **0.75 GB** ceiling. `?gpumem=<GB>` overrides it. Callers hand the result to
+`resampleIsotropic(..., maxVoxels)` and surface `coarsened` — on the reported case, 1.76 GB → 750 MB,
+219×219×256 → 171×171×200 @ 2.92 mm, and the header says so.
+
+**Dynamic low-memory mode**: losing the device IS the answer to the question the API will not answer,
+so remember it. `device.lost` offers "reload at lower resolution", which halves the budget into
+`sessionStorage` (not local — the cause may be another tab, which is not worth remembering past the
+session) so the reload does not walk back into it.
+
+Two easy wins found while accounting: the sdf and attr blurs each held their own scratch texture,
+same format and size and never used at the same time (8 B/voxel of pure duplication, 12% of the
+pipeline); and the seed ping-pong is 32 of the remaining 52, so packing seeds as a voxel INDEX
+rather than RAS+label would be the next big cut if resolution needs to come back up.
+
 ### Region re-flood: the "clipping plane" that was really a partial bake (2026-10-28)
 
 Per-label visibility takes a fast path — rewrite the changed labels' box in the labelmap and re-flood

@@ -26,6 +26,8 @@ import { fetchZarrVolume, type ZarrDesc, type ZarrVolume } from "../../render/za
 import { EditableSegmentation } from "../../algorithms/editable-segmentation.ts";
 import { resampleIsotropic } from "../../algorithms/geom.ts";
 import { SegmentationLogic } from "../../logic/segmentation-logic.ts";
+import { formatBytes, gpuBudget, sdfVoxelCap } from "../../render/gpu-budget.ts";
+import { JfaSdfBaker } from "../../render/sdf-bake.ts";
 import type { Vec3 } from "../../render/mat4.ts";
 
 export const BUCKET = "https://js2.jetstream-cloud.org:8001/swift/v1/spine-review/";
@@ -212,6 +214,10 @@ export interface SpineCompareScene {
   /** The muted intervertebral-disc layer (SPINEPS's 100+n labels): 0 hides, 1 full muted colour. */
   setDiscOpacity(o: number): void;
   discOpacity(): number;
+  /** What this view is holding on the GPU, and the budget it sized itself to. Worth surfacing: when
+   *  the grid is coarsened to fit, the surfaces a reviewer is comparing are lower-resolution than
+   *  the data, and that has to be visible rather than silent. */
+  memory(): { budgetBytes: number; why: string; rows: string[]; coarsened: boolean };
   /** 3D shell smoothing, σ in voxels of the SDF grid. 0 = the labelmap as segmented (every voxel
    *  face visible, which is what a review of the algorithm's actual output needs); higher = a
    *  modelled surface. Applies to both method rows. */
@@ -312,13 +318,25 @@ export async function buildSpineCompareScene(
     lab: Uint8Array; shown: Map<number, number>; rebuild(): void;
     applyShellVisibility(regionRAS: { lo: Vec3; hi: Vec3 } | null): boolean;
   };
+  // MEMORY BUDGET. Two segmentations side by side, each with a JFA-SDF pipeline, is the heaviest
+  // thing this page does: 68 B per padded voxel (render/gpu-budget.ts). At the old flat 256-per-axis
+  // cap that is ~1 GB EACH on a chest CT, which a laptop's integrated GPU does not have — the device
+  // is lost, every canvas goes white, and nothing in the console says why. Size the grid to the
+  // device instead, and say so when that costs resolution.
+  const budget = gpuBudget(gpu.adapter);
+  const voxelCap = sdfVoxelCap(budget.bytes, 2);
+  const memNote: string[] = [];
+  let coarsenedAny = false;
   const makeRow = (key: "spineps" | "ref", lab: Uint8Array): RowState => {
     const overlayTex = bakeOverlay(lab);
     // 3D: this method's SDF shell in level colours, clippable so the extent control
     // crops it (with the CT VR) to the selected levels. The SDF grid is capped at 256
     // per axis (segroulette's standard): bakes AND per-level visibility rebakes scale
     // with this volume, and the full-res med grid still feeds the 2D overlays.
-    const cap = resampleIsotropic(lab, medDims, medRAS, 256);
+    const cap = resampleIsotropic(lab, medDims, medRAS, 256, voxelCap);
+    const capBytes = JfaSdfBaker.estimateBytes(cap.dims);
+    memNote.push(`${key}: ${cap.dims.join("×")} @ ${cap.vox.toFixed(2)}mm = ${formatBytes(capBytes)}${cap.coarsened ? " (coarsened to fit)" : ""}`);
+    if (cap.coarsened) coarsenedAny = true;
     const editable = new EditableSegmentation(dev, cap.dims, { ijkToRAS: cap.ijkToRAS });
     // boundaryMode: "outer" (default) is segroulette's crisp surface-model look — SIGNED
     // distance, tight 0.65-voxel shell band. "all" (multi-material interface field) reads
@@ -354,47 +372,19 @@ export async function buildSpineCompareScene(
     // into range: SPINEPS labels 12 of the reference's 24 levels, so arrowing down from the cervical
     // spine crosses that edge, and the first SPINEPS vertebra rendered at 511 px against 5500 for the
     // same level reached any other way. A full bake there costs ~390 ms, once.
-    let lastBakeEmpty = true;
-    const anyVisible = () => { for (const [, o] of shown) if (o > 0.001) return true; return false; };
     const rebakeShellFull = () => {
       const vis = visOf();
       visKey = vis.join("");
-      lastBakeEmpty = !anyVisible();
       const f = new Uint32Array(cap.lab.length);
       for (let i = 0; i < f.length; i++) { const l = cap.lab[i]; if (vis[l]) f[i] = l; }
       editable.loadLabelmap(f);
       logic.refineNow();
     };
-    const capInv = invertAffine(cap.ijkToRAS);
-    const rebakeShellRegion = (regionRAS: { lo: Vec3; hi: Vec3 }) => {
-      const vis = visOf();
-      visKey = vis.join("");
-      // RAS bbox → label-grid ijk bbox (+2 voxel resample-rounding margin), clamped
-      const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
-      for (const x of [regionRAS.lo[0], regionRAS.hi[0]]) for (const y of [regionRAS.lo[1], regionRAS.hi[1]]) for (const z of [regionRAS.lo[2], regionRAS.hi[2]]) {
-        const i = capInv[0] * x + capInv[1] * y + capInv[2] * z + capInv[3];
-        const j = capInv[4] * x + capInv[5] * y + capInv[6] * z + capInv[7];
-        const k = capInv[8] * x + capInv[9] * y + capInv[10] * z + capInv[11];
-        for (let d = 0; d < 3; d++) { const v = [i, j, k][d]; if (v < lo[d]) lo[d] = v; if (v > hi[d]) hi[d] = v; }
-      }
-      const rlo: Vec3 = [0, 0, 0], rhi: Vec3 = [0, 0, 0];
-      for (let d = 0; d < 3; d++) {
-        rlo[d] = Math.max(0, Math.floor(lo[d]) - 2);
-        rhi[d] = Math.min(cap.dims[d], Math.ceil(hi[d]) + 2);
-        if (rhi[d] <= rlo[d]) return;
-      }
-      const [sx, sy, sz] = [rhi[0] - rlo[0], rhi[1] - rlo[1], rhi[2] - rlo[2]];
-      const out = new Uint32Array(sx * sy * sz);
-      const [dx, dy] = [cap.dims[0], cap.dims[1]];
-      let w = 0;
-      for (let z = rlo[2]; z < rhi[2]; z++) for (let y = rlo[1]; y < rhi[1]; y++) {
-        let r = (z * dy + y) * dx + rlo[0];
-        for (let x = 0; x < sx; x++, r++, w++) { const l = cap.lab[r]; if (vis[l]) out[w] = l; }
-      }
-      editable.writeLabelRegion(out, rlo, [sx, sy, sz]);
-      logic.rebakeShellRegion(regionRAS);
-      lastBakeEmpty = !anyVisible();
-    };
+    // (The region-limited variant of this — rewrite only the changed labels' box and re-flood it —
+    // lived here and is gone. It was wrong three separate ways, two of them about which voxels it
+    // touched rather than how it flooded them, and the full rebake costs ~16 ms at the device-sized
+    // grid. SegmentationLogic.regionReflood still exists for live editing, where the next stroke
+    // corrects an approximation anyway.)
     if (outerShell) rebakeShellFull();   // initial bake already excludes the hidden discs
     else { editable.loadLabelmap(cap.lab); logic.refineNow(); }
     const scene = new SceneRenderer(gpu, format);
@@ -411,8 +401,17 @@ export async function buildSpineCompareScene(
       applyShellVisibility(regionRAS: { lo: Vec3; hi: Vec3 } | null) {
         if (!outerShell) return false;                 // "all" caps interfaces in the field itself
         if (visOf().join("") === visKey) return false; // pure opacity tweak — attr fast path suffices
-        // The region fast path patches the PREVIOUS flood; it needs one to patch.
-        if (regionRAS && !lastBakeEmpty) rebakeShellRegion(regionRAS); else rebakeShellFull();
+        // ALWAYS the full rebake. The region path rewrote only the changed labels' box in the
+        // labelmap, which assumes that box (from the MED-grid level geometry, +2 voxels) covers
+        // every voxel of those labels on the CAP grid. It does not once the cap grid is coarse —
+        // and it is now sized to the device, so it varies per machine. The symptom is a level step
+        // rendering ~4% different from the same level reached any other way, with the leftover
+        // voxels of the label you just hid still in the map. Of the three ways this fast path has
+        // been wrong, two were about which voxels it touched rather than how it flooded them, so
+        // the honest move is to stop guessing at the extent. A full rebake is ~70-150 ms depending
+        // on the grid; it is the correctness floor for a view whose whole job is "do these two
+        // segmentations differ".
+        rebakeShellFull();
         return true;
       },
       destroy() { logic.destroy(); editable.destroy(); this.overlayTex.destroy(); },
@@ -545,6 +544,7 @@ export async function buildSpineCompareScene(
       this.setExtent(extentState.label, extentState.count);   // re-applies 3D label opacities
     },
     discOpacity: () => discOp,
+    memory: () => ({ budgetBytes: budget.bytes, why: budget.why, rows: [...memNote], coarsened: coarsenedAny }),
     setSegSmoothing(sigmaVoxels) {
       segSigma = Math.max(0, sigmaVoxels);
       rowSp.logic.setSmoothing(segSigma);
