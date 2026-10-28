@@ -264,15 +264,18 @@ async function main() {
   let extent = 99;
   const extents = [["ext-one", 0], ["ext-pm1", 1], ["ext-pm3", 3], ["ext-full", 99]] as const;
   const SLICE_MARGIN = 1.5;                     // in-plane context around the level bbox
-  const frameCamera = (center: Vec3, radius: number) => {
-    // keep the current viewing DIRECTION; move focal point + dolly so the target fits
+  /** Point the camera at `center`, keeping the current viewing DIRECTION. `keepDistance` keeps the
+   *  current dolly too, so the move is a pure pan: stepping from one vertebra to the next holds the
+   *  zoom you set instead of refitting to each bone's bounding sphere. Refitting is right when the
+   *  extent MODE changes (you asked for a different amount of spine), not when the target moves. */
+  const frameCamera = (center: Vec3, radius: number, keepDistance = false) => {
     const d: Vec3 = [
       camera.focalPoint[0] - camera.position[0],
       camera.focalPoint[1] - camera.position[1],
       camera.focalPoint[2] - camera.position[2],
     ];
     const len = Math.hypot(d[0], d[1], d[2]) || 1;
-    const dist = radius / Math.tan(((camera.viewAngle / 2) * Math.PI) / 180);
+    const dist = keepDistance ? len : radius / Math.tan(((camera.viewAngle / 2) * Math.PI) / 180);
     camera.focalPoint = [...center] as Vec3;
     camera.position = [center[0] - d[0] / len * dist, center[1] - d[1] / len * dist, center[2] - d[2] / len * dist];
   };
@@ -299,7 +302,9 @@ async function main() {
     }
   };
 
-  const applyFocus = () => {
+  /** `refit` reframes the views to the focus box; without it they keep the zoom they have and only
+   *  move to the new target. Mode changes refit, level changes do not. */
+  const applyFocus = (refit = false) => {
     const box = sc.setExtent(extent >= 99 ? null : currentLevel, extent);
     for (const [id, n] of extents) el(id)?.classList.toggle("on", extent === n);
     updateEmptyNotes();
@@ -307,12 +312,16 @@ async function main() {
       const c: Vec3 = [(box.lo[0] + box.hi[0]) / 2, (box.lo[1] + box.hi[1]) / 2, (box.lo[2] + box.hi[2]) / 2];
       const ext: Vec3 = [box.hi[0] - box.lo[0], box.hi[1] - box.lo[1], box.hi[2] - box.lo[2]];
       // slices: zoom each orientation to the bbox's in-plane extents (u/v axes per orientation)
-      const fov = (a: number, b: number) => [Math.max(30, ext[a] * SLICE_MARGIN), Math.max(30, ext[b] * SLICE_MARGIN)] as const;
-      const [axU, axV] = fov(0, 1); sc.slice.setMirrorFrame("axial", c, axU, axV);
-      const [coU, coV] = fov(0, 2); sc.slice.setMirrorFrame("coronal", c, coU, coV);
-      const [saU, saV] = fov(1, 2); sc.slice.setMirrorFrame("sagittal", c, saU, saV);
-      frameCamera(c, Math.hypot(ext[0], ext[1], ext[2]) / 2 * 1.15);
-    } else {
+      if (refit) {
+        const fov = (a: number, b: number) => [Math.max(30, ext[a] * SLICE_MARGIN), Math.max(30, ext[b] * SLICE_MARGIN)] as const;
+        const [axU, axV] = fov(0, 1); sc.slice.setMirrorFrame("axial", c, axU, axV);
+        const [coU, coV] = fov(0, 2); sc.slice.setMirrorFrame("coronal", c, coU, coV);
+        const [saU, saV] = fov(1, 2); sc.slice.setMirrorFrame("sagittal", c, saU, saV);
+      } else {
+        for (const o of ORIENTS) sc.slice.recenter(o, c);
+      }
+      frameCamera(c, Math.hypot(ext[0], ext[1], ext[2]) / 2 * 1.15, !refit);
+    } else if (refit) {
       for (const o of ORIENTS) sc.slice.resetView(o);
       frameCamera(sc.center, sc.radius);
     }
@@ -338,20 +347,24 @@ async function main() {
       // one. Fall back to the level nearest the crosshair (the volume centre on a fresh load).
       if (n < 99 && currentLevel == null) {
         const l = nearestLevel(xhair.ras ?? sc.center);
-        if (l != null) { selectLevel(l); return; }
+        if (l != null) { selectLevel(l, true); return; }
       }
-      applyFocus();
+      applyFocus(true);          // the MODE changed — reframe to the new amount of spine
     });
   }
 
   const nameToLabel = Object.fromEntries(Object.entries(LEVEL_NAME).map(([n, s]) => [s, Number(n)]));
   const strip = el("levels");
-  const selectLevel = (label: number) => {
+  /** Move the focus to `label`. The views FOLLOW it at the zoom they already have — stepping down
+   *  the spine should not keep refitting under you. They reframe only when the extent mode changes,
+   *  including the implicit full-spine -> one-vertebra that a level click means. */
+  const selectLevel = (label: number, refit = false) => {
     currentLevel = label;
-    if (extent >= 99) extent = 0;               // a level click means "show me this bone"
+    const modeChanged = extent >= 99;
+    if (modeChanged) extent = 0;                // a level click means "show me this bone"
     const g = sc.rows[0].levels.get(label) ?? sc.rows[1].levels.get(label);
     if (g) { xhair.set(g.centroid); jumpAll(g.centroid); }
-    applyFocus();
+    applyFocus(refit || modeChanged);
     for (const bb of strip.querySelectorAll("button")) {
       bb.classList.toggle("sel", (bb as HTMLElement).dataset.label === String(label));
     }
@@ -536,11 +549,16 @@ async function main() {
       return g?.centroid ?? null;
     },
     zoom: (o: Orientation) => sc.slice.zoom(o),
+    zoomAbout: (o: Orientation, f: number) => {
+      const c = cv[`c-ref-${o}`];
+      sc.slice.zoomAbout(o, f, 0.5, 0.5, c.width || 1, c.height || 1);
+      requestDraw();
+    },
     visibleLevels: (k: MethodKey) => sc.visibleLevels(k),
     currentLevel: () => currentLevel,
     stepLevel: (d: number) => stepLevel(d),
     extent: () => extent,
-    setExtent: (n: number) => { extent = n; applyFocus(); },
+    setExtent: (n: number) => { extent = n; applyFocus(true); },   // matches the chip: a mode change reframes
     methodOpacity: (k: MethodKey) => sc.methodOpacity(k),
     setMethodOpacity: (k: MethodKey, o: number) => { sc.setMethodOpacity(k, o); requestDraw(); },
     smoothing: () => sc.segSmoothing(),

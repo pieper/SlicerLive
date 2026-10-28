@@ -575,6 +575,18 @@ export class SliceRenderer {
   /** Reset pan/zoom for an orientation to the fitted view. */
   resetView(orient: Orientation) { this.viewState[orient] = { panU: 0, panV: 0, zoom: 1 }; }
 
+  /** Centre the in-plane view on `centerRAS` WITHOUT touching zoom — move the view, don't refit it.
+   *  setMirrorFrame sets both because it mirrors a slice node's centre AND field of view; an app
+   *  that is following a target from one place to another wants only the pan. */
+  recenter(orient: Orientation, centerRAS: Vec3) {
+    const b = this.basisOf(orient);
+    const volC: Vec3 = [(this.rasLo[0] + this.rasHi[0]) / 2, (this.rasLo[1] + this.rasHi[1]) / 2, (this.rasLo[2] + this.rasHi[2]) / 2];
+    const d: Vec3 = [centerRAS[0] - volC[0], centerRAS[1] - volC[1], centerRAS[2] - volC[2]];
+    const vs = this.viewState[orient];
+    vs.panU = d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2];
+    vs.panV = d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2];
+  }
+
   /** Snapshot per-orientation pan+zoom (e.g. to persist a view across reloads). */
   getViewState(): Record<Orientation, { panU: number; panV: number; zoom: number }> {
     return structuredClone(this.viewState);

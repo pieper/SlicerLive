@@ -1064,6 +1064,25 @@ var SliceRenderer = class {
       zoom: 1
     };
   }
+  /** Centre the in-plane view on `centerRAS` WITHOUT touching zoom — move the view, don't refit it.
+   *  setMirrorFrame sets both because it mirrors a slice node's centre AND field of view; an app
+   *  that is following a target from one place to another wants only the pan. */
+  recenter(orient, centerRAS) {
+    const b = this.basisOf(orient);
+    const volC = [
+      (this.rasLo[0] + this.rasHi[0]) / 2,
+      (this.rasLo[1] + this.rasHi[1]) / 2,
+      (this.rasLo[2] + this.rasHi[2]) / 2
+    ];
+    const d = [
+      centerRAS[0] - volC[0],
+      centerRAS[1] - volC[1],
+      centerRAS[2] - volC[2]
+    ];
+    const vs = this.viewState[orient];
+    vs.panU = d[0] * b.uDir[0] + d[1] * b.uDir[1] + d[2] * b.uDir[2];
+    vs.panV = d[0] * b.vDir[0] + d[1] * b.vDir[1] + d[2] * b.vDir[2];
+  }
   /** Snapshot per-orientation pan+zoom (e.g. to persist a view across reloads). */
   getViewState() {
     return structuredClone(this.viewState);
@@ -8796,14 +8815,14 @@ async function main() {
     ]
   ];
   const SLICE_MARGIN = 1.5;
-  const frameCamera = (center, radius) => {
+  const frameCamera = (center, radius, keepDistance = false) => {
     const d = [
       camera.focalPoint[0] - camera.position[0],
       camera.focalPoint[1] - camera.position[1],
       camera.focalPoint[2] - camera.position[2]
     ];
     const len = Math.hypot(d[0], d[1], d[2]) || 1;
-    const dist = radius / Math.tan(camera.viewAngle / 2 * Math.PI / 180);
+    const dist = keepDistance ? len : radius / Math.tan(camera.viewAngle / 2 * Math.PI / 180);
     camera.focalPoint = [
       ...center
     ];
@@ -8831,7 +8850,7 @@ async function main() {
       }
     }
   };
-  const applyFocus = () => {
+  const applyFocus = (refit = false) => {
     const box = sc.setExtent(extent >= 99 ? null : currentLevel, extent);
     for (const [id, n] of extents) el(id)?.classList.toggle("on", extent === n);
     updateEmptyNotes();
@@ -8846,18 +8865,22 @@ async function main() {
         box.hi[1] - box.lo[1],
         box.hi[2] - box.lo[2]
       ];
-      const fov = (a, b) => [
-        Math.max(30, ext[a] * SLICE_MARGIN),
-        Math.max(30, ext[b] * SLICE_MARGIN)
-      ];
-      const [axU, axV] = fov(0, 1);
-      sc.slice.setMirrorFrame("axial", c, axU, axV);
-      const [coU, coV] = fov(0, 2);
-      sc.slice.setMirrorFrame("coronal", c, coU, coV);
-      const [saU, saV] = fov(1, 2);
-      sc.slice.setMirrorFrame("sagittal", c, saU, saV);
-      frameCamera(c, Math.hypot(ext[0], ext[1], ext[2]) / 2 * 1.15);
-    } else {
+      if (refit) {
+        const fov = (a, b) => [
+          Math.max(30, ext[a] * SLICE_MARGIN),
+          Math.max(30, ext[b] * SLICE_MARGIN)
+        ];
+        const [axU, axV] = fov(0, 1);
+        sc.slice.setMirrorFrame("axial", c, axU, axV);
+        const [coU, coV] = fov(0, 2);
+        sc.slice.setMirrorFrame("coronal", c, coU, coV);
+        const [saU, saV] = fov(1, 2);
+        sc.slice.setMirrorFrame("sagittal", c, saU, saV);
+      } else {
+        for (const o of ORIENTS) sc.slice.recenter(o, c);
+      }
+      frameCamera(c, Math.hypot(ext[0], ext[1], ext[2]) / 2 * 1.15, !refit);
+    } else if (refit) {
       for (const o of ORIENTS) sc.slice.resetView(o);
       frameCamera(sc.center, sc.radius);
     }
@@ -8883,11 +8906,11 @@ async function main() {
       if (n < 99 && currentLevel == null) {
         const l = nearestLevel(xhair.ras ?? sc.center);
         if (l != null) {
-          selectLevel(l);
+          selectLevel(l, true);
           return;
         }
       }
-      applyFocus();
+      applyFocus(true);
     });
   }
   const nameToLabel = Object.fromEntries(Object.entries(LEVEL_NAME).map(([n, s]) => [
@@ -8895,15 +8918,16 @@ async function main() {
     Number(n)
   ]));
   const strip = el("levels");
-  const selectLevel = (label) => {
+  const selectLevel = (label, refit = false) => {
     currentLevel = label;
-    if (extent >= 99) extent = 0;
+    const modeChanged = extent >= 99;
+    if (modeChanged) extent = 0;
     const g = sc.rows[0].levels.get(label) ?? sc.rows[1].levels.get(label);
     if (g) {
       xhair.set(g.centroid);
       jumpAll(g.centroid);
     }
-    applyFocus();
+    applyFocus(refit || modeChanged);
     for (const bb of strip.querySelectorAll("button")) {
       bb.classList.toggle("sel", bb.dataset.label === String(label));
     }
@@ -9158,13 +9182,18 @@ async function main() {
       return g?.centroid ?? null;
     },
     zoom: (o) => sc.slice.zoom(o),
+    zoomAbout: (o, f) => {
+      const c = cv[`c-ref-${o}`];
+      sc.slice.zoomAbout(o, f, 0.5, 0.5, c.width || 1, c.height || 1);
+      requestDraw();
+    },
     visibleLevels: (k) => sc.visibleLevels(k),
     currentLevel: () => currentLevel,
     stepLevel: (d) => stepLevel(d),
     extent: () => extent,
     setExtent: (n) => {
       extent = n;
-      applyFocus();
+      applyFocus(true);
     },
     methodOpacity: (k) => sc.methodOpacity(k),
     setMethodOpacity: (k, o) => {
