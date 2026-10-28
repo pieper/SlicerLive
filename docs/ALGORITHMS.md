@@ -168,6 +168,134 @@ smooths the normal. Result: crisper than Gaussian (rim/green 0.36 vs 0.45) and t
 volumes will want a banded/edit-local JFA (or the Gaussian fast-proxy during an active stroke). The
 demo's **Render: SDF/Gaussian** button A/Bs the two live.
 
+### Band-limited solid (2026-10-27) — what the smoothing control is for
+
+A labelmap is a **sampled indicator function**, so its voxel staircase is *aliasing*, not anatomy. The
+faithful surface is the 0.5 level set of that indicator **reconstructed at the grid's Nyquist limit**.
+The renderer therefore carries `p = G_σ * 1(label != 0)` in the attr texture's `.b` (the baker's
+finalize writes the 0/1 indicator, the attr blur low-passes it) and takes the surface to be `p = 0.5`.
+σ — the smoothing control — is the *reconstruction width*, and it moves the geometry.
+
+It had previously been established that smoothing must NOT move the surface, because blurring at σ=1
+closed the four-voxel disc space between two vertebrae and fused them. That is a property of blurring
+an **unbounded signed distance** (the field reaches −10 voxels inside a vertebra but only +2 in the
+gap, so averaging pulls the gap negative), not of smoothing: a **bounded** indicator at the centre of a
+4-voxel gap is `2·Φ(-2) ≈ 0.05`, nowhere near 0.5. The remaining cost is the curvature term, ≈ σ²/2R
+inward on a convex ridge of radius R — a quarter voxel at σ=1 on a 2-voxel vertebral process.
+
+Measured (`render/test/bandlimited-solid.ts`, a voxelized sphere at ≈10 px/voxel, silhouette RMS vs its
+best-fit circle — the staircase in the *geometry*, not the shading):
+
+| σ (vox) | 0.25 | 0.5 | 1.0 | 1.5 | 2.0 |
+|---|---|---|---|---|---|
+| before (surface pinned to the voxel face) | 1.71 px | 1.60 | 1.39 | 1.35 | 1.34 |
+| band-limited | 1.16 px | 1.00 | 0.62 | 0.48 | 0.46 |
+
+Two gotchas, both found on real spine data:
+
+- **GEOMETRY AND NORMAL MUST COME FROM THE SAME FIELD.** The previous design froze the surface at the
+  voxel face and sent σ only to the shading normal. A stepped silhouette lit by a velvet normal is what
+  reads as "chunky and over-smoothed at the same time" — the two cues contradict each other.
+- **Difference the gradient over a FULL voxel.** `attr.b` is read trilinearly, so the field is only C0
+  and its gradient jumps at every voxel-face plane. A half-voxel central difference stays inside one
+  cell and reports that cell's gradient, which paints a rectangular lattice of dark creases — a maze —
+  over the surface, worst at small σ where the field is steepest. A full-voxel difference straddles the
+  discontinuity. (Shading roughness on the sphere at σ=0.25: 0.199 → 0.092.)
+
+**No shell band at all: an interval crossing test.** A band wants the PERPENDICULAR distance to the
+surface, and the only way to get that from a scalar field is `(0.5 - p)/|grad p|` — which falls apart
+exactly where `|grad p|` collapses: concave creases where two surfaces meet, and thin features. There
+the estimated distance diverges, no sample lands in the band, and an OPAQUE segment renders dusty with
+background showing through it. That is what "parts of the vertebra get cut off as I rotate" was, and it
+predates the band-limited work (it was worse under the old shell).
+
+`p > 0.5` has no such failure. The surface is found by asking whether THIS ray interval contains the
+crossing, which cannot miss one at any σ, curvature or incidence. `Field.intervalSampling` supplies the
+exact distance back to this field's previous sample, so consecutive intervals tile the ray with no gap
+and no overlap — which is what makes the test exact under the per-step ray jitter and across an
+empty-space leap. One crossing contributes exactly the target opacity T, so no band, no profile
+integral, and no dependence on the sample step (verified: 4× finer stepping is byte-identical).
+
+Measured (`render/test/shell-opacity.ts`, an opacity-1 segment over a blue background; any blue left in
+its eroded interior is background leaking through a surface that should be solid):
+
+| | σ 0.25 | 0.5 | 1.0 | 2.0 | T=0.25 | T=0.5 | T=0.75 |
+|---|---|---|---|---|---|---|---|
+| leak, shell band | 2.85% | 0.79% | 0.78% | 0.78% | 0.296 | 0.569 | 0.811 |
+| leak, crossing test | 0.06% | 0.05% | 0.06% | 0.09% | **0.438** | **0.750** | **0.938** |
+
+The last three columns are the composited opacity of a translucent segment, which must be `1-(1-T)²`
+(front face and back face, as a pair of polydata surfaces). The shell band under-delivered it by 20-30%
+— the same defect as the leak, seen head-on. The crossing test hits it exactly.
+
+**GOTCHA when measuring any of this**: the present target is `rgba8unorm-srgb`, so a read-back byte is
+gamma-encoded. Differencing raw bytes reads a correct `1-(1-T)²` composite as ~1.3 crossings and sends
+you hunting a renderer bug that is not there.
+
+**Solid, not a shell.** Clip planes are handled by the same test: the ray enters the kept half-space
+already inside the solid, with no surface crossing, so the previous sample being on the discarded side
+IS the face, and it takes the plane's normal. The sphere-trace skip horizon is clamped to the nearest
+plane while inside the solid, or it sails past the cap. Measured rim/centre brightness over the cut
+disc: 0.62 (hollow) → 1.00 (flat cap); the uncapped multi-material path, unchanged, sits at 0.55.
+
+**Cost**: the soft band also gave sub-pixel silhouette AA, and a binary crossing test does not — edges
+are one pixel harder in a single frame. The accumulation path's sub-pixel camera jitter covers it where
+it runs; `renderToView` (what the spine demo settles to) does not.
+
+### Region re-flood: the "clipping plane" that was really a partial bake (2026-10-28)
+
+Per-label visibility takes a fast path — rewrite the changed labels' box in the labelmap and re-flood
+only that box. It is worth keeping: a level step costs **~14 ms against ~390 ms** for a full rebake on
+a 256³ grid (spine-compare, both rows), which is the difference between holding an arrow key down and
+waiting on each press. It was also wrong in two ways that a user reads as "the renderer is clipping my
+data, and it moves when I rotate":
+
+- **The jump-flood schedule was sized to the BOX.** Its largest step was ~the box extent, so a voxel
+  inside the box whose nearest surface lay outside found **no seed at all**, reported 1e3 mm, and the
+  sphere-trace skip leapt straight through the surface that was really there — the shell came back cut
+  along a flat plane. Fix: dispatch over the box but run the **full-grid** step schedule. The taps read
+  the ping-pong copy of the previous full flood outside the box, which is what lets a large step find a
+  valid exterior seed; it is a handful more passes over a few per cent of the grid.
+- **The re-init halo (8 voxels) was narrower than the gap to the next structure.** Seeds just outside
+  the box still pointed at the surface deleted inside it, so a box voxel inherited a phantom: the label
+  you just hid, still standing. Fix: halo 24 voxels (`SegmentationLogic.regionToIjk`), which has to
+  exceed the spacing to the next real structure (~15-20 mm between vertebrae).
+
+Two more, found by sweeping EVERY level of the spine and comparing each arrow step against a full
+rebake of the same level (22 steps × 2 rows × 3 extent modes):
+
+- **A region patch needs a flood to patch.** Going from "this method has no label in range" to its
+  first one patches a seed texture with no seeds in it at all, and comes back as a scatter of
+  speckles: 511 lit px against 5500. The spine demo now takes the full bake when the previous bake
+  was empty — once per row, on the step where a method's labels first come into range.
+- **The flood must not read outside the ring it re-seeded.** Letting the schedule run to the full
+  grid lets a tap land on a seed from an older bake, pointing at a surface since removed. The
+  schedule is capped at the halo width (`SegmentationLogic.haloMaxStep`), and a voxel whose nearest
+  surface is beyond the halo honestly has no seed — the skip refuses to leap on that, so the ray
+  marches and still finds it.
+
+**Known residual**: at ±3 a walk down the spine still reaches one state where the patched bake renders
+~5% less than a full one — reproducibly via that walk, not reproducibly on the transition alone, and
+not explained. The fast path is therefore scoped to the modes verified clean end to end ("1 vert" and
+±1, max deviation 0.6%); ±3 takes the full bake. Stepping stays ~40 ms median.
+
+Belt and braces in the renderer: `skip_seg` now refuses to leap on `|sd| > 500 mm`. That is not a
+distance, it is "the flood never got here", and leaping on it is what turns a partial bake into a
+visible cut. No real SDF grid here spans 500 mm.
+
+Measured on myeloma/Myel_046 in "1 vert": one arrow step rendered **3221 lit px where a full rebake of
+the same level rendered 4994**; five steps left a **whole extra vertebra** drawn. After: 4994 vs 4994,
+and 5873 vs 5870. `examples/spine/test/level-step-equivalence.ts` checks step-vs-full equivalence on the
+real case — note it passes on the unfixed code too, so it is an invariant check, not a proven guard for
+this specific regression.
+
+**The colour-seam blur is NOT the geometry σ.** It used to be `min(1, σ)`, so asking for a smoother
+SURFACE also dissolved the label boundaries — and in a comparison view the boundary is the entire
+signal. Worst case was the SPINEPS disc layer: a near-white disc between two saturated vertebra
+colours, blurred a full voxel, reads as a milky smear across both bones instead of a disc. The seam
+blur's only job is hiding the per-voxel staircase of the flooded region colour, so it is now capped at
+0.4 voxel (`JfaSdfBaker.seamSigma`) independently of σ.
+
 ---
 
 ## Milestones (each is a reviewable stop)

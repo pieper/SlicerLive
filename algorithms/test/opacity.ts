@@ -29,13 +29,20 @@ scene.build([logic.field()]);
 scene.setBackground(0.05, 0.06, 0.09);
 scene.setCamera([0, -430, 0], [0, 0, 0], [0, 0, 1], 30, W, H);
 
-// Total RED energy in the central region — where the blue segment is in FRONT of the red one. Opaque
-// blue blocks the red (≈0 red there); translucent blue lets it through (red rises).
+// Mean RED in the central region — where the blue segment is in FRONT of the red one. Opaque blue
+// blocks the red (its own low red channel is all that shows); translucent blue lets it through.
+//
+// This used to measure max(0, red - blue) per pixel. That only works if the translucent front
+// segment is transparent enough for red to OUTWEIGH blue, which it is not once the renderer honours
+// the opacity contract: a 35%-opaque segment shows a front AND a back face, so it composites to
+// 1-(1-0.35)² = 58% blue over 42% red — visibly purple, but still blue-dominant. The old shell band
+// leaked (an opaque segment was not opaque — see render/test/shell-opacity.ts), which is the only
+// reason red ever dominated here. Mean red measures the same thing without that assumption.
 const redThrough = (rgba: Uint8Array): number => {
-  let sum = 0;
+  let sum = 0, n = 0;
   const x0 = W / 2 - 40, x1 = W / 2 + 40, y0 = H / 2 - 40, y1 = H / 2 + 40;
-  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const i = (y * W + x) * 4; sum += Math.max(0, rgba[i] - rgba[i + 2]); }   // red over blue
-  return sum;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { sum += rgba[(y * W + x) * 4]; n++; }
+  return sum / n;
 };
 
 logic.setLabelOpacity(2, 1.0); logic.refineNow();
@@ -46,7 +53,7 @@ logic.setLabelOpacity(2, 0.35); logic.refineNow();
 const translucent = redThrough(await scene.renderToRGBA(W, H));
 await Deno.writeFile(new URL("./opacity-translucent.png", import.meta.url).pathname, await encodePNG(await scene.renderToRGBA(W, H), W, H));
 
-console.log(`red-through-blue pixels: opaque=${opaque}  translucent=${translucent}`);
+console.log(`mean red in the overlap: opaque=${opaque.toFixed(1)}  translucent=${translucent.toFixed(1)}`);
 const ok = translucent > opaque * 1.5;
 console.log(ok ? "PASS — translucent front segment reveals the segment behind" : "FAIL");
 gpu.device.destroy();
