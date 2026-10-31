@@ -42,7 +42,8 @@ Do not re-litigate these without a reason; each cost some analysis.
 | **Carrier** | One Secondary Capture per scene save. Screenshot as uncompressed RGB pixel data. The scene's **non-bulk** state in an MRCOM private block. |
 | **Bulk** | **Standard DICOM objects wherever one exists** (§3): SEG for binary segmentations, Surface Segmentation for meshes, the source image series referenced. The private block is the fallback for bulk with no standard representation. |
 | **Encapsulated STL/OBJ/MTL** | **Rejected.** Not flexible enough: an opaque document with no segment identity, no coded terminology, no per-surface colour or display state, and no frame of reference. Surface Segmentation carries all of it. |
-| **A scene save is a derived series** | New instances go in a new series derived from the source, never into the source series (§3.4). |
+| **A scene save is a derived series, one per modality** | New instances go in new series derived from the source, never into a source series. `Modality` is series-level, so an `OT` series carries the Secondary Capture and a `SEG` series carries the Segmentation and Surface Segmentation instances (§3.4). |
+| **Scope now: DICOM-in** | The path being built is *scenes authored over DICOM*, where the source instances exist. Bulk with no DICOM origin goes in **private tags** (§3.5). Exporting a non-DICOM volume *to* DICOM so it can be referenced properly is a real future direction, not this milestone (§3.6). |
 | **Private group / creator** | `0x4D43` ("MC"), creator `"MRCOM.MRSON.1"`. Checked unclaimed against dcmjs, DCMTK (2836 entries, no `4Dxx` at all) and GDCM (only `4d4d`, its own test group). **The creator is the identity; the block number is never assumed.** |
 | **Digests** | Bare lowercase hex, algorithm declared once. `"sha256-"` + 64 hex is 71 characters and `LO` is 64 — it would be silently truncated. |
 | **Reference is render-lossless, not byte-lossless** | Chunk hashes cannot be reproduced bit-for-bit across versions, so a reader reconstructs, **verifies** against a recorded `voxelDigest`, re-chunks, and rewrites the descriptor with honest hashes. |
@@ -106,10 +107,9 @@ DICOM triangle indices are **1-based**; mrson's are 0-based, so the writer offse
 New instances never go into a source series. Each scene save creates new series under the **source
 study**, all tied together so they are discoverable as one unit.
 
-**Recommended structure, which needs your sign-off** (§9, question 1). DICOM makes `Modality` a
-series-level attribute, and a Secondary Capture is `OT` while both Segmentation and Surface
-Segmentation are `SEG` — so one literal series cannot hold all of them without mixing modalities,
-which readers handle badly. The proposal is therefore **one derived series per modality per save**:
+**One derived series per modality per save.** `Modality` is a series-level attribute, and a
+Secondary Capture is `OT` while both Segmentation and Surface Segmentation are `SEG` — so one literal
+series cannot hold all of them without mixing modalities, which readers handle badly:
 
 ```
 Study (the source study)
@@ -136,7 +136,7 @@ Three cases, all real, all with a fallback rather than a failure:
    `PerFrameFunctionalGroupsSequence` with per-frame `ImagePositionPatient`, and dcmjs's
    `Segmentation` derivation reads them from the actual source datasets. If a scene's segmentation
    sits on a volume that came from NRRD, or from DICOM the writer no longer holds, there is nothing
-   to derive from — so that segmentation is **embedded** instead.
+   to derive from — so that segmentation is **embedded** instead. §3.6 is the better answer, later.
 2. **A mesh over 65 535 points needs the `OL` VR, which dcmjs does not support.**
    `TrianglePointIndexList` is `OW`, so 16-bit indices cap a surface at 65 535 points.
    `LongTrianglePointIndexList` is `OL` in the current standard — and dcmjs has no `OL` at all
@@ -146,9 +146,42 @@ Three cases, all real, all with a fallback rather than a failure:
    large mesh across several `SurfaceSequence` items under the cap, re-indexing each; embed.
 3. **A surface needs a `FrameOfReferenceUID`.** mrson meshes are in RAS world. If the scene derives
    from a DICOM series the frame comes from it; otherwise one has to be minted, and a minted frame
-   is not interoperable with anything. Mint it and say so in the manifest.
+   is not interoperable with anything. Mint it and say so in the manifest — or, later, §3.6.
 
 The manifest records which path each piece of bulk took, so a reader never has to guess.
+
+### 3.6 Future: export a non-DICOM volume *to* DICOM, then reference it
+
+Flagged for later, not this milestone, but it is the clean answer to both §3.5 case 1 and case 3 and
+it should shape the interfaces now rather than being bolted on.
+
+Today a segmentation drawn on a volume that came from NRRD has to be embedded, because there are no
+source instances to derive a SEG from and no frame of reference for a surface to live in. The fix is
+to **create** them: write the volume itself as DICOM first, and then the SEG or Surface Segmentation
+references it by `FrameOfReferenceUID` like any other derived object. The scene stops having a
+non-DICOM hole in it.
+
+Two targets, depending on what is known about the volume:
+
+- **Modality known** → a **Legacy Converted Enhanced** instance: CT `1.2.840.10008.5.1.4.1.1.2.2`,
+  MR `…4.4`, PET `…128.1`. These IODs carry `SharedFunctionalGroupsSequence` and
+  `PerFrameFunctionalGroupsSequence`, so `PlanePositionSequence`, `PlaneOrientationSequence` and
+  `PixelMeasuresSequence` give **genuine per-frame** position, orientation and spacing, plus a
+  `FrameOfReferenceUID`. dcmjs already names the CT and MR classes. This is the strong path.
+- **Modality unknown** → a **multi-frame Secondary Capture**
+  (`1.2.840.10008.5.1.4.1.1.7.2` grayscale word, `…7.4` true colour; neither is named in dcmjs, so
+  use the literal). One caveat worth knowing before relying on it: the multi-frame SC IODs have **no
+  functional groups**, so there is nowhere to put per-frame `ImagePositionPatient`. What is available
+  is the **Image Plane module**, which CP-2330 added to Secondary Capture in 2024 — a shared
+  `ImageOrientationPatient`, the first frame's `ImagePositionPatient`, `PixelSpacing` and
+  `SpacingBetweenSlices`. That describes a *regularly spaced* volume, which is the common case, and
+  it still yields a `FrameOfReferenceUID` for a SEG or Surface to reference. A genuinely irregular
+  stack needs the Legacy Converted route instead.
+
+What this would change elsewhere: `logic/dicom/` grows a volume writer, §3.5's fallbacks become rare
+rather than routine, and the manifest gains a way to say "this source instance was minted by us, not
+acquired" — which matters for provenance, since a reader should not mistake a converted NRRD for an
+acquisition.
 
 ---
 
@@ -323,7 +356,7 @@ first and the native one conforms to it (not the reverse), and a **conformance t
 same query set against both backends and compare**, the way `mrson/validate-parity.test.ts` pins the
 TypeScript and Python validators to each other.
 
-Albula is a Deno app, so where it sits in this is an open question (§9, question 2): its web layer
+Albula is a Deno app, so where it sits in this is an open question (§9, question 1): its web layer
 may be able to use the FSA adapter, or it may want a third `node:sqlite` backend behind the same
 interface. The interface is the deliverable; a third backend is a file.
 
@@ -445,16 +478,12 @@ beside this repo, or `SLICERLIVE_GALLERY` points at them; it skips rather than f
 
 ## 9. Open questions
 
-1. **Does a scene save make one derived series per modality, or one per SOP class?** §3.4 proposes
-   per modality — an `OT` series for the Secondary Capture and a `SEG` series holding both the
-   Segmentation and Surface Segmentation instances, since both are `Modality SEG`. One series per
-   SOP class is also defensible and some readers prefer it. Needs a decision before 14c.
-2. **Where does Albula sit in §6.2?** Its web layer may be able to use the FSA adapter, or it may
+1. **Where does Albula sit in §6.2?** Its web layer may be able to use the FSA adapter, or it may
    want a third `node:sqlite` backend behind the same interface.
-3. **Minted frames of reference.** §3.5 case 3: a surface from a non-DICOM volume needs a
+2. **Minted frames of reference.** §3.5 case 3: a surface from a non-DICOM volume needs a
    `FrameOfReferenceUID` that nothing else shares. Mint and record, or refuse to write a surface at
-   all in that case?
-4. **The `OL` PR.** §5. Raise it now so it is in review by the time 14b needs it, or split large
+   all in that case? §3.6 removes the question eventually; it stands until then.
+3. **The `OL` PR.** §5. Raise it now so it is in review by the time 14b needs it, or split large
    meshes in the meantime and raise it later?
 
 ## 10. Open risks

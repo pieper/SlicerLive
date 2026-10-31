@@ -479,11 +479,14 @@ never has to guess.
 
 1. **A SEG needs the source instances, not just their UIDs** — a conformant SEG carries per-frame
    `ImagePositionPatient`. A segmentation over a volume that did not come from DICOM, or whose source
-   instances the writer no longer holds, is embedded.
+   instances the writer no longer holds, is embedded. The eventual fix is to write that volume to
+   DICOM first and reference it, which removes the case entirely; see
+   [`MRCOM-PLAN.md`](MRCOM-PLAN.md) §3.6. This version embeds.
 2. **A mesh over 65 535 points needs `OL`**, because `TrianglePointIndexList` is `OW` and 16-bit
    indices cap a surface. Split across `SurfaceSequence` items under the cap, or embed.
 3. **A surface needs a `FrameOfReferenceUID`.** mrson meshes are RAS world; if the scene does not
-   derive from a DICOM series, a minted frame is not interoperable with anything. Mint it and say so.
+   derive from a DICOM series, a minted frame is not interoperable with anything. Mint it and record
+   that it was minted ([`MRCOM-PLAN.md`](MRCOM-PLAN.md) §3.6 removes the need, later).
 
 ### 7.5 A scene save is a derived series
 
@@ -496,10 +499,10 @@ Study (the source study)
 └── Series  SEG NEW   n instances  the SEG and Surface Segmentation objects
 ```
 
-`Modality` is a series-level attribute and a Secondary Capture is `OT` while both Segmentation and
-Surface Segmentation are `SEG`, so one literal series cannot hold all of them without mixing
-modalities. What ties the save together, in **standard** attributes so a provenance index never needs
-the private block:
+**One derived series per modality per save.** `Modality` is a series-level attribute and a Secondary
+Capture is `OT` while both Segmentation and Surface Segmentation are `SEG`, so one literal series
+cannot hold all of them without mixing modalities. What ties the save together, in **standard**
+attributes so a provenance index never needs the private block:
 
 - every new instance shares the source `StudyInstanceUID`;
 - the SC's `ReferencedSeriesSequence` lists **the source series first** (§3's primary parent) and then
