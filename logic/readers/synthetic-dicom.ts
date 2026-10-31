@@ -190,10 +190,13 @@ export interface SyntheticSeg {
 /**
  * Build a synthetic DICOM SEG over a series from makeDicomSeries.
  *
- * Enough for MRCOM's purposes: it carries `ReferencedSeriesSequence`, a `SegmentSequence` and
- * bit-packed `BINARY` frames, so a bundle can reference it and a reader can see what it points at.
- * It is NOT a full SEG - no shared/per-frame functional group geometry - because MRCOM embeds
- * segmentation voxels rather than resolving them in M1 (docs/MRCOM-PLAN.md section 6, M6).
+ * Enough to be referenced and read: it carries `ReferencedSeriesSequence`, a `SegmentSequence` and
+ * bit-packed `BINARY` frames. It is NOT a full SEG - no shared or per-frame functional group
+ * geometry - so it is a fixture for provenance and reference tests, not a conformant object.
+ *
+ * MRCOM now writes real SEG objects for segmentation bulk (docs/MRCOM-SCENE-BUNDLE.md section 7.2),
+ * so the conformant writer lives in logic/dicom/segmentation.ts (task 14a) and this stays a
+ * lightweight stand-in for tests that only need something to point at.
  */
 export function makeDicomSeg(
   dcmjs: DcmjsLike,

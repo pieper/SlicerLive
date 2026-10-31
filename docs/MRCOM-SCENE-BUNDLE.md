@@ -420,33 +420,104 @@ TypeScript and from `tools/mrcom_check.py`.)*
 
 ---
 
-## 7. Scope of this version
+## 7. Where bulk lives
 
-### 7.1 Images — by reference or embedded
-Full support, both modes.
+Revised 2026-10-31. **Anything with a standard DICOM representation gets one.** Only what has none
+goes in the private block. The reasoning and the fallbacks are in
+[`MRCOM-PLAN.md`](MRCOM-PLAN.md) §3; this section is the normative part.
 
-### 7.2 Segmentations — embedded, referenced as provenance
-A DICOM SEG the scene displays is listed in `ReferencedSeriesSequence` and described in
-`bulk.sources` with `kind: "dicom-seg"`, so lineage and terminology are recorded. But the **voxels are
-embedded**, not resolved from the SEG, in this version: a binary labelmap deflates to very little, and
-the SEG rasterizer (overlap layering, per-frame plane geometry, coded terminology) currently lives
-inside a decode worker rather than in a reusable reader. The descriptor shape is specified now so that
-resolving a SEG later changes no bytes in the format.
+| mrson | DICOM | How |
+|---|---|---|
+| `image` bulk | the source series | **referenced** — never copied |
+| `segmentation` bulk | **Segmentation** `1.2.840.10008.5.1.4.1.1.66.4` | a **new SEG instance** in the derived series, referenced from the scene |
+| `mesh` | **Surface Segmentation** `1.2.840.10008.5.1.4.1.1.66.5` | a **new Surface Segmentation instance** in the derived series, referenced |
+| `markup` measurements | SR TID 1500 / GSPS | deferred; carried in mrson for now |
+| camera, view, slice, layout, transforms, transfer functions, colour tables, display state | *no standard representation* | the **mrson in the private block** |
 
-### 7.3 Meshes and surfaces — embedded; `dicom-surface` reserved
-Mesh geometry is embedded as content-addressed blobs. A `dicom-surface` source kind is **reserved**
-for referencing a standard surface instance — Surface Segmentation (`1.2.840.10008.5.1.4.1.1.66.5`) or
-Encapsulated STL / OBJ / MTL (`…104.3` / `…104.4` / `…104.5`) — and a writer records it when a caller
-supplies one, so provenance can be captured before resolution is implemented.
+So the private block carries the scene's **non-bulk state**, and is small. `EMBED` is a fallback —
+for a self-contained single file, or for bulk that cannot be written as a standard object (§7.4) —
+not the normal case.
 
-### 7.4 Size, and why there is a cap
-A bundle is built as a single byte buffer, so an `EMBED` of a whole study will exhaust memory before it
-exhausts DICOM. A writer refuses above a configured cap (default 512 MiB) and says to use `REFERENCE`
-or `HYBRID` instead, which is almost always the right answer anyway.
+### 7.1 Images — referenced
+
+Unchanged. The source series is referenced by SOPInstanceUID and resolved per §6.
+
+### 7.2 Segmentations — a real SEG
+
+A binary segmentation is written as a **Segmentation** instance in the derived series (§7.5) and
+referenced from the scene with a `dicom-seg` descriptor. It carries its own `SegmentSequence` with
+coded terminology and `RecommendedDisplayCIELabValue`, so OHIF, MITK, 3D Slicer, dcmqi and any PACS
+that knows the IOD can use it.
+
+Embedding a labelmap in a private tag would make it readable by exactly one program, which defeats
+the purpose of riding the installed base.
+
+### 7.3 Meshes — a real Surface Segmentation
+
+A triangle mesh is written as a **Surface Segmentation** instance and referenced with a
+`dicom-surface` descriptor. The mrson mesh blobs map onto it almost directly:
+
+| mrson | Surface Segmentation |
+|---|---|
+| `points` (float32 xyz) | `PointCoordinatesData` (0066,0016), **OF** |
+| `triangles` (uint32) | `TrianglePointIndexList` (0066,0023) **OW**, or `LongTrianglePointIndexList` (0066,0041) **OL** |
+| `normals` (float32) | `VectorCoordinateData` (0066,0021) in `SurfacePointsNormalsSequence`, **OF** |
+| segment name, colour, terminology | `SegmentSequence`, `RecommendedDisplayCIELabValue` |
+
+**DICOM triangle indices are 1-based**; mrson's are 0-based, so a writer offsets them and a reader
+subtracts.
+
+**Encapsulated STL / OBJ / MTL is explicitly NOT used.** It is a document, not a segmentation: no
+segment identity, no coded terminology, no per-surface colour or display state, and geometry in
+whatever space the file used rather than a declared frame of reference. Surface Segmentation has all
+of it. A reader may encounter an encapsulated object in the wild; MRCOM never writes one.
+
+### 7.4 When a standard object is not possible
+
+Each case falls back to embedding, and the manifest records which path the bulk took, so a reader
+never has to guess.
+
+1. **A SEG needs the source instances, not just their UIDs** — a conformant SEG carries per-frame
+   `ImagePositionPatient`. A segmentation over a volume that did not come from DICOM, or whose source
+   instances the writer no longer holds, is embedded.
+2. **A mesh over 65 535 points needs `OL`**, because `TrianglePointIndexList` is `OW` and 16-bit
+   indices cap a surface. Split across `SurfaceSequence` items under the cap, or embed.
+3. **A surface needs a `FrameOfReferenceUID`.** mrson meshes are RAS world; if the scene does not
+   derive from a DICOM series, a minted frame is not interoperable with anything. Mint it and say so.
+
+### 7.5 A scene save is a derived series
+
+New instances never go into a source series. Each save creates new series under the **source study**:
+
+```
+Study (the source study)
+├── Series  CT        the source images                    (referenced, untouched)
+├── Series  OT  NEW   1 instance   the MRCOM Secondary Capture: mrson + screenshot
+└── Series  SEG NEW   n instances  the SEG and Surface Segmentation objects
+```
+
+`Modality` is a series-level attribute and a Secondary Capture is `OT` while both Segmentation and
+Surface Segmentation are `SEG`, so one literal series cannot hold all of them without mixing
+modalities. What ties the save together, in **standard** attributes so a provenance index never needs
+the private block:
+
+- every new instance shares the source `StudyInstanceUID`;
+- the SC's `ReferencedSeriesSequence` lists **the source series first** (§3's primary parent) and then
+  the new SEG series;
+- every new instance carries the same `DerivationDescription` and `DerivationCodeSequence`;
+- every new instance also carries the save's `MRCOMBundleUID` in an MRCOM private block, as a
+  convenience only — the standard attributes above are authoritative, because de-identification
+  removes private attributes by default.
+
+### 7.6 Size, and why there is a cap
+
+A bundle is built as a single byte buffer, so an `EMBED` of a whole study will exhaust memory before
+it exhausts DICOM. A writer refuses above a configured cap (default 512 MiB) and says to use
+`REFERENCE` or `HYBRID` instead, which is almost always the right answer anyway. Writing bulk as
+standard objects (§7.2, §7.3) removes most of the pressure that made this likely.
 
 `MRCOMBundleUID` is a UID rather than a flag so that a future version can split one scene across
-several instances without a format break. **This version does not split**, and a reader may assume one
-bundle is one instance.
+several instances without a format break, and so that every instance of one save can name it.
 
 ---
 

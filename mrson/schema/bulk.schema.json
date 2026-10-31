@@ -130,11 +130,17 @@
       "since": "mrson 0, MRCOM 1",
       "doc": [
         "Bulk BY REFERENCE: 'this object's bulk is these DICOM instances.' Defined by",
-        "docs/MRCOM-SCENE-BUNDLE.md sections 4 and 6. Instances are named by SOPInstanceUID,",
+        "docs/MRCOM-SCENE-BUNDLE.md section 7. Instances are named by SOPInstanceUID,",
         "which is authoritative and archive-independent; `retrieve` entries are ordered HINTS.",
         "A reader reconstructs, VERIFIES against `recon`, re-chunks, and replaces this descriptor",
-        "with an honest `zarr` descriptor for the bytes it actually has \u2014 it never trusts a chunk",
-        "hash it cannot recompute."
+        "with an honest `zarr` descriptor for the bytes it actually has - it never trusts a chunk",
+        "hash it cannot recompute.",
+        "",
+        "kinds: dicom-series (the source images, referenced), dicom-seg (a Segmentation instance,",
+        "1.2.840.10008.5.1.4.1.1.66.4), dicom-surface (a Surface Segmentation instance,",
+        "1.2.840.10008.5.1.4.1.1.66.5). Encapsulated STL/OBJ/MTL is deliberately NOT a kind:",
+        "it is a document, not a segmentation - no segment identity, no coded terminology, no",
+        "per-surface colour, no frame of reference. See MRCOM-SCENE-BUNDLE.md section 7.3."
       ],
       "required": [
         "kind",
@@ -162,7 +168,8 @@
         "sopClassUID": {
           "kind": "string",
           "optional": true,
-          "pattern": "^[0-9.]{1,64}$"
+          "pattern": "^[0-9.]{1,64}$",
+          "doc": "1.2.840.10008.5.1.4.1.1.66.4 for dicom-seg, 1.2.840.10008.5.1.4.1.1.66.5 for dicom-surface, or the image storage class for dicom-series."
         },
         "frameOfReferenceUID": {
           "kind": "string",
