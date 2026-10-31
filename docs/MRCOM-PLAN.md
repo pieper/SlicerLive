@@ -43,7 +43,7 @@ Do not re-litigate these without a reason; each cost some analysis.
 | **Bulk** | **Standard DICOM objects wherever one exists** (§3): SEG for binary segmentations, Surface Segmentation for meshes, the source image series referenced. The private block is the fallback for bulk with no standard representation. |
 | **Encapsulated STL/OBJ/MTL** | **Rejected.** Not flexible enough: an opaque document with no segment identity, no coded terminology, no per-surface colour or display state, and no frame of reference. Surface Segmentation carries all of it. |
 | **A scene save is a derived series, one per modality** | New instances go in new series derived from the source, never into a source series. `Modality` is series-level, so an `OT` series carries the Secondary Capture and a `SEG` series carries the Segmentation and Surface Segmentation instances (§3.4). |
-| **Scope now: DICOM-in** | The path being built is *scenes authored over DICOM*, where the source instances exist. Bulk with no DICOM origin goes in **private tags** (§3.5). Exporting a non-DICOM volume *to* DICOM so it can be referenced properly is a real future direction, not this milestone (§3.6). |
+| **Scope now: DICOM-in** | The path being built is *scenes authored over DICOM*, where the source instances exist. Bulk with no DICOM origin goes in **private tags** (§3.5). Exporting a non-DICOM volume *to* DICOM so it can be referenced properly is a real and standard-conformant future direction, not this milestone (§3.6). |
 | **Private group / creator** | `0x4D43` ("MC"), creator `"MRCOM.MRSON.1"`. Checked unclaimed against dcmjs, DCMTK (2836 entries, no `4Dxx` at all) and GDCM (only `4d4d`, its own test group). **The creator is the identity; the block number is never assumed.** |
 | **Digests** | Bare lowercase hex, algorithm declared once. `"sha256-"` + 64 hex is 71 characters and `LO` is 64 — it would be silently truncated. |
 | **Reference is render-lossless, not byte-lossless** | Chunk hashes cannot be reproduced bit-for-bit across versions, so a reader reconstructs, **verifies** against a recorded `voxelDigest`, re-chunks, and rewrites the descriptor with honest hashes. |
@@ -161,22 +161,77 @@ to **create** them: write the volume itself as DICOM first, and then the SEG or 
 references it by `FrameOfReferenceUID` like any other derived object. The scene stops having a
 non-DICOM hole in it.
 
-Two targets, depending on what is known about the volume:
+**Multi-frame Secondary Capture genuinely supports per-frame position, and has for years.** An
+earlier draft of this plan asserted the opposite and was wrong. Checked against PS3.3 2026d, with the
+provenance traced through two change proposals:
+
+- **CP 600** added the Pixel Measures, Plane Position (Patient) and Plane Orientation (Patient)
+  functional group macros and the Frame of Reference module to the **multi-frame Grayscale and True
+  Color SC** objects. Its stated motivation, quoted from CP-2330's rationale, was "use cases that
+  generate information as a result of processing that is not modality specific and often contains
+  color information, but which to be useful requires preservation of spatial location information in
+  a 3D patient-relative coordinate system." A release diff confirms the capability was already in
+  PS3.3 **2023a**, so this is long-standing, not new.
+- **CP-2330** (David Clunie, submitted 2023-07-26, final text 2024-03-24) then did the *single-frame*
+  case: it added **Image Plane** and **Frame of Reference** to the single-frame SC IOD, because "it
+  has become common practice to use a Standard Extended form of the traditional single frame
+  Secondary Capture SOP Class in a similar manner to the CP 600 approach, particularly for those
+  applications that create **very large individual image frames (e.g., of photographic size)**." It
+  also removed the note deprecating single-frame SC, "since it has proven impractical to actually
+  retire" it. So CP-2330 blessed existing practice rather than inventing a mechanism.
+
+What PS3.3 2026d says now:
+
+- The IOD module tables for **Multi-frame Grayscale Byte** (`…7.2`), **Grayscale Word** (`…7.3`) and
+  **True Color** (`…7.4`) each include **Multi-frame Functional Groups** (C.7.6.16), usage **`U`**.
+- The permitted functional group macros are exactly three — **Pixel Measures**, **Plane Position
+  (Patient)** and **Plane Orientation (Patient)** — each usage `C`, with interlocking conditions
+  ("Required if ‹either of the other two› Macros Present"). So they are **all-three-or-none**:
+  optional as a set, mandatory as a set once you start.
+- Those macros may appear in **`PerFrameFunctionalGroupsSequence` (5200,9230)**, not only in the
+  shared sequence — C.7.6.16 sanctions either placement and the SC tables impose no restriction. So
+  **per-frame `ImagePositionPatient` is available.**
+- Each of the three IODs also gained a **Frame of Reference** IE, usage `C`: *"Required if Pixel
+  Measures or Plane Position (Patient) or Plane Orientation (Patient) Functional Group Macros
+  Present"* — which is precisely the `FrameOfReferenceUID` a SEG or Surface needs to reference.
+
+The practical encoding for a regularly sampled volume: **Plane Orientation + Pixel Measures in
+`SharedFunctionalGroupsSequence`, Plane Position per frame.** A single functional group may not
+appear in both sequences.
+
+Two caveats worth knowing before relying on it:
+
+- **Multi-frame Single Bit SC (`…7.1`) has none of this** — no Multi-frame Functional Groups module,
+  no macro table, no Frame of Reference IE. Do not plan on geometry there.
+- **The standard does not *compel* the position values.** Multi-frame SC has no `FrameType` and no
+  `VolumetricProperties`, and its SOP classes are not in the UID lists those generic conditions name
+  — so every one of `ImagePositionPatient`, `ImageOrientationPatient`, `PixelSpacing` and
+  `SliceThickness` falls through to *"May be present otherwise"*. The IOD table still forces all
+  three macros to travel together once one is present, but nothing makes the values non-empty.
+  Populate them all; just do not expect the conditional machinery to catch a writer that does not.
+
+So the two export targets are:
 
 - **Modality known** → a **Legacy Converted Enhanced** instance: CT `1.2.840.10008.5.1.4.1.1.2.2`,
-  MR `…4.4`, PET `…128.1`. These IODs carry `SharedFunctionalGroupsSequence` and
-  `PerFrameFunctionalGroupsSequence`, so `PlanePositionSequence`, `PlaneOrientationSequence` and
-  `PixelMeasuresSequence` give **genuine per-frame** position, orientation and spacing, plus a
-  `FrameOfReferenceUID`. dcmjs already names the CT and MR classes. This is the strong path.
-- **Modality unknown** → a **multi-frame Secondary Capture**
-  (`1.2.840.10008.5.1.4.1.1.7.2` grayscale word, `…7.4` true colour; neither is named in dcmjs, so
-  use the literal). One caveat worth knowing before relying on it: the multi-frame SC IODs have **no
-  functional groups**, so there is nowhere to put per-frame `ImagePositionPatient`. What is available
-  is the **Image Plane module**, which CP-2330 added to Secondary Capture in 2024 — a shared
-  `ImageOrientationPatient`, the first frame's `ImagePositionPatient`, `PixelSpacing` and
-  `SpacingBetweenSlices`. That describes a *regularly spaced* volume, which is the common case, and
-  it still yields a `FrameOfReferenceUID` for a SEG or Surface to reference. A genuinely irregular
-  stack needs the Legacy Converted route instead.
+  MR `…4.4`, PET `…128.1`. Designed for exactly this conversion, with `FrameType` and
+  `VolumetricProperties` so the conditional machinery *does* bite, and dcmjs already names the CT and
+  MR classes.
+- **Modality unknown** → a **multi-frame Secondary Capture**, `…7.3` for 16-bit grayscale or `…7.4`
+  for colour (neither is named in dcmjs's `sopClassNamesByUID`, so use the literal), with the three
+  macros as above. This is standard-conformant, not a workaround.
+
+Either way, single-frame SC also carries geometry at the top level: per CP-2330, Table A.8-1 now has
+**Image Plane** (usage `U`) and **Frame of Reference** (usage `C`, *"Required if Image Position
+(Patient) (0020,0032) or Image Orientation (Patient) (0020,0037) are present"*). That covers the
+single-slice case with no functional groups at all. Note the CP chose *not* to make Frame of
+Reference conditional on Image Plane, because doing so "might invalidate some existing Standard
+Extended SOP Class uses" — a reminder that these IODs are full of files written before the standard
+caught up.
+
+> One stale-prose hazard, since it will mislead anyone reading the standard alongside this: A.8.1.2
+> still says *"The Frame of Reference IE is not a component of this IOD"* while Table A.8-1 now lists
+> it, and the multi-frame E-R sections (e.g. A.8.3.2) still describe "only the Image IE below the
+> Series IE". **The module tables are the normative list**; the surrounding prose was not updated.
 
 What this would change elsewhere: `logic/dicom/` grows a volume writer, §3.5's fallbacks become rare
 rather than routine, and the manifest gains a way to say "this source instance was minted by us, not
@@ -478,8 +533,8 @@ beside this repo, or `SLICERLIVE_GALLERY` points at them; it skips rather than f
 
 ## 9. Open questions
 
-1. **Where does Albula sit in §6.2?** Its web layer may be able to use the FSA adapter, or it may
-   want a third `node:sqlite` backend behind the same interface.
+1. ~~**Where does Albula sit in §6.2?**~~ **Deferred** — to be reconciled once the FSA adapter
+   exists. The interface is the deliverable; a `node:sqlite` backend behind it is a file.
 2. **Minted frames of reference.** §3.5 case 3: a surface from a non-DICOM volume needs a
    `FrameOfReferenceUID` that nothing else shares. Mint and record, or refuse to write a surface at
    all in that case? §3.6 removes the question eventually; it stands until then.
