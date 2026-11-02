@@ -72,3 +72,42 @@ thresholds are scale-invariant and pass through untouched.
 Measurement always runs on the native grid. EANM is explicit that a maximum must be read with "no
 additional rebinning, resampling, smoothing or any other manipulation", and a display raster is all
 three.
+
+## Verified: AIMI DICOM SEG against an independent decode
+
+The browser path (`idc_tools` SEG decode → resample onto the PET grid → `regionStats` / `suvPeak` /
+`bidimensionalAxes`) was checked against a separate pydicom decode of the same object, on
+`ACRIN-NSCLC-FDG-PET-131`, study 1960-06-08, series
+`759e24e6-d2da-4938-b28f-dd29eeb18575` ("AIMI lung and FDG tumor **radiologist 1 corrected**").
+
+The object is written on the **PET** grid — 168 × 168 × 74 frames at 4.0627 / 4.0627 / 4.0 mm,
+sharing the PET's `ImagePositionPatient` and `ImageOrientationPatient` exactly — so a direct 1:1
+index comparison is possible with no resampling at all. Both the 1:1 reading and a general
+patient-coordinate mapping agree, and both agree with the browser:
+
+| segment | voxels | MTV | SUVmean | SUVmax | CT HU mean | voxels < −500 HU |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 `Lung` | 37 121 | 2450.8 mL | 0.66 | 2.34 | −661 | 82.3 % |
+| 2 `FDG-Avid Tumor` | 3 583 | 236.6 mL | 2.12 | **3.57** | −168 | 12.3 % |
+
+**The lung HU is the alignment proof.** A correctly placed lung mask has to read air density; −661 HU
+with 82 % of voxels below −500 is parenchyma, and a mask shifted or flipped into chest wall and
+mediastinum could not produce it. So this object is **not** row-flipped, unlike the NLST
+TotalSegmentator SEG documented in `examples/colorize/README.md` — the flip is per-object, and
+asserting it either way without checking is how a quantification pipeline reports confident
+nonsense.
+
+**Two traps that cost real time here**, both in reading the SEG's own geometry:
+
+* `ImageOrientationPatient` is *(direction of increasing **column**, direction of increasing
+  **row**)* — the first triplet is not the "row direction" its usual name suggests. Swapping them
+  transposes the in-plane axes, which no combination of row/column flips can repair: every
+  orientation then looks equally wrong, which is itself the diagnostic.
+* `PixelSpacing` is *(row spacing, column spacing)* — spacing **between** rows first, i.e. the
+  y step. See `docs/` on PS3.3 10.7.1.3 for the ITK/DCMTK hazard when `(0018,0088)` is absent.
+
+**SUVmax 3.57 is correct, not a bug.** It looks low for something labelled "FDG-Avid Tumor", but
+this is the post-treatment follow-up, and the whole-body distribution for this series has
+p99.9 = 4.38 — so 3.57 sits near the top of it. The segment is also large and confluent
+(236 mL, 13.7 cm long axis), which is exactly the "bulky confluent nodal mass" case LNQ2023 scored
+worst on: a single label spanning what a reader would call several lesions.
