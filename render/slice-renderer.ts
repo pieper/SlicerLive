@@ -32,6 +32,9 @@ struct U {
   fgParams : vec4<f32>,  // win, lev, opacity (0 = no foreground), compositing (0 alpha,1 reverse alpha,2 add,3 subtract)
   p2tLabel : mat4x4<f32>,// RAS -> label texture[0,1]
   labelParams : vec4<f32>, // opacity (0 = no label layer), lutEntries, fgLutMode (0 gray, 1 LUT row 1), _
+  bgColor : vec4<f32>,     // rgb shown OUTSIDE the volume (the letterbox), a unused. Default black.
+  slab : vec4<f32>,        // thicknessMm, mode (0 single, 1 max, 2 mean, 3 min), steps, fgMode
+  nrm : vec4<f32>,         // plane normal in RAS (unit), for marching through the slab
 };
 @group(0) @binding(0) var<uniform> u : U;
 @group(0) @binding(1) var s_lin : sampler;
@@ -85,28 +88,88 @@ fn ov_at(ras : vec3<f32>, layer : i32) -> vec4<f32> {   // overlay at a RAS poin
   if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { return vec4<f32>(0.0); }
   return ov_layer(t, layer);
 }
+// Composite the background volume through a SLAB of slab.x millimetres centred on the plane.
+//
+// This is what a clinical reader's "Thickness" spinbox does, and with the thickness set to the
+// whole volume it is also a MIP — which is why the rotating MIP needs no separate renderer, just
+// an oblique basis and a full-depth slab. Slicer has no 2D slab/MIP renderer at all (the usual
+// answer is 3D volume rendering with the MIP technique), so this is new capability, not a port.
+//
+// Returns the composited scalar, and hit = false when every sample fell outside the volume.
+struct SlabSample { value : f32, hit : bool };
+fn sample_slab_tex(ras : vec3<f32>, p2t : mat4x4<f32>, fg : bool, mode : i32) -> SlabSample {
+  let steps = max(1, i32(u.slab.z));
+  var acc = 0.0;
+  var best = -3.402823e38;
+  var worst = 3.402823e38;
+  var n = 0;
+  for (var i = 0; i < steps; i = i + 1) {
+    // Centre the slab on the plane: a 10 mm slab reads 5 mm either side, so the displayed slice
+    // stays where the scrollbar says it is.
+    let f = select(f32(i) / f32(steps - 1) - 0.5, 0.0, steps == 1);
+    let p = ras + u.nrm.xyz * (f * u.slab.x);
+    let t = (p2t * vec4<f32>(p, 1.0)).xyz;
+    if (any(t < vec3<f32>(0.0)) || any(t > vec3<f32>(1.0))) { continue; }
+    var sv = 0.0;
+    if (fg) { sv = textureSampleLevel(t_fg, s_lin, t, 0.0).r; }
+    else { sv = textureSampleLevel(t_scalar, s_lin, t, 0.0).r; }
+    acc = acc + sv;
+    best = max(best, sv);
+    worst = min(worst, sv);
+    n = n + 1;
+  }
+  if (n == 0) { return SlabSample(0.0, false); }
+  if (mode == 1) { return SlabSample(best, true); }
+  if (mode == 2) { return SlabSample(acc / f32(n), true); }
+  if (mode == 3) { return SlabSample(worst, true); }
+  return SlabSample(acc / f32(n), true);
+}
+fn sample_slab(ras : vec3<f32>) -> SlabSample {
+  return sample_slab_tex(ras, u.p2t, false, i32(u.slab.y + 0.5));
+}
+
 @fragment
 fn fs_main(v : V) -> @location(0) vec4<f32> {
   let uv = v.position.xy / u.size.xy;                 // [0,1], y down
   let ras = u.origin.xyz + u.uvec.xyz * (uv.x - 0.5) + u.vvec.xyz * (0.5 - uv.y);
   let t4 = u.p2t * vec4<f32>(ras, 1.0);
   let tex = t4.xyz;
-  if (any(tex < vec3<f32>(0.0)) || any(tex > vec3<f32>(1.0))) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
-  let val = textureSampleLevel(t_scalar, s_lin, tex, 0.0).r;
+  // Outside the volume. Not always black: standalone PET is read as inverted grey on WHITE, so a
+  // black letterbox would invert the figure/ground around the image and bury the annotations.
+  // With a slab we must ask the SLAB whether anything was hit — an oblique MIP has plenty of rays
+  // whose centre sample misses the volume while the slab still crosses it.
+  let slab = sample_slab(ras);
+  if (!slab.hit) { return vec4<f32>(srgb2physical(u.bgColor.rgb), 1.0); }
+  let val = slab.value;
   let win = max(u.params.x, 1e-6);
   let g = clamp((val - (u.params.y - win * 0.5)) / win, 0.0, 1.0);
   var col = vec3<f32>(g);
   if (u.size.w > 0.5) { col = textureLoad(t_lut, vec2<i32>(i32(g * 255.0), 0), 0).rgb; }
   // ── foreground layer (Slicer's vtkImageBlend semantics per compositing mode) ──
   if (u.fgParams.z > 0.0) {
-    let tf = (u.p2tFg * vec4<f32>(ras, 1.0)).xyz;
-    if (all(tf >= vec3<f32>(0.0)) && all(tf <= vec3<f32>(1.0))) {
-      let fv = textureSampleLevel(t_fg, s_lin, tf, 0.0).r;
+    // The foreground is composited through the SAME slab as the background, with its own mode:
+    // a thick PET/CT slab normally wants MEAN on the CT (to suppress noise) and MAX on the PET
+    // (so a small avid node inside the slab is not averaged away). Thickening only the CT would
+    // misrepresent where the uptake is.
+    let fs = sample_slab_tex(ras, u.p2tFg, true, i32(u.slab.w + 0.5));
+    if (fs.hit) {
+      let fv = fs.value;
       let fwin = max(u.fgParams.x, 1e-6);
       let fg = clamp((fv - (u.fgParams.y - fwin * 0.5)) / fwin, 0.0, 1.0);
       var fcol = vec3<f32>(fg);
-      if (u.labelParams.z > 0.5) { fcol = textureLoad(t_lut, vec2<i32>(i32(fg * 255.0), 1), 0).rgb; }
-      let a = u.fgParams.z;
+      // The foreground LUT's ALPHA is a per-value opacity ramp multiplied into the layer opacity.
+      // PET/CT fusion needs it: a hot-metal ramp is black at low uptake, so a constant alpha
+      // washes the CT toward black everywhere the PET is cold. A ramp that is transparent at low
+      // SUV and opaque at high SUV is the convention every clinical viewer uses (OHIF expresses
+      // the same thing as colormap opacity control points). Every existing colour table has
+      // alpha 255 throughout, so this is a no-op for them.
+      var fa = 1.0;
+      if (u.labelParams.z > 0.5) {
+        let ftex = textureLoad(t_lut, vec2<i32>(i32(fg * 255.0), 1), 0);
+        fcol = ftex.rgb;
+        fa = ftex.a;
+      }
+      let a = u.fgParams.z * fa;
       let mode = i32(u.fgParams.w + 0.5);
       if (mode == 0) { col = mix(col, fcol, a); }                       // alpha: fg over bg
       else if (mode == 1) { col = mix(fcol, col, a); }                  // reverse alpha: bg over fg
@@ -196,6 +259,9 @@ fn fs_main(v : V) -> @location(0) vec4<f32> {
 // reduce to exactly the arithmetic they always used.
 export interface PlaneBasis { uDir: Vec3; vDir: Vec3; nDir: Vec3 }
 
+/** Slab compositing modes. "max" is a MIP, "min" a MinIP, "mean" an AIP. */
+export type SlabMode = "single" | "max" | "mean" | "min";
+
 const BASES: Record<Orientation, PlaneBasis> = {
   axial: { uDir: [-1, 0, 0], vDir: [0, 1, 0], nDir: [0, 0, 1] },
   coronal: { uDir: [-1, 0, 0], vDir: [0, 0, 1], nDir: [0, 1, 0] },
@@ -247,7 +313,7 @@ export class SliceRenderer {
   private sampler: GPUSampler;
   private nnSampler: GPUSampler;
   private ubuf: GPUBuffer;
-  private u = new Float32Array(80);  // p2t(16) origin(4) uvec(4) vvec(4) params(4) size(4) | p2tFg(16) fgParams(4) p2tLabel(16) labelParams(4)
+  private u = new Float32Array(88);  // p2t(16) origin(4) uvec(4) vvec(4) params(4) size(4) | p2tFg(16) fgParams(4) p2tLabel(16) labelParams(4) bgColor(4)
   private bind?: GPUBindGroup;
   // Adaptive downsample (moving frames): render the reslice into a low-res target, then bilinear-blit
   // it up to the view — the 2D analogue of SceneRenderer.renderUpscaled. Lets a slice cell degrade
@@ -357,20 +423,28 @@ export class SliceRenderer {
     const gray = new Uint8Array(256 * 4); for (let i = 0; i < 256; i++) { gray[i * 4] = gray[i * 4 + 1] = gray[i * 4 + 2] = i; gray[i * 4 + 3] = 255; }
     this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 0] }, bg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
     this.dev.queue.writeTexture({ texture: this.lutTex, origin: [0, 1] }, fg ?? gray, { bytesPerRow: 256 * 4 }, [256, 1]);
-    this.u[35] = bg ? 1 : 0; this.u[58] = fg ? 1 : 0;
+    // labelParams.z is the foreground-LUT flag, at u[74]:
+    //   p2t 0..15, origin 16..19, uvec 20..23, vvec 24..27, params 28..31, size 32..35,
+    //   p2tFg 36..51, fgParams 52..55, p2tLabel 56..71, labelParams 72..75, bgColor 76..79.
+    // This used to write u[58], which lands inside p2tLabel, so the flag stayed 0 and every
+    // foreground layer rendered in GREYSCALE instead of through its LUT — PET/CT fusion came out
+    // as a washed-out background image rather than hot metal.
+    this.u[35] = bg ? 1 : 0; this.u[74] = fg ? 1 : 0;
     if (this.scalarTex) this.rebind();
   }
   /** Label layer: a label volume (integer values in a float texture) coloured through a colour table
    *  (rgba8 entries, index = label value), blended at `opacity`. Pass null to remove. */
   setLabelLayer(tex: GPUTexture | null, p2t: Mat4 | null, table: Uint8Array | null, opacity: number) {
     this.labelVolTex = tex ?? undefined;
-    if (p2t) this.u.set(p2t, 60);
+    // p2tLabel is u[56..71] (see the offset map in setLayerLUTs). This used to write at 60, which
+    // shifted the whole matrix by one vec4 and put labelParams into what is now bgColor.
+    if (p2t) this.u.set(p2t, 56);
     const n = table ? table.length / 4 : 0;
     if (table && n > 0) {
       if (!this.labelLutTex || this.labelLutTex.width !== n) { this.labelLutTex?.destroy(); this.labelLutTex = this.dev.createTexture({ size: [n, 1], format: "rgba8unorm", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST }); }
       this.dev.queue.writeTexture({ texture: this.labelLutTex }, table, { bytesPerRow: n * 4 }, [n, 1]);
     }
-    this.u[76] = tex && table ? opacity : 0; this.u[77] = n;
+    this.u[72] = tex && table ? opacity : 0; this.u[73] = n;
     if (this.scalarTex) this.rebind();
   }
 
@@ -480,6 +554,26 @@ export class SliceRenderer {
     this.offset01 = Math.max(0, Math.min(1, offset01));
   }
   setWindowLevel(win: number, lev: number) { this.u[28] = win; this.u[29] = lev; }
+  /** Colour shown outside the volume (the isotropic-mm letterbox). Default black. Set it to white
+   *  for a standalone PET panel, which is read as inverted grey on white. */
+  setBackground(r: number, g: number, b: number) { this.u[76] = r; this.u[77] = g; this.u[78] = b; this.u[79] = 1; }
+
+  /** Thick-slab compositing through the background volume.
+   *
+   *  `thicknessMm` 0 (or mode "single") is an ordinary one-sample slice. `mode` follows the
+   *  conventional projections: "max" is a MIP, "mean" an average-intensity projection (the usual
+   *  choice for thin CT slabs), "min" a MinIP. `steps` defaults to roughly one sample per
+   *  half-millimetre, clamped, which is dense enough not to alias a 4 mm PET grid. */
+  setSlab(thicknessMm: number, mode: SlabMode = "mean", steps?: number, fgMode: SlabMode = mode) {
+    const t = Math.max(0, thicknessMm);
+    const code = (x: SlabMode) => (t <= 0 || x === "single" ? 0 : x === "max" ? 1 : x === "mean" ? 2 : 3);
+    const m = code(mode);
+    const n = m === 0 ? 1 : Math.max(2, Math.min(512, steps ?? Math.ceil(t * 2) + 1));
+    this.u[80] = t; this.u[81] = m; this.u[82] = n; this.u[83] = code(fgMode);
+  }
+
+  /** Current slab thickness in mm (0 = single slice). */
+  slabThicknessMm(): number { return this.u[81] > 0 ? this.u[80] : 0; }
   /** Overlay FILL opacity (per-voxel coloured regions). 0 hides the fill. */
   setOverlayOpacity(o: number) { this.u[30] = o; }
   /** Overlay OUTLINE opacity (boundary line, composited over the fill). 0 hides the outline. */
@@ -690,6 +784,7 @@ export class SliceRenderer {
     this.u[24] = b.vDir[0] * vS; this.u[25] = b.vDir[1] * vS; this.u[26] = b.vDir[2] * vS; this.u[27] = 0; // vvec [24..27]
     // params[28..30] set via setWindowLevel/setOverlayOpacity
     this.u[32] = w; this.u[33] = h;                                                            // size [32..35]
+    this.u[84] = b.nDir[0]; this.u[85] = b.nDir[1]; this.u[86] = b.nDir[2]; this.u[87] = 0;    // nrm  [84..87]
     this.dev.queue.writeBuffer(this.ubuf, 0, this.u);
     const enc = this.dev.createCommandEncoder();
     const pass = enc.beginRenderPass({ colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }] });

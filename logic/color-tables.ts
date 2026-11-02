@@ -21,6 +21,24 @@ function pw(stops: RGB[]): (t: number) => RGB {
     return [lerp(a[0], b[0], u), lerp(a[1], b[1], u), lerp(a[2], b[2], u)];
   };
 }
+// Piecewise-linear ramp through control colors at EXPLICIT 0..255 indices. Slicer's PET procedural
+// tables (vtkMRMLPETProceduralColorNode) place their control points unevenly -- PET-Heat spends its
+// first 35 indices entirely in black -- so they cannot be expressed with evenly spaced stops.
+function pwAt(stops: [number, RGB][]): (t: number) => RGB {
+  return (t: number) => {
+    const x = clamp01(t) * 255;
+    if (x <= stops[0][0]) return stops[0][1];
+    for (let i = 1; i < stops.length; i++) {
+      const [xa, a] = stops[i - 1], [xb, b] = stops[i];
+      if (x <= xb) {
+        const u = xb === xa ? 0 : (x - xa) / (xb - xa);
+        return [lerp(a[0], b[0], u), lerp(a[1], b[1], u), lerp(a[2], b[2], u)];
+      }
+    }
+    return stops[stops.length - 1][1];
+  };
+}
+
 // Rainbow = Slicer's default "Rainbow": hue 0 (red) .. 0.667 (blue) reversed so low=blue, high=red.
 function rainbow(t: number): RGB { return hsv2rgb((1 - clamp01(t)) * 0.6667, 1, 1); }
 function hsv2rgb(h: number, s: number, v: number): RGB {
@@ -40,6 +58,53 @@ export const COLOR_TABLES: ColorTable[] = [
   { id: "vtkMRMLColorTableNodeFire", name: "Fire", ramp: pw([[0, 0, 0], [0.7, 0, 0], [1, 0.6, 0], [1, 1, 0], [1, 1, 1]]) },
   { id: "vtkMRMLColorTableNodeCool", name: "Cool", ramp: pw([[0, 1, 1], [0, 0.5, 1], [0.3, 0, 1]]) },
   { id: "vtkMRMLColorTableNodeWarm", name: "Warm", ramp: pw([[0.3, 0, 0], [1, 0.3, 0], [1, 1, 0.3]]) },
+
+  // --- Nuclear medicine -----------------------------------------------------------------------
+  // Control points transcribed verbatim from Slicer's
+  // Libs/MRML/Core/vtkMRMLPETProceduralColorNode.cxx (vtkColorTransferFunction in RGB space,
+  // linear between points, indices 0..255).
+  //
+  // PET-MIP is the convention EANM v2.0 asks for in response assessment: "a fixed colour scale;
+  // for example, from SUV=0 to SUV=10 using an INVERSE LINEAR scale" -- hot reads black on white.
+  {
+    id: "vtkMRMLPETProceduralColorNodePET-Heat",
+    name: "PET-Heat",
+    ramp: pwAt([[0, [0, 0, 0]], [35, [0.36, 0, 0]], [38, [0.5, 0, 0]], [50, [0.7, 0.1, 0]], [70, [0.7, 0.5, 0]], [87, [1, 1, 0]], [255, [1, 1, 1]]]),
+  },
+  {
+    id: "vtkMRMLPETProceduralColorNodePET-Rainbow",
+    name: "PET-Rainbow",
+    ramp: pwAt([[0, [0, 0, 0]], [35, [0, 0, 0.3]], [38, [0.2, 0, 0.3]], [50, [0.5, 0, 0]], [70, [0.7, 0.5, 0]], [87, [1, 1, 0]], [255, [1, 1, 1]]]),
+  },
+  {
+    // Based on Rainbow.lut from the FIJI PET-CT plugin's extraLUT set.
+    id: "vtkMRMLPETProceduralColorNodePET-Rainbow2",
+    name: "PET-Rainbow2",
+    ramp: pwAt([
+      [0, [0, 0, 0]], [32, [0.250980392, 0, 0.501960784]], [64, [0, 0, 1]], [96, [0, 1, 0]],
+      [160, [1, 1, 0]], [192, [1, 0.752941176, 0]], [255, [1, 0.011764706, 0]],
+    ]),
+  },
+  {
+    id: "vtkMRMLPETProceduralColorNodePET-DICOM",
+    name: "PET-DICOM",   // DICOM PET Color Palette (PS3.6 B.1.2)
+    ramp: pwAt([[0, [0, 0, 0]], [63, [0, 0.501960784, 0.490196078]], [128, [0.501960784, 0, 1]], [192, [1, 0.501960784, 0]], [255, [1, 1, 1]]]),
+  },
+  {
+    id: "vtkMRMLPETProceduralColorNodePET-HotMetalBlue",
+    name: "PET-HotMetalBlue",   // DICOM Hot Metal Blue Color Palette (PS3.6 B.1.3)
+    ramp: pwAt([
+      [0, [0, 0, 0]], [85, [0, 0, 0.654901961]], [102, [0.196078431, 0, 0.784313725]],
+      [119, [0.352941176, 0, 0.588235294]], [136, [0.549019608, 0.125490196, 0.196078431]],
+      [153, [0.745098039, 0.250980392, 0]], [170, [1, 0.376470588, 0]], [255, [1, 1, 1]],
+    ]),
+  },
+  {
+    // "Useful for displaying inverse grey PET data" -- the standalone-PET reading default.
+    id: "vtkMRMLPETProceduralColorNodePET-MIP",
+    name: "PET-MIP",
+    ramp: pwAt([[0, [1, 1, 1]], [255, [0, 0, 0]]]),
+  },
 ];
 
 export function colorTableById(id: string): ColorTable {
@@ -86,4 +151,33 @@ export function sampleColor(
   let a = 255;
   if (threshold && (scalar < threshold[0] || scalar > threshold[1])) a = 0;
   return [Math.round(c[0] * 255), Math.round(c[1] * 255), Math.round(c[2] * 255), a];
+}
+
+/** A foreground LUT with a per-value OPACITY RAMP in its alpha channel, for image fusion.
+ *
+ *  A PET/CT fusion cannot use a constant layer opacity: hot-metal ramps are black at low uptake,
+ *  so a constant alpha washes the CT toward black everywhere the PET is cold. Clinical viewers
+ *  all solve this the same way — transparent at low values, opaque at high (OHIF states it as
+ *  colormap opacity control points; the default used here matches theirs).
+ *
+ *  `stops` are [t, alpha] with t and alpha in [0,1], interpolated linearly and assumed sorted.
+ */
+export function fusionLut(
+  table: ColorTable | string,
+  stops: [number, number][] = [[0, 0], [0.1, 0.8], [1, 0.9]],
+): Uint8Array {
+  const out = lut(table);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let a = stops[stops.length - 1][1];
+    if (t <= stops[0][0]) a = stops[0][1];
+    else {
+      for (let k = 1; k < stops.length; k++) {
+        const [ta, aa] = stops[k - 1], [tb, ab] = stops[k];
+        if (t <= tb) { a = tb === ta ? ab : aa + (ab - aa) * ((t - ta) / (tb - ta)); break; }
+      }
+    }
+    out[i * 4 + 3] = Math.round(clamp01(a) * 255);
+  }
+  return out;
 }
