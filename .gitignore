@@ -30,3 +30,8 @@ examples/colorize/data/
 examples/colorize/*.js
 tools/modal_spike/out/
 desktop/build/
+
+# Claude Code per-user settings: permission rules can capture
+# commands verbatim (paths, hosts, credentials). Keep them local.
+.claude/settings.json
+.claude/settings.local.json
