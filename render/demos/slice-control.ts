@@ -29,6 +29,15 @@ export interface SliceControlCfg {
   step: (forward: boolean) => void;     // advance the slice one step (demo owns its offset model)
   redraw: () => void;                   // redraw this cell after scroll/pan/zoom
   scrollPx?: number;                    // px per slice step for left-drag scroll (default 7)
+  /** Left-drag scroll by distance instead of by slice: each CSS px of drag moves this many mm
+   *  through the volume, taken in whole `step()`s of `stepMm()` mm. The same hand movement then
+   *  crosses the same anatomy in every series: a 0.4 mm series no longer needs 7x the mouse
+   *  travel of a 3 mm one. Needs `stepMm`; overrides `scrollPx`. The wheel still moves one step
+   *  per notch. */
+  scrollMmPerPx?: number;
+  /** How far one `step()` moves, mm (slice spacing, or the slab). Read on every move, since a
+   *  demo can change it (a new series, a slab). */
+  stepMm?: () => number;
   hooks?: SliceControlHooks;
   /** Slicer's AdjustWindowLevel mouse mode (vtkMRMLWindowLevelWidget): while `enabled()`,
    *  an unmodified left-drag adjusts window/level instead of slice-scrolling, with the
@@ -147,7 +156,11 @@ export function attachSliceControls(canvas: HTMLCanvasElement, cfg: SliceControl
     if (scroll) {
       scroll.acc += (e.clientX - scroll.x) - (e.clientY - scroll.y);   // right/up = forward
       scroll.x = e.clientX; scroll.y = e.clientY;
-      while (Math.abs(scroll.acc) >= SCROLL_PX) { const f = scroll.acc > 0; cfg.step(f); scroll.acc -= f ? SCROLL_PX : -SCROLL_PX; }
+      // px of drag per step: fixed, or from the step's length in mm. Fractional is fine (a 0.3 mm
+      // series at 0.4 mm/px takes 1.3 steps per px); the cap keeps one event from running away.
+      const per = cfg.scrollMmPerPx && cfg.stepMm ? Math.max(0.05, cfg.stepMm() / cfg.scrollMmPerPx) : SCROLL_PX;
+      for (let i = 0; Math.abs(scroll.acc) >= per && i < 400; i++) { const f = scroll.acc > 0; cfg.step(f); scroll.acc -= f ? per : -per; }
+      if (Math.abs(scroll.acc) >= per) scroll.acc = 0;
       cfg.redraw();
       return;
     }
